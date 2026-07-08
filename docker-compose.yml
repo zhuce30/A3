@@ -1,0 +1,114 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: a3_learning
+      MYSQL_USER: a3
+      MYSQL_PASSWORD: a3_password
+      MYSQL_ROOT_PASSWORD: a3_root_password
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - a3-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ua3", "-pa3_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - a3-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      DJANGO_DEBUG: "1"
+      DJANGO_SECRET_KEY: a3-docker-dev-secret-change-before-production
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      MYSQL_DATABASE: a3_learning
+      MYSQL_USER: a3
+      MYSQL_PASSWORD: a3_password
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      A3_WAIT_FOR_DB: "1"
+      A3_RUN_MIGRATIONS: "1"
+      A3_SEED_DEMO_DATA: "1"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./backend/knowledge_base:/app/backend/knowledge_base
+      - ./backend/tmp:/app/backend/tmp
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery:
+    build:
+      context: ./backend
+    command: ["celery", "-A", "backend.config", "worker", "-l", "info"]
+    environment:
+      DJANGO_DEBUG: "1"
+      DJANGO_SECRET_KEY: a3-docker-dev-secret-change-before-production
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      MYSQL_DATABASE: a3_learning
+      MYSQL_USER: a3
+      MYSQL_PASSWORD: a3_password
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      A3_WAIT_FOR_DB: "1"
+      A3_RUN_MIGRATIONS: "0"
+      A3_SEED_DEMO_DATA: "0"
+    volumes:
+      - ./data:/app/data
+      - ./backend/knowledge_base:/app/backend/knowledge_base
+      - ./backend/tmp:/app/backend/tmp
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./OpenMAIC
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_A3_API_BASE_URL: http://localhost:8000
+      A3_API_BASE_URL: http://backend:8000
+      A3_COACHING_BASE_URL: ${A3_COACHING_BASE_URL:-}
+      A3_COACHING_API_KEY: ${A3_COACHING_API_KEY:-}
+      A3_COACHING_MODEL: ${A3_COACHING_MODEL:-qwen-plus}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      ASR_QWEN_API_KEY: ${ASR_QWEN_API_KEY:-}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  a3-mysql-data:
+  a3-redis-data:

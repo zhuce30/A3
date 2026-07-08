@@ -1,0 +1,12 @@
+.venv/
+.cache/
+tmp/
+__pycache__/
+*.pyc
+*.log
+.env
+
+knowledge_base/faiss_index/
+knowledge_base/metadata/
+knowledge_base/chunks/
+knowledge_base/celery_queue/

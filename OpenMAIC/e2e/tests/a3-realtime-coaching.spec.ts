@@ -1,0 +1,208 @@
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import type { Page } from '@playwright/test';
+import { expect } from '@playwright/test';
+import { test } from '../fixtures/base';
+
+const TINY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+const STUDENT_PHONE = '13800000001';
+const DEMO_PASSWORD = 'Demo@123456';
+
+function seedDemoData() {
+  const projectRoot = path.resolve(process.cwd(), '..');
+  const python = process.env.A3_BACKEND_PYTHON ?? path.join(projectRoot, 'backend', '.venv', 'Scripts', 'python.exe');
+  const manage = path.join(projectRoot, 'backend', 'manage.py');
+  execFileSync(python, [manage, 'seed_demo_data'], {
+    cwd: projectRoot,
+    stdio: 'pipe',
+  });
+}
+
+async function loginAsStudent(page: Page) {
+  await page.context().clearCookies();
+  await page.goto('/a3/login');
+  const inputs = page.locator('main input');
+  await inputs.nth(0).fill(STUDENT_PHONE);
+  await inputs.nth(1).fill(DEMO_PASSWORD);
+  await page.getByRole('button', { name: '登录' }).click();
+  await expect(page).not.toHaveURL(/\/a3\/login/, { timeout: 15_000 });
+}
+
+test.describe('A3 realtime coaching', () => {
+  test.setTimeout(120_000);
+
+  test.beforeAll(() => {
+    seedDemoData();
+  });
+
+  test('shows fallback call state, visual evidence thumbnails, frame capture and capability metrics', async ({ page }) => {
+    await page.addInitScript(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 320;
+      canvas.height = 180;
+      const context = canvas.getContext('2d');
+      context!.fillStyle = '#2563eb';
+      context!.fillRect(0, 0, canvas.width, canvas.height);
+      context!.fillStyle = '#ffffff';
+      context!.fillText('root locus', 24, 64);
+      const stream = canvas.captureStream(5);
+      Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: {
+          getUserMedia: async () => stream,
+          getDisplayMedia: async () => stream,
+        },
+      });
+    });
+
+    await page.route('**/api/a3/coaching/realtime/session', async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          success: true,
+          provider: 'local_fallback_record_then_respond',
+          model: 'a3-local-fallback',
+          connection: { type: 'fallback', readyForBrowserMedia: false },
+          coachingSessionId: 'coaching-realtime-e2e',
+          fallbackReason: '测试环境未配置实时 provider，已降级到录音转写问答',
+          instructions: {
+            targetTitle: '根轨迹基础',
+            safetyPolicyVersion: 'a3.realtime-safety.v1',
+            retrievalPolicyVersion: 'a3.hybrid-rag.v1',
+          },
+        }),
+      });
+    });
+    await page.route('**/api/a3/coaching/realtime/message', async (route) => {
+      await route.fulfill({ status: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ success: true, session: {} }) });
+    });
+    await page.route('**/api/a3/coaching/realtime/end', async (route) => {
+      await route.fulfill({ status: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ success: true, summary: {} }) });
+    });
+    await page.route('**/api/a3/coaching/realtime/tool', async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          success: true,
+          evidence: [{
+            title: '根轨迹课件',
+            location: '第 4 章 / 幻灯片 12',
+            snippet: '根轨迹渐近线由极点和零点数量差决定。',
+            score: 0.91,
+            sourceType: 'visual',
+            previewUrl: TINY_PNG,
+          }],
+        }),
+      });
+    });
+    await page.route('**/api/a3/coaching/realtime/frame', async (route) => {
+      const payload = route.request().postDataJSON();
+      expect(payload.imageDataUrl).toContain('data:image/jpeg;base64,');
+      expect(payload.source).toBe('camera');
+      expect(payload.prompt).toContain('请看这里');
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          success: true,
+          reply: '视觉帧已识别：画面里是根轨迹相关题目。',
+          verified: true,
+          citations: [{
+            title: '视觉证据',
+            location: '实时截图',
+            snippet: '截图包含 root locus 关键文字。',
+            sourceType: 'visual',
+            previewUrl: TINY_PNG,
+          }],
+        }),
+      });
+    });
+    await page.route('**/api/demo/status/', async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildDemoStatusPayload()),
+      });
+    });
+    await page.route('**/api/learning/effect/report/', async (route) => {
+      await route.fulfill({ status: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ success: true, effectReport: {} }) });
+    });
+    await page.route('**/api/learning/study-plan/**', async (route) => {
+      await route.fulfill({ status: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ success: true, plan: { days: [] } }) });
+    });
+    await page.route('**/api/a3/system/runtime', async (route) => {
+      await route.fulfill({ status: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ success: true, overallStatus: 'ok', checks: [] }) });
+    });
+
+    await loginAsStudent(page);
+    await page.goto('/a3/coaching');
+    const call = page.getByTestId('a3-realtime-coaching-call');
+    await expect(call).toBeVisible({ timeout: 60_000 });
+    await call.getByTestId('a3-realtime-start').click();
+    await expect(call.getByTestId('a3-realtime-status')).toContainText('已降级');
+    await expect(call).toContainText('测试环境未配置实时 provider');
+
+    await call.getByLabel('实时检索问题').fill('根轨迹渐近线');
+    await call.getByRole('button', { name: '检索' }).click();
+    await expect(call.getByTestId('a3-realtime-evidence-list')).toContainText('根轨迹课件');
+    await expect(call.locator('img').first()).toBeVisible();
+
+    await call.getByRole('button', { name: '开启摄像头' }).click();
+    await expect(call.getByTestId('a3-realtime-camera-preview')).toBeVisible();
+    await call.getByTestId('a3-realtime-capture-frame').click();
+    await expect(call).toContainText('视觉帧已识别');
+
+    await page.goto('/a3/capabilities');
+    const capability = page.getByTestId('a3-realtime-coaching-capability');
+    await expect(capability).toBeVisible({ timeout: 60_000 });
+    await expect(capability).toContainText('dashscope_qwen_omni_realtime');
+    await expect(capability).toContainText('visual frames');
+  });
+});
+
+function buildDemoStatusPayload() {
+  return {
+    success: true,
+    summary: {
+      profileReady: true,
+      pathReady: true,
+      recommendationsReady: true,
+      verifiedQaReady: true,
+      safetyReady: true,
+      assessmentLoopReady: true,
+    },
+    profile: { grade: '大二', majorDirection: '自动化', foundationLevel: '基础', weakPoints: ['根轨迹'], learningGoals: ['掌握控制原理'] },
+    path: { title: '自动控制原理个性化学习路径', progress: 42, itemCount: 10 },
+    recommendation: { count: 3, sourceCount: 3, fallbackUsed: false },
+    verification: { verified: true, citationCount: 2, claimCount: 2, verifiedClaims: 2 },
+    safety: { safe: false, category: 'unsafe', reason: '演示安全拦截' },
+    evaluation: {
+      totalCases: 50,
+      groundedCases: 20,
+      unsafeCases: 10,
+      missingEvidenceCases: 20,
+      targetCases: 50,
+      scaleReady: true,
+      latestMetricsFile: 'backend/tmp/demo_retrieval_metrics.json',
+      metrics: { available: true, retrievalTop3HitRate: 95, verifiedCoverage: 90, safetyRefusalRate: 100, missingEvidenceRefusalRate: 100 },
+    },
+    apis: [],
+    system: { overallStatus: 'ok', checks: [] },
+    agentRuns: [],
+    realtimeCoaching: {
+      schemaVersion: 'a3.realtime-coaching-metrics.v1',
+      available: true,
+      latestProvider: 'dashscope_qwen_omni_realtime',
+      sessionCount: 2,
+      averageLatencyMs: 920,
+      ragToolCallCount: 4,
+      ragHitRate: 0.75,
+      visualFrameCount: 1,
+      verifiedAnswerRate: 0.5,
+      fallbackCount: 1,
+      latestSessionId: 'coaching-realtime-e2e',
+    },
+  };
+}

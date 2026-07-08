@@ -1,0 +1,11 @@
+packages:
+  - "packages/*"
+allowBuilds:
+  '@biomejs/biome': false
+  '@scarf/scarf': false
+  core-js: false
+  es5-ext: false
+  esbuild: false
+  msw: false
+  sharp: false
+  unrs-resolver: false

@@ -1,0 +1,67 @@
+# Dependencies
+node_modules/
+OpenMAIC/node_modules/
+backend/.venv/
+.venv/
+
+# Build outputs and caches
+.next/
+OpenMAIC/.next/
+dist/
+build/
+coverage/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+
+# Runtime and local state
+*.log
+tmp/
+backend/tmp/
+server.log
+server_err.log
+*.sqlite3
+*.db
+.tools/
+.agents/
+.claude/
+.nested-git-backups/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Large local archives and generated handoff assets
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.mp4
+*.mov
+*.avi
+*.gif
+PPT背景/
+智学引擎_界面设计图_23张/
+页面/
+
+# Large local knowledge-base/runtime data
+backend/.cache/
+backend/knowledge_base/faiss_index/
+data/uploads/
+data/PPT/
+data/操作系统/
+data/计算机网络原理/

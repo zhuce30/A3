@@ -1,0 +1,888 @@
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+from django.utils import timezone
+
+from backend.apps.compat.agent_kernel import AgentContext, AgentKernel, AgentResult, BaseAgent, build_recent_run_circuit_breaker
+from backend.apps.compat.safety import check_learning_safety
+from backend.apps.accounts.services import public_user
+from backend.apps.learning.models import Course
+from backend.apps.learning.services import generate_learning_path, generate_study_plan
+from backend.apps.compat.llm import chat_completion
+from backend.apps.profiles.dynamic_profile import append_learning_event, merge_dynamic_profile_signals
+from backend.apps.profiles.models import LearnerProfile
+from backend.apps.profiles.profile_aggregator import aggregate_profile_snapshot
+from backend.apps.profiles.profile_signals import append_profile_signal
+
+
+SESSION_SCHEMA_VERSION = "a3.profile-interview-session.v1"
+
+EMPTY_PROFILE_INTERVIEW_SESSION = {
+    "schemaVersion": SESSION_SCHEMA_VERSION,
+    "turnCount": 0,
+    "latestTraceId": "",
+    "missingDimensions": [],
+    "askFields": [],
+    "askStrategy": {},
+    "nextQuestion": "",
+    "interviewComplete": False,
+    "profileCommitted": False,
+    "confirmedAt": "",
+    "messages": [],
+    "updatedAt": "",
+}
+
+ASK_PRIORITY_ORDER = [
+    "learningGoals",
+    "weakPoints",
+    "dailyMinutes",
+    "foundationLevel",
+    "resourcePreferences",
+    "cognitiveStyle",
+    "majorDirection",
+    "grade",
+    "learningHistory",
+    "motivationRisk",
+]
+
+PROFILE_INTERVIEW_WORKFLOW_SEQUENCE = [
+    "SafetyAgent",
+    "ProfileInterviewAgent",
+    "LearnerModelAgent",
+    "MemoryCommitAgent",
+    "PlannerAgent",
+]
+
+
+class ProfileInterviewSafetyAgent(BaseAgent):
+    name = "SafetyAgent"
+    role = "learning safety"
+    detail = "Check profile interview input safety."
+    output_schema = {
+        "type": "object",
+        "properties": {"safety": {"type": "object"}},
+        "required": ["safety"],
+    }
+
+    def run(self, context: AgentContext) -> AgentResult:
+        action = str(context.payload.get("action") or "message")
+        text = str(context.payload.get("message") or "")
+        if action == "confirm":
+            safety_payload = {"safe": True, "category": "profile_commit", "reason": ""}
+        else:
+            safety = check_learning_safety(text)
+            safety_payload = {"safe": safety.safe, "category": safety.category, "reason": safety.reason}
+        return AgentResult(
+            output={"safety": safety_payload},
+            state_patch={"safety": safety_payload},
+            input_summary={"action": action, "messageLength": len(text)},
+            output_summary={"safe": safety_payload["safe"], "category": safety_payload["category"]},
+            evidence={"safe": safety_payload["safe"], "category": safety_payload["category"]},
+            quality={"safe": safety_payload["safe"]},
+        )
+
+
+class ProfileInterviewAgent(BaseAgent):
+    name = "ProfileInterviewAgent"
+    role = "profile interview"
+    detail = "Extract or validate learner profile dimensions from the interview."
+    output_schema = {
+        "type": "object",
+        "properties": {"profile": {"type": "object"}, "profileReadiness": {"type": "object"}},
+        "required": ["profile", "profileReadiness"],
+    }
+
+    def run(self, context: AgentContext) -> AgentResult:
+        action = str(context.payload.get("action") or "message")
+        safety = context.state.get("safety") if isinstance(context.state.get("safety"), dict) else {"safe": True}
+        profile, _ = LearnerProfile.objects.get_or_create(user=context.user)
+        extracted: dict = {}
+        if action != "confirm" and safety.get("safe"):
+            text = str(context.payload.get("message") or "")
+            extracted = _extract_profile_dimensions(text)
+            _commit_profile(profile, extracted, text)
+            profile.refresh_from_db()
+        missing_dimensions = _missing_dimensions(profile)
+        readiness = {
+            "dimensionCount": _dimension_count(profile),
+            "status": "ready" if _dimension_count(profile) >= 8 else "partial",
+            "missingDimensions": missing_dimensions,
+            "interviewComplete": not missing_dimensions,
+        }
+        return AgentResult(
+            output={"profile": _public_interview_profile(profile), "profileReadiness": readiness},
+            state_patch={
+                "profileReadiness": readiness,
+                "missingDimensions": missing_dimensions,
+                "extractedProfile": extracted,
+            },
+            input_summary={"action": action, "messageLength": len(str(context.payload.get("message") or ""))},
+            output_summary={"dimensionCount": readiness["dimensionCount"], "missingDimensions": len(missing_dimensions)},
+            evidence={"fields": sorted(extracted.keys()) if extracted else [], "missingDimensions": len(missing_dimensions)},
+            quality={"interviewComplete": not missing_dimensions},
+        )
+
+
+class LearnerModelAgent(BaseAgent):
+    name = "LearnerModelAgent"
+    role = "learner modeling"
+    detail = "Update learner profile readiness and commitment state."
+    output_schema = {
+        "type": "object",
+        "properties": {"profileCommitted": {"type": "boolean"}},
+        "required": ["profileCommitted"],
+    }
+
+    def run(self, context: AgentContext) -> AgentResult:
+        action = str(context.payload.get("action") or "message")
+        missing_dimensions = context.state.get("missingDimensions") if isinstance(context.state.get("missingDimensions"), list) else []
+        committed = action == "confirm" and not missing_dimensions
+        if committed:
+            context.user.profile_completed = True
+            context.user.onboarding_step = "complete"
+            context.user.save(update_fields=["profile_completed", "onboarding_step", "updated_at"])
+        profile, _ = LearnerProfile.objects.get_or_create(user=context.user)
+        return AgentResult(
+            output={"profileCommitted": committed, "profile": _public_interview_profile(profile)},
+            state_patch={"profileCommitted": committed},
+            state_diff={"User.profile_completed": "true", "User.onboarding_step": "complete"} if committed else {},
+            evidence={"dimensionCount": _dimension_count(profile), "profileCommitted": committed},
+            quality={"ready": _dimension_count(profile) >= 8, "profileCommitted": committed},
+        )
+
+
+class ProfileInterviewMemoryCommitAgent(BaseAgent):
+    name = "MemoryCommitAgent"
+    role = "memory commit"
+    detail = "Commit interview memory and incomplete-confirmation state."
+    output_schema = {
+        "type": "object",
+        "properties": {"memoryCommitted": {"type": "boolean"}},
+        "required": ["memoryCommitted"],
+    }
+
+    def run(self, context: AgentContext) -> AgentResult:
+        action = str(context.payload.get("action") or "message")
+        profile, _ = LearnerProfile.objects.get_or_create(user=context.user)
+        missing_dimensions = context.state.get("missingDimensions") if isinstance(context.state.get("missingDimensions"), list) else []
+        session = None
+        if action == "confirm" and missing_dimensions:
+            ask_fields = _ask_fields(missing_dimensions)
+            session = _update_interview_session_commit_state(
+                profile,
+                trace_id=str(context.state.get("traceId") or ""),
+                missing_dimensions=missing_dimensions,
+                ask_fields=ask_fields,
+                ask_strategy=_ask_strategy(),
+                next_question=_next_question(ask_fields),
+                committed=False,
+                generated={},
+            )
+        return AgentResult(
+            output={"memoryCommitted": True, **({"interviewSession": session} if session else {})},
+            state_patch={"memoryCommitted": True, **({"interviewSession": session} if session else {})},
+            state_diff={"profileInterviewSession": "updated"} if session else {"LearnerProfile": "updated"},
+            evidence={"profileCommitted": bool(context.state.get("profileCommitted")), "traceId": context.state.get("traceId")},
+            quality={"schemaVersion": SESSION_SCHEMA_VERSION},
+        )
+
+
+class ProfileInterviewPlannerAgent(BaseAgent):
+    name = "PlannerAgent"
+    role = "path planning"
+    detail = "Refresh learning path and study plan from the interview profile."
+    output_schema = {
+        "type": "object",
+        "properties": {"interviewSession": {"type": "object"}, "generated": {"type": "object"}},
+        "required": ["interviewSession", "generated"],
+    }
+
+    def run(self, context: AgentContext) -> AgentResult:
+        action = str(context.payload.get("action") or "message")
+        text = str(context.payload.get("message") or "")
+        profile, _ = LearnerProfile.objects.get_or_create(user=context.user)
+        missing_dimensions = context.state.get("missingDimensions") if isinstance(context.state.get("missingDimensions"), list) else []
+        ask_fields = _ask_fields(missing_dimensions)
+        ask_strategy = _ask_strategy()
+        path_payload = None
+        plan_payload = None
+        should_generate = action != "confirm" or not missing_dimensions
+        course = Course.objects.filter(is_active=True).first() if should_generate else None
+        if course:
+            path = generate_learning_path(context.user, course=course, force=True)
+            plan_payload = generate_study_plan(context.user, duration_days=14, force=True)
+            path_payload = {"id": str(path.id), "title": path.title}
+        if action == "confirm":
+            if missing_dimensions:
+                session = context.state.get("interviewSession") if isinstance(context.state.get("interviewSession"), dict) else _update_interview_session_commit_state(
+                    profile,
+                    trace_id=str(context.state.get("traceId") or ""),
+                    missing_dimensions=missing_dimensions,
+                    ask_fields=ask_fields,
+                    ask_strategy=ask_strategy,
+                    next_question=_next_question(ask_fields),
+                    committed=False,
+                    generated={},
+                )
+                success = False
+                error = "画像信息尚不完整，请先回答本轮追问后再确认。"
+                next_question = session["nextQuestion"]
+            else:
+                profile.refresh_from_db()
+                next_question = "画像已确认，下一步进入入学诊断校准路径和计划。"
+                session = _update_interview_session_commit_state(
+                    profile,
+                    trace_id=str(context.state.get("traceId") or ""),
+                    missing_dimensions=[],
+                    ask_fields=[],
+                    ask_strategy=ask_strategy,
+                    next_question=next_question,
+                    committed=True,
+                    generated={"path": path_payload, "studyPlan": bool(plan_payload)},
+                )
+                success = True
+                error = ""
+        else:
+            interview_complete = not missing_dimensions
+            session = _commit_interview_session(
+                profile,
+                raw_text=text,
+                trace_id=str(context.state.get("traceId") or ""),
+                missing_dimensions=missing_dimensions,
+                ask_fields=ask_fields,
+                ask_strategy=ask_strategy,
+                next_question=_next_question(ask_fields),
+                interview_complete=interview_complete,
+                generated={"path": path_payload, "studyPlan": bool(plan_payload)},
+            )
+            success = True
+            error = ""
+            next_question = session["nextQuestion"]
+        readiness = {
+            "dimensionCount": _dimension_count(profile),
+            "status": "ready" if _dimension_count(profile) >= 8 and not missing_dimensions else "partial",
+            "missingDimensions": missing_dimensions,
+            "interviewComplete": not missing_dimensions,
+        }
+        generated = {"path": path_payload, "studyPlan": bool(plan_payload)}
+        return AgentResult(
+            output={
+                "success": success,
+                "error": error,
+                "profile": _public_interview_profile(profile),
+                "profileReadiness": readiness,
+                "missingDimensions": missing_dimensions,
+                "askFields": ask_fields,
+                "askStrategy": ask_strategy,
+                "nextQuestion": next_question,
+                "interviewComplete": not missing_dimensions,
+                "profileCommitted": bool(context.state.get("profileCommitted")),
+                "interviewSession": session,
+                "generated": generated,
+            },
+            state_patch={"interviewSession": session, "generated": generated},
+            output_summary={"pathGenerated": bool(path_payload), "planGenerated": bool(plan_payload), "success": success},
+            state_diff={"LearningPath": "refreshed", "StudyPlan": "refreshed", "profileInterviewSession": "updated"},
+            evidence={"pathGenerated": bool(path_payload), "planGenerated": bool(plan_payload)},
+            quality={"readyForDiagnostic": bool(path_payload and plan_payload) if success else False},
+        )
+
+
+def build_profile_interview_kernel() -> AgentKernel:
+    kernel = AgentKernel()
+    for agent in (
+        ProfileInterviewSafetyAgent(),
+        ProfileInterviewAgent(),
+        LearnerModelAgent(),
+        ProfileInterviewMemoryCommitAgent(),
+        ProfileInterviewPlannerAgent(),
+    ):
+        kernel.register(agent)
+    return kernel
+
+
+def run_profile_interview_workflow(user, payload: dict, *, kernel: AgentKernel | None = None):
+    kernel = kernel or build_profile_interview_kernel()
+    if kernel._circuit_breaker is None:
+        kernel._circuit_breaker = build_recent_run_circuit_breaker(user)
+    action = str(payload.get("action") or "message")
+    return kernel.run(
+        AgentContext(user=user, workflow="profile_interview", goal=f"profile interview {action}", payload=payload),
+        PROFILE_INTERVIEW_WORKFLOW_SEQUENCE,
+    )
+
+
+def get_profile_interview_session(user) -> dict:
+    profile, _ = LearnerProfile.objects.get_or_create(user=user)
+    extra = profile.extra_profile if isinstance(profile.extra_profile, dict) else {}
+    session = extra.get("profileInterviewSession")
+    if not isinstance(session, dict):
+        return dict(EMPTY_PROFILE_INTERVIEW_SESSION)
+    merged = {
+        **EMPTY_PROFILE_INTERVIEW_SESSION,
+        **session,
+        "messages": _valid_messages(session.get("messages")),
+    }
+    if int(merged.get("turnCount") or 0) > 0:
+        missing_dimensions = merged.get("missingDimensions") if isinstance(merged.get("missingDimensions"), list) else _missing_dimensions(profile)
+        if not isinstance(merged.get("profileSnapshot"), dict):
+            merged["profileSnapshot"] = _public_interview_profile(profile)
+        if not isinstance(merged.get("profileReadiness"), dict):
+            merged["profileReadiness"] = {
+                "dimensionCount": _dimension_count(profile),
+                "status": "ready" if _dimension_count(profile) >= 8 else "partial",
+                "missingDimensions": missing_dimensions,
+                "interviewComplete": bool(merged.get("interviewComplete")),
+            }
+        if not isinstance(merged.get("generated"), dict):
+            merged["generated"] = {}
+    return {
+        **merged,
+    }
+
+
+def run_profile_interview(user, message: str) -> dict:
+    text = _latest_student_interview_text(str(message or ""))
+    if not text:
+        raise ValueError("message 不能为空")
+    result = run_profile_interview_workflow(user, {"action": "message", "message": text})
+    output = dict(result.output)
+    output["traceId"] = result.trace["traceId"]
+    return output
+
+
+def _latest_student_interview_text(message: str) -> str:
+    text = str(message or "").strip()
+    if not text:
+        return ""
+    matches = re.findall(r"(?:^|\n)\s*(?:学生|student)\s*[：:]\s*(.*?)(?=\n\s*(?:学生|student|画像访谈Agent|图像访谈Agent|agent)\s*[：:]|\Z)", text, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = [item.strip() for item in matches if item.strip()]
+    return cleaned[-1] if cleaned else text
+
+
+def confirm_profile_interview(user) -> dict:
+    result = run_profile_interview_workflow(user, {"action": "confirm"})
+    output = dict(result.output)
+    output["traceId"] = result.trace["traceId"]
+    if output.get("success"):
+        output["user"] = public_user(user)
+    return output
+
+
+def _extract_profile_dimensions(text: str) -> dict:
+    try:
+        return _merge_extracted_profiles(_rule_extract_profile_dimensions(text), _llm_extract_profile_dimensions(text))
+    except Exception:
+        return _rule_extract_profile_dimensions(text)
+
+
+def _llm_extract_profile_dimensions(text: str) -> dict:
+    result = chat_completion(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "你是学习画像访谈智能体。请从学生自然语言中抽取结构化画像，只返回 JSON。"
+                    "字段包括 grade, major_direction, foundation_level, daily_study_time, pace, "
+                    "learning_goals, weak_points, expected_resources, learning_preferences, "
+                    "cognitiveStyle, motivationRisk, learningHistory, mistakePatterns。"
+                    "不要使用默认占位补齐；无法判断的字段返回空字符串、空数组或空对象。"
+                ),
+            },
+            {"role": "user", "content": text[:3000]},
+        ],
+        temperature=0.1,
+        max_tokens=900,
+    )
+    raw = str(result.get("content") or "").strip()
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        raw = "\n".join(lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:])
+    extracted = json.loads(raw)
+    if not isinstance(extracted, dict):
+        raise ValueError("profile extraction must return object")
+    extracted["_llm"] = {
+        "provider": result.get("provider") or "dashscope",
+        "model": result.get("model") or "",
+        "fallback": bool(result.get("fallback")),
+    }
+    return _normalize_extracted_profile(extracted)
+
+
+def _rule_extract_profile_dimensions(text: str) -> dict:
+    normalized = text.lower()
+    grade = _extract_grade(text, normalized)
+    resources = _extract_resource_preferences(text, normalized)
+    weak_points = _extract_weak_points(text, normalized)
+    learning_goals = _extract_learning_goals(text, normalized)
+    daily_minutes = _extract_daily_minutes(text)
+    major = _extract_major(text, normalized)
+    foundation = _extract_foundation(text, normalized)
+    cognitive_style = "图解与例题驱动" if _likes_visual_examples(text, normalized) else "结构化讲解"
+    mistake_patterns = _extract_mistake_patterns(text, normalized)
+    return {
+        "grade": grade,
+        "major_direction": major,
+        "foundation_level": foundation or "基础一般",
+        "daily_study_time": daily_minutes,
+        "learning_goals": learning_goals or ["提升课程掌握度"],
+        "weak_points": weak_points or ["当前路径节点"],
+        "expected_resources": resources or ["知识卡片", "练习题库"],
+        "learning_preferences": {
+            "cognitiveStyle": cognitive_style,
+            "preferredFormats": resources or ["知识卡片", "练习题库"],
+        },
+        "cognitiveStyle": cognitive_style,
+        "motivationRisk": "考研目标明确，建议保持连续反馈" if _contains_any(text, normalized, ["考研", "graduate exam"]) else "普通",
+        "learningHistory": _learning_history_hint(normalized),
+        "mistakePatterns": mistake_patterns,
+        "_llm": {"provider": "rules", "model": "", "fallback": True},
+    }
+
+
+def _normalize_extracted_profile(extracted: dict) -> dict:
+    normalized = dict(extracted)
+    normalized["grade"] = str(extracted.get("grade") or "").strip()
+    normalized["major_direction"] = str(extracted.get("major_direction") or "").strip()
+    normalized["foundation_level"] = str(extracted.get("foundation_level") or "").strip()
+    daily = extracted.get("daily_study_time")
+    normalized["daily_study_time"] = int(daily) if isinstance(daily, int) and 10 <= daily <= 480 else 0
+    pace = str(extracted.get("pace") or "").strip()
+    normalized["pace"] = pace if pace in {"relaxed", "standard", "intensive"} else ""
+    normalized["learning_goals"] = _clean_text_list(extracted.get("learning_goals"), limit=8)
+    normalized["weak_points"] = _clean_text_list(extracted.get("weak_points"), limit=8)
+    normalized["expected_resources"] = _clean_text_list(extracted.get("expected_resources"), limit=8)
+    prefs = extracted.get("learning_preferences")
+    normalized["learning_preferences"] = prefs if isinstance(prefs, dict) else {}
+    cognitive_style = str(extracted.get("cognitiveStyle") or "").strip()
+    if cognitive_style:
+        normalized["learning_preferences"] = {**normalized["learning_preferences"], "cognitiveStyle": cognitive_style}
+    normalized["motivationRisk"] = str(extracted.get("motivationRisk") or "").strip()
+    normalized["learningHistory"] = str(extracted.get("learningHistory") or "").strip()
+    normalized["mistakePatterns"] = _clean_text_list(extracted.get("mistakePatterns"), limit=12)
+    normalized["_llm"] = extracted.get("_llm") if isinstance(extracted.get("_llm"), dict) else {}
+    return normalized
+
+
+def _merge_extracted_profiles(rule_based: dict, llm_based: dict) -> dict:
+    merged = dict(rule_based)
+    for key, value in llm_based.items():
+        if key == "_llm":
+            merged[key] = value
+        elif _has_profile_value(value):
+            merged[key] = value
+    return merged
+
+
+def _has_profile_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    if isinstance(value, int):
+        return value > 0
+    return value is not None
+
+
+def _commit_profile(profile: LearnerProfile, extracted: dict, raw_text: str) -> None:
+    updated_fields: set[str] = set()
+    for field in (
+        "grade",
+        "major_direction",
+        "foundation_level",
+        "daily_study_time",
+        "learning_goals",
+        "weak_points",
+        "expected_resources",
+        "learning_preferences",
+    ):
+        value = extracted.get(field)
+        if value:
+            setattr(profile, field, value)
+            updated_fields.add(field)
+    extra = dict(profile.extra_profile or {})
+    extra["motivationRisk"] = extracted.get("motivationRisk", "")
+    extra["learningHistory"] = extracted.get("learningHistory", "")
+    profile.extra_profile = extra
+    merge_dynamic_profile_signals(
+        profile,
+        cognitive_style=(profile.learning_preferences or {}).get("cognitiveStyle", "") if isinstance(profile.learning_preferences, dict) else "",
+        learning_history=str(extracted.get("learningHistory") or ""),
+        motivation_risk=str(extracted.get("motivationRisk") or ""),
+        mistake_patterns=extracted.get("mistakePatterns") if isinstance(extracted.get("mistakePatterns"), list) else [],
+        resource_preferences=extracted.get("expected_resources") if isinstance(extracted.get("expected_resources"), list) else [],
+        llm=extracted.get("_llm") if isinstance(extracted.get("_llm"), dict) else {},
+        save=False,
+    )
+    append_learning_event(
+        profile,
+        event_type="profile_interview",
+        summary="通过自然语言对话生成学习画像",
+        source="profile_interview",
+        importance=0.8,
+        signals={
+            "weakPoints": extracted.get("weak_points", []),
+            "resourcePreferences": extracted.get("expected_resources", []),
+            "motivation": extracted.get("motivationRisk", ""),
+            "mistakePatterns": extracted.get("mistakePatterns", []),
+        },
+        raw_preview=raw_text,
+        save=False,
+    )
+    llm = extracted.get("_llm") if isinstance(extracted.get("_llm"), dict) else {}
+    evidence = {"rawPreview": str(raw_text or "")[:120]}
+    if llm.get("provider"):
+        evidence["provider"] = llm.get("provider")
+    confidence = 0.75 if llm.get("fallback") else 0.9
+    for dimension, extracted_key in (
+        ("learningGoals", "learning_goals"),
+        ("weakPoints", "weak_points"),
+        ("resourcePreferences", "expected_resources"),
+        ("motivationRisk", "motivationRisk"),
+        ("mistakePatterns", "mistakePatterns"),
+    ):
+        value = extracted.get(extracted_key)
+        if _has_profile_value(value):
+            append_profile_signal(
+                profile,
+                dimension=dimension,
+                value=value,
+                source="profile_interview",
+                confidence=confidence,
+                evidence=evidence,
+                save=False,
+            )
+    snapshot = aggregate_profile_snapshot(profile, save=False)
+    extra = dict(profile.extra_profile or {})
+    extra["profileSnapshot"] = snapshot
+    extra["dynamicProfileV2"] = snapshot
+    profile.extra_profile = extra
+    profile.save(update_fields=[*sorted(updated_fields), "extra_profile", "updated_at"])
+
+
+def _commit_interview_session(
+    profile: LearnerProfile,
+    raw_text: str,
+    trace_id: str,
+    missing_dimensions: list[dict],
+    ask_fields: list[dict],
+    ask_strategy: dict,
+    next_question: str,
+    interview_complete: bool,
+    generated: dict | None = None,
+) -> dict:
+    extra = dict(profile.extra_profile or {})
+    previous_session = extra.get("profileInterviewSession")
+    session = dict(previous_session) if isinstance(previous_session, dict) else {}
+    messages = _valid_messages(session.get("messages"))
+    now = timezone.now().isoformat()
+    messages.append({"role": "user", "content": str(raw_text or "")[:500], "createdAt": now})
+    if next_question:
+        messages.append({"role": "agent", "content": str(next_question)[:500], "createdAt": now})
+    interview_session = {
+        "schemaVersion": SESSION_SCHEMA_VERSION,
+        "turnCount": int(session.get("turnCount") or 0) + 1,
+        "latestTraceId": trace_id,
+        "profileSnapshot": _public_interview_profile(profile),
+        "profileReadiness": {
+            "dimensionCount": _dimension_count(profile),
+            "status": "ready" if _dimension_count(profile) >= 8 else "partial",
+            "missingDimensions": missing_dimensions,
+            "interviewComplete": bool(interview_complete),
+        },
+        "missingDimensions": missing_dimensions,
+        "askFields": ask_fields,
+        "askStrategy": ask_strategy,
+        "nextQuestion": next_question,
+        "interviewComplete": bool(interview_complete),
+        "generated": generated or {},
+        "messages": messages[-12:],
+        "updatedAt": now,
+    }
+    extra["profileInterviewSession"] = interview_session
+    profile.extra_profile = extra
+    profile.save(update_fields=["extra_profile", "updated_at"])
+    return interview_session
+
+
+def _update_interview_session_commit_state(
+    profile: LearnerProfile,
+    *,
+    trace_id: str,
+    missing_dimensions: list[dict],
+    ask_fields: list[dict],
+    ask_strategy: dict,
+    next_question: str,
+    committed: bool,
+    generated: dict | None = None,
+) -> dict:
+    extra = dict(profile.extra_profile or {})
+    previous_session = extra.get("profileInterviewSession")
+    session = dict(previous_session) if isinstance(previous_session, dict) else {}
+    messages = _valid_messages(session.get("messages"))
+    now = timezone.now().isoformat()
+    if next_question:
+        messages.append({"role": "agent", "content": str(next_question)[:500], "createdAt": now})
+    interview_session = {
+        **EMPTY_PROFILE_INTERVIEW_SESSION,
+        **session,
+        "latestTraceId": trace_id,
+        "profileSnapshot": _public_interview_profile(profile),
+        "profileReadiness": {
+            "dimensionCount": _dimension_count(profile),
+            "status": "ready" if not missing_dimensions else "partial",
+            "missingDimensions": missing_dimensions,
+            "interviewComplete": not missing_dimensions,
+        },
+        "missingDimensions": missing_dimensions,
+        "askFields": ask_fields,
+        "askStrategy": ask_strategy,
+        "nextQuestion": next_question,
+        "interviewComplete": not missing_dimensions,
+        "profileCommitted": bool(committed),
+        "confirmedAt": now if committed else str(session.get("confirmedAt") or ""),
+        "generated": generated if generated is not None else session.get("generated", {}),
+        "messages": messages[-12:],
+        "updatedAt": now,
+    }
+    extra["profileInterviewSession"] = interview_session
+    profile.extra_profile = extra
+    profile.save(update_fields=["extra_profile", "updated_at"])
+    return interview_session
+
+
+def _public_interview_profile(profile: LearnerProfile) -> dict:
+    extra = profile.extra_profile or {}
+    learning_preferences = profile.learning_preferences if isinstance(profile.learning_preferences, dict) else {}
+    return {
+        "grade": profile.grade,
+        "majorDirection": profile.major_direction,
+        "foundationLevel": profile.foundation_level,
+        "dailyMinutes": profile.daily_study_time,
+        "learningGoals": profile.learning_goals or [],
+        "weakPoints": profile.weak_points or [],
+        "resourcePreferences": profile.expected_resources or [],
+        "cognitiveStyle": learning_preferences.get("cognitiveStyle", ""),
+        "learningHistory": extra.get("learningHistory", ""),
+        "motivationRisk": extra.get("motivationRisk", ""),
+    }
+
+
+def _dimension_count(profile: LearnerProfile) -> int:
+    return len([value for value in _public_interview_profile(profile).values() if value])
+
+
+def _missing_dimensions(profile: LearnerProfile) -> list[dict]:
+    public = _public_interview_profile(profile)
+    checks = (
+        ("grade", "年级", public.get("grade")),
+        ("majorDirection", "专业方向", public.get("majorDirection")),
+        ("foundationLevel", "基础水平", public.get("foundationLevel")),
+        ("dailyMinutes", "每日时间", public.get("dailyMinutes")),
+        ("learningGoals", "学习目标", public.get("learningGoals")),
+        ("weakPoints", "薄弱点", public.get("weakPoints")),
+        ("resourcePreferences", "资源偏好", public.get("resourcePreferences")),
+        ("cognitiveStyle", "认知风格", public.get("cognitiveStyle")),
+        ("learningHistory", "学习历史", public.get("learningHistory")),
+        ("motivationRisk", "动机风险", public.get("motivationRisk")),
+    )
+    return [{"field": field, "label": label} for field, label, value in checks if _profile_dimension_missing(field, value)]
+
+
+def _profile_dimension_missing(field: str, value: Any) -> bool:
+    if not value:
+        return True
+    if field in {"learningGoals", "weakPoints", "resourcePreferences"} and isinstance(value, list):
+        text = " ".join(str(item) for item in value)
+        placeholder_markers = ("当前路径节点", "提升课程掌握度", "知识卡片", "练习题库")
+        return any(marker in text for marker in placeholder_markers)
+    return False
+
+
+def _ask_strategy() -> dict:
+    return {
+        "name": "plan_critical_priority",
+        "priorityOrder": ASK_PRIORITY_ORDER,
+        "reason": "优先追问最影响计划生成、推荐排序和薄弱点补救的画像字段。",
+    }
+
+
+def _ask_fields(missing_dimensions: list[dict]) -> list[dict]:
+    priority = {field: index for index, field in enumerate(ASK_PRIORITY_ORDER)}
+    return sorted(
+        missing_dimensions,
+        key=lambda item: (priority.get(str(item.get("field") or ""), 999), str(item.get("field") or "")),
+    )[:2]
+
+
+def _next_question(ask_fields: list[dict]) -> str:
+    if not ask_fields:
+        return "画像信息已经比较完整。你可以确认画像并进入学习诊断。"
+    labels = "、".join(str(item.get("label") or item.get("field")) for item in ask_fields)
+    return f"这一轮先补充：{labels}。请用一句话回答，我会再继续追问其他维度。"
+
+
+def _valid_messages(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    messages = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        message = dict(item)
+        if message.get("role") == "user":
+            message["content"] = _latest_student_interview_text(str(message.get("content") or ""))[:500]
+        elif message.get("content"):
+            message["content"] = str(message.get("content") or "")[:500]
+        messages.append(message)
+    return messages
+
+
+def _extract_grade(text: str, normalized: str) -> str:
+    grade_tokens = (
+        ("大一", "大一"),
+        ("大二", "大二"),
+        ("sophomore", "大二"),
+        ("大三", "大三"),
+        ("junior", "大三"),
+        ("大四", "大四"),
+        ("senior", "大四"),
+        ("研究生", "研究生"),
+    )
+    return _first_label_match(text, normalized, grade_tokens)
+
+
+def _extract_major(text: str, normalized: str) -> str:
+    if _contains_any(text, normalized, ["计算机", "computer science", "computer", "软件", "software"]):
+        return "计算机科学与技术"
+    return ""
+
+
+def _extract_foundation(text: str, normalized: str) -> str:
+    if _contains_any(text, normalized, ["基础弱", "基础较弱", "薄弱", "weak"]):
+        return "基础较弱"
+    if _contains_any(text, normalized, ["基础好", "基础扎实", "solid"]):
+        return "基础扎实"
+    if _contains_any(text, normalized, ["基础一般", "一般", "中等", "average"]):
+        return "基础一般"
+    return ""
+
+
+def _extract_daily_minutes(text: str) -> int:
+    minute_match = re.search(r"(\d{2,3})\s*(?:分钟|分|mins?|minutes?)", text, flags=re.I)
+    return int(minute_match.group(1)) if minute_match else 60
+
+
+def _extract_weak_points(text: str, normalized: str) -> list[str]:
+    weak_tokens = (
+        ("处理机调度", "处理机调度算法"),
+        ("cpu scheduling", "处理机调度算法"),
+        ("进程调度", "处理机调度算法"),
+        ("进程", "进程与 PCB"),
+        ("process", "进程与 PCB"),
+        ("线程", "线程与并发执行"),
+        ("thread", "线程与并发执行"),
+        ("信号量", "同步互斥与信号量"),
+        ("semaphore", "同步互斥与信号量"),
+        ("死锁", "死锁条件与处理"),
+        ("deadlock", "死锁条件与处理"),
+        ("虚拟内存", "虚拟内存与页面置换"),
+        ("virtual memory", "虚拟内存与页面置换"),
+        ("页面置换", "虚拟内存与页面置换"),
+        ("文件系统", "文件系统与目录"),
+        ("file system", "文件系统与目录"),
+    )
+    return _all_label_matches(text, normalized, weak_tokens)
+
+
+def _extract_mistake_patterns(text: str, normalized: str) -> list[str]:
+    pattern_tokens = (
+        ("符号", "符号方向混淆"),
+        ("sign", "符号方向混淆"),
+        ("正负号", "符号方向混淆"),
+        ("公式", "公式套用不稳"),
+        ("formula", "公式套用不稳"),
+        ("概念", "概念边界不清"),
+        ("concept", "概念边界不清"),
+        ("不会迁移", "迁移应用困难"),
+        ("迁移", "迁移应用困难"),
+        ("transfer", "迁移应用困难"),
+        ("看懂不会做", "例题到练习迁移慢"),
+        ("计算", "计算步骤易漏"),
+        ("calculation", "计算步骤易漏"),
+        ("粗心", "审题与细节检查不足"),
+        ("careless", "审题与细节检查不足"),
+        ("混淆", "相近概念混淆"),
+        ("confuse", "相近概念混淆"),
+    )
+    return _all_label_matches(text, normalized, pattern_tokens)
+
+
+def _extract_learning_goals(text: str, normalized: str) -> list[str]:
+    goals = []
+    if _contains_any(text, normalized, ["考研", "graduate exam", "postgraduate"]):
+        goals.append("考研复习")
+    if _contains_any(text, normalized, ["考试", "期末", "exam"]):
+        goals.append("课程考试")
+    if _contains_any(text, normalized, ["操作系统", "operating system", "operating systems"]):
+        goals.append("掌握操作系统")
+    return goals
+
+
+def _extract_resource_preferences(text: str, normalized: str) -> list[str]:
+    resource_tokens = (
+        ("动画演示", "动画演示"),
+        ("animation", "动画演示"),
+        ("例题推导", "例题推导"),
+        ("examples", "例题推导"),
+        ("工程案例", "工程案例"),
+        ("engineering cases", "工程案例"),
+        ("练习题库", "练习题库"),
+        ("知识卡片", "知识卡片"),
+        ("短视频", "短视频"),
+    )
+    return _all_label_matches(text, normalized, resource_tokens)
+
+
+def _likes_visual_examples(text: str, normalized: str) -> bool:
+    return _contains_any(text, normalized, ["动画", "图", "例题", "animation", "examples", "visual"])
+
+
+def _learning_history_hint(normalized: str) -> str:
+    if "学过" in normalized or "learned" in normalized:
+        return "有相关学习经历"
+    return "待通过诊断和学习行为持续补充"
+
+
+def _contains_any(text: str, normalized: str, needles: list[str]) -> bool:
+    return any(needle in text or needle.lower() in normalized for needle in needles)
+
+
+def _first_label_match(text: str, normalized: str, tokens: tuple[tuple[str, str], ...]) -> str:
+    for token, label in tokens:
+        if token in text or token.lower() in normalized:
+            return label
+    return ""
+
+
+def _all_label_matches(text: str, normalized: str, tokens: tuple[tuple[str, str], ...]) -> list[str]:
+    labels = []
+    for token, label in tokens:
+        if token in text or token.lower() in normalized:
+            if label not in labels:
+                labels.append(label)
+    return labels
+
+
+def _clean_text_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for item in value:
+        text = str(item).strip()
+        if text and text not in cleaned:
+            cleaned.append(text[:120])
+    return cleaned[:limit]

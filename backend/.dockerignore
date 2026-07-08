@@ -1,0 +1,15 @@
+.venv/
+.cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.log
+tmp/
+knowledge_base/celery_queue/
+django-dev.log
+django-dev-error.log
+celery-worker.log
+celery-worker-error.log
+celery-debug.log
+celery-debug-error.log
