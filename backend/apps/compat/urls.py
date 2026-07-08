@@ -20,6 +20,7 @@ urlpatterns = [
     path("resources/packs/<str:pack_id>/", views.resource_pack_detail, name="compat-resource-pack-detail"),
     path("learning/effect/evaluate/", views.learning_effect_evaluate, name="compat-learning-effect-evaluate"),
     path("learning/effect/report/", views.learning_effect_report, name="compat-learning-effect-report"),
+    path("learning/effect/optimization-policy/", views.learning_effect_optimization_policy, name="compat-learning-effect-optimization-policy"),
     path("path/generate/", views.path_generate, name="compat-path-generate"),
     path("assess/grade/", views.assess_grade, name="compat-assess-grade"),
     path("recommend/", views.recommend, name="compat-recommend"),

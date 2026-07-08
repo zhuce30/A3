@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Activity, ArrowRight, CheckCircle2, Download, Eye, FileJson, Loader2, ShieldCheck, TerminalSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
+import { trackPageView } from '@/lib/a3/learning-event-client';
 import { buildEvaluationTargetStatuses } from '@/lib/a3/evaluation-targets';
 import type { A3ApiResponse, StudyPlan } from '@/lib/a3/learning-types';
 import { buildOpenMAICEvidenceSummary } from '@/lib/a3/openmaic-evidence-summary';
@@ -347,6 +348,14 @@ type LearningEffectReportResponse = {
       favorited?: number;
       totalFeedback?: number;
     };
+    eventStream?: {
+      schemaVersion?: string;
+      v2EventCount?: number;
+      acceptedCount?: number;
+      singleApi?: string;
+      batchApi?: string;
+      sourcePages?: Array<{ sourcePage?: string; count?: number }>;
+    };
     resourceEffectiveness?: number;
     masterySignals?: {
       averageFeedbackScore?: number;
@@ -370,6 +379,20 @@ type LearningEffectReportResponse = {
         latestGoal?: string;
       };
       nextAction?: { label: string; href: string; reason?: string };
+    };
+    optimizationPolicy?: {
+      policyVersion?: string;
+      decisionId?: string;
+      selectedStrategy?: string;
+      outcomeStatus?: string;
+      selectedCandidate?: {
+        decisionScore?: number;
+        rankingBasis?: string[];
+        expectedMetricDelta?: Record<string, number>;
+      };
+      candidates?: Array<{ strategy?: string; decisionScore?: number; rankingBasis?: string[] }>;
+      successCriteria?: Array<{ metric?: string; target?: number; targetDelta?: number; windowDays?: number }>;
+      observedMetricDelta?: Record<string, number>;
     };
     updatedAt?: string;
   };
@@ -405,6 +428,10 @@ type RuntimeStatusResponse = {
 };
 
 type StudyPlanResponse = A3ApiResponse<{ plan: StudyPlan }>;
+type OptimizationPolicyResponse = A3ApiResponse<{
+  optimizationPolicy?: NonNullable<LearningEffectReportResponse['effectReport']>['optimizationPolicy'];
+  decisionHistory?: Array<NonNullable<LearningEffectReportResponse['effectReport']>['optimizationPolicy'] & { decisionAt?: string }>;
+}>;
 
 const capabilityLabels: Record<string, { title: string; href: string; desc: string }> = {
   profileReady: { title: '学习画像', href: '/a3/profile-setup', desc: '年级、基础、目标、薄弱点和资源偏好可结构化沉淀。' },
@@ -429,6 +456,7 @@ export function buildAgentTraceWorkflowOptions(agentRuns?: DemoStatusResponse['a
 export function CapabilitiesView() {
   const [data, setData] = useState<DemoStatusResponse | null>(null);
   const [learningEffectReport, setLearningEffectReport] = useState<LearningEffectReportResponse['effectReport'] | null>(null);
+  const [optimizationPolicyResponse, setOptimizationPolicyResponse] = useState<OptimizationPolicyResponse | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatusResponse | null>(null);
   const [studyPlan, setStudyPlan] = useState<StudyPlan | null>(null);
   const [message, setMessage] = useState('');
@@ -445,9 +473,10 @@ export function CapabilitiesView() {
 
   async function load() {
     setLoading(true);
-    const [result, effectResult, planResult, runtimeResult] = await Promise.all([
+    const [result, effectResult, optimizationResult, planResult, runtimeResult] = await Promise.all([
       a3GetJson<DemoStatusResponse>('/api/demo/status/'),
       a3GetJson<LearningEffectReportResponse>('/api/learning/effect/report/'),
+      a3GetJson<OptimizationPolicyResponse>('/api/learning/effect/optimization-policy/?days=30'),
       a3GetJson<StudyPlanResponse>('/api/learning/study-plan/?auto=1'),
       fetch('/api/a3/system/runtime', { credentials: 'include', cache: 'no-store' })
         .then((response) => response.json() as Promise<RuntimeStatusResponse>)
@@ -457,6 +486,7 @@ export function CapabilitiesView() {
     if (effectResult.success) {
       setLearningEffectReport(effectResult.effectReport ?? null);
     }
+    setOptimizationPolicyResponse(optimizationResult.success ? optimizationResult : null);
     if (planResult.success) {
       setStudyPlan(planResult.plan ?? null);
     }
@@ -595,6 +625,7 @@ export function CapabilitiesView() {
   }
 
   useEffect(() => {
+    void trackPageView('/a3/capabilities', { page: 'capabilities' });
     const timer = window.setTimeout(() => {
       void load();
     }, 0);
@@ -1271,6 +1302,32 @@ export function CapabilitiesView() {
             <MetricInline label="confidence" value={learningEffectReport?.confidence ?? '--'} />
             <MetricInline label="events" value={`${learningEffectReport?.behavior?.eventCount ?? 0}`} />
           </div>
+          <div className="mt-4 rounded-xl border border-emerald-200 bg-white/85 px-4 py-3" data-testid="a3-event-stream-v2-evidence">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-emerald-950">事件流 v2 / 埋点采集证据</div>
+                <p className="mt-1 text-xs leading-5 text-emerald-800">
+                  单条与批量 ingest 均写入 LearningEvent，来源页面和客户端时间会进入效果评估证据。
+                </p>
+              </div>
+              <A3Pill tone={(learningEffectReport?.eventStream?.v2EventCount ?? 0) > 0 ? 'green' : 'orange'}>
+                {learningEffectReport?.eventStream?.schemaVersion ?? 'a3.learning-event.v2'}
+              </A3Pill>
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-4">
+              <MetricInline label="v2 events" value={`${learningEffectReport?.eventStream?.v2EventCount ?? 0}`} />
+              <MetricInline label="accepted" value={`${learningEffectReport?.eventStream?.acceptedCount ?? 0}`} />
+              <MetricInline label="single API" value={learningEffectReport?.eventStream?.singleApi ?? '/api/learning/events/'} />
+              <MetricInline label="batch API" value={learningEffectReport?.eventStream?.batchApi ?? '/api/learning/events/batch/'} />
+            </div>
+            {(learningEffectReport?.eventStream?.sourcePages ?? []).length > 0 && (
+              <div className="mt-3 grid gap-2 md:grid-cols-3">
+                {(learningEffectReport?.eventStream?.sourcePages ?? []).slice(0, 3).map((page) => (
+                  <MetricInline key={page.sourcePage ?? 'unknown'} label={page.sourcePage || 'unknown'} value={`${page.count ?? 0}`} />
+                ))}
+              </div>
+            )}
+          </div>
           <div className="mt-4 grid gap-3 md:grid-cols-3">
             <MetricInline
               label="plan execution"
@@ -1279,6 +1336,37 @@ export function CapabilitiesView() {
             <MetricInline label="avg score" value={`${learningEffectReport?.masterySignals?.averageFeedbackScore ?? 0}`} />
             <MetricInline label="adjustment" value={learningEffectReport?.planAdjustment?.strategy ?? '--'} />
           </div>
+          {learningEffectReport?.optimizationPolicy && (
+            <div className="mt-4 rounded-xl border border-blue-200 bg-white/85 px-4 py-3" data-testid="a3-optimization-policy-evidence">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-blue-950">持续优化策略引擎</div>
+                  <p className="mt-1 text-xs leading-5 text-blue-800">
+                    候选策略先评分，再写入计划调整，并在 7 天窗口内回看 outcome。
+                  </p>
+                </div>
+                <A3Pill tone={learningEffectReport.optimizationPolicy.outcomeStatus === 'succeeded' ? 'green' : learningEffectReport.optimizationPolicy.outcomeStatus === 'failed' ? 'red' : 'orange'}>
+                  {learningEffectReport.optimizationPolicy.outcomeStatus ?? 'pending'}
+                </A3Pill>
+              </div>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <MetricInline label="policy" value={learningEffectReport.optimizationPolicy.policyVersion ?? '--'} />
+                <MetricInline label="decision" value={learningEffectReport.optimizationPolicy.decisionId ?? '--'} />
+                <MetricInline label="strategy" value={learningEffectReport.optimizationPolicy.selectedStrategy ?? '--'} />
+                <MetricInline label="score" value={`${learningEffectReport.optimizationPolicy.selectedCandidate?.decisionScore ?? 0}`} />
+              </div>
+              <div className="mt-3 grid gap-3 md:grid-cols-3">
+                <MetricInline label="independent API" value={optimizationPolicyResponse?.success ? 'ready' : 'not loaded'} />
+                <MetricInline label="history" value={`${optimizationPolicyResponse?.decisionHistory?.length ?? 0}/12`} />
+                <MetricInline label="latest" value={optimizationPolicyResponse?.decisionHistory?.[0]?.decisionAt ?? '--'} />
+              </div>
+              <div className="mt-3 grid gap-2 md:grid-cols-3">
+                {(learningEffectReport.optimizationPolicy.candidates ?? []).slice(0, 3).map((candidate) => (
+                  <MetricInline key={candidate.strategy ?? 'candidate'} label={candidate.strategy ?? '--'} value={`${candidate.decisionScore ?? 0}`} />
+                ))}
+              </div>
+            </div>
+          )}
           <div className="mt-4 grid gap-3 md:grid-cols-3">
             <MetricInline label="7d answers" value={`${learningEffectReport?.trends?.sevenDay?.assessment?.attemptCount ?? 0}`} />
             <MetricInline label="14d answers" value={`${learningEffectReport?.trends?.fourteenDay?.assessment?.attemptCount ?? 0}`} />

@@ -6,7 +6,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_http_methods
 
-from backend.apps.learning.effect_events import aggregate_learning_events, list_recent_learning_events
+from backend.apps.learning.effect_events import aggregate_learning_events, ingest_learning_event_v2, ingest_learning_events_batch_v2, list_recent_learning_events, serialize_learning_event
 from backend.apps.learning.resource_attribution import build_resource_effect_attribution
 from backend.apps.learning.models import Course, CourseEnrollment, LearningPath, LearningPathItem, LearningPathStatus
 from backend.apps.accounts.permissions import require_teacher_role
@@ -127,6 +127,41 @@ def recent_events(request):
     except (TypeError, ValueError):
         limit = 100
     return JsonResponse({"success": True, "events": list_recent_learning_events(request.user, limit=limit)})
+
+
+@require_http_methods(["POST"])
+def ingest_event(request):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    try:
+        result = ingest_learning_event_v2(request.user, _body(request))
+        status_code = 201 if result["status"] == "accepted" else 200
+        return JsonResponse(
+            {
+                "success": True,
+                "schemaVersion": "a3.learning-event.v2",
+                "status": result["status"],
+                "event": serialize_learning_event(result["event"]),
+            },
+            status=status_code,
+        )
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["POST"])
+def ingest_events_batch(request):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    try:
+        payload = _body(request)
+        result = ingest_learning_events_batch_v2(request.user, payload.get("events"))
+        status_code = 207 if result["rejected"] else 201
+        return JsonResponse({"success": True, **result}, status=status_code)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
 
 
 @require_http_methods(["GET"])

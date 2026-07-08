@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
+import { trackLearningEvent, trackResourceComplete, trackResourceOpen } from '@/lib/a3/learning-event-client';
 import type {
   A3OpenMAICClassroomArtifact,
   A3OpenMAICPPTXExportArtifact,
@@ -147,13 +148,15 @@ export function ResourceStandaloneView({ packId, resourceType }: { packId: strin
   useEffect(() => {
     if (!openedPackId || !openedResourceType) return;
     void recordResourceFeedback(openedPackId, openedResourceType, 'opened');
-  }, [openedPackId, openedResourceType]);
+    void recordResourceLearningEvent(pack, resource, config, 'opened');
+  }, [config, openedPackId, openedResourceType, pack, resource]);
 
   async function handleFeedback(action: 'completed' | 'skipped' | 'favorited') {
     if (!pack || !resource) return;
     setFeedbackSaving(action);
     setFeedbackMessage('');
     const result = await recordResourceFeedback(pack.resourcePackId, resource.type, action, action === 'completed' ? 90 : 0);
+    void recordResourceLearningEvent(pack, resource, config, action);
     setFeedbackSaving('');
     setFeedbackMessage(result.success ? feedbackSuccessText(action) : result.error ?? '资源反馈回流失败');
   }
@@ -986,6 +989,39 @@ async function recordResourceFeedback(
     action,
     resourceType,
     score,
+  });
+}
+
+function recordResourceLearningEvent(
+  pack: A3ResourcePackV2 | null,
+  resource: A3ResourcePackV2Resource | null,
+  config: ResourcePageConfig,
+  action: 'opened' | 'completed' | 'skipped' | 'favorited',
+) {
+  if (!pack || !resource) return Promise.resolve({ success: false, error: 'missing resource' });
+  const eventInput = {
+    eventId: `resource_${pack.resourcePackId}_${resource.type}_${action}_${config.slug}`,
+    sourcePage: `/a3/resources/${pack.resourcePackId}/${config.slug}`,
+    targetType: 'resource_pack',
+    targetId: pack.resourcePackId,
+    resourceType: resource.type,
+    durationSec: action === 'completed' ? resource.estimatedMinutes * 60 : 0,
+    score: action === 'completed' ? 90 : null,
+    quality: action === 'completed' ? { completionRate: 1 } : {},
+    metadata: {
+      action,
+      resourceTitle: resource.title,
+      resourcePage: config.slug,
+      generationMode: pack.generationMode ?? '',
+      requestedResourceType: pack.requestedResourceType ?? '',
+    },
+    traceId: pack.traceId,
+  };
+  if (action === 'opened') return trackResourceOpen(eventInput);
+  if (action === 'completed') return trackResourceComplete(eventInput);
+  return trackLearningEvent({
+    ...eventInput,
+    eventType: action === 'favorited' ? 'resource_favorited' : 'resource_skipped',
   });
 }
 

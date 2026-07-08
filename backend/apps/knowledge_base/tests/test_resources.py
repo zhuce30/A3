@@ -1423,7 +1423,9 @@ class KnowledgeBaseApiPermissionTests(TestCase):
         self.assertTrue(payload["success"])
         self.assertEqual(payload["job"]["type"], "parse")
         self.assertEqual(payload["job"]["status"], IndexJobStatus.QUEUED)
+        self.assertEqual(payload["resource"]["status"], ResourceStatus.INDEXING)
         resource.refresh_from_db()
+        self.assertEqual(resource.status, ResourceStatus.INDEXING)
         self.assertEqual(resource.index_job_id, KnowledgeIndexJob.objects.get(celery_task_id="single-parse-task-id").id)
 
     @patch("backend.apps.knowledge_base.tasks.run_index_job.delay")

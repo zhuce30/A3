@@ -1127,12 +1127,18 @@ def evaluate_learning_effect(user) -> dict:
         degraded_reason=report["analysisDegradedReason"],
         trace=report["agentTrace"],
     )
+    from backend.apps.learning.optimization_policy import append_policy_decision_history, build_continuous_optimization_policy_report
+
+    policy_report = build_continuous_optimization_policy_report(user, effect_report=report)
+    report["optimizationPolicy"] = policy_report
+    append_policy_decision_history(user, policy_report)
     plan_adjustment_action = _apply_learning_effect_plan_adjustment(user, report)
     if plan_adjustment_action:
         report["planAdjustmentAction"] = plan_adjustment_action
     profile, _ = LearnerProfile.objects.get_or_create(user=user)
     extra = dict(profile.extra_profile or {})
     extra["learningEffectReport"] = report
+    extra["continuousOptimizationPolicyReport"] = policy_report
     _append_learning_event(
         extra,
         "learning_effect_evaluated",
@@ -1150,6 +1156,7 @@ def build_learning_effect_report(user, *, include_persisted_analysis: bool = Tru
     feedbacks = [item for item in extra.get("resourceFeedback", []) if isinstance(item, dict)]
     event_summary = aggregate_learning_events(user, days=30)
     event_usage = event_summary.get("resourceUsage") if isinstance(event_summary.get("resourceUsage"), dict) else {}
+    event_stream = event_summary.get("eventStream") if isinstance(event_summary.get("eventStream"), dict) else {}
     event_total = sum(_safe_int(event_usage.get(key), 0) for key in ["opened", "completed", "skipped", "favorited"])
     if event_total:
         opened = _safe_int(event_usage.get("opened"), 0)
@@ -1197,6 +1204,7 @@ def build_learning_effect_report(user, *, include_persisted_analysis: bool = Tru
             "favorited": favorited,
             "totalFeedback": total_feedback,
         },
+        "eventStream": event_stream,
         "resourceEffectiveness": effectiveness,
         "masterySignals": {
             "averageFeedbackScore": average_score,
@@ -1223,6 +1231,9 @@ def build_learning_effect_report(user, *, include_persisted_analysis: bool = Tru
         },
         "updatedAt": timezone.now().isoformat(),
     }
+    from backend.apps.learning.optimization_policy import build_continuous_optimization_policy_report
+
+    report["optimizationPolicy"] = build_continuous_optimization_policy_report(user, effect_report=report)
     if include_persisted_analysis:
         persisted = extra.get("learningEffectAnalysis") if isinstance(extra.get("learningEffectAnalysis"), dict) else {}
         if persisted:
@@ -1345,7 +1356,14 @@ def _apply_learning_effect_plan_adjustment(user, report: dict) -> dict:
     if not isinstance(plan, dict):
         return {}
     adjustment = build_plan_adjustment_from_analysis(analysis, report)
+    policy_report = report.get("optimizationPolicy") if isinstance(report.get("optimizationPolicy"), dict) else {}
+    if policy_report:
+        from backend.apps.learning.optimization_policy import decorate_adjustment_with_policy_decision
+
+        adjustment = decorate_adjustment_with_policy_decision(adjustment, policy_report)
     adjusted_plan = apply_plan_adjustment_to_study_plan(plan, adjustment)
+    if policy_report:
+        extra["continuousOptimizationPolicyReport"] = policy_report
     extra["studyPlan"] = adjusted_plan
     profile.extra_profile = extra
     profile.save(update_fields=["extra_profile", "updated_at"])

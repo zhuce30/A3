@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, Bell, BookOpenCheck, CheckCircle2, Clock3, Loader2, MessageCircle, RotateCcw, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
+import { trackLearningEvent, trackPageView } from '@/lib/a3/learning-event-client';
 import type { LearningReport } from '@/lib/a3/assessment-types';
 import type { A3ApiResponse, DailyReflection, StudyPlan, StudyPlanDay, StudyPlanTask, StudyPlanTaskFeedback } from '@/lib/a3/learning-types';
 import { formatReportMetricDelta } from '@/lib/a3/report-delta';
@@ -74,6 +75,7 @@ export function TodayLearningView() {
     }
     setPlan(response.plan);
     setFeedback(response.feedback ?? response.plan.lastTaskFeedback ?? null);
+    void trackTaskCompletedEvent(day, task, response.plan.planId);
     setPreviousReport(report);
     const reportResponse = await a3GetJson<ReportResponse>('/api/assessments/report/');
     if (reportResponse.success) setReport(reportResponse.report);
@@ -96,6 +98,7 @@ export function TodayLearningView() {
   }
 
   useEffect(() => {
+    void trackPageView('/a3/today', { page: 'today_learning' });
     const timer = window.setTimeout(() => {
       void load();
     }, 0);
@@ -496,6 +499,25 @@ export function TodayLearningView() {
       </div>
     </div>
   );
+}
+
+function trackTaskCompletedEvent(day: StudyPlanDay, task: StudyPlanTask, planId: string) {
+  return trackLearningEvent({
+    eventId: `task_${planId}_${day.dayIndex}_${task.id}_completed`,
+    eventType: 'task_completed',
+    sourcePage: '/a3/today',
+    targetType: 'study_plan_task',
+    targetId: task.id,
+    knowledgePointId: task.knowledgePointId,
+    durationSec: task.estimatedMinutes * 60,
+    metadata: {
+      planId,
+      dayIndex: day.dayIndex,
+      taskType: task.type,
+      taskTitle: task.title,
+      href: task.href,
+    },
+  });
 }
 
 function SessionMetric({ label, value }: { label: string; value: string }) {

@@ -155,6 +155,7 @@ class ResourcePackLog(models.Model):
 class LearningEvent(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="learning_events")
+    event_id = models.CharField(max_length=128, blank=True, default="")
     event_type = models.CharField(max_length=64)
     target_type = models.CharField(max_length=64, blank=True, default="")
     target_id = models.CharField(max_length=128, blank=True, default="")
@@ -165,6 +166,10 @@ class LearningEvent(models.Model):
     quality = models.JSONField(default=dict, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
     trace_id = models.CharField(max_length=128, blank=True, default="")
+    source_page = models.CharField(max_length=255, blank=True, default="")
+    client_timestamp = models.DateTimeField(null=True, blank=True)
+    schema_version = models.CharField(max_length=64, blank=True, default="a3.learning-event.v1")
+    ingest_status = models.CharField(max_length=32, blank=True, default="accepted")
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -172,9 +177,11 @@ class LearningEvent(models.Model):
         ordering = ["-created_at", "-id"]
         indexes = [
             models.Index(fields=["user", "-created_at"], name="idx_event_user_time"),
+            models.Index(fields=["user", "event_id"], name="idx_event_user_event_id"),
             models.Index(fields=["user", "event_type", "-created_at"], name="idx_event_user_type_time"),
             models.Index(fields=["user", "knowledge_point_id", "-created_at"], name="idx_event_user_kp_time"),
             models.Index(fields=["user", "resource_type", "-created_at"], name="idx_event_user_res_time"),
+            models.Index(fields=["user", "source_page", "-created_at"], name="idx_event_user_page_time"),
         ]
 
 

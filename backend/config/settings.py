@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from celery.schedules import crontab
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
@@ -143,6 +144,15 @@ CELERY_TASK_IGNORE_RESULT = True
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "14400"))
 CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "13800"))
+CELERY_BEAT_POLICY_OUTCOME_HOUR = int(os.getenv("CELERY_BEAT_POLICY_OUTCOME_HOUR", "3"))
+CELERY_BEAT_POLICY_OUTCOME_MINUTE = int(os.getenv("CELERY_BEAT_POLICY_OUTCOME_MINUTE", "15"))
+CELERY_BEAT_SCHEDULE = {
+    "a3-evaluate-optimization-policy-outcomes-daily": {
+        "task": "learning.evaluate_optimization_policy_outcomes",
+        "schedule": crontab(hour=CELERY_BEAT_POLICY_OUTCOME_HOUR, minute=CELERY_BEAT_POLICY_OUTCOME_MINUTE),
+        "kwargs": {"days": 7},
+    }
+}
 
 A3_AGENT_CIRCUIT_RECENT_LIMIT = int(os.getenv("A3_AGENT_CIRCUIT_RECENT_LIMIT", "12"))
 A3_AGENT_CIRCUIT_MIN_SAMPLES = int(os.getenv("A3_AGENT_CIRCUIT_MIN_SAMPLES", "3"))

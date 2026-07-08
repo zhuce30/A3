@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, ExternalLink, Loader2, Play, ShieldCheck, Video } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
+import { trackResourceComplete, trackResourceOpen } from '@/lib/a3/learning-event-client';
 import type { A3OpenMAICVideoArtifact, A3ResourceFeedbackResponse, A3ResourcePackV2, A3ResourcePackV2Resource } from '@/lib/a3/recommendation-types';
 import { A3Card, A3Pill } from '../ui/a3-card';
 
@@ -58,6 +59,7 @@ export function ResourceVideoView({ packId }: { packId: string }) {
 
   async function recordVideoFeedback(action: 'opened' | 'completed') {
     if (!pack || (action === 'opened' && openedRecorded) || (action === 'completed' && completedRecorded)) return;
+    void recordVideoLearningEvent(pack, videoArtifact, script, action);
     const result = await a3PostJson<A3ResourceFeedbackResponse>(`/api/resources/packs/${pack.resourcePackId}/feedback/`, {
       action,
       resourceType: 'micro_video_script',
@@ -207,6 +209,34 @@ function VideoScriptSummary({ resource }: { resource: A3ResourcePackV2Resource }
       </div>
     </div>
   );
+}
+
+function recordVideoLearningEvent(
+  pack: A3ResourcePackV2,
+  videoArtifact: A3OpenMAICVideoArtifact | null,
+  script: A3ResourcePackV2Resource | null,
+  action: 'opened' | 'completed',
+) {
+  const fallbackDurationSec = (script?.estimatedMinutes ?? 0) * 60;
+  const completedDurationSec = videoArtifact?.duration ?? fallbackDurationSec;
+  const eventInput = {
+    eventId: `resource_${pack.resourcePackId}_micro_video_script_${action}_video`,
+    sourcePage: `/a3/resources/${pack.resourcePackId}/video`,
+    targetType: 'resource_pack',
+    targetId: pack.resourcePackId,
+    resourceType: 'micro_video_script',
+    durationSec: action === 'completed' ? completedDurationSec : 0,
+    score: action === 'completed' ? 90 : null,
+    quality: action === 'completed' ? { completionRate: 1 } : {},
+    metadata: {
+      action,
+      artifactStatus: videoArtifact?.status ?? 'missing',
+      provider: videoArtifact?.provider ?? '',
+      scriptTitle: script?.title ?? '',
+    },
+    traceId: pack.traceId,
+  };
+  return action === 'opened' ? trackResourceOpen(eventInput) : trackResourceComplete(eventInput);
 }
 
 async function loadResourcePack(packId: string): Promise<ResourcePackDetailResponse> {

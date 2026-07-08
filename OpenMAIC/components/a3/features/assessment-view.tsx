@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson, resolveA3Endpoint } from '@/lib/a3/api-client';
+import { trackLearningEvent, trackPageView, trackPracticeSubmit } from '@/lib/a3/learning-event-client';
 import type { AnswerFeedback, AssessmentQuestion, AssessmentSession, PracticeSuggestion } from '@/lib/a3/assessment-types';
 import type { A3ApiResponse } from '@/lib/a3/learning-types';
 import type { A3Recommendation, RecommendationResponse } from '@/lib/a3/recommendation-types';
@@ -40,6 +41,11 @@ export function AssessmentView() {
   const reportEnd = searchParams.get('end')?.trim();
 
   useEffect(() => {
+    void trackPageView('/a3/assessment', {
+      page: 'assessment',
+      source: searchParams.get('source') ?? '',
+      practice: searchParams.get('practice') ?? '',
+    });
     let active = true;
     const practice = searchParams.get('practice')?.trim();
     const load = practice
@@ -67,6 +73,7 @@ export function AssessmentView() {
 
   async function submit(skipped = false) {
     if (!session || (!selected && !skipped)) return;
+    const submittedQuestion = session.currentQuestion;
     setSubmitting(true);
     setError('');
     setNextRecommendations(null);
@@ -79,6 +86,7 @@ export function AssessmentView() {
 
     if (result.success) {
       setFeedback(result);
+      void trackAssessmentSubmitEvents(session, submittedQuestion, result, selected, skipped);
       const weakPoints = result.profileUpdate?.weakPoints ?? [];
       if (weakPoints.length) {
         void loadNextRecommendations(weakPoints);
@@ -448,6 +456,55 @@ export function AssessmentView() {
       </div>
     </div>
   );
+}
+
+function trackAssessmentSubmitEvents(
+  session: AssessmentSession,
+  question: AssessmentQuestion | null,
+  feedback: AnswerFeedback,
+  selectedAnswer: string,
+  skipped: boolean,
+) {
+  const score = skipped ? 0 : feedback.isCorrect ? 100 : 0;
+  const knowledgePointId = question?.knowledgePoint.id ?? session.focus?.knowledgePoint ?? '';
+  void trackLearningEvent({
+    eventId: `question_${session.id}_${question?.id ?? session.currentIndex}_answered`,
+    eventType: 'question_answered',
+    sourcePage: '/a3/assessment',
+    targetType: 'assessment_question',
+    targetId: question?.id ?? '',
+    knowledgePointId,
+    score,
+    quality: {
+      isCorrect: feedback.isCorrect,
+      skipped,
+    },
+    metadata: {
+      sessionId: session.id,
+      mode: session.mode ?? 'assessment',
+      selectedAnswer,
+      correctAnswer: feedback.correctAnswer,
+      questionTitle: question?.stem ?? '',
+    },
+  });
+  void trackPracticeSubmit({
+    eventId: `practice_${session.id}_${feedback.session.answeredCount}_submitted`,
+    sourcePage: '/a3/assessment',
+    targetType: 'assessment_session',
+    targetId: session.id,
+    knowledgePointId,
+    score,
+    quality: {
+      isCorrect: feedback.isCorrect,
+      skipped,
+      sessionCompleted: feedback.session.status === 'completed',
+    },
+    metadata: {
+      mode: session.mode ?? 'assessment',
+      answeredCount: feedback.session.answeredCount,
+      totalQuestions: feedback.session.totalQuestions,
+    },
+  });
 }
 
 function RecommendationPanel({ loading, data }: { loading: boolean; data: RecommendationResponse | null }) {

@@ -47,6 +47,7 @@ type KnowledgeResource = {
     warnings: string[];
   };
   updatedAt: string;
+  jobId?: string | null;
 };
 
 type KnowledgeStats = {
@@ -114,6 +115,8 @@ export function KnowledgeBaseView() {
   const [uploading, setUploading] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [forceReparsing, setForceReparsing] = useState(false);
+  const [reparsingResourceIds, setReparsingResourceIds] = useState<Set<string>>(() => new Set());
+  const [resourceFeedback, setResourceFeedback] = useState<Record<string, { tone: 'blue' | 'green' | 'red'; text: string }>>({});
   const [searching, setSearching] = useState(false);
 
   const loadResources = useCallback(async () => {
@@ -140,6 +143,15 @@ export function KnowledgeBaseView() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadResources, loadJobs]);
+
+  useEffect(() => {
+    if (!jobs.some((job) => job.status === 'queued' || job.status === 'running')) return undefined;
+    const timer = window.setInterval(() => {
+      void loadResources();
+      void loadJobs();
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [jobs, loadResources, loadJobs]);
 
   const visibleResources = useMemo(
     () => resources.filter((resource) => resourceMatchesTab(resource, activeScope)),
@@ -211,10 +223,45 @@ export function KnowledgeBaseView() {
   }
 
   async function reparseResource(resource: KnowledgeResource) {
-    const result = await a3PostJson<{ success: boolean; error?: string; job?: KnowledgeJob }>(`/api/kb/resources/${resource.id}/reparse/`, {});
-    setMessage(result.success ? `已提交多模态解析任务：${resource.name}` : result.error ?? '重解析任务提交失败。');
+    if (reparsingResourceIds.has(resource.id)) return;
+    setReparsingResourceIds((current) => new Set(current).add(resource.id));
+    setResourceFeedback((current) => ({
+      ...current,
+      [resource.id]: { tone: 'blue', text: '正在提交重解析任务...' },
+    }));
+    const result = await a3PostJson<{ success: boolean; error?: string; job?: KnowledgeJob; resource?: KnowledgeResource }>(`/api/kb/resources/${resource.id}/reparse/`, {});
+    if (!result.success) {
+      setResourceFeedback((current) => ({
+        ...current,
+        [resource.id]: { tone: 'red', text: result.error ?? '重解析任务提交失败，请稍后重试。' },
+      }));
+      setMessage(result.error ?? '重解析任务提交失败。');
+      setReparsingResourceIds((current) => {
+        const next = new Set(current);
+        next.delete(resource.id);
+        return next;
+      });
+      return;
+    }
+    const updatedResource = result.resource;
+    if (updatedResource) {
+      setResources((current) => current.map((item) => (item.id === resource.id ? { ...item, ...updatedResource } : item)));
+    }
+    if (result.job) {
+      setJobs((current) => [result.job!, ...current.filter((job) => job.id !== result.job!.id)]);
+    }
+    setResourceFeedback((current) => ({
+      ...current,
+      [resource.id]: { tone: 'green', text: '已加入后台解析队列，右侧可查看进度。' },
+    }));
+    setMessage(`已提交重解析任务：${resource.name}。后台会重新抽取文本、表格、公式、图片说明和引用证据。`);
     await loadResources();
     await loadJobs();
+    setReparsingResourceIds((current) => {
+      const next = new Set(current);
+      next.delete(resource.id);
+      return next;
+    });
   }
 
   async function deleteResource(resource: KnowledgeResource) {
@@ -353,7 +400,10 @@ export function KnowledgeBaseView() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleResources.map((resource) => (
+                  {visibleResources.map((resource) => {
+                    const reparseFeedback = resourceFeedback[resource.id];
+                    const isReparsingResource = reparsingResourceIds.has(resource.id);
+                    return (
                     <tr key={resource.id} data-testid="a3-kb-resource-row" className="border-t border-[var(--a3-border)]">
                       <td className="px-4 py-3">
                         <div className="font-medium text-[var(--a3-text)]">{resource.name}</div>
@@ -365,12 +415,33 @@ export function KnowledgeBaseView() {
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-2">
                           <Button type="button" variant="ghost" size="sm" onClick={() => void downloadResource(resource)}><Download className="size-4" />下载</Button>
-                          <Button type="button" variant="ghost" size="sm" onClick={() => void reparseResource(resource)}><RotateCcw className="size-4" />重解析</Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={isReparsingResource || resource.status === 'indexing'}
+                            onClick={() => void reparseResource(resource)}
+                          >
+                            {isReparsingResource || resource.status === 'indexing' ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
+                            {isReparsingResource ? '提交中' : resource.status === 'indexing' ? '处理中' : '重解析'}
+                          </Button>
                           <Button type="button" variant="ghost" size="sm" onClick={() => void deleteResource(resource)}><Trash2 className="size-4" />删除</Button>
                         </div>
+                        {reparseFeedback ? (
+                          <div className={`mt-2 rounded-lg px-2.5 py-1.5 text-xs ${
+                            reparseFeedback.tone === 'red'
+                              ? 'bg-red-50 text-red-700'
+                              : reparseFeedback.tone === 'green'
+                                ? 'bg-emerald-50 text-emerald-700'
+                                : 'bg-blue-50 text-blue-700'
+                          }`}>
+                            {reparseFeedback.text}
+                          </div>
+                        ) : null}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

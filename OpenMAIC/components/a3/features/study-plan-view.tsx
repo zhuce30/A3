@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { CalendarDays, CheckCircle2, Clock3, Flame, Loader2, RefreshCw, Route, Sparkles, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
+import { trackLearningEvent, trackPageView } from '@/lib/a3/learning-event-client';
 import type { A3ApiResponse, StudyPlan, StudyPlanDay, StudyPlanTask } from '@/lib/a3/learning-types';
 import { getReviewStatusMeta } from '@/lib/a3/review-status';
 import { cn } from '@/lib/utils';
@@ -96,9 +97,11 @@ export function StudyPlanView() {
       return;
     }
     setPlan(result.plan);
+    void trackStudyPlanTaskCompletedEvent(day, task, result.plan.planId);
   }
 
   useEffect(() => {
+    void trackPageView('/a3/study-plan', { page: 'study_plan' });
     const timer = window.setTimeout(() => {
       void load(true);
     }, 0);
@@ -532,6 +535,25 @@ export function StudyPlanView() {
       </section>
     </div>
   );
+}
+
+function trackStudyPlanTaskCompletedEvent(day: StudyPlanDay, task: StudyPlanTask, planId: string) {
+  return trackLearningEvent({
+    eventId: `task_${planId}_${day.dayIndex}_${task.id}_completed_study_plan`,
+    eventType: 'task_completed',
+    sourcePage: '/a3/study-plan',
+    targetType: 'study_plan_task',
+    targetId: task.id,
+    knowledgePointId: task.knowledgePointId,
+    durationSec: task.estimatedMinutes * 60,
+    metadata: {
+      planId,
+      dayIndex: day.dayIndex,
+      taskType: task.type,
+      taskTitle: task.title,
+      href: task.href,
+    },
+  });
 }
 
 function adjustmentLabel(type: NonNullable<StudyPlan['adjustmentTimeline']>[number]['type']) {

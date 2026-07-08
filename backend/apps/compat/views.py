@@ -216,6 +216,24 @@ def learning_effect_report(request):
     return JsonResponse({"success": True, "effectReport": build_learning_effect_report(request.user)})
 
 
+@require_http_methods(["GET"])
+def learning_effect_optimization_policy(request):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    try:
+        days = int(request.GET.get("days") or 30)
+    except (TypeError, ValueError):
+        days = 30
+    from backend.apps.learning.optimization_policy import build_continuous_optimization_policy_report
+
+    policy = build_continuous_optimization_policy_report(request.user, days=days)
+    profile = LearnerProfile.objects.filter(user=request.user).first()
+    extra = profile.extra_profile if profile and isinstance(profile.extra_profile, dict) else {}
+    history = [item for item in extra.get("optimizationPolicyDecisions", []) if isinstance(item, dict)][:12]
+    return JsonResponse({"success": True, "optimizationPolicy": policy, "decisionHistory": history})
+
+
 def _demo_report_path() -> Path:
     configured = getattr(settings, "A3_DEMO_REPORT_PATH", "")
     if configured:

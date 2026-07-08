@@ -26,6 +26,7 @@ import { SVGRenderer } from 'echarts/renderers';
 import { Button } from '@/components/ui/button';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { a3GetJson } from '@/lib/a3/api-client';
+import { trackPageView } from '@/lib/a3/learning-event-client';
 import type { LearningReport } from '@/lib/a3/assessment-types';
 import { buildWeaknessTrendItems } from '@/lib/a3/report-weakness-trends';
 import { buildLearningReportCsv } from '@/lib/a3/report-export';
@@ -81,6 +82,14 @@ type LearningEffectReport = {
     favorited?: number;
     totalFeedback?: number;
   };
+  eventStream?: {
+    schemaVersion?: string;
+    v2EventCount?: number;
+    acceptedCount?: number;
+    singleApi?: string;
+    batchApi?: string;
+    sourcePages?: Array<{ sourcePage?: string; count?: number }>;
+  };
   resourceEffectiveness?: number;
   masterySignals?: {
     averageFeedbackScore?: number;
@@ -105,7 +114,40 @@ type LearningEffectReport = {
     };
     nextAction?: { label: string; href: string; reason?: string };
   };
+  optimizationPolicy?: {
+    policyVersion?: string;
+    decisionId?: string;
+    selectedStrategy?: string;
+    outcomeStatus?: string;
+    selectedCandidate?: {
+      decisionScore?: number;
+      rankingBasis?: string[];
+      expectedMetricDelta?: Record<string, number>;
+    };
+    candidates?: Array<{ strategy?: string; decisionScore?: number; rankingBasis?: string[] }>;
+    successCriteria?: Array<{ metric?: string; target?: number; targetDelta?: number; windowDays?: number }>;
+    observedMetricDelta?: Record<string, number>;
+  };
   updatedAt?: string;
+};
+
+type OptimizationPolicyDecision = {
+  decisionId?: string;
+  decisionAt?: string;
+  selectedStrategy?: string;
+  decisionScore?: number;
+  outcomeStatus?: string;
+  rankingBasis?: string[];
+  evaluationWindow?: { days?: number; startedAt?: string; endedAt?: string };
+  observedMetricDelta?: Record<string, number>;
+  expectedMetricDelta?: Record<string, number>;
+  explorationMode?: boolean;
+};
+
+type OptimizationPolicyResponse = {
+  success: boolean;
+  error?: string;
+  decisionHistory?: OptimizationPolicyDecision[];
 };
 
 type LearningEffectTrend = {
@@ -148,6 +190,7 @@ export function ReportView() {
   const user = useA3CurrentUser();
   const [report, setReport] = useState<LearningReport | null>(null);
   const [learningEffect, setLearningEffect] = useState<LearningEffectReport | null>(null);
+  const [optimizationDecisionHistory, setOptimizationDecisionHistory] = useState<OptimizationPolicyDecision[]>([]);
   const [studyPlan, setStudyPlan] = useState<StudyPlan | null>(null);
   const [dynamicProfile, setDynamicProfile] = useState<DynamicProfileInsight | null>(null);
   const [loading, setLoading] = useState(true);
@@ -157,6 +200,7 @@ export function ReportView() {
   const displayName = user?.displayName?.trim() || '同学';
 
   useEffect(() => {
+    void trackPageView('/a3/report', { page: 'report', period });
     let active = true;
     void a3GetJson<A3ApiResponse<{ report: LearningReport }>>(`/api/assessments/report/?period=${period}`).then((result) => {
       if (!active) return;
@@ -175,6 +219,10 @@ export function ReportView() {
     void a3GetJson<{ success: boolean; error?: string; effectReport?: LearningEffectReport }>('/api/learning/effect/report/').then((result) => {
       if (!active) return;
       if (result.success) setLearningEffect(result.effectReport ?? null);
+    });
+    void a3GetJson<OptimizationPolicyResponse>('/api/learning/effect/optimization-policy/?days=30').then((result) => {
+      if (!active) return;
+      if (result.success) setOptimizationDecisionHistory(result.decisionHistory ?? []);
     });
     void a3GetJson<StudyPlanResponse>('/api/learning/study-plan/?auto=1').then((result) => {
       if (!active) return;
@@ -402,7 +450,7 @@ export function ReportView() {
 
       <section className="grid gap-5 xl:grid-cols-2">
         {report.resourcePackEffect && <ResourcePackEffectPanel effect={report.resourcePackEffect} />}
-        {learningEffect && <LearningEffectPanel effect={learningEffect} />}
+        {learningEffect && <LearningEffectPanel effect={learningEffect} decisionHistory={optimizationDecisionHistory} />}
       </section>
 
       <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
@@ -918,12 +966,14 @@ function WrongQuestionPanel({ report }: { report: LearningReport }) {
   );
 }
 
-function LearningEffectPanel({ effect }: { effect: LearningEffectReport }) {
+function LearningEffectPanel({ effect, decisionHistory }: { effect: LearningEffectReport; decisionHistory: OptimizationPolicyDecision[] }) {
   const usage = effect.resourceUsage ?? {};
   const execution = effect.planExecution ?? {};
   const mastery = effect.masterySignals ?? {};
   const adjustment = effect.planAdjustment ?? {};
   const evidence = adjustment.evidence ?? {};
+  const eventStream = effect.eventStream ?? {};
+  const optimizationPolicy = effect.optimizationPolicy;
   const knowledgePoints = effect.knowledgePoints ?? [];
   const missingEvidence = effect.missingEvidence ?? [];
   return (
@@ -941,6 +991,20 @@ function LearningEffectPanel({ effect }: { effect: LearningEffectReport }) {
           <EffectMetric icon={BarChart3} label="7 天作答" value={`${effect.trends?.sevenDay?.assessment?.attemptCount ?? 0}`} />
           <EffectMetric icon={BarChart3} label="14 天作答" value={`${effect.trends?.fourteenDay?.assessment?.attemptCount ?? 0}`} />
           <EffectMetric icon={BarChart3} label="30 天作答" value={`${effect.trends?.thirtyDay?.assessment?.attemptCount ?? 0}`} />
+        </div>
+        <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 p-4" data-testid="a3-report-event-stream-evidence">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-blue-950">事件流采集证据</div>
+              <p className="mt-1 text-xs leading-5 text-blue-800">报告读取 LearningEvent v2 的来源页面、客户端事件和批量 ingest 证据。</p>
+            </div>
+            <A3Pill tone={(eventStream.v2EventCount ?? 0) > 0 ? 'green' : 'orange'}>{eventStream.schemaVersion ?? 'a3.learning-event.v2'}</A3Pill>
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <EffectMetric icon={BarChart3} label="v2 事件" value={`${eventStream.v2EventCount ?? 0}`} />
+            <EffectMetric icon={CheckCircle2} label="已接收" value={`${eventStream.acceptedCount ?? 0}`} />
+            <EffectMetric icon={BookOpen} label="来源页" value={`${eventStream.sourcePages?.length ?? 0}`} />
+          </div>
         </div>
         {missingEvidence.length > 0 && (
           <div className="mt-4 rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm leading-6 text-orange-800">
@@ -981,9 +1045,109 @@ function LearningEffectPanel({ effect }: { effect: LearningEffectReport }) {
             </div>
           )}
         </details>
+        {optimizationPolicy && (
+          <details className="mt-4 rounded-xl border border-blue-100 bg-blue-50 p-4" data-testid="a3-report-optimization-policy">
+            <summary className="cursor-pointer text-sm font-semibold text-blue-950">持续优化策略</summary>
+            <div className="mt-4 grid gap-3 md:grid-cols-4">
+              <EffectMetric icon={Target} label="策略" value={optimizationPolicy.selectedStrategy ?? '--'} />
+              <EffectMetric icon={BarChart3} label="决策分" value={`${optimizationPolicy.selectedCandidate?.decisionScore ?? 0}`} />
+              <EffectMetric icon={CheckCircle2} label="评测状态" value={optimizationPolicy.outcomeStatus ?? 'pending'} />
+              <EffectMetric icon={RotateCcw} label="候选数" value={`${optimizationPolicy.candidates?.length ?? 0}`} />
+            </div>
+            <div className="mt-3 rounded-lg bg-white/75 p-3 text-xs leading-5 text-blue-900">
+              {(optimizationPolicy.selectedCandidate?.rankingBasis ?? ['等待更多学习行为后回看策略效果']).join('；')}
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              {(optimizationPolicy.successCriteria ?? []).slice(0, 2).map((item) => (
+                <div key={`${item.metric}-${item.windowDays}`} className="rounded-lg bg-white/75 px-3 py-2 text-xs text-blue-900">
+                  {item.metric} / {item.windowDays ?? 7} 天 / 目标 {item.targetDelta ?? item.target ?? '--'}
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+        <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4" data-testid="a3-report-optimization-decision-history">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-950">策略决策历史</div>
+              <p className="mt-1 text-xs leading-5 text-slate-500">最近 {decisionHistory.length}/12 条策略动作及 7 天回看状态。</p>
+            </div>
+            <A3Pill tone={decisionHistory.length > 0 ? 'blue' : 'slate'}>decisionHistory</A3Pill>
+          </div>
+          {decisionHistory.length > 0 ? (
+            <div className="mt-4 divide-y divide-slate-100">
+              {decisionHistory.slice(0, 12).map((decision) => (
+                <div key={decision.decisionId || `${decision.selectedStrategy}-${decision.decisionAt}`} className="grid gap-3 py-3 first:pt-0 last:pb-0 md:grid-cols-[minmax(0,1fr)_110px_120px] md:items-center">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="truncate text-sm font-semibold text-slate-950">{policyStrategyLabel(decision.selectedStrategy)}</span>
+                      <A3Pill tone={policyOutcomeTone(decision.outcomeStatus)}>{policyOutcomeLabel(decision.outcomeStatus)}</A3Pill>
+                      {decision.explorationMode && <A3Pill tone="violet">探索</A3Pill>}
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">
+                      {(decision.rankingBasis ?? []).join('；') || decision.decisionId || '等待更多证据完成回看'}
+                    </p>
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    <div className="font-semibold text-slate-900">分数 {decision.decisionScore ?? '--'}</div>
+                    <div>{formatReportDateTime(decision.decisionAt)}</div>
+                  </div>
+                  <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-600">
+                    效果 {formatSignedMetric(decision.observedMetricDelta?.effectScoreDelta)}
+                    <br />
+                    窗口 {decision.evaluationWindow?.days ?? 7} 天
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-4 rounded-lg bg-slate-50 px-3 py-3 text-sm text-slate-500">
+              完成一次学习效果评估后，策略决策会写入历史并进入 7 天回看。
+            </div>
+          )}
+        </div>
       </A3Card>
     </div>
   );
+}
+
+function policyStrategyLabel(strategy?: string) {
+  const labels: Record<string, string> = {
+    add_remedial_practice: '补弱练习',
+    add_spaced_review: '间隔复习',
+    add_diagnostic_practice: '诊断练习',
+    reduce_new_content: '降低新内容负荷',
+    increase_challenge: '提升挑战',
+    recommend_coaching: '辅导介入',
+  };
+  return labels[strategy || ''] || strategy || '--';
+}
+
+function policyOutcomeLabel(status?: string) {
+  if (status === 'succeeded') return '有效';
+  if (status === 'failed') return '回滚';
+  if (status === 'insufficient_evidence') return '证据不足';
+  return '回看中';
+}
+
+function policyOutcomeTone(status?: string): 'blue' | 'green' | 'orange' | 'red' | 'slate' {
+  if (status === 'succeeded') return 'green';
+  if (status === 'failed') return 'red';
+  if (status === 'insufficient_evidence') return 'orange';
+  if (status === 'pending') return 'blue';
+  return 'slate';
+}
+
+function formatSignedMetric(value?: number) {
+  if (value == null || Number.isNaN(value)) return '--';
+  return `${value > 0 ? '+' : ''}${value}`;
+}
+
+function formatReportDateTime(value?: string) {
+  if (!value) return '--';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '--';
+  return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
 }
 
 function EffectMetric({ icon: Icon, label, value }: { icon: typeof BookOpen; label: string; value: string }) {

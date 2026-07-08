@@ -376,7 +376,9 @@ def create_parse_job(owner, resources: list[KnowledgeResource]) -> KnowledgeInde
     )
     for resource in resources:
         resource.index_job = job
-    KnowledgeResource.objects.bulk_update(resources, ["index_job"])
+        resource.status = ResourceStatus.INDEXING
+        resource.error_message = ""
+    KnowledgeResource.objects.bulk_update(resources, ["index_job", "status", "error_message"])
     return dispatch_index_job(job)
 
 

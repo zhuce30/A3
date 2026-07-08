@@ -1,6 +1,8 @@
 from datetime import timedelta
+from io import StringIO
 import json
-from django.test import TestCase
+from django.core.management import call_command
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from unittest.mock import patch
@@ -13,6 +15,8 @@ from backend.apps.compat.llm import LLMUnavailable
 from backend.apps.compat.resource_generation import build_learning_effect_report, evaluate_learning_effect, record_resource_feedback
 from backend.apps.learning.effect_events import aggregate_learning_events, list_recent_learning_events, record_learning_event
 from backend.apps.learning.models import Chapter, Course, KnowledgePoint, LearningEvent
+from backend.apps.learning.optimization_policy import build_continuous_optimization_policy_report
+from backend.apps.learning.tasks import evaluate_optimization_policy_outcomes_task
 from backend.apps.learning.resource_attribution import build_resource_effect_attribution
 from backend.apps.learning.services import append_classroom_chat_messages, append_coaching_messages, complete_study_plan_task, submit_daily_reflection
 from backend.apps.profiles.models import LearnerProfile
@@ -113,6 +117,124 @@ class LearningEventApiTests(TestCase):
         self.assertTrue(payload["success"])
         self.assertEqual(payload["summary"]["totalEvents"], 1)
         self.assertEqual(payload["summary"]["totalDurationSec"], 120)
+
+    def test_ingest_learning_event_v2_requires_login(self):
+        response = self.client.post(
+            reverse("learning-events-ingest"),
+            data=json.dumps({"eventType": "page_viewed"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(response.json()["success"])
+
+    def test_ingest_learning_event_v2_persists_client_event_fields(self):
+        self.client.force_login(self.user)
+        timestamp = timezone.now().isoformat()
+
+        response = self.client.post(
+            reverse("learning-events-ingest"),
+            data=json.dumps(
+                {
+                    "schemaVersion": "a3.learning-event.v2",
+                    "eventId": "evt-client-1",
+                    "eventType": "resource_opened",
+                    "targetType": "resource_pack",
+                    "targetId": "pack-1",
+                    "knowledgePointId": "kp-1",
+                    "resourceType": "practice_set",
+                    "sourcePage": "/a3/recommendations",
+                    "clientTimestamp": timestamp,
+                    "durationSec": 35,
+                    "score": 88,
+                    "quality": {"completionRate": 1},
+                    "metadata": {"sessionId": "session-1"},
+                    "traceId": "trace-client-1",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["status"], "accepted")
+        event = LearningEvent.objects.get(user=self.user, event_id="evt-client-1")
+        self.assertEqual(event.schema_version, "a3.learning-event.v2")
+        self.assertEqual(event.source_page, "/a3/recommendations")
+        self.assertEqual(event.client_timestamp.isoformat(), timestamp)
+        self.assertEqual(event.ingest_status, "accepted")
+        self.assertEqual(event.metadata["sessionId"], "session-1")
+
+    def test_ingest_learning_event_v2_deduplicates_event_id_for_same_user(self):
+        self.client.force_login(self.user)
+        payload = {
+            "schemaVersion": "a3.learning-event.v2",
+            "eventId": "evt-duplicate-1",
+            "eventType": "page_viewed",
+            "sourcePage": "/a3/today",
+        }
+
+        first = self.client.post(reverse("learning-events-ingest"), data=json.dumps(payload), content_type="application/json")
+        second = self.client.post(reverse("learning-events-ingest"), data=json.dumps(payload), content_type="application/json")
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["status"], "duplicate")
+        self.assertEqual(LearningEvent.objects.filter(user=self.user, event_id="evt-duplicate-1").count(), 1)
+
+    def test_batch_ingest_learning_events_v2_returns_accepted_duplicate_and_rejected_counts(self):
+        self.client.force_login(self.user)
+        base = {
+            "schemaVersion": "a3.learning-event.v2",
+            "eventType": "resource_completed",
+            "targetType": "resource_pack",
+            "targetId": "pack-1",
+            "sourcePage": "/a3/resources/pack-1",
+        }
+
+        first = self.client.post(
+            reverse("learning-events-batch-ingest"),
+            data=json.dumps(
+                {
+                    "events": [
+                        {**base, "eventId": "evt-batch-1"},
+                        {**base, "eventId": "evt-batch-1"},
+                        {**base, "eventId": "evt-batch-2", "eventType": "not_allowed_event"},
+                    ]
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(first.status_code, 207)
+        payload = first.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["accepted"], 1)
+        self.assertEqual(payload["duplicates"], 1)
+        self.assertEqual(payload["rejected"], 1)
+        self.assertEqual(LearningEvent.objects.filter(user=self.user, event_id__startswith="evt-batch").count(), 1)
+
+    def test_ingest_learning_event_v2_rejects_invalid_event_type_with_chinese_error(self):
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse("learning-events-ingest"),
+            data=json.dumps(
+                {
+                    "schemaVersion": "a3.learning-event.v2",
+                    "eventId": "evt-invalid-1",
+                    "eventType": "x" * 80,
+                    "sourcePage": "/a3/today",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertFalse(payload["success"])
+        self.assertIn("事件类型", payload["error"])
 
 
 class LearningEventWorkflowWritebackTests(TestCase):
@@ -302,6 +424,37 @@ class LearningEffectReportEventBackfillTests(TestCase):
         self.assertEqual(report["resourceUsage"]["skipped"], 1)
         self.assertEqual(report["masterySignals"]["averageFeedbackScore"], 90)
 
+    def test_learning_effect_report_exposes_event_stream_v2_evidence(self):
+        user = User.objects.create_user(phone="13800001122", password="TestPassword123")
+        LearnerProfile.objects.create(user=user, extra_profile={})
+        self.client.force_login(user)
+        response = self.client.post(
+            reverse("learning-events-ingest"),
+            data=json.dumps(
+                {
+                    "schemaVersion": "a3.learning-event.v2",
+                    "eventId": "evt-report-v2-1",
+                    "eventType": "resource_opened",
+                    "targetType": "resource_pack",
+                    "targetId": "pack-report",
+                    "resourceType": "lecture_doc",
+                    "sourcePage": "/a3/resources/pack-report",
+                    "clientTimestamp": timezone.now().isoformat(),
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+
+        report = build_learning_effect_report(user)
+
+        self.assertEqual(report["eventStream"]["schemaVersion"], "a3.learning-event.v2")
+        self.assertEqual(report["eventStream"]["v2EventCount"], 1)
+        self.assertEqual(report["eventStream"]["acceptedCount"], 1)
+        self.assertEqual(report["eventStream"]["sourcePages"][0]["sourcePage"], "/a3/resources/pack-report")
+        self.assertEqual(report["eventStream"]["singleApi"], "/api/learning/events/")
+        self.assertEqual(report["eventStream"]["batchApi"], "/api/learning/events/batch/")
+
     def test_learning_effect_report_v2_includes_knowledge_gain_trends_and_confidence(self):
         user = User.objects.create_user(phone="13800001117", password="TestPassword123")
         course = Course.objects.create(code="LE-002", title="Learning Effect V2")
@@ -450,6 +603,255 @@ class ResourceEffectAttributionTests(TestCase):
         payload = response.json()
         self.assertTrue(payload["success"])
         self.assertEqual(payload["attribution"]["resourceTypes"][0]["resourceType"], "lecture_doc")
+
+
+class ContinuousOptimizationPolicyTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(phone="13800001123", password="TestPassword123")
+        course = Course.objects.create(code="LE-OPT-001", title="Optimization Policy")
+        chapter = Chapter.objects.create(course=course, order=1, title="Basics")
+        self.point = KnowledgePoint.objects.create(chapter=chapter, code="LE-OPT-KP", order=1, title="Cache locality")
+        LearnerProfile.objects.create(user=self.user, weak_points=["Cache locality"], extra_profile={})
+
+    def test_optimization_policy_report_scores_candidates_with_resource_attribution(self):
+        before = record_learning_event(
+            self.user,
+            event_type="question_answered",
+            target_type="assessment_question",
+            target_id="q-before",
+            knowledge_point_id=str(self.point.id),
+            score=30,
+        )
+        opened = record_learning_event(
+            self.user,
+            event_type="resource_opened",
+            target_type="resource_pack",
+            target_id="pack-opt",
+            knowledge_point_id=str(self.point.id),
+            resource_type="practice_set",
+        )
+        for index in range(2):
+            record_learning_event(
+                self.user,
+                event_type="resource_completed",
+                target_type="resource_pack",
+                target_id=f"pack-opt-{index}",
+                knowledge_point_id=str(self.point.id),
+                resource_type="practice_set",
+                score=90,
+            )
+        for index, score in enumerate((80, 90, 100), start=1):
+            record_learning_event(
+                self.user,
+                event_type="question_answered",
+                target_type="assessment_question",
+                target_id=f"q-after-{index}",
+                knowledge_point_id=str(self.point.id),
+                score=score,
+            )
+        LearningEvent.objects.filter(id=before.id).update(created_at=timezone.now() - timedelta(days=5))
+        LearningEvent.objects.filter(id=opened.id).update(created_at=timezone.now() - timedelta(days=4))
+
+        report = build_continuous_optimization_policy_report(self.user, days=30)
+
+        self.assertEqual(report["schemaVersion"], "a3.continuous-optimization-policy.v1")
+        self.assertEqual(report["policyVersion"], "a3.policy-engine.v1")
+        self.assertTrue(report["decisionId"].startswith("policy:"))
+        self.assertIn(report["selectedStrategy"], [candidate["strategy"] for candidate in report["candidates"]])
+        self.assertIn("add_diagnostic_practice", [candidate["strategy"] for candidate in report["candidates"]])
+        selected = report["selectedCandidate"]
+        self.assertGreaterEqual(selected["decisionScore"], 60)
+        self.assertTrue(any("practice_set" in item for item in selected["rankingBasis"]))
+        self.assertEqual(report["outcomeStatus"], "pending")
+        self.assertIn("successCriteria", report)
+        self.assertIn("expectedMetricDelta", selected)
+
+    def test_optimization_policy_report_marks_insufficient_evidence_without_events(self):
+        report = build_continuous_optimization_policy_report(self.user, days=30)
+
+        self.assertEqual(report["outcomeStatus"], "insufficient_evidence")
+        self.assertGreater(len(report["missingEvidence"]), 0)
+        self.assertEqual(report["observedMetricDelta"]["effectScoreDelta"], 0)
+
+    @patch("backend.apps.compat.resource_generation.chat_completion")
+    def test_evaluate_learning_effect_writes_policy_decision_metadata_to_plan_adjustment(self, chat):
+        chat.side_effect = LLMUnavailable("no key")
+        LearnerProfile.objects.filter(user=self.user).update(
+            extra_profile={
+                "studyPlan": {
+                    "planId": "plan-opt",
+                    "days": [
+                        {
+                            "dayIndex": 1,
+                            "date": timezone.localdate().isoformat(),
+                            "progress": 0,
+                            "tasks": [],
+                        }
+                    ],
+                }
+            }
+        )
+        for score in (0, 40, 60):
+            record_learning_event(
+                self.user,
+                event_type="question_answered",
+                target_type="assessment_question",
+                target_id=f"q-policy-{score}",
+                knowledge_point_id=str(self.point.id),
+                score=score,
+            )
+
+        report = evaluate_learning_effect(self.user)
+
+        adjustment = report["planAdjustmentAction"]
+        self.assertTrue(adjustment["policyDecisionId"].startswith("policy:"))
+        self.assertEqual(adjustment["policyVersion"], "a3.policy-engine.v1")
+        self.assertIn("successCriteria", adjustment)
+        self.assertIn("evaluationWindow", adjustment)
+        profile = LearnerProfile.objects.get(user=self.user)
+        persisted = profile.extra_profile["studyPlan"]["lastLearningEffectAdjustment"]
+        self.assertEqual(persisted["policyDecisionId"], adjustment["policyDecisionId"])
+        self.assertIn("continuousOptimizationPolicyReport", profile.extra_profile)
+
+    def test_optimization_policy_api_requires_login_and_returns_policy_report(self):
+        response = self.client.get(reverse("compat-learning-effect-optimization-policy"))
+        self.assertEqual(response.status_code, 401)
+
+        self.client.force_login(self.user)
+        record_learning_event(
+            self.user,
+            event_type="question_answered",
+            target_type="assessment_question",
+            target_id="q-api",
+            knowledge_point_id=str(self.point.id),
+            score=80,
+        )
+
+        response = self.client.get(reverse("compat-learning-effect-optimization-policy"), {"days": "30"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["optimizationPolicy"]["schemaVersion"], "a3.continuous-optimization-policy.v1")
+        self.assertEqual(payload["optimizationPolicy"]["policyVersion"], "a3.policy-engine.v1")
+
+    @patch("backend.apps.compat.resource_generation.chat_completion")
+    def test_evaluate_learning_effect_keeps_recent_twelve_policy_decisions(self, chat):
+        chat.side_effect = LLMUnavailable("no key")
+        for index in range(14):
+            record_learning_event(
+                self.user,
+                event_type="question_answered",
+                target_type="assessment_question",
+                target_id=f"q-history-{index}",
+                knowledge_point_id=str(self.point.id),
+                score=50 + index,
+            )
+            evaluate_learning_effect(self.user)
+
+        profile = LearnerProfile.objects.get(user=self.user)
+        decisions = profile.extra_profile["optimizationPolicyDecisions"]
+        self.assertEqual(len(decisions), 12)
+        self.assertEqual(decisions[0]["schemaVersion"], "a3.continuous-optimization-policy.v1")
+        self.assertTrue(decisions[0]["decisionId"].startswith("policy:"))
+        self.assertGreaterEqual(decisions[0]["decisionAt"], decisions[-1]["decisionAt"])
+
+    def test_evaluate_optimization_policy_outcomes_command_updates_history(self):
+        profile = LearnerProfile.objects.get(user=self.user)
+        profile.extra_profile = {
+            "optimizationPolicyDecisions": [
+                {
+                    "schemaVersion": "a3.continuous-optimization-policy.v1",
+                    "policyVersion": "a3.policy-engine.v1",
+                    "decisionId": "policy:command-test",
+                    "selectedStrategy": "add_remedial_practice",
+                    "outcomeStatus": "pending",
+                    "observedMetricDelta": {},
+                    "missingEvidence": [],
+                    "decisionAt": (timezone.now() - timedelta(days=8)).isoformat(),
+                    "evaluationWindow": {
+                        "days": 7,
+                        "startedAt": (timezone.now() - timedelta(days=8)).isoformat(),
+                        "endedAt": (timezone.now() - timedelta(days=1)).isoformat(),
+                    },
+                }
+            ]
+        }
+        profile.save(update_fields=["extra_profile", "updated_at"])
+        for index, score in enumerate((80, 90, 100), start=1):
+            record_learning_event(
+                self.user,
+                event_type="question_answered",
+                target_type="assessment_question",
+                target_id=f"q-command-{index}",
+                knowledge_point_id=str(self.point.id),
+                score=score,
+            )
+        out = StringIO()
+
+        call_command("evaluate_optimization_policy_outcomes", "--user-phone", self.user.phone, stdout=out)
+
+        profile.refresh_from_db()
+        decision = profile.extra_profile["optimizationPolicyDecisions"][0]
+        self.assertIn(decision["outcomeStatus"], {"succeeded", "pending", "insufficient_evidence"})
+        self.assertIn("effectScoreDelta", decision["observedMetricDelta"])
+        self.assertIn("updated=1", out.getvalue())
+
+    def test_evaluate_optimization_policy_outcomes_task_updates_pending_history(self):
+        profile = LearnerProfile.objects.get(user=self.user)
+        profile.extra_profile = {
+            "optimizationPolicyDecisions": [
+                {
+                    "schemaVersion": "a3.continuous-optimization-policy.v1",
+                    "policyVersion": "a3.policy-engine.v1",
+                    "decisionId": "policy:task-test",
+                    "selectedStrategy": "add_spaced_review",
+                    "outcomeStatus": "pending",
+                    "observedMetricDelta": {},
+                    "missingEvidence": [],
+                    "decisionAt": (timezone.now() - timedelta(days=8)).isoformat(),
+                    "evaluationWindow": {
+                        "days": 7,
+                        "startedAt": (timezone.now() - timedelta(days=8)).isoformat(),
+                        "endedAt": (timezone.now() - timedelta(days=1)).isoformat(),
+                    },
+                }
+            ]
+        }
+        profile.save(update_fields=["extra_profile", "updated_at"])
+        for index, score in enumerate((75, 85, 95), start=1):
+            record_learning_event(
+                self.user,
+                event_type="question_answered",
+                target_type="assessment_question",
+                target_id=f"q-task-{index}",
+                knowledge_point_id=str(self.point.id),
+                score=score,
+            )
+
+        result = evaluate_optimization_policy_outcomes_task.run(days=7, user_phone=self.user.phone)
+
+        profile.refresh_from_db()
+        decision = profile.extra_profile["optimizationPolicyDecisions"][0]
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["users"], 1)
+        self.assertIn("effectScoreDelta", decision["observedMetricDelta"])
+
+    @override_settings(
+        CELERY_BEAT_SCHEDULE={
+            "a3-evaluate-optimization-policy-outcomes-daily": {
+                "task": "learning.evaluate_optimization_policy_outcomes",
+                "kwargs": {"days": 7},
+            }
+        }
+    )
+    def test_celery_beat_schedule_registers_policy_outcome_task(self):
+        from django.conf import settings
+
+        entry = settings.CELERY_BEAT_SCHEDULE["a3-evaluate-optimization-policy-outcomes-daily"]
+
+        self.assertEqual(entry["task"], "learning.evaluate_optimization_policy_outcomes")
+        self.assertEqual(entry["kwargs"], {"days": 7})
 
 
 class LearningEffectAnalyzerAgentTests(TestCase):
