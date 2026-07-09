@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from datetime import timedelta
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -381,8 +382,23 @@ class ResourceFeedbackAgent(BaseAgent):
             extra,
             "resource_feedback",
             f"{action}: {pack.get('goal')}",
-            {"resourceType": feedback["resourceType"], "score": feedback["score"]},
+            {"resourceType": feedback["resourceType"], "action": action, "score": feedback["score"]},
         )
+        try:
+            from backend.apps.profiles.profile_updates import create_profile_update_candidates_from_event
+
+            profile.extra_profile = extra
+            create_profile_update_candidates_from_event(
+                profile,
+                event_type="resource_feedback",
+                source="resource_feedback",
+                signals={"resourceType": feedback["resourceType"], "action": action, "score": feedback["score"]},
+                evidence={"packId": pack_id, "goal": feedback["goal"]},
+                save=False,
+            )
+            extra = dict(profile.extra_profile or {})
+        except Exception:
+            pass
         try:
             record_learning_event(
                 context.user,
@@ -777,7 +793,16 @@ def record_resource_feedback(user, pack_id: str, payload: dict) -> dict:
         },
     )
     if not workflow_result.success:
-        raise RuntimeError(str(workflow_result.output.get("error") or "resource feedback workflow failed"))
+        error = str(workflow_result.output.get("error") or "resource feedback workflow failed")
+        return _degraded_resource_feedback_result(
+            user,
+            pack=pack,
+            pack_id=pack_id,
+            action=action,
+            resource_type=str(payload.get("resourceType") or ""),
+            score=_safe_int(payload.get("score"), 0),
+            reason=error,
+        )
     effect_report = workflow_result.output.get("effectReport") if isinstance(workflow_result.output.get("effectReport"), dict) else {}
     analysis = workflow_result.output.get("analysis") if isinstance(workflow_result.output.get("analysis"), dict) else {}
     if effect_report and analysis:
@@ -804,6 +829,63 @@ def record_resource_feedback(user, pack_id: str, payload: dict) -> dict:
         "feedback": workflow_result.output.get("feedback") or {},
         "effectReport": effect_report,
         "traceId": workflow_result.trace["traceId"],
+    }
+
+
+def _degraded_resource_feedback_result(
+    user,
+    *,
+    pack: dict,
+    pack_id: str,
+    action: str,
+    resource_type: str,
+    score: int,
+    reason: str,
+) -> dict:
+    profile, _ = LearnerProfile.objects.get_or_create(user=user)
+    extra = dict(profile.extra_profile or {})
+    feedback = {
+        "packId": pack_id,
+        "goal": pack.get("goal") or "",
+        "action": action,
+        "resourceType": resource_type,
+        "score": score,
+        "createdAt": timezone.now().isoformat(),
+        "degraded": True,
+        "degradedReason": reason[:240],
+    }
+    feedbacks = [item for item in extra.get("resourceFeedback", []) if isinstance(item, dict)]
+    feedbacks.insert(0, feedback)
+    extra["resourceFeedback"] = feedbacks[:100]
+    try:
+        from backend.apps.profiles.profile_updates import create_profile_update_candidates_from_event
+
+        profile.extra_profile = extra
+        create_profile_update_candidates_from_event(
+            profile,
+            event_type="resource_feedback",
+            source="resource_feedback",
+            signals={"resourceType": resource_type, "action": action, "score": score},
+            evidence={"packId": pack_id, "goal": feedback["goal"], "degraded": True},
+            save=False,
+        )
+        extra = dict(profile.extra_profile or {})
+    except Exception:
+        pass
+    profile.extra_profile = extra
+    profile.save(update_fields=["extra_profile", "updated_at"])
+    effect_report = build_learning_effect_report(user, include_persisted_analysis=False)
+    _apply_resource_feedback_plan_adjustment(user, extra, effect_report)
+    profile.extra_profile = extra
+    profile.save(update_fields=["extra_profile", "updated_at"])
+    return {
+        "feedback": feedback,
+        "effectReport": {
+            **effect_report,
+            "analysisDegraded": True,
+            "analysisDegradedReason": reason[:240],
+        },
+        "traceId": "",
     }
 
 
@@ -847,6 +929,7 @@ class OpenMAICVideoBridgeAgent(BaseAgent):
 
     def run(self, context: AgentContext) -> AgentResult:
         payload = context.payload
+        segments = _normalize_openmaic_video_segments(payload.get("segments"))
         artifact = {
             "schemaVersion": "a3.openmaic-video-artifact.v1",
             "type": "openmaic_video",
@@ -857,6 +940,7 @@ class OpenMAICVideoBridgeAgent(BaseAgent):
             "duration": _safe_int(payload.get("duration"), 0),
             "width": _safe_int(payload.get("width"), 0),
             "height": _safe_int(payload.get("height"), 0),
+            "segments": segments,
             "elapsedMs": _safe_int(payload.get("elapsedMs"), 0),
             "degradedReason": str(payload.get("degradedReason") or ""),
             "createdAt": timezone.now().isoformat(),
@@ -865,8 +949,8 @@ class OpenMAICVideoBridgeAgent(BaseAgent):
             output={"artifact": artifact},
             state_patch={"artifact": artifact},
             input_summary={"packId": payload.get("packId"), "provider": artifact["provider"], "status": artifact["status"]},
-            output_summary={"status": artifact["status"], "hasVideoUrl": bool(artifact["videoUrl"])},
-            evidence={"videoUrl": bool(artifact["videoUrl"]), "degraded": bool(artifact["degradedReason"])},
+            output_summary={"status": artifact["status"], "hasVideoUrl": bool(artifact["videoUrl"]), "segments": len(segments)},
+            evidence={"videoUrl": bool(artifact["videoUrl"]), "segments": len(segments), "degraded": bool(artifact["degradedReason"])},
             quality={"providerEvidenceRecorded": True, "degradationTransparent": bool(artifact["degradedReason"] or artifact["status"] == "succeeded")},
         )
 
@@ -984,6 +1068,31 @@ class OpenMAICInteractionProfileAgent(BaseAgent):
                 "elapsedMs": interaction.get("elapsedMs"),
             },
         )
+        try:
+            from backend.apps.profiles.profile_updates import create_profile_update_candidates_from_event
+
+            profile.extra_profile = extra
+            create_profile_update_candidates_from_event(
+                profile,
+                event_type=str(interaction.get("eventType") or "openmaic_interaction"),
+                source="classroom",
+                signals={
+                    "questionCount": 1 if interaction.get("actionType") else 0,
+                    "resourceType": "openmaic_classroom",
+                    "progress": interaction.get("progress"),
+                    "sceneTitle": interaction.get("sceneTitle"),
+                },
+                evidence={
+                    "resourcePackId": interaction.get("resourcePackId"),
+                    "classroomId": interaction.get("classroomId"),
+                    "sceneId": interaction.get("sceneId"),
+                },
+                raw_preview=str(interaction.get("sceneTitle") or interaction.get("actionType") or ""),
+                save=False,
+            )
+            extra = dict(profile.extra_profile or {})
+        except Exception:
+            pass
         profile.extra_profile = extra
         profile.save(update_fields=["extra_profile", "updated_at"])
         return AgentResult(
@@ -1014,6 +1123,26 @@ def run_openmaic_video_bridge_workflow(user, payload: dict, *, kernel: AgentKern
     if kernel._circuit_breaker is None:
         kernel._circuit_breaker = build_recent_run_circuit_breaker(user)
     return kernel.run(AgentContext(user=user, workflow="openmaic_video_bridge", goal=f"OpenMAIC video writeback: {payload.get('packId')}", payload=payload), OPENMAIC_VIDEO_BRIDGE_WORKFLOW_SEQUENCE)
+
+
+def _normalize_openmaic_video_segments(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    segments = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        segments.append({
+            "index": _safe_int(item.get("index"), index),
+            "title": str(item.get("title") or f"片段 {index}"),
+            "status": str(item.get("status") or "").strip().lower(),
+            "videoUrl": str(item.get("videoUrl") or ""),
+            "duration": _safe_int(item.get("duration"), 0),
+            "width": _safe_int(item.get("width"), 0),
+            "height": _safe_int(item.get("height"), 0),
+            "degradedReason": str(item.get("degradedReason") or ""),
+        })
+    return segments[:12]
 
 
 def run_openmaic_pptx_export_bridge_workflow(user, payload: dict, *, kernel: AgentKernel | None = None):
@@ -1049,8 +1178,8 @@ def record_openmaic_video_artifact(user, pack_id: str, payload: dict) -> dict:
     if not get_resource_pack(user, pack_id):
         raise ValueError("资源包不存在")
     status = str(payload.get("status") or "").strip().lower()
-    if status not in {"succeeded", "failed", "running", "queued"}:
-        raise ValueError("status 必须是 queued/running/succeeded/failed")
+    if status not in {"succeeded", "partial", "failed", "running", "queued"}:
+        raise ValueError("status 必须是 queued/running/succeeded/partial/failed")
     provider = str(payload.get("provider") or "").strip()
     if not provider:
         raise ValueError("provider 不能为空")
@@ -1154,7 +1283,20 @@ def build_learning_effect_report(user, *, include_persisted_analysis: bool = Tru
     profile = LearnerProfile.objects.filter(user=user).first()
     extra = profile.extra_profile if profile and isinstance(profile.extra_profile, dict) else {}
     feedbacks = [item for item in extra.get("resourceFeedback", []) if isinstance(item, dict)]
-    event_summary = aggregate_learning_events(user, days=30)
+    event_degraded_reason = ""
+    try:
+        event_summary = aggregate_learning_events(user, days=30)
+    except Exception as exc:
+        event_summary = {
+            "resourceUsage": {},
+            "eventStream": {
+                "status": "degraded",
+                "degraded": True,
+                "reason": str(exc)[:240],
+            },
+            "recentEvents": [],
+        }
+        event_degraded_reason = str(exc)[:240]
     event_usage = event_summary.get("resourceUsage") if isinstance(event_summary.get("resourceUsage"), dict) else {}
     event_stream = event_summary.get("eventStream") if isinstance(event_summary.get("eventStream"), dict) else {}
     event_total = sum(_safe_int(event_usage.get(key), 0) for key in ["opened", "completed", "skipped", "favorited"])
@@ -1192,7 +1334,11 @@ def build_learning_effect_report(user, *, include_persisted_analysis: bool = Tru
         average_score=average_score,
     )
 
-    metrics = build_learning_effect_metrics(user, days=30)
+    try:
+        metrics = build_learning_effect_metrics(user, days=30)
+    except Exception as exc:
+        event_degraded_reason = event_degraded_reason or str(exc)[:240]
+        metrics = _degraded_learning_effect_metrics(days=30, reason=event_degraded_reason)
 
     report = {
         "schemaVersion": "a3.learning-effect.v2",
@@ -1231,6 +1377,15 @@ def build_learning_effect_report(user, *, include_persisted_analysis: bool = Tru
         },
         "updatedAt": timezone.now().isoformat(),
     }
+    if event_degraded_reason:
+        missing = report.get("missingEvidence") if isinstance(report.get("missingEvidence"), list) else []
+        report["missingEvidence"] = [*missing, "学习事件表暂不可用，已使用资源反馈记录降级评估"]
+        report["eventStream"] = {
+            **(report.get("eventStream") if isinstance(report.get("eventStream"), dict) else {}),
+            "status": "degraded",
+            "degraded": True,
+            "reason": event_degraded_reason,
+        }
     from backend.apps.learning.optimization_policy import build_continuous_optimization_policy_report
 
     report["optimizationPolicy"] = build_continuous_optimization_policy_report(user, effect_report=report)
@@ -1261,6 +1416,53 @@ def _learning_effect_analysis_input(effect_report: dict) -> dict:
         "trends": effect_report.get("trends", {}),
         "resourceUsage": effect_report.get("resourceUsage", {}),
         "planExecution": effect_report.get("planExecution", {}),
+    }
+
+
+def _degraded_learning_effect_metrics(*, days: int, reason: str) -> dict:
+    now = timezone.now()
+    started_at = now - timedelta(days=days)
+    empty_behavior = {
+        "activeDays": 0,
+        "totalDurationSec": 0,
+        "taskCompletionRate": 0,
+        "completedTaskCount": 0,
+        "taskEventCount": 0,
+        "reflectionCount": 0,
+        "eventCount": 0,
+    }
+    empty_assessment = {
+        "attemptCount": 0,
+        "averageScore": 0,
+        "correctRate": 0,
+        "wrongQuestionCount": 0,
+        "reviewedWrongQuestionCount": 0,
+    }
+    return {
+        "overallEffectScore": 0,
+        "confidence": "low",
+        "missingEvidence": [
+            "学习事件流暂不可用",
+            reason or "事件表结构需要迁移",
+        ],
+        "timeWindow": {
+            "days": days,
+            "startedAt": started_at.date().isoformat(),
+            "endedAt": now.date().isoformat(),
+        },
+        "behavior": empty_behavior,
+        "assessment": empty_assessment,
+        "knowledgePoints": [],
+        "trends": {
+            "sevenDay": {"days": 7, "behavior": empty_behavior, "assessment": empty_assessment},
+            "fourteenDay": {"days": 14, "behavior": empty_behavior, "assessment": empty_assessment},
+            "thirtyDay": {"days": 30, "behavior": empty_behavior, "assessment": empty_assessment},
+        },
+        "baseline": {
+            "type": "degraded_no_event_stream",
+            "planExpectedCompletionRate": 0.8,
+            "actualCompletionRate": 0,
+        },
     }
 
 
@@ -1446,6 +1648,8 @@ def _resource_title(resource_type: str, goal: str) -> str:
 
 def _resource_content(resource_type: str, goal: str, sources: list[dict], profile: LearnerProfile | None, *, allow_llm: bool) -> tuple[dict, dict]:
     llm_content, llm_meta = _try_llm_resource_content(resource_type, goal, sources, profile, allow_llm=allow_llm)
+    if llm_content:
+        llm_content = _repair_llm_resource_content(resource_type, llm_content, goal, sources, profile)
     if llm_content and _is_rich_resource_content(resource_type, llm_content):
         content = _attach_content_defaults(llm_content, resource_type, sources, mode="llm")
         return content, {**llm_meta, "mode": "llm", "degraded": False}
@@ -1458,6 +1662,42 @@ def _resource_content(resource_type: str, goal: str, sources: list[dict], profil
         "degradationReason": llm_meta.get("error") or ("LLM disabled" if not llm_meta.get("attempted") else "LLM output did not pass resource schema"),
     }
     return content, synthesis
+
+
+def _repair_llm_resource_content(resource_type: str, content: dict, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
+    if resource_type != "mind_map" or not isinstance(content, dict):
+        return content
+    repaired = dict(content)
+    nodes = repaired.get("nodes")
+    if not isinstance(nodes, list) or len(nodes) < 3:
+        return repaired
+    normalized_nodes = []
+    source_ids = [f"S{index}" for index in range(1, min(len(sources), 6) + 1)]
+    for index, node in enumerate(nodes, start=1):
+        if not isinstance(node, dict):
+            continue
+        label = str(node.get("label") or node.get("title") or f"分支 {index}").strip()
+        children = node.get("children")
+        if not isinstance(children, list):
+            children = []
+        source_id_list = node.get("sourceIds") if isinstance(node.get("sourceIds"), list) else source_ids[: min(len(source_ids), 2)]
+        normalized_nodes.append({
+            **node,
+            "label": label,
+            "children": [str(child).strip() for child in children if str(child).strip()][:6],
+            "sourceIds": source_id_list,
+        })
+    if not normalized_nodes:
+        return repaired
+    root = str(repaired.get("root") or goal or "当前学习主题").strip()
+    repaired["root"] = root
+    repaired["nodes"] = normalized_nodes
+    repaired.setdefault("markdown", _mind_map_markdown(root, normalized_nodes))
+    repaired.setdefault("mermaid", _mind_map_mermaid(root, normalized_nodes))
+    repaired.setdefault("algorithm", "llm_repaired_markdown_mindmap.v1")
+    repaired.setdefault("layout", {"style": "radial", "primaryAxis": "llm_structured", "sourceAware": True})
+    repaired.setdefault("studyPath", _mind_map_study_path(root, normalized_nodes, profile))
+    return repaired
 
 
 def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
@@ -1490,19 +1730,7 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
         ]
         return {"schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION, "front": cards[0]["front"], "back": cards[0]["back"], "cards": cards, "tags": _profile_tags(profile), "sourceIds": source_ids}
     if resource_type == "mind_map":
-        return {
-            "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
-            "root": goal,
-            "nodes": [
-                {"label": "概念定义", "children": [_short_snippet(evidence, 0), "用自己的话复述定义", "标出关键词"], "sourceIds": source_ids[:2]},
-                {"label": "先修基础", "children": ["相关术语", "输入输出关系", "公式/流程前提"], "sourceIds": source_ids[:2]},
-                {"label": "核心机制", "children": [_short_snippet(evidence, 1), "关键步骤", "影响因素"], "sourceIds": source_ids[:3]},
-                {"label": "题目应用", "children": ["概念判断题", "过程分析题", "迁移应用题"], "sourceIds": source_ids[:4]},
-                {"label": "易错点", "children": weak_points or ["概念混淆", "条件遗漏", "结论没有引用依据"], "sourceIds": source_ids[:3]},
-                {"label": "复习动作", "children": ["完成专项练习", "整理错题原因", "回到今日任务打卡"], "sourceIds": source_ids[:2]},
-            ],
-            "sourceIds": source_ids,
-        }
+        return _fallback_mind_map_content(goal, evidence, source_ids, weak_points, profile)
     if resource_type == "practice_set":
         question_types = ["concept", "choice", "fill_blank", "application", "analysis", "debug", "transfer", "reflection"]
         return {
@@ -1580,13 +1808,13 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
     return {
         "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
         "shots": [
-            {"scene": "开场定位", "durationSeconds": 8, "visual": "标题 + 当前薄弱点", "narration": f"今天围绕“{goal}”，先解决你最容易混淆的判断条件。", "sourceIds": source_ids[:1]},
-            {"scene": "资料证据", "durationSeconds": 12, "visual": "本地资料摘录高亮", "narration": _short_snippet(evidence, 0), "sourceIds": source_ids[:2]},
-            {"scene": "概念拆解", "durationSeconds": 14, "visual": "对象-条件-过程-结论四栏", "narration": f"把“{goal}”拆成对象、条件、过程和结果，先看条件是否满足。", "sourceIds": source_ids[:3]},
-            {"scene": "步骤演示", "durationSeconds": 16, "visual": "逐步推理动画", "narration": _step_explanation(goal, evidence)[:180], "sourceIds": source_ids[:3]},
-            {"scene": "易错提醒", "durationSeconds": 10, "visual": "错误选项打叉", "narration": _misconception_text(goal, weak_points, evidence)[:160], "sourceIds": source_ids[:2]},
-            {"scene": "即时练习", "durationSeconds": 12, "visual": "暂停答题卡", "narration": f"暂停 20 秒，回答：什么时候不能直接使用“{goal}”？", "sourceIds": source_ids[:2]},
-            {"scene": "收束行动", "durationSeconds": 8, "visual": "今日任务和错题本入口", "narration": "完成后进入专项练习，系统会把结果回写画像和下一轮推荐。", "sourceIds": source_ids[:1]},
+            {"scene": "开场定位", "durationSeconds": 8, "visual": "学生面对抽象概念的困惑表情，背景保持干净，不出现任何文字或符号", "narration": f"今天围绕“{goal}”，先解决你最容易混淆的判断条件。", "sourceIds": source_ids[:1]},
+            {"scene": "资料证据", "durationSeconds": 12, "visual": "教材、笔记和资料卡片以图标形式聚合，使用颜色高亮，不展示可读文字", "narration": _short_snippet(evidence, 0), "sourceIds": source_ids[:2]},
+            {"scene": "概念拆解", "durationSeconds": 14, "visual": "四个无文字图标依次点亮，表示对象、条件、过程和结果", "narration": f"把“{goal}”拆成对象、条件、过程和结果，先看条件是否满足。", "sourceIds": source_ids[:3]},
+            {"scene": "步骤演示", "durationSeconds": 16, "visual": "用箭头、节点和颜色变化展示逐步推理，不出现板书文字", "narration": _step_explanation(goal, evidence)[:180], "sourceIds": source_ids[:3]},
+            {"scene": "易错提醒", "durationSeconds": 10, "visual": "错误路径变暗、正确路径高亮，用图标表达，不出现字母或汉字", "narration": _misconception_text(goal, weak_points, evidence)[:160], "sourceIds": source_ids[:2]},
+            {"scene": "即时练习", "durationSeconds": 12, "visual": "学生暂停思考，屏幕仅出现抽象选择卡片和倒计时图标，不出现题干文字", "narration": f"暂停 20 秒，回答：什么时候不能直接使用“{goal}”？", "sourceIds": source_ids[:2]},
+            {"scene": "收束行动", "durationSeconds": 8, "visual": "学习路径、练习和错题本用三个简洁图标串联，不出现界面文字", "narration": "完成后进入专项练习，系统会把结果回写画像和下一轮推荐。", "sourceIds": source_ids[:1]},
         ],
         "style": {"pace": "短句、图解、先证据后结论", "preferredFormats": preferred},
         "sourceIds": source_ids,
@@ -1621,6 +1849,153 @@ def _normalized_resource_sources(sources: list[dict], *, limit: int, goal: str) 
         "score": None,
         "snippet": f"当前学习目标是“{goal}”，资源基于画像、学习路径和今日任务生成。",
     }]
+
+
+def _fallback_mind_map_content(goal: str, evidence: list[dict], source_ids: list[str], weak_points: list[str], profile: LearnerProfile | None) -> dict:
+    topic = str(goal or "").strip() or "当前学习主题"
+    if _is_deadlock_topic(topic, evidence):
+        nodes = [
+            {
+                "label": "概念边界",
+                "children": [
+                    "死锁：一组进程互相等待对方占有的资源，导致都无法继续推进",
+                    "先区分：饥饿是长期得不到资源，死锁是循环等待导致系统停住",
+                    "判断口径：看是否存在不可推进的等待闭环，而不是只看阻塞数量",
+                ],
+                "sourceIds": source_ids[:2],
+            },
+            {
+                "label": "四个必要条件",
+                "children": [
+                    "互斥：资源一次只能被一个进程使用",
+                    "占有并等待：已拿到资源的进程继续请求新资源",
+                    "不可抢占：资源不能被系统强制剥夺，只能主动释放",
+                    "循环等待：进程之间形成首尾相接的等待链",
+                ],
+                "sourceIds": source_ids[:3],
+            },
+            {
+                "label": "资源分配图",
+                "children": [
+                    "请求边：进程 -> 资源，表示进程正在等待资源",
+                    "分配边：资源 -> 进程，表示资源实例已经分给进程",
+                    "单实例资源：有环通常可判定死锁",
+                    "多实例资源：有环只是风险信号，还要结合可用实例判断",
+                ],
+                "sourceIds": source_ids[:3],
+            },
+            {
+                "label": "处理策略对比",
+                "children": [
+                    "预防：破坏四个必要条件之一，保守但实现直接",
+                    "避免：分配前判断是否仍处于安全状态",
+                    "检测：允许发生，周期性找等待环或不可完成进程集合",
+                    "解除：撤销进程、回滚状态或抢占资源，代价较高",
+                ],
+                "sourceIds": source_ids[:4],
+            },
+            {
+                "label": "银行家算法",
+                "children": [
+                    "核心表：Available、Max、Allocation、Need",
+                    "请求检查：Request <= Need 且 Request <= Available",
+                    "试探分配：临时扣减 Available、增加 Allocation、减少 Need",
+                    "安全性检测：能找到安全序列才真正分配",
+                ],
+                "sourceIds": source_ids[:4],
+            },
+            {
+                "label": "检测与解除",
+                "children": [
+                    "检测输入：当前可用资源、已分配矩阵、请求矩阵",
+                    "检测输出：哪些进程无法完成，是否形成死锁集合",
+                    "解除方式：终止进程、资源抢占、回滚检查点",
+                    "选择原则：优先考虑代价、已运行时间、占用资源量和影响范围",
+                ],
+                "sourceIds": source_ids[:4],
+            },
+            {
+                "label": "题型路径",
+                "children": [
+                    "概念题：先写定义，再列四个必要条件",
+                    "判断题：画资源分配图，区分单实例和多实例",
+                    "算法题：按银行家算法表格逐步找安全序列",
+                    "简答题：从预防、避免、检测、解除四类策略横向对比",
+                ],
+                "sourceIds": source_ids[:3],
+            },
+            {
+                "label": "错题提醒",
+                "children": weak_points[:4] or [
+                    "把有环直接等同于多实例死锁",
+                    "忘记 Need = Max - Allocation",
+                    "安全状态不等于一定不会等待，只表示存在完成顺序",
+                    "解除死锁时只写终止进程，没说明代价和选择依据",
+                ],
+                "sourceIds": source_ids[:2],
+            },
+        ]
+    else:
+        nodes = [
+            {"label": "概念边界", "children": [_short_snippet(evidence, 0) or f"先给出“{topic}”的一句话定义", "说明它解决什么问题", "列出容易混淆的相近概念"], "sourceIds": source_ids[:2]},
+            {"label": "先修依赖", "children": ["相关术语", "输入输出关系", "公式/流程前提"], "sourceIds": source_ids[:2]},
+            {"label": "核心机制", "children": [_short_snippet(evidence, 1) or "把过程拆成条件、步骤、结果", "关键步骤", "影响因素"], "sourceIds": source_ids[:3]},
+            {"label": "证据来源", "children": [f"{item['sourceId']}：{item['title']}" for item in evidence[:4]], "sourceIds": source_ids[:4]},
+            {"label": "题型路径", "children": ["概念判断题", "过程分析题", "迁移应用题", "错因复盘题"], "sourceIds": source_ids[:4]},
+            {"label": "易错点", "children": weak_points or ["概念混淆", "条件遗漏", "结论没有引用依据"], "sourceIds": source_ids[:3]},
+            {"label": "复习动作", "children": ["完成专项练习", "整理错题原因", "回到今日任务打卡"], "sourceIds": source_ids[:2]},
+        ]
+
+    markdown = _mind_map_markdown(topic, nodes)
+    return {
+        "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
+        "root": topic,
+        "algorithm": "evidence_guided_markdown_mindmap.v2",
+        "layout": {"style": "radial", "primaryAxis": "exam_path", "sourceAware": True},
+        "nodes": nodes,
+        "markdown": markdown,
+        "mermaid": _mind_map_mermaid(topic, nodes),
+        "studyPath": _mind_map_study_path(topic, nodes, profile),
+        "sourceIds": source_ids,
+    }
+
+
+def _is_deadlock_topic(goal: str, evidence: list[dict]) -> bool:
+    text = goal + " " + " ".join(str(item.get("snippet") or "") for item in evidence[:4])
+    return any(keyword in text for keyword in ("死锁", "银行家", "资源分配图", "循环等待", "deadlock", "Deadlock"))
+
+
+def _mind_map_markdown(root: str, nodes: list[dict]) -> str:
+    lines = [f"# {root}"]
+    for node in nodes:
+        lines.append(f"## {node['label']}")
+        for child in node.get("children", [])[:6]:
+            lines.append(f"- {child}")
+    return "\n".join(lines)
+
+
+def _mind_map_mermaid(root: str, nodes: list[dict]) -> str:
+    lines = ["mindmap", f"  root(({_mermaid_label(root)}))"]
+    for node in nodes[:8]:
+        lines.append(f"    {_mermaid_label(str(node.get('label') or '分支'))}")
+        for child in (node.get("children") or [])[:4]:
+            lines.append(f"      {_mermaid_label(str(child))}")
+    return "\n".join(lines)
+
+
+def _mermaid_label(value: str) -> str:
+    text = str(value or "").replace("\n", " ").replace("(", "（").replace(")", "）").strip()
+    return text[:34] or "节点"
+
+
+def _mind_map_study_path(root: str, nodes: list[dict], profile: LearnerProfile | None) -> list[dict]:
+    daily_minutes = getattr(profile, "daily_study_time", 0) or 30
+    chunk = 8 if daily_minutes <= 30 else 12
+    return [
+        {"step": 1, "title": "先看中心和一级分支", "minutes": chunk, "action": f"用自己的话说出“{root}”解决的问题"},
+        {"step": 2, "title": "沿题型路径做题", "minutes": chunk, "action": "从概念、判断、算法、简答四类题各选一个"},
+        {"step": 3, "title": "回写错因", "minutes": max(5, chunk - 3), "action": "把最不稳的分支加入错题本或今日复习"},
+    ]
 
 
 def _evidence_units(sources: list[dict], goal: str) -> list[dict]:
@@ -1711,11 +2086,11 @@ def _resource_llm_requirements(resource_type: str) -> dict:
     return {
         "lecture_doc": {"sections": "至少 6 节，每节含 heading/body/sourceIds，覆盖目标、先修、概念、步骤、例题、误区、复盘"},
         "knowledge_card": {"cards": "至少 4 张 front/back/sourceIds 卡片"},
-        "mind_map": {"nodes": "至少 5 个一级节点，每个 3 个 children，并标 sourceIds"},
+        "mind_map": {"nodes": "至少 7 个一级节点，每个 3-5 个 children，并标 sourceIds；同时输出 markdown 和 mermaid。结构必须像真实思维导图：中心主题、概念边界、核心机制、证据来源、题型路径、易错点、复习动作。操作系统死锁主题必须覆盖四个必要条件、资源分配图、银行家算法、检测与解除"},
         "practice_set": {"questions": "至少 8 题，覆盖概念、选择、填空、应用、分析、纠错、迁移、反思，含 answer/explanation/sourceIds"},
         "case_study": {"case": "包含 scenario/background/task/materials/steps/analysis/reflection/sourceIds"},
         "code_lab": {"lab": "包含 language/objective/environment/starterCode/steps/expectedOutput/checkpoints/extension/sourceIds"},
-        "micro_video_script": {"shots": "至少 7 个镜头，每个含 scene/durationSeconds/visual/narration/sourceIds"},
+        "micro_video_script": {"shots": "至少 7 个镜头，每个含 scene/durationSeconds/visual/narration/sourceIds；visual 只能描述无文字画面，所有中文概念放到 narration，不要要求视频模型生成板书、字幕、标题或屏幕文字"},
     }[resource_type]
 
 
@@ -1727,7 +2102,7 @@ def _is_rich_resource_content(resource_type: str, content: dict) -> bool:
     if resource_type == "knowledge_card":
         return len(content.get("cards") or []) >= 4 or bool(content.get("front") and content.get("back"))
     if resource_type == "mind_map":
-        return len(content.get("nodes") or []) >= 5
+        return len(content.get("nodes") or []) >= 5 and bool(content.get("markdown") or content.get("mermaid"))
     if resource_type == "practice_set":
         return len(content.get("questions") or []) >= 6
     if resource_type == "case_study":
@@ -1829,8 +2204,8 @@ def _store_resource_pack(user, pack: dict) -> None:
         user=user,
         task_id=f"resource-pack:{pack['resourcePackId']}",
         defaults={
-            "task_title": pack.get("goal", ""),
-            "learning_goal": pack.get("goal", ""),
+            "task_title": _resource_pack_log_text(pack.get("goal", "")),
+            "learning_goal": _resource_pack_log_text(pack.get("goal", "")),
             "verified_source_count": sum(len(item.get("citations") or []) for item in pack.get("resources", [])),
             "confidence": "high",
             "practice_href": next(
@@ -1893,8 +2268,8 @@ def _update_resource_pack_artifact(user, pack_id: str, artifact: dict) -> dict:
         user=user,
         task_id=f"resource-pack:{pack_id}",
         defaults={
-            "task_title": updated_pack.get("goal", ""),
-            "learning_goal": updated_pack.get("goal", ""),
+            "task_title": _resource_pack_log_text(updated_pack.get("goal", "")),
+            "learning_goal": _resource_pack_log_text(updated_pack.get("goal", "")),
             "verified_source_count": sum(len(item.get("citations") or []) for item in updated_pack.get("resources", [])),
             "confidence": "high",
             "practice_href": next(
@@ -1907,6 +2282,13 @@ def _update_resource_pack_artifact(user, pack_id: str, artifact: dict) -> dict:
         },
     )
     return _attach_openmaic_artifacts(user, updated_pack)
+
+
+def _resource_pack_log_text(value: object, limit: int = 160) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _record_openmaic_artifact_row(user, pack_id: str, artifact: dict) -> None:
@@ -1987,7 +2369,7 @@ def _apply_resource_feedback_plan_adjustment(user, extra: dict, effect_report: d
     if not isinstance(adjustment, dict):
         return
     strategy = str(adjustment.get("strategy") or "")
-    if strategy not in {"increase_practice", "reduce_load", "reinforce_mastery"}:
+    if strategy not in {"increase_practice", "reduce_load", "reinforce_mastery", "keep_current_pace"}:
         return
 
     plan = extra.get("studyPlan")
@@ -2091,14 +2473,18 @@ def _append_feedback_adjustment_event(plan: dict, strategy: str, latest_goal: st
         title = "资源反馈追加补救练习"
     elif strategy == "reinforce_mastery":
         title = "资源反馈追加掌握巩固"
-    else:
+    elif strategy == "reduce_load":
         title = "资源反馈触发计划减负"
+    else:
+        title = "资源反馈保持当前节奏"
     detail = (
         f"《{latest_goal}》资源反馈分数偏低，已加入补救专项练习。"
         if strategy == "increase_practice"
         else f"《{latest_goal}》资源学习反馈较好，已加入掌握巩固复盘。"
         if strategy == "reinforce_mastery"
         else f"《{latest_goal}》近期跳过较多，已加入轻量复盘任务。"
+        if strategy == "reduce_load"
+        else f"《{latest_goal}》资源反馈已记录，当前节奏保持观察并加入轻量复盘。"
     )
     timeline.insert(0, {
         "id": task_id,

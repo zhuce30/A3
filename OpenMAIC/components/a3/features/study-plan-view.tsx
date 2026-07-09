@@ -5,13 +5,16 @@ import { useEffect, useMemo, useState } from 'react';
 import { CalendarDays, CheckCircle2, Clock3, Flame, Loader2, RefreshCw, Route, Sparkles, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
+import { buildProfileChangeInsight, buildStudyPlanFlowInsights, buildTaskProfileRationale, type LearningFlowInsight } from '@/lib/a3/learning-flow-insights';
 import { trackLearningEvent, trackPageView } from '@/lib/a3/learning-event-client';
 import type { A3ApiResponse, StudyPlan, StudyPlanDay, StudyPlanTask } from '@/lib/a3/learning-types';
+import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
 import { getReviewStatusMeta } from '@/lib/a3/review-status';
 import { cn } from '@/lib/utils';
 import { A3Card, A3Pill } from '../ui/a3-card';
 
 type StudyPlanResponse = A3ApiResponse<{ plan: StudyPlan }>;
+type ProfileFeedResponse = DynamicProfileFeedResponse;
 
 const taskTone: Record<StudyPlanTask['type'], 'blue' | 'green' | 'orange' | 'violet'> = {
   learn: 'blue',
@@ -47,6 +50,8 @@ const adjustmentTone: Record<NonNullable<StudyPlan['adjustmentTimeline']>[number
   learning_effect: 'orange',
 };
 
+const PROFILE_SETUP_HREF = '/a3/profile-setup';
+
 export function StudyPlanView() {
   const [plan, setPlan] = useState<StudyPlan | null>(null);
   const [durationDays, setDurationDays] = useState(14);
@@ -54,6 +59,7 @@ export function StudyPlanView() {
   const [savingTask, setSavingTask] = useState('');
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
+  const [profileFeed, setProfileFeed] = useState<ProfileFeedResponse | null>(null);
 
   async function load(auto = true) {
     setLoading(true);
@@ -66,6 +72,9 @@ export function StudyPlanView() {
     }
     setPlan(result.plan);
     setDurationDays(result.plan.durationDays);
+    void a3GetJson<ProfileFeedResponse>('/api/profiles/dynamic-profile/').then((profileResponse) => {
+      if (profileResponse.success) setProfileFeed(profileResponse);
+    });
   }
 
   async function generate(nextDuration = durationDays) {
@@ -143,6 +152,8 @@ export function StudyPlanView() {
   const currentWeakPoints = profileSignals?.weakPoints?.length ? profileSignals.weakPoints : weakMastery.map((item) => item.title);
   const todayPrimaryTask = today?.tasks.find((task) => task.status !== 'completed') ?? today?.tasks[0] ?? null;
   const planningReason = currentChange?.reason ?? explanation?.weakPointPolicy.reason ?? plan?.adaptivePolicy?.reason ?? plan?.coachTip ?? '系统会结合画像、诊断、路径进度和错题复习队列安排任务。';
+  const planFlowInsights = useMemo(() => buildStudyPlanFlowInsights({ plan }), [plan]);
+  const profileChangeInsight = useMemo(() => buildProfileChangeInsight(profileFeed), [profileFeed]);
   const studentPlanReason = buildStudentPlanReason({
     taskTitle: todayPrimaryTask?.title,
     weakPoint: currentWeakPoints[0],
@@ -230,6 +241,9 @@ export function StudyPlanView() {
           </div>
         </div>
       </section>
+
+      <StudyPlanFlowInsightPanel insights={planFlowInsights} />
+      <StudyPlanProfileChangePanel insight={profileChangeInsight} />
 
       {error && <div className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
 
@@ -404,7 +418,7 @@ export function StudyPlanView() {
                     </div>
                   )}
                   {today.tasks.map((task) => (
-                    <TaskRow key={task.id} day={today} task={task} saving={savingTask === task.id} onComplete={completeTask} />
+                    <TaskRow key={task.id} day={today} task={task} saving={savingTask === task.id} profileFeed={profileFeed} onComplete={completeTask} />
                   ))}
                 </div>
               ) : (
@@ -596,6 +610,54 @@ function shortPlanReason(reason: string) {
   return firstSentence && firstSentence.length <= 42 ? `${firstSentence}。` : `${text.slice(0, 42)}。`;
 }
 
+function StudyPlanFlowInsightPanel({ insights }: { insights: LearningFlowInsight[] }) {
+  if (!insights.length) return null;
+  return (
+    <A3Card
+      title="计划为什么调整"
+      subtitle="这里展示会影响后续任务的学习效果、资源反馈和复习信号。"
+      action={<A3Pill tone="green">已进入排程</A3Pill>}
+    >
+      <div className="grid gap-3 lg:grid-cols-3" data-testid="a3-study-plan-flow-insights">
+        {insights.map((item) => (
+          <Link
+            key={`${item.title}-${item.href}`}
+            href={item.href}
+            className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 transition-colors hover:border-blue-300 hover:bg-blue-50/60"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 text-sm font-semibold text-[var(--a3-text)]">{item.title}</div>
+              <A3Pill tone={item.tone}>{item.meta || '调整'}</A3Pill>
+            </div>
+            <p className="mt-3 line-clamp-3 text-xs leading-5 text-[var(--a3-text-muted)]">{item.detail}</p>
+          </Link>
+        ))}
+      </div>
+    </A3Card>
+  );
+}
+
+function StudyPlanProfileChangePanel({ insight }: { insight: LearningFlowInsight | null }) {
+  if (!insight) return null;
+  return (
+    <A3Card
+      title="计划为什么因画像而变"
+      subtitle={insight.detail}
+      action={<A3Pill tone={insight.tone}>{insight.meta || '画像时间线'}</A3Pill>}
+    >
+      <div data-testid="a3-study-plan-profile-change-reason" className="grid gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+        <div>
+          <div className="text-sm font-semibold text-blue-950">{insight.title}</div>
+          <p className="mt-1 text-xs leading-5 text-blue-800">计划会把已确认画像用于任务时长、复习队列、资源类型和下一次推荐排序。</p>
+        </div>
+        <Button asChild size="sm" className="bg-blue-600 hover:bg-blue-700">
+          <Link href={insight.href}>查看画像证据</Link>
+        </Button>
+      </div>
+    </A3Card>
+  );
+}
+
 function RationaleItem({ label, value, detail }: { label: string; value: string; detail: string }) {
   return (
     <div className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4">
@@ -664,8 +726,9 @@ function PlanSyncMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TaskRow({ day, task, saving, onComplete }: { day: StudyPlanDay; task: StudyPlanTask; saving: boolean; onComplete: (day: StudyPlanDay, task: StudyPlanTask) => void }) {
+function TaskRow({ day, task, saving, profileFeed, onComplete }: { day: StudyPlanDay; task: StudyPlanTask; saving: boolean; profileFeed: ProfileFeedResponse | null; onComplete: (day: StudyPlanDay, task: StudyPlanTask) => void }) {
   const completed = task.status === 'completed';
+  const profileRationale = buildTaskProfileRationale(task, profileFeed);
   return (
     <div className={cn('grid gap-4 rounded-xl border p-4 md:grid-cols-[1fr_150px]', completed ? 'border-emerald-200 bg-emerald-50/70' : 'border-[var(--a3-border)] bg-[var(--a3-surface-solid)]')}>
       <div>
@@ -681,6 +744,16 @@ function TaskRow({ day, task, saving, onComplete }: { day: StudyPlanDay; task: S
         </div>
         <div className="mt-2 text-base font-semibold text-[var(--a3-text)]">{task.title}</div>
         <p className="mt-2 text-sm leading-6 text-[var(--a3-text-muted)]">{task.subtitle}</p>
+        <div data-testid="a3-task-profile-rationale" className="mt-3 min-w-0 break-words rounded-lg border border-orange-100 bg-orange-50 px-3 py-2 text-xs leading-5 text-orange-800">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-semibold text-orange-950">{profileRationale.label}</span>
+            <Link href={profileRationale.href || PROFILE_SETUP_HREF} className="font-semibold text-orange-700 hover:text-orange-900">
+              查看画像
+            </Link>
+          </div>
+          <div className="mt-1 break-words">{profileRationale.detail}</div>
+          {profileRationale.confidence > 0 && <div className="mt-1 text-orange-700">证据置信度 {profileRationale.confidence}%</div>}
+        </div>
         {task.source === 'personal_material' && task.sourceResourceName && (
           <div className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-800">
             来源：{task.sourceResourceName}

@@ -500,9 +500,27 @@ export function KnowledgeBaseView() {
             检索
           </Button>
         </form>
+        <div data-testid="a3-kb-quality-panel" className="mt-4 grid gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-900 md:grid-cols-4">
+          <div data-testid="a3-kb-quality-upload-evidence">
+            <div className="text-xs font-semibold uppercase tracking-wide text-blue-700">上传证据</div>
+            <div className="mt-1 font-medium">{resources.length} 个资源</div>
+          </div>
+          <div data-testid="a3-kb-quality-index-evidence">
+            <div className="text-xs font-semibold uppercase tracking-wide text-blue-700">索引证据</div>
+            <div className="mt-1 font-medium">{stats.indexedDocuments} 个片段</div>
+          </div>
+          <div data-testid="a3-kb-quality-search-evidence">
+            <div className="text-xs font-semibold uppercase tracking-wide text-blue-700">检索证据</div>
+            <div data-testid="a3-kb-quality-search-count" className="mt-1 font-medium">{results.length} 条结果</div>
+          </div>
+          <div data-testid="a3-kb-quality-classroom-evidence">
+            <div className="text-xs font-semibold uppercase tracking-wide text-blue-700">课堂引用</div>
+            <Link className="mt-1 inline-flex font-medium text-blue-700 hover:text-blue-900" href="/a3/classroom">进入 AI 课堂</Link>
+          </div>
+        </div>
         <div className="mt-4 space-y-3">
           {results.map((result, index) => (
-            <div key={`${displayTitle(result.metadata, index)}-${index}`} className="rounded-xl border border-[var(--a3-border)] p-4">
+            <div key={`${displayTitle(result.metadata, index)}-${index}`} data-testid="a3-kb-search-result" className="rounded-xl border border-[var(--a3-border)] p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <A3Pill tone="blue">{sourceOrigin(result.metadata)}</A3Pill>
                 <A3Pill tone="slate">{sourceType(result.metadata)}</A3Pill>

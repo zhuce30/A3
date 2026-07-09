@@ -20,7 +20,7 @@ from backend.apps.assessments.generation import run_question_generation_job, ser
 from backend.apps.assessments.models import Question, QuestionGenerationJob, QuestionQualityCheck, StudentQuestionMastery, WrongQuestion
 from backend.apps.assessments.services import answer_assessment_question, build_learning_report
 from backend.apps.engagement.models import UserNotification
-from backend.apps.knowledge_base.models import KnowledgeAsset, KnowledgeBlock, KnowledgeResource, ResourceStatus
+from backend.apps.knowledge_base.models import KnowledgeAsset, KnowledgeBlock, KnowledgeGraphClaim, KnowledgeGraphEntity, KnowledgeGraphRelation, KnowledgeIndexEntry, KnowledgeResource, ResourceStatus
 from backend.apps.knowledge_base.display import format_source_display_location, format_source_type_label, safe_source_filename, source_origin_label
 from backend.apps.knowledge_base.services import indexed_resource_scope_by_path
 from backend.apps.learning.services import classroom_context, execute_teacher_task, generate_learning_path, generate_study_plan, serialize_path, submit_admission_diagnostic, teacher_workbench
@@ -248,7 +248,7 @@ class AgentKernel:
                         run.persist()
                         return KernelRunResult(success=False, state=state, output={**output, "error": str(exc)}, trace=run.as_dict())
                     run.fail(str(exc))
-                    return KernelRunResult(success=False, state=state, output=output, trace=run.as_dict())
+                    return KernelRunResult(success=False, state=state, output={**output, "error": str(exc)}, trace=run.as_dict())
                 run.fallback_strategy = "circuit_breaker" if circuit_decision.get("open") else "fallback_result"
                 result = fallback_result
                 schema_validation = _validate_agent_output_schema(agent, result.output)
@@ -525,7 +525,7 @@ class RetrieverAgent(BaseAgent):
                 resource_id=selected_resource_id,
             )
             allowed_source_paths = set(source_scope_by_path)
-            indexed_block_sources = _search_classroom_indexed_blocks(
+            fusion_sources, fusion_metadata = _search_classroom_fusion_sources(
                 context.user,
                 question,
                 top_k=top_k,
@@ -533,7 +533,7 @@ class RetrieverAgent(BaseAgent):
                 reasoning_mode=reasoning_mode,
             )
             realtime_rag_enabled = os.getenv("A3_QA_REALTIME_RAG_ENABLED", "0").strip() == "1"
-            if realtime_rag_enabled and not indexed_block_sources:
+            if realtime_rag_enabled and not fusion_sources:
                 try:
                     rag_results = (
                         search_knowledge_base(
@@ -550,9 +550,9 @@ class RetrieverAgent(BaseAgent):
                     )
                 except Exception:
                     rag_results = []
-            if indexed_block_sources:
-                sources = indexed_block_sources
-                retrieval_mode = "indexed_blocks_deep" if reasoning_mode == "deep" else "indexed_blocks_fast"
+            if fusion_sources:
+                sources = fusion_sources
+                retrieval_mode = "graph_vector_fusion"
             elif rag_results:
                 sources = [_rag_result_to_source(item, index) for index, item in enumerate(rag_results, start=1)]
                 retrieval_mode = "realtime_rag"
@@ -570,14 +570,18 @@ class RetrieverAgent(BaseAgent):
                     "candidateMultiplier": candidate_multiplier,
                     "allowedSourceCount": len(allowed_source_paths),
                     "realtimeRagEnabled": realtime_rag_enabled,
-                    "indexedBlockSearch": bool(indexed_block_sources),
+                    "indexedBlockSearch": bool(fusion_metadata.get("blockCount")),
+                    "fusionComponents": fusion_metadata.get("components", []),
+                    "fusionGraphCount": fusion_metadata.get("graphCount", 0),
+                    "fusionBlockCount": fusion_metadata.get("blockCount", 0),
+                    "fusionVectorIndexedCount": fusion_metadata.get("vectorIndexedCount", 0),
                     "reasoningMode": reasoning_mode,
                     "requestedScope": requested_scope,
                     "selectedResourceId": selected_resource_id,
                     "budgetMode": "interactive_qa",
                 },
-                quality={"hasSources": bool(sources), "realtimeRag": retrieval_mode == "realtime_rag", "fastIndexedBlocks": retrieval_mode in {"indexed_blocks_fast", "indexed_blocks_deep"}},
-                detail="Retrieve fast indexed block sources for classroom QA.",
+                quality={"hasSources": bool(sources), "realtimeRag": retrieval_mode == "realtime_rag", "fusionRetrieval": retrieval_mode == "graph_vector_fusion", "fastIndexedBlocks": bool(fusion_metadata.get("blockCount"))},
+                detail="Retrieve graph/vector/lexical fused sources for classroom QA.",
             )
         mode = "deep" if context.payload.get("mode") == "deep" else "fast"
         top_k = max(1, min(int(context.payload.get("topK") or 6), 12))
@@ -1197,6 +1201,237 @@ def _search_classroom_indexed_blocks(user, question: str, *, top_k: int, source_
     ]
 
 
+def _search_classroom_fusion_sources(user, question: str, *, top_k: int, source_scope_by_path: dict[str, str], reasoning_mode: str = "fast") -> tuple[list[dict], dict]:
+    block_sources = _search_classroom_indexed_blocks(
+        user,
+        question,
+        top_k=max(top_k * 2, top_k),
+        source_scope_by_path=source_scope_by_path,
+        reasoning_mode=reasoning_mode,
+    )
+    block_sources = [_enrich_block_source_with_index_types(source) for source in block_sources]
+    graph_sources = _search_classroom_graph_sources(
+        user,
+        question,
+        top_k=max(top_k, 4),
+        source_scope_by_path=source_scope_by_path,
+    )
+    merged: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for source in sorted([*graph_sources, *block_sources], key=lambda item: float(item.get("score") or 0), reverse=True):
+        key = (
+            str(source.get("resourceId") or ""),
+            str(source.get("blockId") or source.get("claimId") or source.get("entityId") or ""),
+            str(source.get("retriever") or "block"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append({**source, "id": f"fusion-source-{len(merged) + 1}"})
+        if len(merged) >= top_k:
+            break
+    components = []
+    if block_sources:
+        components.append("block")
+    if any(source.get("indexTypes") for source in block_sources):
+        components.append("vector")
+    if graph_sources:
+        components.append("graph")
+    return merged, {
+        "components": components,
+        "blockCount": len(block_sources),
+        "graphCount": len(graph_sources),
+        "vectorIndexedCount": sum(1 for source in block_sources if source.get("indexTypes")),
+    }
+
+
+def _enrich_block_source_with_index_types(source: dict) -> dict:
+    block_id = str(source.get("blockId") or "").strip()
+    if not block_id:
+        return {**source, "retriever": source.get("retriever") or "block", "indexTypes": []}
+    index_types = list(
+        KnowledgeIndexEntry.objects.filter(block_id=block_id, status="indexed")
+        .order_by("index_type")
+        .values_list("index_type", flat=True)
+        .distinct()
+    )
+    score = float(source.get("score") or 0)
+    if "text_vector" in index_types:
+        score += 1.5
+    if "visual_vector" in index_types:
+        score += 1.0
+    if "lexical" in index_types:
+        score += 0.5
+    return {
+        **source,
+        "retriever": "block",
+        "indexTypes": index_types,
+        "score": round(score, 3),
+    }
+
+
+def _search_classroom_graph_sources(user, question: str, *, top_k: int, source_scope_by_path: dict[str, str]) -> list[dict]:
+    terms = _classroom_query_terms(question)
+    if not terms:
+        return []
+    resources = _fusion_resources_for_scope(source_scope_by_path)
+    if not resources:
+        return []
+    resource_by_id = {resource.id: resource for resource in resources}
+    claim_rows = KnowledgeGraphClaim.objects.filter(owner=user, resource_id__in=resource_by_id.keys()).select_related("resource")[:600]
+    entity_rows = KnowledgeGraphEntity.objects.filter(owner=user, resource_id__in=resource_by_id.keys()).select_related("resource")[:600]
+    relation_rows = KnowledgeGraphRelation.objects.filter(owner=user, resource_id__in=resource_by_id.keys()).select_related("resource", "source_entity", "target_entity")[:600]
+    candidates: list[tuple[float, dict]] = []
+    for claim in claim_rows:
+        text = str(claim.text or "")
+        score = _graph_text_score(text, terms) + (2.5 if claim.verified else 0.8) + (0 if claim.degraded else 1.0)
+        if score <= 0:
+            continue
+        candidates.append((score, _graph_claim_to_source(claim, score, source_scope_by_path)))
+    for entity in entity_rows:
+        text = " ".join([entity.label, entity.normalized_label, entity.summary, " ".join(str(alias) for alias in (entity.aliases or []))])
+        score = _graph_text_score(text, terms) + (0 if entity.degraded else 0.8)
+        if score <= 0:
+            continue
+        candidates.append((score, _graph_entity_to_source(entity, score, source_scope_by_path)))
+    for relation in relation_rows:
+        text = " ".join([relation.source_entity.label, relation.label, relation.target_entity.label, relation.relation_type, _graph_evidence_text(relation.evidence)])
+        score = _graph_text_score(text, terms) + float(relation.weight or 0) + (0 if relation.degraded else 0.8)
+        if score <= 0:
+            continue
+        candidates.append((score, _graph_relation_to_source(relation, score, source_scope_by_path)))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [source for _, source in candidates[:top_k]]
+
+
+def _fusion_resources_for_scope(source_scope_by_path: dict[str, str]) -> list[KnowledgeResource]:
+    paths = list(source_scope_by_path.keys())
+    if not paths:
+        return []
+    return list(
+        KnowledgeResource.objects.filter(
+            status__in=[ResourceStatus.INDEXED, ResourceStatus.INDEXED_WITH_WARNINGS],
+            stored_path__in=paths,
+        ).only("id", "original_name", "stored_path", "file_type", "resource_scope", "updated_at")
+    )
+
+
+def _graph_text_score(text: str, terms: list[str]) -> float:
+    value = str(text or "").lower()
+    score = 0.0
+    for term in terms:
+        normalized = term.lower()
+        if not normalized:
+            continue
+        score += min(value.count(normalized), 4) * (2.0 if len(normalized) >= 3 else 1.0)
+    return score
+
+
+def _graph_claim_to_source(claim: KnowledgeGraphClaim, score: float, source_scope_by_path: dict[str, str]) -> dict:
+    resource = claim.resource
+    metadata = _graph_source_metadata(resource, source_scope_by_path)
+    return {
+        "id": f"graph-claim-{claim.id}",
+        "title": resource.original_name,
+        "location": _graph_evidence_location(claim.evidence) or format_source_display_location(metadata),
+        "type": "知识图谱断言",
+        "sourceTypeLabel": "知识图谱断言",
+        "sourceOrigin": source_origin_label(metadata),
+        "sourceScope": str(metadata.get("source_scope") or ""),
+        "score": round(float(score), 3),
+        "snippet": claim.text[:900],
+        "retriever": "graph",
+        "graphType": "claim",
+        "claimId": str(claim.id),
+        "resourceId": str(resource.id),
+        "verified": bool(claim.verified),
+        "schemaVersion": claim.schema_version,
+    }
+
+
+def _graph_entity_to_source(entity: KnowledgeGraphEntity, score: float, source_scope_by_path: dict[str, str]) -> dict:
+    resource = entity.resource
+    metadata = _graph_source_metadata(resource, source_scope_by_path)
+    return {
+        "id": f"graph-entity-{entity.id}",
+        "title": resource.original_name,
+        "location": _graph_locations_label(entity.source_locations) or format_source_display_location(metadata),
+        "type": "知识图谱实体",
+        "sourceTypeLabel": "知识图谱实体",
+        "sourceOrigin": source_origin_label(metadata),
+        "sourceScope": str(metadata.get("source_scope") or ""),
+        "score": round(float(score), 3),
+        "snippet": f"{entity.label}：{entity.summary}"[:900],
+        "retriever": "graph",
+        "graphType": "entity",
+        "entityId": str(entity.id),
+        "resourceId": str(resource.id),
+        "schemaVersion": entity.schema_version,
+    }
+
+
+def _graph_relation_to_source(relation: KnowledgeGraphRelation, score: float, source_scope_by_path: dict[str, str]) -> dict:
+    resource = relation.resource
+    metadata = _graph_source_metadata(resource, source_scope_by_path)
+    evidence_text = _graph_evidence_text(relation.evidence)
+    relation_text = f"{relation.source_entity.label} {relation.label or relation.relation_type} {relation.target_entity.label}"
+    return {
+        "id": f"graph-relation-{relation.id}",
+        "title": resource.original_name,
+        "location": _graph_evidence_location(relation.evidence) or format_source_display_location(metadata),
+        "type": "知识图谱关系",
+        "sourceTypeLabel": "知识图谱关系",
+        "sourceOrigin": source_origin_label(metadata),
+        "sourceScope": str(metadata.get("source_scope") or ""),
+        "score": round(float(score), 3),
+        "snippet": (evidence_text or relation_text)[:900],
+        "retriever": "graph",
+        "graphType": "relation",
+        "relationId": str(relation.id),
+        "resourceId": str(resource.id),
+        "schemaVersion": relation.schema_version,
+    }
+
+
+def _graph_source_metadata(resource: KnowledgeResource, source_scope_by_path: dict[str, str]) -> dict:
+    resolved_path = str(Path(resource.stored_path).resolve()) if resource.stored_path else ""
+    return {
+        "source_path": resolved_path,
+        "original_name": resource.original_name,
+        "source_type": str(resource.file_type or "").lstrip(".") or "resource",
+        "source_scope": resource.resource_scope or source_scope_by_path.get(resolved_path, ""),
+        "resource_id": str(resource.id),
+    }
+
+
+def _graph_evidence_text(evidence: list | dict | str) -> str:
+    if isinstance(evidence, str):
+        return evidence
+    if isinstance(evidence, dict):
+        return str(evidence.get("text") or evidence.get("snippet") or evidence.get("quote") or "")
+    if isinstance(evidence, list):
+        return " ".join(_graph_evidence_text(item) for item in evidence[:3]).strip()
+    return ""
+
+
+def _graph_evidence_location(evidence: list | dict | str) -> str:
+    items = evidence if isinstance(evidence, list) else [evidence]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        page = item.get("page") or item.get("pageNumber")
+        slide = item.get("slide") or item.get("slideNumber")
+        if page:
+            return f"page {page}"
+        if slide:
+            return f"slide {slide}"
+    return ""
+
+
+def _graph_locations_label(locations: list | dict | str) -> str:
+    return _graph_evidence_location(locations)
+
+
 def _classroom_query_terms(question: str) -> list[str]:
     raw = str(question or "").strip()
     terms: list[str] = []
@@ -1240,9 +1475,36 @@ def _classroom_block_score(question: str, terms: list[str], block: KnowledgeBloc
         score += 1.0
     if block.modality in {"text", "table", "formula"}:
         score += 0.6
+    if _looks_like_table_of_contents(text):
+        score -= 8.0 if reasoning_mode == "deep" else 6.0
+    if _looks_like_explanatory_block(text):
+        score += 4.0 if reasoning_mode == "deep" else 3.0
     if resource_rank:
         score -= resource_rank * 0.35
     return score
+
+
+def _looks_like_table_of_contents(text: str) -> bool:
+    value = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not value:
+        return False
+    toc_markers = ("目录", "本章内容", "本章目录", "contents", "table of contents")
+    has_toc_marker = any(marker in value for marker in toc_markers)
+    if not has_toc_marker:
+        return False
+    bullet_like = len(re.findall(r"(?:^|\s)(?:[>•\-]|\d+[.、]|第[一二三四五六七八九十0-9]+[章节])", value))
+    explanatory_markers = ("是指", "是", "定义", "例如", "包括", "用于", "通过", "因此", "所以", "原因", "特点")
+    explanatory_hits = sum(1 for marker in explanatory_markers if marker in value)
+    return bullet_like >= 3 and explanatory_hits <= 2
+
+
+def _looks_like_explanatory_block(text: str) -> bool:
+    value = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if len(value) < 30:
+        return False
+    explanatory_markers = ("是指", "定义", "例如", "包括", "用于", "通过", "因此", "所以", "特点", "作用", "组成")
+    hits = sum(1 for marker in explanatory_markers if marker in value)
+    return hits >= 2
 
 
 def _knowledge_block_to_source(block: KnowledgeBlock, index: int, score: float, source_scope_by_path: dict[str, str]) -> dict:

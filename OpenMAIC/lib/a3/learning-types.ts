@@ -280,6 +280,9 @@ export type StudyPlanLearningEffectAdjustment = {
   taskId?: string;
   applied?: boolean;
   appliedAt?: string;
+  policyDecisionId?: string;
+  observedMetricDelta?: Record<string, string | number | boolean | null | undefined>;
+  outcomeMetrics?: Record<string, string | number | boolean | null | undefined>;
 };
 
 export type StudyPlanContext = {

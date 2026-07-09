@@ -23,6 +23,7 @@ from backend.domains.knowledge_base.markdown_normalizer import normalize_materia
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_PPTX_RENDER_MAX_SLIDES = 120
 DEFAULT_PPTX_OCR_MAX_SLIDES = 40
+DEFAULT_PDF_RENDER_MAX_PAGES = 120
 QWEN_OCR_PROVIDERS = {"qwen_ocr", "qwen-vl-ocr", "qwen_vl_ocr", "qwen_ocr_vl", "qwen_vl"}
 
 
@@ -744,6 +745,7 @@ def _vision_understanding_blocks(
     metadata: dict,
 ) -> list[ParsedBlock]:
     metadata = dict(metadata)
+    provider = str((understanding.raw or {}).get("provider") or "").strip()
     structured_metadata = {
         **metadata,
         "ocr": bool(understanding.text),
@@ -751,6 +753,8 @@ def _vision_understanding_blocks(
         "keywords": understanding.keywords,
         "figures": understanding.figures,
     }
+    if provider:
+        structured_metadata["provider"] = provider
     visual_text = _visual_block_text(understanding) or visual_fallback
     blocks = [
         ParsedBlock(
@@ -767,7 +771,13 @@ def _vision_understanding_blocks(
                 modality="text",
                 text=understanding.text.strip(),
                 confidence=0.72,
-                metadata={**metadata, "ocr": True, "vlm": bool(structured_metadata["vlm"]), "keywords": understanding.keywords},
+                metadata={
+                    **metadata,
+                    **({"provider": provider} if provider else {}),
+                    "ocr": True,
+                    "vlm": bool(structured_metadata["vlm"]),
+                    "keywords": understanding.keywords,
+                },
             )
         )
     for formula in understanding.formulas:
@@ -778,13 +788,23 @@ def _vision_understanding_blocks(
                     modality="formula",
                     text=text,
                     confidence=0.7,
-                    metadata={**metadata, "vlm": bool(structured_metadata["vlm"]), "keywords": understanding.keywords},
+                    metadata={
+                        **metadata,
+                        **({"provider": provider} if provider else {}),
+                        "vlm": bool(structured_metadata["vlm"]),
+                        "keywords": understanding.keywords,
+                    },
                 )
             )
     for table in understanding.tables:
         text = str(table.get("markdown") or table.get("text") or "").strip()
         if text:
-            table_metadata = {**metadata, "vlm": bool(structured_metadata["vlm"]), "caption": str(table.get("caption") or "").strip()}
+            table_metadata = {
+                **metadata,
+                **({"provider": provider} if provider else {}),
+                "vlm": bool(structured_metadata["vlm"]),
+                "caption": str(table.get("caption") or "").strip(),
+            }
             blocks.append(
                 ParsedBlock(
                     modality="table",
@@ -1094,7 +1114,12 @@ class BaiduDocumentParserProvider:
             return VisionUnderstanding(warnings=["BaiduDocumentParserProvider 未配置 A3_BAIDU_PADDLEOCR_TOKEN，已降级为本地 OCR。"])
         started = time.monotonic()
         try:
-            submit_data = _submit_baidu_paddleocr_job(image_path, submit_url=self.submit_url, token=self.token)
+            submit_data = _submit_baidu_paddleocr_job(
+                image_path,
+                submit_url=self.submit_url,
+                token=self.token,
+                optional_payload=_baidu_optional_payload(enhanced=False),
+            )
             job_id = _extract_baidu_job_id(submit_data)
             if not job_id:
                 return VisionUnderstanding(warnings=[f"BaiduDocumentParserProvider 未返回 job id：{submit_data}"])
@@ -1106,6 +1131,34 @@ class BaiduDocumentParserProvider:
                 poll_interval=self.poll_interval,
             )
             understanding = _baidu_result_to_vision_understanding(result_data, job_id=job_id)
+            if not _has_readable_vision_content(understanding) and _env_bool("A3_BAIDU_PADDLEOCR_RETRY_EMPTY", True):
+                retry_data = _submit_baidu_paddleocr_job(
+                    image_path,
+                    submit_url=self.submit_url,
+                    token=self.token,
+                    optional_payload=_baidu_optional_payload(enhanced=True),
+                )
+                retry_job_id = _extract_baidu_job_id(retry_data)
+                if retry_job_id:
+                    retry_result = _poll_baidu_paddleocr_job(
+                        retry_job_id,
+                        result_url_template=self.result_url_template,
+                        token=self.token,
+                        timeout=self.timeout,
+                        poll_interval=self.poll_interval,
+                    )
+                    retry_understanding = _baidu_result_to_vision_understanding(retry_result, job_id=retry_job_id)
+                    if _has_readable_vision_content(retry_understanding):
+                        object.__setattr__(retry_understanding, "raw", {
+                            **(retry_understanding.raw or {}),
+                            "retry": {
+                                "reason": "first_empty",
+                                "firstJobId": job_id,
+                                "retryJobId": retry_job_id,
+                                "enhanced": True,
+                            },
+                        })
+                        understanding = retry_understanding
             object.__setattr__(understanding, "raw", {
                 **(understanding.raw or {}),
                 "provider": self.provider,
@@ -1120,9 +1173,18 @@ def _understand_image_with_baidu_document_provider(image_path: Path) -> VisionUn
     return BaiduDocumentParserProvider().understand_image(image_path)
 
 
-def _submit_baidu_paddleocr_job(image_path: Path, *, submit_url: str, token: str) -> dict:
+def _baidu_optional_payload(*, enhanced: bool) -> dict:
+    return {
+        "useDocOrientationClassify": _env_bool("A3_BAIDU_PADDLEOCR_USE_DOC_ORIENTATION_CLASSIFY", enhanced),
+        "useDocUnwarping": _env_bool("A3_BAIDU_PADDLEOCR_USE_DOC_UNWARPING", enhanced),
+        "useChartRecognition": _env_bool("A3_BAIDU_PADDLEOCR_USE_CHART_RECOGNITION", enhanced),
+    }
+
+
+def _submit_baidu_paddleocr_job(image_path: Path, *, submit_url: str, token: str, optional_payload: dict | None = None) -> dict:
     fields = {
-        "model": os.getenv("A3_BAIDU_PADDLEOCR_MODEL", "PaddleOCR-VL"),
+        "model": os.getenv("A3_BAIDU_PADDLEOCR_MODEL", "PaddleOCR-VL-1.6"),
+        "optionalPayload": json.dumps(optional_payload or _baidu_optional_payload(enhanced=False), ensure_ascii=False),
         "fileType": image_path.suffix.lstrip(".") or "png",
     }
     body, content_type = _multipart_form_data(fields, file_field="file", file_path=image_path)
@@ -1147,7 +1209,13 @@ def _poll_baidu_paddleocr_job(job_id: str, *, result_url_template: str, token: s
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"}, method="GET")
         with urllib.request.urlopen(request, timeout=_env_int("A3_BAIDU_PADDLEOCR_RESULT_TIMEOUT_SECONDS", 30)) as response:
             last_data = json.loads(response.read().decode("utf-8"))
-        status = str(_deep_get(last_data, "data.status") or last_data.get("status") or "").lower()
+        status = str(
+            _deep_get(last_data, "data.state")
+            or _deep_get(last_data, "data.status")
+            or last_data.get("state")
+            or last_data.get("status")
+            or ""
+        ).lower()
         if status in {"succeeded", "success", "completed", "done", "finished"}:
             return last_data
         if status in {"failed", "error", "canceled", "cancelled"}:
@@ -1173,9 +1241,18 @@ def _baidu_result_to_vision_understanding(data: dict, *, job_id: str) -> VisionU
         formulas=list(dict.fromkeys(formulas)),
         tables=tables,
         figures=[],
-        keywords=["baidu_paddleocr_vl"],
+        keywords=[],
         raw={"provider": "baidu_paddleocr_vl", "jobId": job_id, "result": data},
         warnings=[] if text else [f"Baidu PaddleOCR-VL job {job_id} returned no readable text."],
+    )
+
+
+def _has_readable_vision_content(understanding: VisionUnderstanding) -> bool:
+    return bool(
+        understanding.text.strip()
+        or understanding.formulas
+        or understanding.tables
+        or understanding.figures
     )
 
 
@@ -1192,6 +1269,10 @@ def _extract_baidu_markdown(data: dict) -> str:
         value = _deep_get(data, path)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    json_payload = _extract_baidu_json_payload(data)
+    markdown = _extract_baidu_markdown_from_payload(json_payload)
+    if markdown:
+        return markdown
     markdown_url = _deep_get(data, "data.resultUrl.markdownUrl") or _deep_get(data, "resultUrl.markdownUrl")
     return _download_text(markdown_url) if markdown_url else ""
 
@@ -1208,8 +1289,55 @@ def _extract_baidu_json_payload(data: dict):
             try:
                 return json.loads(raw)
             except json.JSONDecodeError:
-                return {"text": raw}
+                jsonl_payload = _parse_jsonl_payload(raw)
+                return jsonl_payload if jsonl_payload else {"text": raw}
     return {}
+
+
+def _parse_jsonl_payload(raw: str) -> list[dict]:
+    items: list[dict] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            items.append(parsed)
+    return items
+
+
+def _extract_baidu_markdown_from_payload(payload) -> str:
+    parts: list[str] = []
+    if isinstance(payload, dict):
+        markdown = payload.get("markdown")
+        if isinstance(markdown, dict):
+            text = str(markdown.get("text") or "").strip()
+            if text:
+                parts.append(text)
+        elif isinstance(markdown, str) and markdown.strip():
+            parts.append(markdown.strip())
+        result = payload.get("result")
+        if isinstance(result, dict):
+            parts.append(_extract_baidu_markdown_from_payload(result))
+        elif isinstance(result, list):
+            for item in result:
+                parts.append(_extract_baidu_markdown_from_payload(item))
+        layout_results = payload.get("layoutParsingResults")
+        if isinstance(layout_results, list):
+            for item in layout_results:
+                parts.append(_extract_baidu_markdown_from_payload(item))
+        for key in ("pages", "blocks", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    parts.append(_extract_baidu_markdown_from_payload(item))
+    elif isinstance(payload, list):
+        for item in payload:
+            parts.append(_extract_baidu_markdown_from_payload(item))
+    return "\n\n".join(part for part in parts if part).strip()
 
 
 def _baidu_json_to_text(payload) -> str:
@@ -1460,7 +1588,8 @@ def _get_ocr_engine():
     return RapidOCR()
 
 
-def _render_pdf_pages(source_path: Path, max_pages: int = 20) -> tuple[dict[int, ParsedAsset], list[str]]:
+def _render_pdf_pages(source_path: Path, max_pages: int | None = None) -> tuple[dict[int, ParsedAsset], list[str]]:
+    max_pages = max_pages if max_pages is not None else _env_int("A3_PDF_RENDER_MAX_PAGES", DEFAULT_PDF_RENDER_MAX_PAGES)
     output_dir = source_path.parent / ".a3_rendered" / source_path.stem
     return _render_pdf_to_assets(
         source_path,

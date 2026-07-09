@@ -393,6 +393,7 @@ type LearningEffectReportResponse = {
       candidates?: Array<{ strategy?: string; decisionScore?: number; rankingBasis?: string[] }>;
       successCriteria?: Array<{ metric?: string; target?: number; targetDelta?: number; windowDays?: number }>;
       observedMetricDelta?: Record<string, number>;
+      outcomeMetrics?: PolicyOutcomeMetrics;
     };
     updatedAt?: string;
   };
@@ -406,7 +407,7 @@ type RuntimeStatusResponse = {
     name: string;
     status: 'ok' | 'warning' | 'error';
     message: string;
-    detail?: Record<string, string | boolean>;
+    detail?: Record<string, string | boolean | number | Record<string, unknown>>;
   }>;
   openmaicSmokeReport?: {
     available: boolean;
@@ -427,10 +428,31 @@ type RuntimeStatusResponse = {
   };
 };
 
+type PolicyOutcomeMetrics = {
+  schemaVersion?: string;
+  windowDays?: number;
+  resourceTypeGain7d?: Array<{
+    resourceType?: string;
+    knowledgePointId?: string;
+    completed7d?: number;
+    opened7d?: number;
+    postAssessmentGain7d?: number;
+    practiceConversionRate7d?: number;
+    historicalEffectiveness7d?: number;
+    confidence?: string;
+    explorationRecommended?: boolean;
+  }>;
+  summary?: {
+    resourceTypeCount?: number;
+    topResourceTypeGain7d?: number;
+    effectScore?: number;
+  };
+};
+
 type StudyPlanResponse = A3ApiResponse<{ plan: StudyPlan }>;
 type OptimizationPolicyResponse = A3ApiResponse<{
   optimizationPolicy?: NonNullable<LearningEffectReportResponse['effectReport']>['optimizationPolicy'];
-  decisionHistory?: Array<NonNullable<LearningEffectReportResponse['effectReport']>['optimizationPolicy'] & { decisionAt?: string }>;
+  decisionHistory?: Array<NonNullable<LearningEffectReportResponse['effectReport']>['optimizationPolicy'] & { decisionAt?: string; outcomeMetrics?: PolicyOutcomeMetrics }>;
 }>;
 
 const capabilityLabels: Record<string, { title: string; href: string; desc: string }> = {
@@ -638,6 +660,7 @@ export function CapabilitiesView() {
   const resourcePackMetricCards = data?.resourcePackMetrics ? buildResourcePackMetricCards(data.resourcePackMetrics) : [];
   const openmaicPageOwnershipMetrics = buildOpenMAICPageOwnershipMetrics(A3_OPENMAIC_PAGE_OWNERSHIP);
   const openmaicHandoffSync = buildOpenMAICHandoffSyncSummary(A3_OPENMAIC_PAGE_OWNERSHIP);
+  const celeryBeatCheck = runtimeStatus?.checks?.find((check) => check.name === 'celeryBeat');
   const openmaicVideoProviderCheck = runtimeStatus?.checks?.find((check) => check.name === 'openmaicVideoProvider');
   const openmaicVideoProviderConfigured = Boolean(openmaicVideoProviderCheck?.detail?.configured);
   const openmaicVerificationSummary = buildOpenMAICVerificationSummary(A3_OPENMAIC_PAGE_OWNERSHIP, openmaicVideoProviderConfigured);
@@ -647,6 +670,8 @@ export function CapabilitiesView() {
     || generatedResourcePack?.resourcePackId
     || '';
   const canWriteBackOpenMAICSmoke = Boolean(openmaicSmokeReport?.success && openmaicSmokeReport.hasVideoUrl);
+  const policyOutcomeMetrics = learningEffectReport?.optimizationPolicy?.outcomeMetrics ?? optimizationPolicyResponse?.optimizationPolicy?.outcomeMetrics;
+  const policyResourceGains = policyOutcomeMetrics?.resourceTypeGain7d ?? [];
   const artifactAudit = data?.resourcePackMetrics?.artifactAudit;
   const evaluationTargets = useMemo(() => buildEvaluationTargetStatuses(metrics ?? {}), [metrics]);
   const multimodalRag = data?.multimodalRag;
@@ -1365,6 +1390,34 @@ export function CapabilitiesView() {
                   <MetricInline key={candidate.strategy ?? 'candidate'} label={candidate.strategy ?? '--'} value={`${candidate.decisionScore ?? 0}`} />
                 ))}
               </div>
+              <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/70 p-3" data-testid="a3-policy-outcome-resource-gain">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-blue-950">资源类型 7 天效果回看</div>
+                  <A3Pill tone={(policyOutcomeMetrics?.summary?.resourceTypeCount ?? 0) > 0 ? 'green' : 'orange'}>
+                    {policyOutcomeMetrics?.schemaVersion ?? 'a3.policy-outcome-metrics.v1'}
+                  </A3Pill>
+                </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <MetricInline label="window" value={`${policyOutcomeMetrics?.windowDays ?? 7}d`} />
+                  <MetricInline label="resource types" value={`${policyOutcomeMetrics?.summary?.resourceTypeCount ?? 0}`} />
+                  <MetricInline label="top gain" value={`${policyOutcomeMetrics?.summary?.topResourceTypeGain7d ?? 0}`} />
+                </div>
+                {policyResourceGains.length > 0 ? (
+                  <div className="mt-3 grid gap-2 md:grid-cols-3">
+                    {policyResourceGains.slice(0, 3).map((item) => (
+                      <MetricInline
+                        key={`${item.resourceType}-${item.knowledgePointId}`}
+                        label={`${item.resourceType ?? '--'} · ${item.confidence ?? 'low'}`}
+                        value={`gain ${item.postAssessmentGain7d ?? 0} / done ${item.completed7d ?? 0}`}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 rounded-lg bg-white/80 px-3 py-2 text-xs leading-5 text-blue-800">
+                    等待资源打开、完成和后续测评事件形成可归因样本。
+                  </div>
+                )}
+              </div>
             </div>
           )}
           <div className="mt-4 grid gap-3 md:grid-cols-3">
@@ -1907,6 +1960,23 @@ export function CapabilitiesView() {
       </section>
 
       <A3Card
+        title="Celery Beat 定时任务"
+        subtitle="展示后端部署定时任务是否注册，用于证明策略 outcome 回看不是只能手动运行。"
+        action={<A3Pill tone={celeryBeatCheck?.status === 'ok' ? 'green' : celeryBeatCheck?.status === 'error' ? 'red' : 'orange'}>{celeryBeatCheck?.status ?? 'missing'}</A3Pill>}
+      >
+        <div className="grid gap-3 md:grid-cols-4" data-testid="a3-celery-beat-runtime-status">
+          <MetricInline label="task" value={String(celeryBeatCheck?.detail?.task ?? 'learning.evaluate_optimization_policy_outcomes')} />
+          <MetricInline label="entry" value={String(celeryBeatCheck?.detail?.entry ?? 'a3-evaluate-optimization-policy-outcomes-daily')} />
+          <MetricInline label="schedule" value={String(celeryBeatCheck?.detail?.schedule ?? '--')} />
+          <MetricInline label="kwargs" value={formatRuntimeDetail(celeryBeatCheck?.detail?.kwargs)} />
+        </div>
+        <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-800">
+          {celeryBeatCheck?.message ?? '等待 /api/a3/system/runtime 合并 Django system health 的 celeryBeat 检查。'}
+          <span className="ml-2 text-xs font-semibold">{String(celeryBeatCheck?.detail?.deployment ?? 'docker compose service celery-beat')}</span>
+        </div>
+      </A3Card>
+
+      <A3Card
         title="Agent 运行治理"
         subtitle="展示最近工作流的重试、超时、契约校验和降级策略，答辩时可直接证明多智能体不是黑盒调用。"
         action={<A3Pill tone={(data?.agentRuntime?.contractViolations ?? 0) > 0 ? 'orange' : 'green'}>runtime</A3Pill>}
@@ -2142,6 +2212,20 @@ function MetricInline({ label, value }: { label: string; value: string }) {
       <div className="mt-1 truncate text-xs font-semibold text-[var(--a3-text)]">{value}</div>
     </div>
   );
+}
+
+function formatRuntimeDetail(value: unknown) {
+  if (value === undefined || value === null || value === '') {
+    return '--';
+  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function formatShortDateTime(value?: string) {

@@ -5,9 +5,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, Bell, BookOpenCheck, CheckCircle2, Clock3, Loader2, MessageCircle, RotateCcw, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
+import { buildProfileChangeInsight, buildTaskProfileRationale, buildTodayFlowInsights, type LearningFlowInsight } from '@/lib/a3/learning-flow-insights';
 import { trackLearningEvent, trackPageView } from '@/lib/a3/learning-event-client';
 import type { LearningReport } from '@/lib/a3/assessment-types';
 import type { A3ApiResponse, DailyReflection, StudyPlan, StudyPlanDay, StudyPlanTask, StudyPlanTaskFeedback } from '@/lib/a3/learning-types';
+import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
 import { formatReportMetricDelta } from '@/lib/a3/report-delta';
 import { cn } from '@/lib/utils';
 import { A3Card, A3Pill } from '../ui/a3-card';
@@ -15,6 +17,7 @@ import { A3Card, A3Pill } from '../ui/a3-card';
 type StudyPlanResponse = A3ApiResponse<{ plan: StudyPlan; feedback?: StudyPlanTaskFeedback }>;
 type ReflectionResponse = A3ApiResponse<{ reflection: DailyReflection; recent: DailyReflection[] }>;
 type ReportResponse = { success: boolean; error?: string; report: LearningReport };
+type ProfileFeedResponse = DynamicProfileFeedResponse;
 
 const taskCopy: Record<StudyPlanTask['type'], { label: string; action: string; tone: 'blue' | 'green' | 'orange' | 'violet' }> = {
   learn: { label: '讲解', action: '进入 AI 课堂', tone: 'blue' },
@@ -30,6 +33,8 @@ const policyLabel: Record<NonNullable<StudyPlan['adaptivePolicy']>['mode'], stri
   standard: '标准节奏',
 };
 
+const PROFILE_SETUP_HREF = '/a3/profile-setup';
+
 export function TodayLearningView() {
   const [plan, setPlan] = useState<StudyPlan | null>(null);
   const [loading, setLoading] = useState(true);
@@ -41,15 +46,17 @@ export function TodayLearningView() {
   const [reflectionConfusion, setReflectionConfusion] = useState('');
   const [confidence, setConfidence] = useState(3);
   const [reflection, setReflection] = useState<DailyReflection | null>(null);
+  const [profileFeed, setProfileFeed] = useState<ProfileFeedResponse | null>(null);
   const [savingReflection, setSavingReflection] = useState(false);
   const [error, setError] = useState('');
 
   async function load() {
     setLoading(true);
     setError('');
-    const [response, reportResponse] = await Promise.all([
+    const [response, reportResponse, profileResponse] = await Promise.all([
       a3GetJson<StudyPlanResponse>('/api/learning/study-plan/?auto=1'),
       a3GetJson<ReportResponse>('/api/assessments/report/'),
+      a3GetJson<ProfileFeedResponse>('/api/profiles/dynamic-profile/'),
     ]);
     setLoading(false);
     if (!response.success) {
@@ -59,6 +66,7 @@ export function TodayLearningView() {
     setPlan(response.plan);
     setFeedback(response.plan.lastTaskFeedback ?? null);
     if (reportResponse.success) setReport(reportResponse.report);
+    if (profileResponse.success) setProfileFeed(profileResponse);
   }
 
   async function completeTask(day: StudyPlanDay, task: StudyPlanTask) {
@@ -117,6 +125,8 @@ export function TodayLearningView() {
   const resourceFeedbackAdjustment = plan?.lastResourceFeedbackAdjustment;
   const relationship = plan?.planContext?.relationship;
   const todayBindings = plan?.planContext?.todayBindings ?? [];
+  const flowInsights = useMemo(() => buildTodayFlowInsights({ plan, today }), [plan, today]);
+  const profileChangeInsight = useMemo(() => buildProfileChangeInsight(profileFeed), [profileFeed]);
 
   if (loading) {
     return (
@@ -163,10 +173,10 @@ export function TodayLearningView() {
                   <ArrowRight className="size-4" />
                 </Link>
               </Button>
-              <Button asChild variant="outline" className="border-white/20 bg-white/10 text-white hover:bg-white/15">
+              <Button asChild variant="outline" className="min-w-[104px] justify-center border-slate-600 bg-slate-800 text-slate-50 hover:bg-slate-700 hover:text-white">
                 <Link href="/a3/admission-diagnostic">重新诊断</Link>
               </Button>
-              <Button onClick={load} variant="outline" className="border-white/20 bg-white/10 text-white hover:bg-white/15">
+              <Button onClick={load} variant="outline" className="min-w-[112px] justify-center border-slate-600 bg-slate-800 text-slate-50 hover:bg-slate-700 hover:text-white">
                 <RotateCcw className="size-4" />
                 刷新任务
               </Button>
@@ -196,6 +206,9 @@ export function TodayLearningView() {
 
       {error && <div className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
 
+      <TodayFlowInsightPanel insights={flowInsights} />
+      <ProfileChangeReasonCard insight={profileChangeInsight} />
+
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_390px]">
         <A3Card
           title={today ? today.focus : '今日暂无任务'}
@@ -212,6 +225,7 @@ export function TodayLearningView() {
                   index={index + 1}
                   active={activeTask?.id === task.id && !finished}
                   saving={savingTask === task.id}
+                  profileFeed={profileFeed}
                   onComplete={completeTask}
                 />
               ))}
@@ -540,6 +554,58 @@ function TodayLoopStep({ title, detail }: { title: string; detail: string }) {
   );
 }
 
+function TodayFlowInsightPanel({ insights }: { insights: LearningFlowInsight[] }) {
+  if (!insights.length) return null;
+  return (
+    <A3Card
+      title="今天为什么这样学"
+      subtitle="根据当前路径、今日任务、错题复习和最近学习效果调整。"
+      action={<A3Pill tone="blue">实时排程</A3Pill>}
+    >
+      <div className="grid gap-3 lg:grid-cols-3" data-testid="a3-today-flow-insights">
+        {insights.map((item) => (
+          <Link
+            key={`${item.title}-${item.href}`}
+            href={item.href}
+            className="group rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 transition hover:border-blue-300 hover:bg-blue-50/60"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 text-sm font-semibold text-[var(--a3-text)]">{item.title}</div>
+              <A3Pill tone={item.tone}>{item.meta || '下一步'}</A3Pill>
+            </div>
+            <p className="mt-3 line-clamp-3 text-xs leading-5 text-[var(--a3-text-muted)]">{item.detail}</p>
+            <div className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-blue-700 group-hover:text-blue-800">
+              查看对应任务
+              <ArrowRight className="size-3" />
+            </div>
+          </Link>
+        ))}
+      </div>
+    </A3Card>
+  );
+}
+
+function ProfileChangeReasonCard({ insight }: { insight: LearningFlowInsight | null }) {
+  if (!insight) return null;
+  return (
+    <A3Card
+      title="本次安排为什么因画像而变"
+      subtitle={insight.detail}
+      action={<A3Pill tone={insight.tone}>{insight.meta || '画像证据'}</A3Pill>}
+    >
+      <div data-testid="a3-today-profile-change-reason" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-orange-100 bg-orange-50 px-4 py-3">
+        <div>
+          <div className="text-sm font-semibold text-orange-950">{insight.title}</div>
+          <p className="mt-1 text-xs leading-5 text-orange-800">确认或查看画像变化后，今日任务会继续按新的薄弱点、偏好和风险信号调整。</p>
+        </div>
+        <Button asChild size="sm" variant="outline" className="border-orange-200 bg-white text-orange-800 hover:bg-orange-50">
+          <Link href={insight.href}>查看画像变化</Link>
+        </Button>
+      </div>
+    </A3Card>
+  );
+}
+
 function FeedbackMetric({ label, value, delta }: { label: string; value: string; delta?: string }) {
   return (
     <div className="rounded-lg bg-white/70 p-2">
@@ -578,6 +644,7 @@ function SessionTask({
   index,
   active,
   saving,
+  profileFeed,
   onComplete,
 }: {
   day: StudyPlanDay;
@@ -585,10 +652,12 @@ function SessionTask({
   index: number;
   active: boolean;
   saving: boolean;
+  profileFeed: ProfileFeedResponse | null;
   onComplete: (day: StudyPlanDay, task: StudyPlanTask) => void;
 }) {
   const completed = task.status === 'completed';
   const copy = taskCopy[task.type];
+  const profileRationale = buildTaskProfileRationale(task, profileFeed);
   return (
     <div
       data-testid="a3-today-task"
@@ -613,6 +682,16 @@ function SessionTask({
         </div>
         <div className="mt-2 text-base font-semibold text-[var(--a3-text)]">{task.title}</div>
         <p className="mt-2 text-sm leading-6 text-[var(--a3-text-muted)]">{task.subtitle}</p>
+        <div data-testid="a3-task-profile-rationale" className="mt-3 min-w-0 break-words rounded-lg border border-orange-100 bg-orange-50 px-3 py-2 text-xs leading-5 text-orange-800">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-semibold text-orange-950">{profileRationale.label}</span>
+            <Link href={profileRationale.href || PROFILE_SETUP_HREF} className="font-semibold text-orange-700 hover:text-orange-900">
+              查看画像
+            </Link>
+          </div>
+          <div className="mt-1 break-words">{profileRationale.detail}</div>
+          {profileRationale.confidence > 0 && <div className="mt-1 text-orange-700">证据置信度 {profileRationale.confidence}%</div>}
+        </div>
       </div>
       <div className="flex items-center justify-end gap-2">
         <Button asChild size="sm" variant="outline">

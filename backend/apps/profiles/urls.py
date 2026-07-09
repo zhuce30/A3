@@ -10,4 +10,7 @@ urlpatterns = [
     path("options/", views.profile_options, name="profile-options"),
     path("learning-profile/", views.learning_profile, name="learning-profile"),
     path("extract/", views.extract_profile, name="profile-extract"),
+    path("dynamic-profile/", views.dynamic_profile, name="dynamic-profile"),
+    path("profile-updates/<str:update_id>/confirm/", views.confirm_profile_update_view, name="profile-update-confirm"),
+    path("profile-updates/<str:update_id>/reject/", views.reject_profile_update_view, name="profile-update-reject"),
 ]

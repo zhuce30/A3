@@ -3,6 +3,8 @@ from __future__ import annotations
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
+from backend.apps.profiles.models import LearnerProfile
+from backend.apps.profiles.profile_updates import confirm_profile_update, dynamic_profile_feed, reject_profile_update
 from backend.apps.profiles.services import get_learning_profile_options, get_profile_payload, save_learning_profile, update_user_profile, extract_and_save_profile
 from backend.utils.http import json_body
 
@@ -67,3 +69,37 @@ def extract_profile(request):
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
     except Exception as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=500)
+
+
+@require_http_methods(["GET"])
+def dynamic_profile(request):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    profile, _created = LearnerProfile.objects.get_or_create(user=request.user)
+    return JsonResponse({"success": True, **dynamic_profile_feed(profile)})
+
+
+@require_http_methods(["POST"])
+def confirm_profile_update_view(request, update_id: str):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    profile, _created = LearnerProfile.objects.get_or_create(user=request.user)
+    try:
+        return JsonResponse({"success": True, **confirm_profile_update(profile, update_id)})
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=404)
+
+
+@require_http_methods(["POST"])
+def reject_profile_update_view(request, update_id: str):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    profile, _created = LearnerProfile.objects.get_or_create(user=request.user)
+    body = json_body(request)
+    try:
+        return JsonResponse({"success": True, **reject_profile_update(profile, update_id, reason=str(body.get("reason") or ""))})
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=404)

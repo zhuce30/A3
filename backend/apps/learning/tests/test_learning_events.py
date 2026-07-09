@@ -837,6 +837,45 @@ class ContinuousOptimizationPolicyTests(TestCase):
         self.assertEqual(result["users"], 1)
         self.assertIn("effectScoreDelta", decision["observedMetricDelta"])
 
+    def test_policy_outcome_includes_resource_type_gain_for_seven_day_window(self):
+        before = record_learning_event(
+            self.user,
+            event_type="question_answered",
+            target_type="assessment_question",
+            target_id="q-before-resource-gain",
+            knowledge_point_id=str(self.point.id),
+            score=40,
+        )
+        resource = record_learning_event(
+            self.user,
+            event_type="resource_completed",
+            target_type="resource_pack",
+            target_id="pack-resource-gain",
+            knowledge_point_id=str(self.point.id),
+            resource_type="practice_set",
+            score=90,
+        )
+        for index, score in enumerate((80, 100), start=1):
+            record_learning_event(
+                self.user,
+                event_type="question_answered",
+                target_type="assessment_question",
+                target_id=f"q-after-resource-gain-{index}",
+                knowledge_point_id=str(self.point.id),
+                score=score,
+            )
+        LearningEvent.objects.filter(id=before.id).update(created_at=timezone.now() - timedelta(days=8))
+        LearningEvent.objects.filter(id=resource.id).update(created_at=timezone.now() - timedelta(days=6))
+
+        report = build_continuous_optimization_policy_report(self.user, days=30)
+
+        resource_gain = report["outcomeMetrics"]["resourceTypeGain7d"][0]
+        self.assertEqual(resource_gain["resourceType"], "practice_set")
+        self.assertEqual(resource_gain["postAssessmentGain7d"], 50)
+        self.assertEqual(resource_gain["completed7d"], 1)
+        self.assertIn(resource_gain["confidence"], {"medium", "high"})
+        self.assertEqual(report["observedMetricDelta"]["topResourceTypeGain7d"], 50)
+
     @override_settings(
         CELERY_BEAT_SCHEDULE={
             "a3-evaluate-optimization-policy-outcomes-daily": {

@@ -17,6 +17,8 @@
     "format": "prettier . --write",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:e2e:a3-profile": "playwright test e2e/tests/a3-profile-confirm-refresh.spec.ts e2e/tests/a3-profile-rationale-visual.spec.ts --project=chromium --workers=1",
+    "test:e2e:a3-regression": "playwright test e2e/tests/a3-profile-confirm-refresh.spec.ts e2e/tests/a3-profile-rationale-visual.spec.ts e2e/tests/a3-profile-candidate-real-flows.spec.ts e2e/tests/a3-button-actions.spec.ts e2e/tests/a3-resource-feedback-loop.spec.ts --project=chromium --workers=1",
     "test:e2e:a3-classroom": "playwright test e2e/tests/a3-openmaic-bridge.spec.ts --project=chromium --workers=1 -g \"resource pack queues OpenMAIC classroom\" && playwright test e2e/tests/a3-openmaic-bridge.spec.ts --project=chromium --workers=1 -g \"failed OpenMAIC classroom job\" && playwright test e2e/tests/a3-openmaic-bridge.spec.ts --project=chromium --workers=1 -g \"micro video script\" && playwright test e2e/tests/a3-classroom-note.spec.ts e2e/tests/a3-classroom-embedded-practice-sync.spec.ts --project=chromium --workers=1",
     "test:e2e:ui": "playwright test --ui",
     "realtime:dashscope-proxy": "node scripts/a3-dashscope-realtime-proxy.mjs",

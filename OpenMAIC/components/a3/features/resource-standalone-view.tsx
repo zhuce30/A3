@@ -5,8 +5,11 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   BookOpenText,
+  CheckSquare2,
   CheckCircle2,
   Code2,
+  Copy,
+  Download,
   ExternalLink,
   FileText,
   GitBranch,
@@ -14,6 +17,8 @@ import {
   Loader2,
   MonitorPlay,
   ShieldCheck,
+  Square,
+  TerminalSquare,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
@@ -660,7 +665,7 @@ function PracticeSet({ resource }: { resource: A3ResourcePackV2Resource }) {
 function CaseStudy({ resource }: { resource: A3ResourcePackV2Resource }) {
   const steps = toTextArray(resource.content.steps);
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" data-testid="a3-resource-code-lab-workbench">
       <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
         <div className="text-sm font-semibold text-blue-700">案例场景</div>
         <h2 className="mt-2 text-lg font-semibold text-slate-950">{safeText(resource.content.scenario, resource.title)}</h2>
@@ -690,11 +695,53 @@ function CaseStudy({ resource }: { resource: A3ResourcePackV2Resource }) {
 function CodeLab({ resource }: { resource: A3ResourcePackV2Resource }) {
   const steps = toTextArray(resource.content.steps);
   const checkpoints = toTextArray(resource.content.checkpoints);
+  const [checked, setChecked] = useState<Set<number>>(() => new Set());
+  const [copyMessage, setCopyMessage] = useState('');
+  const language = safeText(resource.content.language, 'Python');
+  const starterCode = safeText(resource.content.starterCode, '# 暂无起始代码');
+  const fileName = codeLabFileName(resource.title, language);
+  const runCommand = codeLabRunCommand(fileName, language);
+  const completion = checkpoints.length ? Math.round((checked.size / checkpoints.length) * 100) : 0;
+
+  async function copyStarterCode() {
+    try {
+      await navigator.clipboard.writeText(starterCode);
+      setCopyMessage('已复制起始代码');
+    } catch {
+      setCopyMessage('复制失败，请手动选中代码复制');
+    }
+    window.setTimeout(() => setCopyMessage(''), 1800);
+  }
+
+  function downloadStarterCode() {
+    const blob = new Blob([starterCode], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function toggleCheckpoint(index: number) {
+    setChecked((current) => {
+      const next = new Set(current);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }
   return (
     <div className="space-y-5">
       <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
         <div className="text-sm font-semibold text-blue-700">实验目标</div>
         <A3Markdown className="mt-3 text-slate-700">{safeText(resource.content.objective, resource.title)}</A3Markdown>
+      </section>
+      <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 text-xs md:grid-cols-4">
+        <MiniLabMetric label="语言" value={language} />
+        <MiniLabMetric label="检查点" value={`${checked.size}/${checkpoints.length || 0}`} />
+        <MiniLabMetric label="文件" value={fileName} />
+        <MiniLabMetric label="完成度" value={`${completion}%`} />
       </section>
       <section className="rounded-2xl border border-slate-200 bg-white p-5">
         <div className="text-sm font-semibold text-blue-700">操作步骤</div>
@@ -708,10 +755,57 @@ function CodeLab({ resource }: { resource: A3ResourcePackV2Resource }) {
         </div>
       </section>
       <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/70 px-4 py-3">
+          <div>
+            <div className="text-sm font-semibold text-slate-100">代码工作区</div>
+            <div className="mt-1 font-mono text-xs text-slate-400">{fileName}</div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" size="sm" variant="outline" className="border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800" onClick={() => void copyStarterCode()}>
+              <Copy className="size-4" />
+              复制
+            </Button>
+            <Button type="button" size="sm" variant="outline" className="border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800" onClick={downloadStarterCode}>
+              <Download className="size-4" />
+              下载
+            </Button>
+          </div>
+        </div>
         <div className="border-b border-slate-800 px-4 py-3 text-sm font-semibold text-slate-200">
           {safeText(resource.content.language, '代码')} 起始代码
         </div>
         <pre className="max-h-[520px] overflow-auto p-5 text-sm leading-6 text-slate-100">{safeText(resource.content.starterCode, '# 暂无起始代码')}</pre>
+      </section>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5">
+        <div className="flex flex-wrap items-center gap-2 text-sm text-slate-700">
+          <TerminalSquare className="size-4 text-emerald-600" />
+          <span className="font-semibold text-slate-950">本地运行</span>
+          <code className="rounded-lg bg-slate-100 px-2 py-1 font-mono text-xs text-slate-800">{runCommand}</code>
+        </div>
+        {copyMessage && <div className="mt-2 text-xs text-emerald-700">{copyMessage}</div>}
+      </section>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm font-semibold text-blue-700">实验检查</div>
+          <A3Pill tone={completion === 100 && checkpoints.length ? 'green' : 'slate'}>{completion}%</A3Pill>
+        </div>
+        <div className="mt-3 space-y-2">
+          {checkpoints.map((item, index) => {
+            const isChecked = checked.has(index);
+            return (
+              <button
+                key={`${item}-${index}`}
+                type="button"
+                className="flex w-full items-start gap-2 rounded-xl px-2 py-2 text-left text-sm leading-6 text-slate-700 transition hover:bg-slate-50"
+                onClick={() => toggleCheckpoint(index)}
+              >
+                {isChecked ? <CheckSquare2 className="mt-1 size-4 shrink-0 text-emerald-600" /> : <Square className="mt-1 size-4 shrink-0 text-slate-400" />}
+                <span className={isChecked ? 'text-slate-500 line-through decoration-slate-300' : ''}>{item}</span>
+              </button>
+            );
+          })}
+          {!checkpoints.length && <div className="text-sm leading-6 text-slate-500">暂无检查点。</div>}
+        </div>
       </section>
       <section className="grid gap-3 md:grid-cols-2">
         <TextPanel title="检查点" items={checkpoints} />
@@ -719,6 +813,46 @@ function CodeLab({ resource }: { resource: A3ResourcePackV2Resource }) {
       </section>
     </div>
   );
+}
+
+function MiniLabMetric({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
+  return (
+    <div className={wide ? 'col-span-2 md:col-span-1' : ''}>
+      <div className="text-[11px] text-slate-500">{label}</div>
+      <div className="mt-1 truncate font-semibold text-slate-900" title={value}>{value}</div>
+    </div>
+  );
+}
+
+function codeLabFileName(title: string, language: string) {
+  const ext = codeLabExtension(language);
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 36) || 'code-lab';
+  return `${slug}.${ext}`;
+}
+
+function codeLabExtension(language: string) {
+  const normalized = language.toLowerCase();
+  if (normalized.includes('python') || normalized.includes('py')) return 'py';
+  if (normalized.includes('java') && !normalized.includes('javascript')) return 'java';
+  if (normalized.includes('c++') || normalized.includes('cpp')) return 'cpp';
+  if (normalized === 'c' || normalized.includes(' c ')) return 'c';
+  if (normalized.includes('typescript')) return 'ts';
+  if (normalized.includes('javascript')) return 'js';
+  return 'txt';
+}
+
+function codeLabRunCommand(fileName: string, language: string) {
+  const normalized = language.toLowerCase();
+  if (normalized.includes('python') || fileName.endsWith('.py')) return `python ${fileName}`;
+  if (fileName.endsWith('.java')) return `javac ${fileName} && java ${fileName.replace(/\.java$/, '')}`;
+  if (fileName.endsWith('.cpp')) return `g++ ${fileName} -o lab && ./lab`;
+  if (fileName.endsWith('.c')) return `gcc ${fileName} -o lab && ./lab`;
+  if (fileName.endsWith('.js')) return `node ${fileName}`;
+  return `打开 ${fileName} 查看`;
 }
 
 function KnowledgeCards({ resource }: { resource: A3ResourcePackV2Resource }) {
@@ -817,15 +951,15 @@ function EvidencePanel({
   const actionCard = (
     <A3Card title="学习反馈回流" subtitle="用于更新资源实际效果，影响后续推荐排序。">
       <div className="grid gap-2">
-        <Button type="button" onClick={() => onFeedback('completed')} disabled={Boolean(feedbackSaving)} className="bg-emerald-600 text-white hover:bg-emerald-700">
+        <Button type="button" onClick={() => onFeedback('completed')} disabled={Boolean(feedbackSaving)} className="bg-emerald-600 text-white hover:bg-emerald-700" data-testid="a3-resource-feedback-completed">
           {feedbackSaving === 'completed' ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
           完成学习
         </Button>
-        <Button type="button" variant="outline" onClick={() => onFeedback('favorited')} disabled={Boolean(feedbackSaving)} className="bg-white">
+        <Button type="button" variant="outline" onClick={() => onFeedback('favorited')} disabled={Boolean(feedbackSaving)} className="bg-white" data-testid="a3-resource-feedback-favorited">
           {feedbackSaving === 'favorited' ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
           收藏为有效资源
         </Button>
-        <Button type="button" variant="outline" onClick={() => onFeedback('skipped')} disabled={Boolean(feedbackSaving)} className="bg-white">
+        <Button type="button" variant="outline" onClick={() => onFeedback('skipped')} disabled={Boolean(feedbackSaving)} className="bg-white" data-testid="a3-resource-feedback-skipped">
           {feedbackSaving === 'skipped' ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
           暂不学习
         </Button>

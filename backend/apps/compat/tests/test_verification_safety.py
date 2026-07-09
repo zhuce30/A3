@@ -1,7 +1,7 @@
 ﻿from .common import *
 
 
-from backend.apps.knowledge_base.models import KnowledgeAsset, KnowledgeBlock, KnowledgePage, ResourceScope, ResourceStatus
+from backend.apps.knowledge_base.models import KnowledgeAsset, KnowledgeBlock, KnowledgeGraphClaim, KnowledgeGraphEntity, KnowledgeGraphRelation, KnowledgeIndexEntry, KnowledgePage, ResourceScope, ResourceStatus
 
 
 class CompatApiTests(CompatApiTestCase):
@@ -192,9 +192,154 @@ class CompatApiTests(CompatApiTestCase):
         self.assertTrue(payload["success"])
         run = AgentRun.objects.get(trace_id=payload["traceId"])
         retriever_step = run.steps.get(name="RetrieverAgent")
-        self.assertEqual(retriever_step.metadata["evidence"]["retrievalMode"], "indexed_blocks_fast")
+        self.assertEqual(retriever_step.metadata["evidence"]["retrievalMode"], "graph_vector_fusion")
+        self.assertIn("block", retriever_step.metadata["evidence"]["fusionComponents"])
         source_titles = [item["title"] for item in generate_tutoring_answer.call_args.kwargs["sources"]]
         self.assertIn("root-locus-upload.pptx", source_titles)
+
+    @patch("backend.apps.compat.agent_kernel.generate_tutoring_answer")
+    @patch("backend.apps.compat.agent_kernel.classroom_context")
+    def test_open_api_qa_prefers_body_evidence_over_table_of_contents(self, classroom_context, generate_tutoring_answer):
+        pdf_path = Path(tempfile.gettempdir()) / "a3-classroom-os-overview.pdf"
+        pdf_path.write_bytes(b"pdf")
+        resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            original_name="第1章 操作系统概述.pdf",
+            stored_path=str(pdf_path),
+            file_type=".pdf",
+            file_size=pdf_path.stat().st_size,
+            resource_scope=ResourceScope.PERSONAL,
+            visibility="owner",
+            status=ResourceStatus.INDEXED,
+        )
+        toc_page = KnowledgePage.objects.create(resource=resource, page_number=5)
+        body_page = KnowledgePage.objects.create(resource=resource, page_number=6)
+        KnowledgeBlock.objects.create(
+            resource=resource,
+            page=toc_page,
+            modality="text",
+            text="第1章 操作系统概述 > 计算机系统概观 > 操作系统的概念 > 操作系统的功能 > 操作系统的发展 > 操作系统的运行环境 > 操作系统的结构",
+            markdown="第1章 操作系统概述\n> 计算机系统概观\n> 操作系统的概念\n> 操作系统的功能\n> 操作系统的发展\n> 操作系统的运行环境\n> 操作系统的结构",
+            confidence=0.92,
+        )
+        KnowledgeBlock.objects.create(
+            resource=resource,
+            page=body_page,
+            modality="text",
+            text="什么是操作系统？操作系统是控制和管理计算机硬件与软件资源、组织程序运行并为用户和应用程序提供接口的系统软件。它包括处理器管理、存储管理、设备管理和文件管理等功能。",
+            markdown="什么是操作系统？操作系统是控制和管理计算机硬件与软件资源、组织程序运行并为用户和应用程序提供接口的系统软件。它包括处理器管理、存储管理、设备管理和文件管理等功能。",
+            confidence=0.96,
+        )
+        classroom_context.return_value = {"target": {"title": "操作系统功能与结构"}, "sources": []}
+        generate_tutoring_answer.return_value = {
+            "answer": "操作系统是控制和管理计算机资源的系统软件。",
+            "provider": "dashscope",
+            "model": "qwen-plus",
+            "fallback": False,
+        }
+
+        response = self.client.get("/api/v1/qa/interact/?q=什么是操作系统&mode=deep&scope=personal")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        sources = generate_tutoring_answer.call_args.kwargs["sources"]
+        self.assertGreaterEqual(len(sources), 1)
+        self.assertIn("控制和管理计算机硬件与软件资源", sources[0]["snippet"])
+        self.assertIn("page 6", sources[0]["location"])
+        self.assertNotIn("操作系统的发展 > 操作系统的运行环境", sources[0]["snippet"])
+
+    @patch("backend.apps.compat.agent_kernel.generate_tutoring_answer")
+    @patch("backend.apps.compat.agent_kernel.classroom_context")
+    def test_open_api_qa_uses_graph_and_index_fusion_sources(self, classroom_context, generate_tutoring_answer):
+        pdf_path = Path(tempfile.gettempdir()) / "a3-classroom-os-graph-fusion.pdf"
+        pdf_path.write_bytes(b"pdf")
+        resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            original_name="操作系统图谱融合.pdf",
+            stored_path=str(pdf_path),
+            file_type=".pdf",
+            file_size=pdf_path.stat().st_size,
+            resource_scope=ResourceScope.PERSONAL,
+            visibility="owner",
+            status=ResourceStatus.INDEXED,
+        )
+        page = KnowledgePage.objects.create(resource=resource, page_number=8)
+        block = KnowledgeBlock.objects.create(
+            resource=resource,
+            page=page,
+            modality="text",
+            text="进程管理负责进程创建、调度、同步、通信和终止，是操作系统资源管理的核心内容。",
+            markdown="进程管理负责进程创建、调度、同步、通信和终止，是操作系统资源管理的核心内容。",
+            confidence=0.97,
+        )
+        KnowledgeIndexEntry.objects.create(block=block, index_type="text_vector", index_backend="faiss", status="indexed")
+        KnowledgeIndexEntry.objects.create(block=block, index_type="lexical", index_backend="bm25", status="indexed")
+        process = KnowledgeGraphEntity.objects.create(
+            owner=self.user,
+            resource=resource,
+            label="进程管理",
+            normalized_label="进程管理",
+            entity_type="concept",
+            summary="管理进程的创建、调度、同步、通信和终止。",
+            confidence=0.91,
+            source_count=1,
+            source_locations=[{"page": 8}],
+            degraded=False,
+        )
+        scheduling = KnowledgeGraphEntity.objects.create(
+            owner=self.user,
+            resource=resource,
+            label="进程调度",
+            normalized_label="进程调度",
+            entity_type="concept",
+            summary="决定就绪进程获得处理机的次序。",
+            confidence=0.9,
+            source_count=1,
+            source_locations=[{"page": 8}],
+            degraded=False,
+        )
+        KnowledgeGraphRelation.objects.create(
+            owner=self.user,
+            resource=resource,
+            source_entity=process,
+            target_entity=scheduling,
+            relation_type="includes",
+            label="包含",
+            weight=0.8,
+            evidence=[{"text": "进程管理包括调度。", "page": 8}],
+            degraded=False,
+        )
+        KnowledgeGraphClaim.objects.create(
+            owner=self.user,
+            resource=resource,
+            text="进程管理包括进程创建、调度、同步、通信和终止。",
+            entity_ids=[str(process.id), str(scheduling.id)],
+            verified=True,
+            evidence=[{"text": "进程管理负责进程创建、调度、同步、通信和终止。", "page": 8}],
+            degraded=False,
+        )
+        classroom_context.return_value = {"target": {"title": "操作系统进程管理"}, "sources": []}
+        generate_tutoring_answer.return_value = {
+            "answer": "进程管理包括创建、调度、同步、通信和终止。",
+            "provider": "dashscope",
+            "model": "qwen-plus",
+            "fallback": False,
+        }
+
+        response = self.client.get("/api/v1/qa/interact/?q=进程管理包括哪些内容&mode=deep&scope=personal")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        sources = generate_tutoring_answer.call_args.kwargs["sources"]
+        self.assertTrue(any(source.get("retriever") == "graph" for source in sources))
+        self.assertTrue(any("text_vector" in source.get("indexTypes", []) for source in sources))
+        run = AgentRun.objects.get(trace_id=payload["traceId"])
+        evidence = run.steps.get(name="RetrieverAgent").metadata["evidence"]
+        self.assertEqual(evidence["retrievalMode"], "graph_vector_fusion")
+        self.assertIn("graph", evidence["fusionComponents"])
+        self.assertIn("block", evidence["fusionComponents"])
 
     @patch("backend.apps.compat.agent_kernel.generate_tutoring_answer")
     @patch("backend.apps.compat.agent_kernel.classroom_context")
@@ -262,12 +407,13 @@ class CompatApiTests(CompatApiTestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["success"])
-        self.assertEqual(payload["retrievalMode"], "indexed_blocks_deep")
+        self.assertEqual(payload["retrievalMode"], "graph_vector_fusion")
         run = AgentRun.objects.get(trace_id=payload["traceId"])
         evidence = run.steps.get(name="RetrieverAgent").metadata["evidence"]
-        self.assertEqual(evidence["retrievalMode"], "indexed_blocks_deep")
+        self.assertEqual(evidence["retrievalMode"], "graph_vector_fusion")
         self.assertEqual(evidence["reasoningMode"], "deep")
         self.assertEqual(evidence["requestedScope"], "personal")
+        self.assertIn("block", evidence["fusionComponents"])
         source_titles = [item["title"] for item in generate_tutoring_answer.call_args.kwargs["sources"]]
         self.assertIn("personal-root-locus.pptx", source_titles)
         self.assertNotIn("teacher-root-locus.pptx", source_titles)
@@ -306,6 +452,28 @@ class CompatApiTests(CompatApiTestCase):
         self.assertIn("safety.safe expected boolean", result.output["error"])
         self.assertIn("safety.category expected string", result.output["error"])
         self.assertEqual(result.trace["steps"][-1]["name"], "ContractAgent")
+
+
+    def test_agent_kernel_preserves_runtime_error_for_callers(self):
+        from backend.apps.compat.agent_kernel import AgentContext, AgentKernel, BaseAgent
+
+        class FailingAgent(BaseAgent):
+            name = "FailingAgent"
+
+            def run(self, context):
+                raise TimeoutError("ResourceSynthesisAgent exceeded 5000ms")
+
+        kernel = AgentKernel()
+        kernel.register(FailingAgent())
+
+        result = kernel.run(
+            AgentContext(user=self.user, workflow="resource_generate", goal="video script", payload={}),
+            ["FailingAgent"],
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("ResourceSynthesisAgent exceeded 5000ms", result.output["error"])
+        self.assertEqual(result.trace["status"], "failed")
 
 
     def test_verify_answer_workflow_contract_matches_kernel_agent_sequence(self):

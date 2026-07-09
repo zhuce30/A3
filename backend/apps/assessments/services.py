@@ -41,6 +41,8 @@ def _safe_record_learning_event(user, **kwargs):
     try:
         return record_learning_event(user, **kwargs)
     except Exception:
+        if transaction.get_connection().in_atomic_block:
+            transaction.set_rollback(False)
         return None
 
 
@@ -618,6 +620,29 @@ def retry_wrong(user, wrong: WrongQuestion, selected_answer: str) -> dict:
             "wrongCount": wrong.wrong_count,
             "reviewAfter": wrong.review_after.isoformat() if wrong.review_after else "",
         },
+    )
+    from backend.apps.profiles.dynamic_profile import append_learning_event
+    from backend.apps.profiles.models import LearnerProfile
+
+    profile, _ = LearnerProfile.objects.get_or_create(user=user)
+    point_title = wrong.question.knowledge_point.title
+    error_cause = str(wrong.question.error_cause or "").strip()
+    append_learning_event(
+        profile,
+        event_type="wrong_question_reviewed",
+        summary=f"错题重练已回写画像候选：{point_title}",
+        source="assessment",
+        importance=0.82,
+        signals={
+            "weakPoints": [point_title],
+            "errorCauses": [error_cause] if error_cause else [],
+            "wrongQuestionId": str(wrong.id),
+            "wrongCount": wrong.wrong_count,
+            "isCorrect": is_correct,
+            "mastered": wrong.mastered,
+        },
+        raw_preview=wrong.question.stem,
+        save=True,
     )
     return {
         "isCorrect": is_correct,

@@ -38,6 +38,20 @@ def append_learning_event(
     extra["learningEvents"] = events[:LEARNING_EVENT_LIMIT]
     extra["dynamicProfile"] = build_dynamic_profile(profile, extra=extra)
     profile.extra_profile = extra
+    try:
+        from backend.apps.profiles.profile_updates import create_profile_update_candidates_from_event
+
+        create_profile_update_candidates_from_event(
+            profile,
+            event_type=event["eventType"],
+            source=event["source"],
+            signals=event["signals"],
+            evidence={"summary": event["summary"], "createdAt": event["createdAt"]},
+            raw_preview=event["rawPreview"],
+            save=False,
+        )
+    except Exception:
+        pass
     if save:
         profile.save(update_fields=["extra_profile", "updated_at"])
     return event

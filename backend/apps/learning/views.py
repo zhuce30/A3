@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from django.db import DatabaseError
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_http_methods
@@ -148,6 +149,17 @@ def ingest_event(request):
         )
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
+    except DatabaseError as exc:
+        return JsonResponse(
+            {
+                "success": True,
+                "schemaVersion": "a3.learning-event.v2",
+                "status": "degraded",
+                "degraded": True,
+                "degradedReason": str(exc)[:240],
+            },
+            status=202,
+        )
 
 
 @require_http_methods(["POST"])
@@ -162,6 +174,21 @@ def ingest_events_batch(request):
         return JsonResponse({"success": True, **result}, status=status_code)
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
+    except DatabaseError as exc:
+        return JsonResponse(
+            {
+                "success": True,
+                "schemaVersion": "a3.learning-event.v2",
+                "accepted": 0,
+                "duplicates": 0,
+                "rejected": 0,
+                "status": "degraded",
+                "degraded": True,
+                "degradedReason": str(exc)[:240],
+                "results": [],
+            },
+            status=202,
+        )
 
 
 @require_http_methods(["GET"])

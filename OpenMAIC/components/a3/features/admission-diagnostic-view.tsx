@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, CalendarDays, CheckCircle2, Loader2, RotateCcw, Sparkles, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { ProfileUpdateCandidatePanel } from '@/components/a3/profile/profile-update-candidate-panel';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import type {
   A3ApiResponse,
@@ -15,6 +16,7 @@ import type {
 } from '@/lib/a3/learning-types';
 import { cn } from '@/lib/utils';
 import { A3Card, A3Pill } from '../ui/a3-card';
+import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
 
 type DiagnosticBlueprintResponse = A3ApiResponse<{
   current: AdmissionDiagnosticResult | null;
@@ -50,14 +52,19 @@ export function AdmissionDiagnosticView() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
 
   useEffect(() => {
     let active = true;
     async function load() {
       setLoading(true);
-      const response = await a3GetJson<DiagnosticBlueprintResponse>('/api/learning/admission-diagnostic/');
+      const [response, feedResponse] = await Promise.all([
+        a3GetJson<DiagnosticBlueprintResponse>('/api/learning/admission-diagnostic/'),
+        a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/'),
+      ]);
       if (!active) return;
       setLoading(false);
+      if (feedResponse.success) setProfileFeed(feedResponse);
       if (!response.success) {
         setError(response.error ?? '诊断题加载失败');
         return;
@@ -103,6 +110,8 @@ export function AdmissionDiagnosticView() {
     }
     setResult(response);
     setCurrent(response.diagnostic);
+    const feedResponse = await a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/');
+    if (feedResponse.success) setProfileFeed(feedResponse);
   }
 
   function reset() {
@@ -179,6 +188,16 @@ export function AdmissionDiagnosticView() {
       </section>
 
       {error && <div className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+
+      <div data-testid="a3-flow-profile-candidates">
+        <ProfileUpdateCandidatePanel
+          feed={profileFeed}
+          profileHref="/a3/profile-setup"
+          testId="a3-profile-update-candidate-panel"
+          title="本次诊断让画像发生了变化"
+          subtitle="诊断得分和薄弱点已经生成画像候选，确认后会影响路径难度、今日任务和推荐排序。"
+        />
+      </div>
 
       {result ? (
         <ResultPanel result={result} onReset={reset} />

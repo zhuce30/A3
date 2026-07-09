@@ -14,7 +14,17 @@ class SystemHealthTests(TestCase):
         response = self.client.get("/api/system/health/")
         self.assertEqual(response.status_code, 401)
 
-    @override_settings(SMS_WEBHOOK_URL="https://sms.example.test/send", CELERY_BROKER_URL="redis://127.0.0.1:6379/0")
+    @override_settings(
+        SMS_WEBHOOK_URL="https://sms.example.test/send",
+        CELERY_BROKER_URL="redis://127.0.0.1:6379/0",
+        CELERY_BEAT_SCHEDULE={
+            "a3-evaluate-optimization-policy-outcomes-daily": {
+                "task": "learning.evaluate_optimization_policy_outcomes",
+                "schedule": 86400,
+                "kwargs": {"days": 7},
+            }
+        },
+    )
     def test_health_returns_checks_for_logged_in_user(self):
         self.client.force_login(self.user)
         response = self.client.get("/api/system/health/")
@@ -28,4 +38,7 @@ class SystemHealthTests(TestCase):
         self.assertIn("defaultCourse", checks)
         self.assertEqual(checks["defaultCourse"]["detail"].get("defaultCourseCode"), "OS-001")
         self.assertIn("smsVerification", checks)
+        self.assertEqual(checks["celeryBeat"]["status"], "ok")
+        self.assertEqual(checks["celeryBeat"]["detail"]["task"], "learning.evaluate_optimization_policy_outcomes")
+        self.assertEqual(checks["celeryBeat"]["detail"]["kwargs"], {"days": 7})
         self.assertNotIn("SMS_WEBHOOK_TOKEN", str(data))

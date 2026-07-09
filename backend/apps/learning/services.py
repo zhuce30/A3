@@ -767,6 +767,20 @@ def submit_admission_diagnostic(user, payload: dict) -> dict:
     foundation_level = str(payload.get("foundationLevel") or level["foundationLevel"]).strip()[:64]
 
     merged_weak_points = _merge_unique(weak_points + (profile.weak_points if isinstance(profile.weak_points, list) else []), limit=8)
+    try:
+        from backend.apps.profiles.profile_updates import create_profile_update_candidates_from_event
+
+        create_profile_update_candidates_from_event(
+            profile,
+            event_type="admission_diagnostic",
+            source="admission_diagnostic",
+            signals={"foundationLevel": foundation_level, "weakPoints": merged_weak_points, "score": score, "level": level},
+            evidence={"score": score, "correctCount": correct_count, "totalCount": total},
+            raw_preview=goal,
+            save=False,
+        )
+    except Exception:
+        pass
     profile.foundation_level = foundation_level
     profile.daily_study_time = daily_minutes
     profile.learning_goals = _merge_unique([goal] + (profile.learning_goals if isinstance(profile.learning_goals, list) else []), limit=6)

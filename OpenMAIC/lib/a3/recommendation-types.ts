@@ -168,6 +168,16 @@ export type A3OpenMAICVideoArtifact = {
   duration: number;
   width: number;
   height: number;
+  segments?: Array<{
+    index: number;
+    title: string;
+    status: 'succeeded' | 'failed' | string;
+    videoUrl: string;
+    duration: number;
+    width: number;
+    height: number;
+    degradedReason?: string;
+  }>;
   elapsedMs: number;
   degradedReason?: string;
   createdAt?: string;

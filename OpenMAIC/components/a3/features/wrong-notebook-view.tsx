@@ -5,10 +5,12 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { BookMarked, CheckCircle2, ChevronDown, ChevronUp, Loader2, RefreshCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { ProfileUpdateCandidatePanel } from '@/components/a3/profile/profile-update-candidate-panel';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import type { WrongQuestion, WrongReviewSummary, WrongRetryFeedback } from '@/lib/a3/assessment-types';
 import { getReviewStatusMeta } from '@/lib/a3/review-status';
 import type { A3ApiResponse } from '@/lib/a3/learning-types';
+import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
 import { A3Card, A3Pill } from '../ui/a3-card';
 
 type RetryResult = {
@@ -34,14 +36,19 @@ export function WrongNotebookView() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState('');
   const [error, setError] = useState('');
+  const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
   const reportSource = searchParams.get('source') === 'report';
   const reportFocus = searchParams.get('focus')?.trim();
   const reportPeriod = searchParams.get('period')?.trim();
 
   useEffect(() => {
     let active = true;
-    void a3GetJson<A3ApiResponse<WrongQuestionsResponse>>('/api/assessments/wrong-questions/').then((result) => {
+    void Promise.all([
+      a3GetJson<A3ApiResponse<WrongQuestionsResponse>>('/api/assessments/wrong-questions/'),
+      a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/'),
+    ]).then(([result, feedResponse]) => {
       if (!active) return;
+      if (feedResponse.success) setProfileFeed(feedResponse);
       if (result.success) {
         setItems(result.wrongQuestions);
         setReviewSummary(result.reviewSummary);
@@ -69,6 +76,8 @@ export function WrongNotebookView() {
         activeCount: Math.max(0, current.activeCount + (result.wrongQuestion.mastered ? -1 : 0)),
         masteredCount: current.masteredCount + (result.wrongQuestion.mastered ? 1 : 0),
       } : current);
+      const feedResponse = await a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/');
+      if (feedResponse.success) setProfileFeed(feedResponse);
     } else {
       setError(result.error || '重练提交失败');
     }
@@ -97,6 +106,10 @@ export function WrongNotebookView() {
   const dueItems = sortWrongItems(items.filter(isDueForReview));
   const upcomingItems = sortWrongItems(items.filter((item) => !item.mastered && !isDueForReview(item)));
   const visibleItems = sortWrongItems(items);
+  const reviewedItems = items.filter((item) => Boolean(results[item.id]));
+  const currentReviewItems = dueItems.length
+    ? sortWrongItems([...dueItems, ...reviewedItems.filter((item) => !dueItems.some((dueItem) => dueItem.id === item.id))])
+    : visibleItems;
 
   return (
     <div className="space-y-5" data-testid="a3-wrong-notebook-view">
@@ -114,6 +127,16 @@ export function WrongNotebookView() {
       </div>
 
       {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+
+      <div data-testid="a3-flow-profile-candidates">
+        <ProfileUpdateCandidatePanel
+          feed={profileFeed}
+          profileHref="/a3/profile-setup"
+          testId="a3-profile-update-candidate-panel"
+          title="本次错题复盘让画像发生了变化"
+          subtitle="错因、薄弱点和掌握状态已生成画像候选，确认后会调整复习节奏和推荐排序。"
+        />
+      </div>
 
       {reportSource && (
         <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800">
@@ -191,7 +214,7 @@ export function WrongNotebookView() {
           </div>
         ) : (
           <div className="divide-y divide-slate-200">
-            {(dueItems.length ? dueItems : visibleItems).map((item) => {
+            {currentReviewItems.map((item) => {
               const isOpen = expanded === item.id;
               const result = results[item.id];
               const status = getReviewStatusMeta(item);

@@ -3,14 +3,18 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Bot, CheckCircle2, ClipboardCheck, ExternalLink, FileText, Image as ImageIcon, Library, Loader2, RefreshCw, Route, Send, Settings, ShieldCheck, Star, Target, UploadCloud, UserRound, X, Zap } from 'lucide-react';
+import { Bot, CheckCircle2, ClipboardCheck, ExternalLink, FileText, Image as ImageIcon, Library, Loader2, Mic, MicOff, RefreshCw, Route, Send, Settings, ShieldCheck, Star, Target, UploadCloud, UserRound, X, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { ProfileUpdateCandidatePanel } from '@/components/a3/profile/profile-update-candidate-panel';
 import { a3GetJson, a3PostJson, resolveA3Endpoint } from '@/lib/a3/api-client';
 import type { AnswerFeedback, AssessmentSession } from '@/lib/a3/assessment-types';
 import { buildPracticeSyncEvidence, buildPracticeWritebackPayload, findPracticePlanTaskForRecommendation } from '@/lib/a3/classroom-practice';
 import type { ClassroomContext } from '@/lib/a3/classroom-types';
+import { buildClassroomContextInsight } from '@/lib/a3/learning-flow-insights';
 import type { A3ApiResponse, StudyPlan, StudyPlanTaskFeedback } from '@/lib/a3/learning-types';
+import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
 import type { A3OpenMAICClassroomArtifact, A3ResourcePacksResponse } from '@/lib/a3/recommendation-types';
+import { normalizeASRUploadAudio } from '@/lib/audio/wav-utils';
 import { cn } from '@/lib/utils';
 import { A3Card, A3Pill } from '../ui/a3-card';
 import { A3Markdown } from '../ui/a3-markdown';
@@ -76,9 +80,19 @@ type ClassroomImageAttachment = {
   dataUrl: string;
   size: number;
 };
+type TranscriptionResponse = { success?: boolean; text?: string; error?: string; details?: string };
 
 const MAX_CLASSROOM_IMAGE_BYTES = 6 * 1024 * 1024;
 const CLASSROOM_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp']);
+const CLASSROOM_ASR_PROVIDER_ID = 'qwen-asr';
+const CLASSROOM_ASR_MODEL_ID = 'qwen3-asr-flash';
+
+function appendVoiceTranscript(current: string, transcript: string) {
+  const normalized = transcript.trim();
+  if (!normalized) return current;
+  const separator = current.trim() ? (/[，。！？,.!?]$/.test(current.trim()) ? ' ' : '，') : '';
+  return `${current.trim()}${separator}${normalized}`;
+}
 
 function buildClassroomWelcomeMessage(target: ClassroomContext['target'] | null | undefined): ChatMessage {
   return {
@@ -110,22 +124,54 @@ export function ClassroomView() {
   const [viewingHistoryId, setViewingHistoryId] = useState('');
   const [imageAttachment, setImageAttachment] = useState<ClassroomImageAttachment | null>(null);
   const [imageAttachmentError, setImageAttachmentError] = useState('');
+  const [voiceSupported, setVoiceSupported] = useState(true);
+  const [voiceListening, setVoiceListening] = useState(false);
+  const [voiceTranscribing, setVoiceTranscribing] = useState(false);
+  const [voiceDraft, setVoiceDraft] = useState('');
+  const [voiceError, setVoiceError] = useState('');
   const [retrievalMode, setRetrievalMode] = useState<ClassroomRetrievalMode>('fast');
   const [retrievalScope, setRetrievalScope] = useState<ClassroomRetrievalScope>('all');
+  const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
   const chatRef = useRef(chat);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceStreamRef = useRef<MediaStream | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
+  const hasUserQuestion = chat.some((item) => item.role === 'user');
+  const hasAssistantAnswer = chat.some((item) => (
+    item.role === 'assistant'
+    && item.id !== 'welcome'
+    && (
+      Boolean(item.traceId)
+      || Boolean(item.citations?.length)
+      || Boolean(item.claims?.length)
+      || Boolean(item.followUps?.length)
+    )
+  ));
+  const showLessonRunway = !viewingHistoryId && !hasUserQuestion && !hasAssistantAnswer;
 
   useEffect(() => {
     chatRef.current = chat;
   }, [chat]);
 
+  useEffect(() => {
+    setVoiceSupported(Boolean(navigator.mediaDevices?.getUserMedia) && typeof MediaRecorder !== 'undefined');
+    return () => {
+      if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
+      voiceStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaRecorderRef.current = null;
+      voiceStreamRef.current = null;
+    };
+  }, []);
+
   const loadClassroom = useCallback(async () => {
     setLoading(true);
-    const [result, packsResult, historyResult, planResult] = await Promise.all([
+    const [result, packsResult, historyResult, planResult, profileFeedResult] = await Promise.all([
       a3GetJson<ClassroomResponse>('/api/learning/classroom/'),
       a3GetJson<A3ResourcePacksResponse>('/api/resources/packs/'),
       a3GetJson<ClassroomHistoryResponse>('/api/learning/classroom/history/'),
       a3GetJson<StudyPlanResponse>('/api/learning/study-plan/?auto=1'),
+      a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/'),
     ]);
     setLoading(false);
     if (!result.success) {
@@ -136,6 +182,7 @@ export function ClassroomView() {
       setOpenmaicClassroomArtifact(findLatestOpenMAICClassroomArtifact(packsResult.resourcePacks));
     }
     if (planResult.success) setStudyPlan(planResult.plan);
+    if (profileFeedResult.success) setProfileFeed(profileFeedResult);
     setClassroom(result.classroom);
     setMessage('');
     const target = result.classroom.target;
@@ -203,12 +250,119 @@ export function ClassroomView() {
       };
       setChat((current) => [...current, assistantMessage]);
       void a3PostJson('/api/learning/classroom/history/', { messages: [userMessage, assistantMessage] });
+      const feedResponse = await a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/');
+      if (feedResponse.success) setProfileFeed(feedResponse);
       setImageAttachment(null);
       if (imageInputRef.current) imageInputRef.current.value = '';
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'AI 课堂服务暂时不可用');
     } finally {
       setAsking(false);
+    }
+  }
+
+  function stopVoiceInput() {
+    if (mediaRecorderRef.current?.state === 'recording') {
+      mediaRecorderRef.current.stop();
+      return;
+    }
+    voiceStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaRecorderRef.current = null;
+    voiceStreamRef.current = null;
+    setVoiceListening(false);
+    setVoiceDraft('');
+  }
+
+  async function transcribeClassroomAudio(audioBlob: Blob) {
+    setVoiceTranscribing(true);
+    setVoiceError('');
+    setVoiceDraft('正在调用阿里云语音识别...');
+    try {
+      const uploadAudio = await normalizeASRUploadAudio(CLASSROOM_ASR_PROVIDER_ID, audioBlob);
+      const formData = new FormData();
+      formData.append('audio', uploadAudio.blob, uploadAudio.fileName);
+      formData.append('providerId', CLASSROOM_ASR_PROVIDER_ID);
+      formData.append('modelId', CLASSROOM_ASR_MODEL_ID);
+      formData.append('language', 'zh');
+      const response = await fetch('/api/transcription', {
+        method: 'POST',
+        body: formData,
+      });
+      const result = await response.json().catch(() => ({})) as TranscriptionResponse;
+      if (!response.ok || result.success === false) {
+        throw new Error(result.details || result.error || '语音识别接口调用失败');
+      }
+      const text = result.text?.trim();
+      if (!text) {
+        setVoiceError('没有识别到有效语音，请靠近麦克风后重试。');
+        return;
+      }
+      setInput((current) => appendVoiceTranscript(current, text));
+      setMessage('已通过阿里云 ASR 识别语音，可继续编辑后发送。');
+    } catch (error) {
+      setVoiceError(error instanceof Error ? error.message : '语音识别失败，请重试或改用键盘输入。');
+    } finally {
+      setVoiceTranscribing(false);
+      setVoiceDraft('');
+    }
+  }
+
+  async function toggleVoiceInput() {
+    if (voiceListening) {
+      stopVoiceInput();
+      return;
+    }
+    if (asking || voiceTranscribing || !target || viewingHistoryId) return;
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setVoiceSupported(false);
+      setVoiceError('当前浏览器不支持录音上传，请使用 Chrome 或 Edge，或改用键盘输入。');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : '';
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      voiceChunksRef.current = [];
+      voiceStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) voiceChunksRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        setVoiceError('录音失败，请检查麦克风设备后重试。');
+        setVoiceListening(false);
+      };
+      recorder.onstop = () => {
+        const chunks = voiceChunksRef.current;
+        voiceChunksRef.current = [];
+        stream.getTracks().forEach((track) => track.stop());
+        voiceStreamRef.current = null;
+        mediaRecorderRef.current = null;
+        setVoiceListening(false);
+        if (!chunks.length) {
+          setVoiceError('没有录到声音，请重试。');
+          setVoiceDraft('');
+          return;
+        }
+        const audioBlob = new Blob(chunks, { type: mimeType || 'audio/webm' });
+        void transcribeClassroomAudio(audioBlob);
+      };
+      recorder.start();
+      setVoiceListening(true);
+      setVoiceDraft('正在录音，再点一次麦克风结束并识别。');
+      setVoiceError('');
+      setMessage('');
+    } catch (error) {
+      setVoiceListening(false);
+      setVoiceDraft('');
+      setVoiceError(error instanceof DOMException && error.name === 'NotAllowedError'
+        ? '浏览器没有麦克风权限，请允许麦克风后再试。'
+        : '录音启动失败，请检查麦克风权限和设备。');
     }
   }
 
@@ -254,6 +408,7 @@ export function ClassroomView() {
 
   async function startNewClassroomDialogue() {
     if (asking) return;
+    stopVoiceInput();
     window.speechSynthesis?.cancel();
     const welcomeMessage = buildClassroomWelcomeMessage(classroom?.target);
     setChat([welcomeMessage]);
@@ -268,6 +423,7 @@ export function ClassroomView() {
   }
 
   function viewClassroomHistory(session: ClassroomHistorySession) {
+    stopVoiceInput();
     window.speechSynthesis?.cancel();
     setViewingHistoryId(session.id);
     setChat(normalizeClassroomMessages(session.messages));
@@ -416,22 +572,31 @@ export function ClassroomView() {
     <div className="grid gap-5 2xl:grid-cols-[340px_minmax(0,1fr)_390px]" data-testid="a3-classroom-view">
       <aside className="space-y-5 2xl:sticky 2xl:top-4 2xl:self-start">
         <CurrentTargetCard loading={loading} target={target ?? null} graphSummary={classroom?.graphSummary ?? null} />
+        <ClassroomContextCard studyPlan={studyPlan} />
         <ClassroomHistoryCard sessions={classroomSessions} activeId={viewingHistoryId} onOpen={viewClassroomHistory} />
         <OpenMAICClassroomCard artifact={openmaicClassroomArtifact} />
         <AgentsCard classroom={classroom} />
       </aside>
 
-      <section className="min-w-0 rounded-[18px] border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] shadow-[var(--a3-shadow)]">
+      <section className="min-w-0 self-start rounded-[18px] border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] shadow-[var(--a3-shadow)]">
         <LessonHeader
           target={target ?? null}
           classroom={classroom}
           loading={loading}
           onRefresh={() => void loadClassroom()}
         />
-        <div className="grid min-h-[720px] grid-rows-[auto_minmax(360px,1fr)_auto]">
+        <div className="grid min-h-[640px] grid-rows-[auto_minmax(260px,1fr)_auto]">
           <LearningEvidenceStrip classroom={classroom} artifact={openmaicClassroomArtifact} />
-          <div className="space-y-5 overflow-y-auto px-5 py-6 md:px-7" data-testid="a3-classroom-dialogue">
-            <LessonRunwayPanel target={target ?? null} asking={asking} onAsk={askQuestion} />
+          <div className="flex flex-col gap-5 overflow-y-auto px-5 py-6 md:px-7" data-testid="a3-classroom-dialogue">
+            {showLessonRunway && (
+              <LessonRunwayPanel
+                target={target ?? null}
+                asking={asking}
+                sourceCount={classroom?.sources.length ?? 0}
+                exerciseCount={classroom?.recommended.length ?? 0}
+                onAsk={askQuestion}
+              />
+            )}
             {chat.map((item) => (
               <ChatBubble
                 key={item.id}
@@ -496,6 +661,30 @@ export function ClassroomView() {
               </div>
             )}
             {imageAttachmentError && <div className="mb-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{imageAttachmentError}</div>}
+            {(voiceListening || voiceTranscribing || voiceDraft || voiceError || !voiceSupported) && (
+              <div
+                className={cn(
+                  'mb-3 flex items-start gap-2 rounded-lg px-3 py-2 text-sm',
+                  voiceError || !voiceSupported
+                    ? 'bg-amber-50 text-amber-800'
+                    : 'bg-blue-50 text-blue-800',
+                )}
+                data-testid="a3-classroom-voice-status"
+              >
+                {voiceTranscribing ? <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" /> : voiceListening ? <Mic className="mt-0.5 size-4 shrink-0" /> : <MicOff className="mt-0.5 size-4 shrink-0" />}
+                <div className="min-w-0">
+                  {voiceError || (!voiceSupported ? '当前浏览器不支持录音上传，请使用 Chrome 或 Edge，或改用键盘输入。' : '')}
+                  {!voiceError && voiceSupported && voiceListening && !voiceDraft && '正在录音，再点一次麦克风结束并识别。'}
+                  {!voiceError && voiceTranscribing && !voiceDraft && '正在调用阿里云语音识别。'}
+                  {!voiceError && voiceDraft && (
+                    <>
+                      <span className="font-medium">{voiceTranscribing ? '转写中：' : '录音中：'}</span>
+                      <span>{voiceDraft}</span>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
             <form onSubmit={(event) => { event.preventDefault(); void askQuestion(); }} className="flex items-center gap-3">
               <input
                 ref={imageInputRef}
@@ -515,6 +704,23 @@ export function ClassroomView() {
               >
                 <ImageIcon className="size-4" />
               </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={asking || voiceTranscribing || !target || Boolean(viewingHistoryId)}
+                aria-pressed={voiceListening}
+                data-testid="a3-classroom-voice-input"
+                className={cn(
+                  'h-12 rounded-xl px-3 transition',
+                  voiceListening
+                    ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-[0_0_0_4px_rgba(59,130,246,0.12)]'
+                    : 'bg-white',
+                )}
+                title={voiceListening ? '结束录音并识别' : '语音输入'}
+                onClick={toggleVoiceInput}
+              >
+                {voiceTranscribing ? <Loader2 className="size-4 animate-spin" /> : voiceListening ? <MicOff className="size-4" /> : <Mic className="size-4" />}
+              </Button>
               <input
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
@@ -532,6 +738,15 @@ export function ClassroomView() {
       </section>
 
       <aside className="space-y-5 2xl:sticky 2xl:top-4 2xl:self-start">
+        <div data-testid="a3-flow-profile-candidates">
+          <ProfileUpdateCandidatePanel
+            feed={profileFeed}
+            profileHref="/a3/profile-setup"
+            testId="a3-profile-update-candidate-panel"
+            title="本次课堂问答让画像发生了变化"
+            subtitle="课堂追问、讲解偏好和学习阻塞已生成画像候选，确认后会影响后续课堂讲解和资源推荐。"
+          />
+        </div>
         <SourcesCard
           classroom={classroom}
           target={target ?? null}
@@ -735,37 +950,54 @@ function emptyAssessmentSession(knowledgePoint: string): AssessmentSession {
   };
 }
 
-function LessonRunwayPanel({ target, asking, onAsk }: { target: ClassroomContext['target']; asking: boolean; onAsk: (question: string) => void }) {
+function LessonRunwayPanel({
+  target,
+  asking,
+  sourceCount,
+  exerciseCount,
+  onAsk,
+}: {
+  target: ClassroomContext['target'];
+  asking: boolean;
+  sourceCount: number;
+  exerciseCount: number;
+  onAsk: (question: string) => void;
+}) {
   const title = target?.title ?? '当前知识点';
   const steps = [
     {
-      title: '1. 先讲清概念',
-      detail: '主讲教师 Agent 用学习路径语境拆解定义、公式和适用条件。',
+      title: '先把概念问清楚',
+      detail: `围绕《${title}》用定义、例子和易错点开始，适合第一次进入本节。`,
       action: '开始讲解',
       prompt: `请按“定义、关键公式、适用条件、常见误区”的结构讲解：${title}`,
       icon: <Bot className="size-5" />,
+      meta: target ? '推荐第一步' : '等待学习目标',
     },
     {
-      title: '2. 再做证据校验',
-      detail: '知识检索 Agent 调用本地知识库，VerifierAgent 标出可验证引用。',
-      action: '验证来源',
+      title: '先看资料依据',
+      detail: sourceCount ? `当前有 ${sourceCount} 条资料可验证回答，适合先确认来源。` : '当前缺少可引用资料，建议先补充课件或笔记。',
+      action: sourceCount ? '验证来源' : '补充资料',
       prompt: `请为“${title}”列出本地知识库中的支撑来源，并说明哪些结论已验证、哪些未验证。`,
       icon: <ShieldCheck className="size-5" />,
+      meta: sourceCount ? `${sourceCount} 条引用` : '证据不足',
+      href: sourceCount ? undefined : '/a3/knowledge-base',
     },
     {
-      title: '3. 最后练习复盘',
-      detail: '练习诊断 Agent 生成题目，回答后可进入测评和错题复盘。',
-      action: '生成练习',
+      title: '做一次小练习',
+      detail: exerciseCount ? `已有 ${exerciseCount} 项课堂练习，完成后会回写计划和错题本。` : '还没有课堂练习，可以先进入测评生成掌握度证据。',
+      action: exerciseCount ? '生成练习' : '进入测评',
       prompt: `请围绕“${title}”生成一道适合我当前水平的练习题，附答案、解析和错因提示。`,
       icon: <ClipboardCheck className="size-5" />,
+      meta: exerciseCount ? `${exerciseCount} 项练习` : '待生成练习',
+      href: exerciseCount ? undefined : '/a3/assessment',
     },
   ];
   return (
     <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4" data-testid="a3-classroom-runway">
       <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div>
-          <div className="text-sm font-semibold text-blue-950">本节课堂流程</div>
-          <p className="mt-1 text-xs leading-5 text-blue-800">围绕当前目标完成讲解、引用验证、练习诊断和复习回流。</p>
+          <div className="text-sm font-semibold text-blue-950">从这里开始本节课堂</div>
+          <p className="mt-1 text-xs leading-5 text-blue-800">选一个入口开始，系统会结合路径、资料和错题记录回答。</p>
         </div>
         <Button asChild size="sm" variant="outline" className="bg-white">
           <Link href="/a3/assessment">进入测评</Link>
@@ -773,15 +1005,24 @@ function LessonRunwayPanel({ target, asking, onAsk }: { target: ClassroomContext
       </div>
       <div className="mt-4 grid gap-3 lg:grid-cols-3">
         {steps.map((step) => (
-          <div key={step.title} className="rounded-xl border border-blue-100 bg-white p-4">
-            <div className="flex items-center gap-2 text-blue-700">
-              {step.icon}
-              <div className="text-sm font-semibold text-blue-950">{step.title}</div>
+          <div key={step.title} className="rounded-xl border border-blue-100 bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2 text-blue-700">
+                {step.icon}
+                <div className="text-sm font-semibold text-blue-950">{step.title}</div>
+              </div>
+              <span className="shrink-0 rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">{step.meta}</span>
             </div>
             <p className="mt-2 min-h-12 text-xs leading-5 text-[var(--a3-text-muted)]">{step.detail}</p>
-            <Button size="sm" variant="outline" disabled={asking || !target} title={!target ? '请先生成学习路径目标' : step.detail} className="mt-3 w-full bg-white" onClick={() => onAsk(step.prompt)}>
-              {step.action}
-            </Button>
+            {step.href ? (
+              <Button asChild size="sm" variant="outline" className="mt-3 w-full bg-white">
+                <Link href={step.href}>{step.action}</Link>
+              </Button>
+            ) : (
+              <Button size="sm" variant="outline" disabled={asking || !target} title={!target ? '请先生成学习路径目标' : step.detail} className="mt-3 w-full bg-white" onClick={() => onAsk(step.prompt)}>
+                {step.action}
+              </Button>
+            )}
           </div>
         ))}
       </div>
@@ -831,6 +1072,22 @@ function CurrentTargetCard({ loading, target, graphSummary }: { loading: boolean
           </Button>
         </div>
       )}
+    </A3Card>
+  );
+}
+
+function ClassroomContextCard({ studyPlan }: { studyPlan: StudyPlan | null }) {
+  const insight = buildClassroomContextInsight({ plan: studyPlan });
+  return (
+    <A3Card title="课堂会怎么辅导" action={<A3Pill tone="violet">路径上下文</A3Pill>}>
+      <div className="rounded-xl border border-violet-100 bg-violet-50 p-4" data-testid="a3-classroom-flow-context">
+        <div className="text-sm font-semibold leading-5 text-violet-950">{insight.title}</div>
+        <p className="mt-2 text-xs leading-5 text-violet-800">{insight.detail}</p>
+        <div className="mt-3 rounded-lg bg-white/80 px-3 py-2 text-xs leading-5 text-violet-800">依据：{insight.evidence}</div>
+        <Button asChild size="sm" variant="outline" className="mt-3 w-full bg-white">
+          <Link href={insight.href}>查看关联任务</Link>
+        </Button>
+      </div>
     </A3Card>
   );
 }
@@ -948,50 +1205,69 @@ function AgentsCard({ classroom }: { classroom: ClassroomContext | null }) {
   const exerciseCount = classroom?.recommended.length ?? 0;
   const weakCount = classroom?.graphSummary.weak ?? 0;
   const targetTitle = classroom?.target?.title ?? '当前知识点';
-  const readiness = sourceCount > 0 && exerciseCount > 0 ? '闭环就绪' : sourceCount > 0 ? '待生成练习' : '待补充证据';
-  const workflow = [
+  const completedSteps = [Boolean(classroom?.target), sourceCount > 0, exerciseCount > 0].filter(Boolean).length;
+  const readiness = completedSteps === 3 ? '可以闭环' : completedSteps === 2 ? '差一次练习' : sourceCount > 0 ? '先问清概念' : '先补证据';
+  const progress = Math.round((completedSteps / 3) * 100);
+  const workflow: Array<{
+    key: string;
+    label: string;
+    detail: string;
+    icon: ReactNode;
+    done: boolean;
+    actionLabel: string;
+    href: string;
+  }> = [
     {
       key: 'teach',
-      label: '讲解',
-      detail: classroom?.target ? `围绕《${targetTitle}》拆解概念与公式` : '等待学习路径同步当前目标',
+      label: '问清这个知识点',
+      detail: classroom?.target ? `围绕《${targetTitle}》先问定义、场景和易错点。` : '还没有同步到当前路径节点，先刷新课堂上下文。',
       icon: <Bot className="size-4" />,
       done: Boolean(classroom?.target),
+      actionLabel: '在中间提问',
+      href: '#a3-classroom-input',
     },
     {
       key: 'evidence',
-      label: '证据',
-      detail: sourceCount ? `${sourceCount} 条知识库来源可用于验证` : '上传或检索资料后再验证回答',
+      label: '看引用依据',
+      detail: sourceCount ? `${sourceCount} 条资料可用于验证回答，优先看来源和片段。` : '还缺可引用资料，回答会更容易变成泛泛讲解。',
       icon: <ShieldCheck className="size-4" />,
       done: sourceCount > 0,
+      actionLabel: '补充资料',
+      href: '/a3/knowledge-base',
     },
     {
       key: 'practice',
-      label: '练习',
-      detail: exerciseCount ? `${exerciseCount} 项课堂练习可执行` : '生成推荐资源后安排练习',
+      label: '做一次练习',
+      detail: exerciseCount ? `${exerciseCount} 项练习可执行，完成后会回写测评、错题和计划。` : '还没有课堂练习，先进入测评生成掌握度证据。',
       icon: <ClipboardCheck className="size-4" />,
       done: exerciseCount > 0,
+      actionLabel: '进入测评',
+      href: '/a3/assessment',
     },
   ];
 
   return (
     <A3Card
-      title="课堂协作控制台"
-      subtitle="把讲解、检索、验证和练习串成当前课堂闭环"
-      action={<A3Pill tone={readiness === '闭环就绪' ? 'green' : 'orange'}>{readiness}</A3Pill>}
+      title="本节学习进度"
+      subtitle="围绕当前知识点完成提问、证据和练习，完成后会回写学习计划。"
+      action={<A3Pill tone={completedSteps === 3 ? 'green' : 'orange'}>{readiness}</A3Pill>}
     >
       <div className="space-y-4">
         <div className="rounded-xl border border-blue-100 bg-blue-50/70 p-4">
           <div className="flex items-start justify-between gap-3">
-            <div>
+            <div className="min-w-0">
               <div className="text-sm font-semibold text-blue-950">{targetTitle}</div>
               <p className="mt-1 text-xs leading-5 text-blue-800">
-                {activeAgents.length ? `${activeAgents.length} 个 Agent 正在协作，优先完成可验证讲解和课堂练习。` : '课堂 Agent 正在等待上下文，先同步学习路径或刷新课堂。'}
+                先把概念问清楚，再看引用依据，最后做一次练习。系统会把练习结果同步到今日任务和错题本。
               </p>
             </div>
-            <div className="rounded-lg bg-white px-2.5 py-2 text-right shadow-sm">
-              <div className="text-base font-semibold text-blue-700">{classroom?.graphSummary.masteryRate ?? 0}%</div>
-              <div className="text-[11px] text-blue-600">掌握率</div>
+            <div className="shrink-0 rounded-lg bg-white px-3 py-2 text-right shadow-sm">
+              <div className="text-base font-semibold text-blue-700">{progress}%</div>
+              <div className="text-[11px] text-blue-600">本节进度</div>
             </div>
+          </div>
+          <div className="mt-4 h-2 overflow-hidden rounded-full bg-white">
+            <div className="h-full rounded-full bg-blue-600 transition-[width] duration-200" style={{ width: `${progress}%` }} />
           </div>
           <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
             <MiniSignal label="引用" value={sourceCount} tone={sourceCount ? 'blue' : 'slate'} />
@@ -1001,41 +1277,51 @@ function AgentsCard({ classroom }: { classroom: ClassroomContext | null }) {
         </div>
 
         <div className="space-y-2">
-          {workflow.map((step, index) => (
-            <div key={step.key} className="flex items-start gap-3 rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-3 transition-colors duration-150 hover:border-blue-200 hover:bg-blue-50/40">
+          {workflow.map((step) => (
+            <div key={step.key} className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-3 transition-colors duration-150 hover:border-blue-200 hover:bg-blue-50/40">
+              <div className="flex items-start gap-3">
               <div className={cn('flex size-8 shrink-0 items-center justify-center rounded-lg', step.done ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500')}>
                 {step.done ? <CheckCircle2 className="size-4" /> : step.icon}
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-sm font-semibold text-[var(--a3-text)]">{index + 1}. {step.label}</div>
+                  <div className="text-sm font-semibold text-[var(--a3-text)]">{step.label}</div>
                   <A3Pill tone={step.done ? 'green' : 'slate'}>{step.done ? '已就绪' : '待完成'}</A3Pill>
                 </div>
                 <p className="mt-1 text-xs leading-5 text-[var(--a3-text-muted)]">{step.detail}</p>
               </div>
+              </div>
+              <Button asChild size="sm" variant={step.done ? 'outline' : 'default'} className={cn('mt-3 w-full', step.done ? 'bg-white' : 'bg-blue-600 text-white hover:bg-blue-700')}>
+                <Link href={step.href}>{step.actionLabel}</Link>
+              </Button>
             </div>
           ))}
         </div>
 
-        <div className="space-y-2">
-          {agents.slice(0, 3).map((agent) => (
-            <div key={agent.id} className="flex items-center gap-3 rounded-xl bg-[var(--a3-surface-muted)] px-3 py-2.5">
-              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg text-white" style={{ backgroundColor: agent.color }}>
-                <Bot className="size-4" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-semibold text-[var(--a3-text)]">{agent.name}</div>
-                <div className="truncate text-xs text-[var(--a3-text-muted)]">{agent.role}</div>
+        <details className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+          <summary className="cursor-pointer font-semibold text-slate-900">
+            查看协作证据{activeAgents.length ? `，${activeAgents.length} 个模块在线` : ''}
+          </summary>
+          <div className="mt-3 space-y-2">
+            {agents.slice(0, 3).map((agent) => (
+              <div key={agent.id} className="flex items-center gap-3 rounded-lg bg-white px-3 py-2">
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-md text-white" style={{ backgroundColor: agent.color }}>
+                  <Bot className="size-3.5" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-semibold text-[var(--a3-text)]">{agent.name}</div>
+                  <div className="truncate text-[11px] text-[var(--a3-text-muted)]">{agent.role}</div>
+                </div>
+                <A3Pill tone={agent.status === 'active' ? 'blue' : 'slate'}>{agent.status === 'active' ? '工作中' : '候场'}</A3Pill>
               </div>
-              <A3Pill tone={agent.status === 'active' ? 'blue' : 'slate'}>{agent.status === 'active' ? '工作中' : '候场'}</A3Pill>
-            </div>
-          ))}
-          {!agents.length && (
-            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm leading-6 text-[var(--a3-text-muted)]">
-              智能体配置加载中。若长时间为空，请刷新课堂上下文。
-            </div>
-          )}
-        </div>
+            ))}
+            {!agents.length && (
+              <div className="rounded-lg border border-dashed border-slate-300 bg-white p-3 text-xs leading-5 text-[var(--a3-text-muted)]">
+                暂无协作记录，刷新课堂后会重新读取。
+              </div>
+            )}
+          </div>
+        </details>
 
         <div className="grid gap-2 text-sm sm:grid-cols-2">
           <Button asChild variant="outline" className="bg-white">

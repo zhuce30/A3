@@ -101,6 +101,53 @@ class ParsedBlockMarkdownMetadataTests(SimpleTestCase):
         self.assertEqual(result.raw["jobId"], "job-1")
         self.assertIsInstance(result.raw["latencyMs"], int)
 
+    @patch("backend.domains.knowledge_base.multimodal_parser._poll_baidu_paddleocr_job")
+    @patch("backend.domains.knowledge_base.multimodal_parser._submit_baidu_paddleocr_job")
+    def test_baidu_document_parser_provider_retries_empty_result_with_enhanced_options(self, submit_job, poll_job):
+        submit_job.side_effect = [{"data": {"jobId": "job-empty"}}, {"data": {"jobId": "job-retry"}}]
+        poll_job.side_effect = [
+            {"data": {"state": "done"}},
+            {"data": {"state": "done", "markdown": "Enhanced OCR text"}},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "page.png"
+            image_path.write_bytes(b"fake-image")
+            with patch.dict(os.environ, {"A3_BAIDU_PADDLEOCR_TOKEN": "token", "A3_BAIDU_PADDLEOCR_RETRY_EMPTY": "1"}, clear=False):
+                result = BaiduDocumentParserProvider().understand_image(image_path)
+
+        self.assertEqual(result.to_search_text(), "Enhanced OCR text")
+        self.assertEqual(submit_job.call_count, 2)
+        self.assertFalse(submit_job.call_args_list[0].kwargs["optional_payload"]["useDocUnwarping"])
+        self.assertTrue(submit_job.call_args_list[1].kwargs["optional_payload"]["useDocUnwarping"])
+
+    @patch(
+        "backend.domains.knowledge_base.multimodal_parser._download_text",
+        return_value='{"result":{"layoutParsingResults":[{"markdown":{"text":"# Deadlock\\n| Condition | Meaning |\\n|---|---|\\n| Hold and wait | holds resources |"}}]}}\n',
+    )
+    def test_baidu_document_parser_provider_reads_jsonl_result_url(self, _download_text):
+        from backend.domains.knowledge_base.multimodal_parser import _baidu_result_to_vision_understanding
+
+        result = _baidu_result_to_vision_understanding(
+            {"data": {"state": "done", "resultUrl": {"jsonUrl": "https://example.test/result.jsonl"}}},
+            job_id="job-jsonl",
+        )
+
+        self.assertIn("Deadlock", result.to_search_text())
+        self.assertIn("Hold and wait", result.to_search_text())
+        self.assertEqual(result.raw["jobId"], "job-jsonl")
+
+    @patch("backend.domains.knowledge_base.multimodal_parser._render_pdf_to_assets", return_value=({}, []))
+    def test_pdf_render_pages_uses_configured_page_limit(self, render_pdf_to_assets):
+        from backend.domains.knowledge_base.multimodal_parser import _render_pdf_pages
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "lesson.pdf"
+            pdf_path.write_bytes(MINIMAL_TEXT_PDF)
+            with patch.dict(os.environ, {"A3_PDF_RENDER_MAX_PAGES": "72"}, clear=False):
+                _render_pdf_pages(pdf_path)
+
+        self.assertEqual(render_pdf_to_assets.call_args.kwargs["max_pages"], 72)
+
     def test_parsed_block_adds_markdown_metadata_without_changing_raw_text(self):
         block = ParsedBlock(
             modality="text",

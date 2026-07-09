@@ -28,12 +28,27 @@ POLICY_STRATEGIES = [
 def build_continuous_optimization_policy_report(user, *, days: int = 30, effect_report: dict | None = None) -> dict:
     safe_days = max(1, min(_safe_int(days, 30), 365))
     effect = effect_report if isinstance(effect_report, dict) else build_learning_effect_report(user, include_persisted_analysis=False)
-    attribution = build_resource_effect_attribution(user, days=safe_days)
+    degraded_reasons: list[str] = []
+    try:
+        attribution = build_resource_effect_attribution(user, days=safe_days)
+    except Exception as exc:
+        degraded_reasons.append(f"resource attribution unavailable: {str(exc)[:180]}")
+        attribution = _degraded_attribution_report(safe_days, str(exc))
     candidates = build_policy_candidates(effect, attribution)
     selected = max(candidates, key=lambda item: item["decisionScore"]) if candidates else _empty_candidate()
     missing = list(effect.get("missingEvidence") if isinstance(effect.get("missingEvidence"), list) else [])
-    event_summary = aggregate_learning_events(user, days=safe_days)
-    outcome = evaluate_policy_outcome(effect, event_summary, missing)
+    try:
+        event_summary = aggregate_learning_events(user, days=safe_days)
+    except Exception as exc:
+        degraded_reasons.append(f"event stream unavailable: {str(exc)[:180]}")
+        event_summary = {"totalEvents": 0, "degraded": True, "degradedReason": str(exc)[:240]}
+        missing = [*missing, "策略引擎事件流暂不可用，已按低置信度降级评估"]
+    try:
+        outcome_metrics = build_policy_outcome_metrics(user, effect, days=7)
+    except Exception as exc:
+        degraded_reasons.append(f"outcome metrics unavailable: {str(exc)[:180]}")
+        outcome_metrics = _degraded_policy_outcome_metrics(str(exc))
+    outcome = evaluate_policy_outcome(effect, event_summary, missing, outcome_metrics=outcome_metrics)
     decision_id = _decision_id(user, selected["strategy"], effect, safe_days)
     now = timezone.now()
     return {
@@ -59,8 +74,11 @@ def build_continuous_optimization_policy_report(user, *, days: int = 30, effect_
         },
         "expectedMetricDelta": selected.get("expectedMetricDelta", {}),
         "observedMetricDelta": outcome["observedMetricDelta"],
+        "outcomeMetrics": outcome_metrics,
         "outcomeStatus": outcome["outcomeStatus"],
         "missingEvidence": missing,
+        "degraded": bool(degraded_reasons),
+        "degradedReasons": degraded_reasons,
         "attribution": {
             "schemaVersion": attribution.get("schemaVersion"),
             "summary": attribution.get("summary", {}),
@@ -146,7 +164,10 @@ def score_policy_candidate(strategy: str, effect_report: dict, attribution_repor
     }
 
 
-def evaluate_policy_outcome(effect_report: dict, event_summary: dict, missing_evidence: list[str]) -> dict:
+def evaluate_policy_outcome(effect_report: dict, event_summary: dict, missing_evidence: list[str], *, outcome_metrics: dict | None = None) -> dict:
+    metrics = outcome_metrics if isinstance(outcome_metrics, dict) else {}
+    resource_gain = metrics.get("resourceTypeGain7d") if isinstance(metrics.get("resourceTypeGain7d"), list) else []
+    top_resource_gain = _safe_float(resource_gain[0].get("postAssessmentGain7d"), 0) if resource_gain and isinstance(resource_gain[0], dict) else 0
     total_events = _safe_int(event_summary.get("totalEvents"), 0)
     if missing_evidence or total_events < 3:
         return {
@@ -155,6 +176,7 @@ def evaluate_policy_outcome(effect_report: dict, event_summary: dict, missing_ev
                 "effectScoreDelta": 0,
                 "taskCompletionRateDelta": 0,
                 "correctRateDelta": 0,
+                "topResourceTypeGain7d": top_resource_gain,
             },
             "rollbackReason": "",
         }
@@ -175,8 +197,88 @@ def evaluate_policy_outcome(effect_report: dict, event_summary: dict, missing_ev
             "effectScoreDelta": effect_delta,
             "taskCompletionRateDelta": completion_delta,
             "correctRateDelta": correct_delta,
+            "topResourceTypeGain7d": top_resource_gain,
         },
         "rollbackReason": "observed effect declined below rollback threshold" if status == "failed" else "",
+    }
+
+
+def build_policy_outcome_metrics(user, effect_report: dict, *, days: int = 7) -> dict:
+    safe_days = max(1, min(_safe_int(days, 7), 30))
+    window_attribution = build_resource_effect_attribution(user, days=safe_days)
+    baseline_attribution = build_resource_effect_attribution(user, days=max(30, safe_days))
+    baseline_by_type = _resource_effect_by_type(baseline_attribution)
+    resource_types = window_attribution.get("resourceTypes") if isinstance(window_attribution.get("resourceTypes"), list) else []
+    serialized = []
+    for item in resource_types:
+        if not isinstance(item, dict):
+            continue
+        resource_type = str(item.get("resourceType") or "unknown")
+        baseline = baseline_by_type.get(resource_type, {})
+        serialized.append(
+            {
+                "resourceType": resource_type,
+                "knowledgePointId": str(item.get("knowledgePointId") or ""),
+                "completed7d": _safe_int(item.get("completed"), 0),
+                "opened7d": _safe_int(item.get("opened"), 0),
+                "postAssessmentGain7d": _safe_float(baseline.get("postAssessmentGain"), _safe_float(item.get("postAssessmentGain"), 0)),
+                "practiceConversionRate7d": _safe_float(item.get("practiceConversionRate"), 0),
+                "historicalEffectiveness7d": _safe_float(item.get("historicalEffectiveness"), 0),
+                "confidence": str(baseline.get("effectConfidence") or item.get("effectConfidence") or "low"),
+                "explorationRecommended": bool(item.get("explorationRecommended")),
+            }
+        )
+    serialized = sorted(serialized, key=lambda item: (item["postAssessmentGain7d"], item["historicalEffectiveness7d"]), reverse=True)
+    return {
+        "schemaVersion": "a3.policy-outcome-metrics.v1",
+        "windowDays": safe_days,
+        "resourceTypeGain7d": serialized[:5],
+        "summary": {
+            "resourceTypeCount": len(serialized),
+            "topResourceTypeGain7d": _safe_float(serialized[0].get("postAssessmentGain7d"), 0) if serialized else 0,
+            "effectScore": _safe_float(effect_report.get("overallEffectScore"), 0),
+        },
+    }
+
+
+def _degraded_attribution_report(days: int, reason: str) -> dict:
+    return {
+        "schemaVersion": "a3.resource-effect-attribution.v1",
+        "windowDays": days,
+        "status": "degraded",
+        "degraded": True,
+        "degradedReason": reason[:240],
+        "summary": {
+            "resourceTypeCount": 0,
+            "averageEffectiveness": 0,
+            "confidence": "low",
+        },
+        "resourceTypes": [],
+    }
+
+
+def _degraded_policy_outcome_metrics(reason: str) -> dict:
+    return {
+        "schemaVersion": "a3.policy-outcome-metrics.v1",
+        "status": "degraded",
+        "degraded": True,
+        "degradedReason": reason[:240],
+        "windowDays": 7,
+        "resourceTypeGain7d": [],
+        "summary": {
+            "resourceTypeCount": 0,
+            "topResourceTypeGain7d": 0,
+            "effectScore": 0,
+        },
+    }
+
+
+def _resource_effect_by_type(attribution_report: dict) -> dict[str, dict]:
+    items = attribution_report.get("resourceTypes") if isinstance(attribution_report.get("resourceTypes"), list) else []
+    return {
+        str(item.get("resourceType") or ""): item
+        for item in items
+        if isinstance(item, dict) and item.get("resourceType")
     }
 
 
@@ -195,6 +297,7 @@ def decorate_adjustment_with_policy_decision(adjustment: dict, policy_report: di
         "rankingBasis": selected.get("rankingBasis", []),
         "expectedMetricDelta": selected.get("expectedMetricDelta", {}),
         "observedMetricDelta": policy_report.get("observedMetricDelta", {}),
+        "outcomeMetrics": policy_report.get("outcomeMetrics", {}),
     }
 
 
@@ -230,11 +333,13 @@ def evaluate_policy_decision_history_outcomes(user, *, days: int = 7) -> dict:
         if str(decision.get("outcomeStatus") or "") not in {"pending", ""}:
             updated_history.append(decision)
             continue
-        outcome = evaluate_policy_outcome(effect, event_summary, missing)
+        outcome_metrics = build_policy_outcome_metrics(user, effect, days=days)
+        outcome = evaluate_policy_outcome(effect, event_summary, missing, outcome_metrics=outcome_metrics)
         updated = {
             **decision,
             "outcomeStatus": outcome["outcomeStatus"],
             "observedMetricDelta": outcome["observedMetricDelta"],
+            "outcomeMetrics": outcome_metrics,
             "rollbackTriggered": outcome["outcomeStatus"] == "failed",
             "rollbackReason": outcome.get("rollbackReason", ""),
             "evaluatedAt": timezone.now().isoformat(),
@@ -271,6 +376,7 @@ def _history_decision(policy_report: dict) -> dict:
         "evaluationWindow": policy_report.get("evaluationWindow", {}),
         "expectedMetricDelta": policy_report.get("expectedMetricDelta", {}),
         "observedMetricDelta": policy_report.get("observedMetricDelta", {}),
+        "outcomeMetrics": policy_report.get("outcomeMetrics", {}),
         "outcomeStatus": policy_report.get("outcomeStatus", "pending"),
         "missingEvidence": policy_report.get("missingEvidence", []),
         "explorationMode": bool(policy_report.get("explorationMode")),

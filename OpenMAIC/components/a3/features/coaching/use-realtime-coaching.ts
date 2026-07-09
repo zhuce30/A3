@@ -49,6 +49,11 @@ type EndResponse = {
 };
 
 type BrowserAudioContext = typeof AudioContext;
+type RetrievalProgress = {
+  status: 'idle' | 'running' | 'succeeded' | 'failed';
+  message: string;
+  sourceCount?: number;
+};
 
 export function useRealtimeCoaching() {
   const [status, setStatus] = useState<A3RealtimeStatus>('idle');
@@ -63,6 +68,11 @@ export function useRealtimeCoaching() {
   const [audioLevel, setAudioLevel] = useState(0);
   const [assistantSpeaking, setAssistantSpeaking] = useState(false);
   const [summary, setSummary] = useState<RealtimeSummary | null>(null);
+  const [retrievalProgress, setRetrievalProgress] = useState<RetrievalProgress>({
+    status: 'idle',
+    message: '等待检索本地资料',
+  });
+  const coachingSessionId = session?.coachingSessionId;
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -658,25 +668,40 @@ export function useRealtimeCoaching() {
     if (!normalizedQuery) return;
     setToolQuery(normalizedQuery);
     setError('');
-    const response = await fetch('/api/a3/coaching/realtime/tool', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        coachingSessionId: session?.coachingSessionId,
-        toolName: 'retrieve_learning_evidence',
-        query: normalizedQuery,
-        topK: 5,
-        includeVisualEvidence: true,
-      }),
-    });
-    const result = await response.json().catch(() => ({})) as ToolResponse;
-    if (!response.ok || !result.success) {
-      setError(result.error || '实时辅导知识库检索失败');
-      return;
+    setRetrievalProgress({ status: 'running', message: `正在检索本地资料：${normalizedQuery}` });
+    try {
+      const response = await fetch('/api/a3/coaching/realtime/tool', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          coachingSessionId,
+          toolName: 'retrieve_learning_evidence',
+          query: normalizedQuery,
+          topK: 5,
+          includeVisualEvidence: true,
+        }),
+      });
+      const result = await response.json().catch(() => ({})) as ToolResponse;
+      if (!response.ok || !result.success) {
+        const message = result.error || '实时辅导知识库检索失败';
+        setRetrievalProgress({ status: 'failed', message: `检索失败：${message}` });
+        setError(message);
+        return;
+      }
+      const nextEvidence = result.evidence || [];
+      setEvidence(nextEvidence);
+      setRetrievalProgress({
+        status: 'succeeded',
+        message: `已找到 ${nextEvidence.length} 条本地资料证据`,
+        sourceCount: nextEvidence.length,
+      });
+    } catch (retrieveError) {
+      const message = retrieveError instanceof Error ? retrieveError.message : '实时辅导知识库检索失败';
+      setRetrievalProgress({ status: 'failed', message: `检索失败：${message}` });
+      setError(message);
     }
-    setEvidence(result.evidence || []);
-  }, [session?.coachingSessionId]);
+  }, [coachingSessionId]);
 
   const toggleMic = useCallback(async () => {
     try {
@@ -828,6 +853,7 @@ export function useRealtimeCoaching() {
     audioLevel,
     assistantSpeaking,
     summary,
+    retrievalProgress,
     setError,
     setToolQuery,
     start,

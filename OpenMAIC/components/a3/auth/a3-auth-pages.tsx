@@ -38,6 +38,17 @@ import type { DynamicProfileInsight } from '@/components/a3/profile/dynamic-prof
 import { AgentDecisionEvidence } from '@/components/a3/ui/agent-decision-evidence';
 import { a3GetJson, a3PatchJson, a3PostJson } from '@/lib/a3/api-client';
 import { mergeInterviewProfile, normalizeLearningProfileForOptions } from '@/lib/a3/profile-setup';
+import {
+  pendingProfileUpdateCount,
+  profileDimensionLabel,
+  profileSourceLabel,
+  profileStatusLabel,
+  profileStatusTone,
+  summarizeProfileTimelineEntry,
+  summarizeProfileUpdateEvidence,
+  type DynamicProfileFeedResponse,
+  type ProfileTimelineEntry,
+} from '@/lib/a3/profile-timeline';
 import type {
   A3LearningProfile,
   A3ProfileSnapshot,
@@ -79,18 +90,6 @@ type ApiResult = {
     explanation?: string;
   };
   generationError?: string;
-};
-
-type ProfileSnapshotResponse = {
-  success: boolean;
-  error?: string;
-  profile?: {
-    extraProfile?: {
-      dynamicProfile?: DynamicProfileInsight;
-      dynamicProfileV2?: A3ProfileSnapshot;
-      profileSnapshot?: A3ProfileSnapshot;
-    };
-  };
 };
 
 type ProfileInterviewResult = {
@@ -789,13 +788,15 @@ export function ProfileSetupPage() {
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [dynamicProfile, setDynamicProfile] = useState<DynamicProfileInsight | null>(null);
   const [profileSnapshot, setProfileSnapshot] = useState<A3ProfileSnapshot | null>(null);
+  const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
+  const [profileUpdateBusyId, setProfileUpdateBusyId] = useState('');
 
   const loadDynamicProfile = useCallback(async () => {
-    const result = await a3GetJson<ProfileSnapshotResponse>('/api/profiles/me/');
+    const result = await a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/');
     if (result.success) {
-      const extraProfile = result.profile?.extraProfile;
-      setDynamicProfile(extraProfile?.dynamicProfile ?? null);
-      setProfileSnapshot(extraProfile?.profileSnapshot ?? extraProfile?.dynamicProfileV2 ?? null);
+      setProfileFeed(result);
+      setDynamicProfile(result.dynamicProfile ?? null);
+      setProfileSnapshot(result.profileSnapshot ?? null);
     }
   }, []);
 
@@ -836,11 +837,11 @@ export function ProfileSetupPage() {
 
   useEffect(() => {
     let active = true;
-    a3GetJson<ProfileSnapshotResponse>('/api/profiles/me/').then((result) => {
+    a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/').then((result) => {
       if (!active || !result.success) return;
-      const extraProfile = result.profile?.extraProfile;
-      setDynamicProfile(extraProfile?.dynamicProfile ?? null);
-      setProfileSnapshot(extraProfile?.profileSnapshot ?? extraProfile?.dynamicProfileV2 ?? null);
+      setProfileFeed(result);
+      setDynamicProfile(result.dynamicProfile ?? null);
+      setProfileSnapshot(result.profileSnapshot ?? null);
     });
     return () => {
       active = false;
@@ -985,6 +986,20 @@ export function ProfileSetupPage() {
     void loadDynamicProfile();
   }
 
+  async function resolveProfileUpdate(updateId: string, action: 'confirm' | 'reject') {
+    setProfileUpdateBusyId(updateId);
+    const result = await a3PostJson<DynamicProfileFeedResponse & { update?: ProfileTimelineEntry }>(
+      `/api/profiles/profile-updates/${updateId}/${action}/`,
+      action === 'reject' ? { reason: '学生在画像页手动忽略' } : {},
+    );
+    setProfileUpdateBusyId('');
+    if (!result.success) {
+      setMessage(result.error ?? '画像更新处理失败，请稍后重试。');
+      return;
+    }
+    await loadDynamicProfile();
+  }
+
   const previewRows = [
     ['姓名/昵称', displayName || currentUser?.displayName || '待完善'],
     ['专业方向', profile.majorDirection],
@@ -1002,6 +1017,7 @@ export function ProfileSetupPage() {
   const primaryWeakPoint = profile.weakPoints[0] || '待补充';
   const preferredResources = profile.expectedResources.slice(0, 2).join('、') || '待补充';
   const hasInterviewHistory = interviewMessages.some((item) => item.role === 'user') || Boolean(interviewResult?.success);
+  const pendingProfileUpdates = pendingProfileUpdateCount(profileFeed);
   const planningStages = [
     {
       index: '1',
@@ -1028,8 +1044,8 @@ export function ProfileSetupPage() {
       index: '4',
       title: 'Agent 追问',
       detail: interviewReadyToConfirm ? '画像已可确认' : missingInterviewDimensions.length ? `还需补 ${missingInterviewDimensions.length} 项` : '用一句话补齐关键信息',
-      meta: interviewResult?.traceId ? `trace ${interviewResult.traceId.slice(0, 8)}` : 'ProfileAgent',
-      active: Boolean(interviewResult?.success),
+      meta: pendingProfileUpdates > 0 ? `${pendingProfileUpdates} 条变化待确认` : interviewResult?.traceId ? `trace ${interviewResult.traceId.slice(0, 8)}` : 'ProfileAgent',
+      active: Boolean(interviewResult?.success || pendingProfileUpdates > 0),
     },
   ];
 
@@ -1164,6 +1180,12 @@ export function ProfileSetupPage() {
                 compact
                 title="动态画像摘要"
                 subtitle="系统会用诊断、测评、课堂问答继续修正画像。"
+              />
+              <ProfileUpdateTimelinePanel
+                feed={profileFeed}
+                busyId={profileUpdateBusyId}
+                onConfirm={(id) => resolveProfileUpdate(id, 'confirm')}
+                onReject={(id) => resolveProfileUpdate(id, 'reject')}
               />
               <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <button
@@ -1424,6 +1446,89 @@ function AgentExtractionPanel({ interviewResult }: { interviewResult: ProfileInt
       )}
     </div>
   );
+}
+
+function ProfileUpdateTimelinePanel({
+  feed,
+  busyId,
+  onConfirm,
+  onReject,
+}: {
+  feed: DynamicProfileFeedResponse | null;
+  busyId: string;
+  onConfirm: (id: string) => void;
+  onReject: (id: string) => void;
+}) {
+  const queue = feed?.confirmationQueue ?? [];
+  const timeline = feed?.timeline ?? [];
+  return (
+    <section data-testid="a3-profile-update-timeline" className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-950">画像变化确认</h3>
+          <p className="mt-1 text-xs leading-5 text-slate-500">诊断、测评、课堂和资源反馈会先形成候选变化，确认后才写入长期画像。</p>
+        </div>
+        <span className={queue.length ? 'rounded-full bg-orange-50 px-2.5 py-1 text-xs font-semibold text-orange-700' : 'rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600'}>
+          {queue.length ? `${queue.length} 条待确认` : '无待确认'}
+        </span>
+      </div>
+
+      {queue.length > 0 ? (
+        <div className="mt-4 space-y-3">
+          {queue.slice(0, 3).map((item) => (
+            <div key={item.id} className="rounded-xl border border-orange-100 bg-orange-50/70 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-orange-700">{profileDimensionLabel(item.changedDimensions[0] || '')}</span>
+                <span className="text-xs font-medium text-orange-800">{profileSourceLabel(item.source)}</span>
+                <span className="text-xs text-orange-700">置信度 {Math.round((item.confidence ?? 0) * 100)}%</span>
+              </div>
+              <p className="mt-2 text-sm leading-6 text-slate-800">{summarizeProfileTimelineEntry(item)}</p>
+              <p className="mt-1 text-xs leading-5 text-orange-800">{summarizeProfileUpdateEvidence(item)}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button data-testid="a3-profile-update-confirm" type="button" size="sm" disabled={busyId === item.id} onClick={() => onConfirm(item.id)} className="h-8 bg-blue-600 px-3 text-xs text-white hover:bg-blue-700">
+                  {busyId === item.id ? '处理中' : '确认更新'}
+                </Button>
+                <Button data-testid="a3-profile-update-reject" type="button" size="sm" variant="outline" disabled={busyId === item.id} onClick={() => onReject(item.id)} className="h-8 px-3 text-xs">
+                  忽略
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-4 rounded-xl bg-slate-50 px-3 py-3 text-sm leading-6 text-slate-600">
+          完成入学诊断、错题复盘或课堂问答后，这里会显示哪次行为让画像发生变化。
+        </div>
+      )}
+
+      {timeline.length > 0 && (
+        <div className="mt-4 border-t border-slate-100 pt-4">
+          <div className="mb-2 text-xs font-semibold text-slate-500">最近变化</div>
+          <div className="space-y-2">
+            {timeline.slice(0, 4).map((item) => (
+              <div key={`${item.id}-${item.versionId || item.createdAt}`} className="rounded-xl bg-slate-50 px-3 py-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-900">{profileSourceLabel(item.source)}</span>
+                  <span className={profileTimelineStatusClass(item.status)}>{profileStatusLabel(item.status)}</span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-600">{summarizeProfileTimelineEntry(item)}</p>
+                <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{summarizeProfileUpdateEvidence(item)}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function profileTimelineStatusClass(status: ProfileTimelineEntry['status']) {
+  const tone = profileStatusTone(status);
+  if (tone === 'green') return 'rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700';
+  if (tone === 'orange') return 'rounded-full bg-orange-50 px-2 py-0.5 text-xs font-semibold text-orange-700';
+  if (tone === 'red') return 'rounded-full bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700';
+  if (tone === 'blue') return 'rounded-full bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-700';
+  return 'rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600';
 }
 
 function AgentMetric({ label, value }: { label: string; value: string }) {

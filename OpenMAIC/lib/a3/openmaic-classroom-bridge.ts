@@ -41,7 +41,19 @@ export type OpenMAICVideoBridgeInput = {
     width?: number;
     height?: number;
   };
+  segments?: A3OpenMAICVideoSegment[];
   error?: string;
+};
+
+export type A3OpenMAICVideoSegment = {
+  index: number;
+  title: string;
+  status: 'succeeded' | 'failed' | string;
+  videoUrl: string;
+  duration: number;
+  width: number;
+  height: number;
+  degradedReason: string;
 };
 
 export type A3OpenMAICVideoPayload = {
@@ -53,6 +65,7 @@ export type A3OpenMAICVideoPayload = {
   duration: number;
   width: number;
   height: number;
+  segments?: A3OpenMAICVideoSegment[];
   elapsedMs: number;
   degradedReason: string;
 };
@@ -144,17 +157,19 @@ export function buildA3OpenMAICVideoPayload(
   elapsedMs: number,
 ): A3OpenMAICVideoPayload {
   const videoUrl = input.result?.url ?? '';
+  const segments = input.segments?.filter((segment) => segment && typeof segment === 'object') ?? [];
   return {
     type: 'openmaic_video',
     status: input.status,
     provider: input.provider,
     resourceType: input.resourceType,
     videoUrl,
-    duration: Number(input.result?.duration ?? 0),
+    duration: Number(input.result?.duration ?? segments.reduce((sum, segment) => sum + Number(segment.duration || 0), 0)),
     width: Number(input.result?.width ?? 0),
     height: Number(input.result?.height ?? 0),
+    ...(segments.length ? { segments } : {}),
     elapsedMs,
-    degradedReason: videoUrl ? '' : (input.error || ''),
+    degradedReason: input.status === 'succeeded' ? '' : (input.error || ''),
   };
 }
 

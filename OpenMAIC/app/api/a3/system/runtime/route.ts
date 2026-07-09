@@ -10,8 +10,19 @@ type AuthMeResponse = {
 };
 
 type RuntimeCheckStatus = 'ok' | 'warning' | 'error';
+type RuntimeCheckDetail = Record<string, string | boolean | number | Record<string, unknown>>;
 
-function check(name: string, status: RuntimeCheckStatus, message: string, detail: Record<string, string | boolean> = {}) {
+type DjangoHealthResponse = {
+  overallStatus?: RuntimeCheckStatus;
+  checks?: Array<{
+    name: string;
+    status: RuntimeCheckStatus;
+    message: string;
+    detail?: RuntimeCheckDetail;
+  }>;
+};
+
+function check(name: string, status: RuntimeCheckStatus, message: string, detail: RuntimeCheckDetail = {}) {
   return { name, status, message, detail };
 }
 
@@ -70,6 +81,11 @@ export async function GET(request: NextRequest) {
     return apiError('UNAUTHORIZED', 401, 'Please login first');
   }
 
+  const djangoHealth = await fetchA3DjangoJson<DjangoHealthResponse>('/api/system/health/', cookieHeader);
+  const celeryBeatCheck = djangoHealth.success
+    ? djangoHealth.checks?.find((item) => item.name === 'celeryBeat')
+    : null;
+
   const checks = [
     check('djangoApi', configured('NEXT_PUBLIC_A3_API_BASE_URL') ? 'ok' : 'warning', 'Django API base URL is resolved', {
       baseUrl: value('NEXT_PUBLIC_A3_API_BASE_URL', 'http://localhost:8000'),
@@ -99,6 +115,9 @@ export async function GET(request: NextRequest) {
       smokeOverride: configured('A3_VIDEO_SMOKE_API_KEY'),
       smokeCommand: 'pnpm smoke:a3-video',
     }),
+    celeryBeatCheck
+      ? check('celeryBeat', celeryBeatCheck.status, celeryBeatCheck.message, celeryBeatCheck.detail ?? {})
+      : check('celeryBeat', 'warning', 'Django system health did not return Celery beat status', { source: '/api/system/health/' }),
   ];
   const statuses = new Set(checks.map((item) => item.status));
   const overallStatus: RuntimeCheckStatus = statuses.has('error') ? 'error' : statuses.has('warning') ? 'warning' : 'ok';

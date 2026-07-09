@@ -22,12 +22,12 @@ export function A3Card({
       )}
     >
       {(title || subtitle || action) && (
-        <div className="flex items-start justify-between gap-4 border-b border-[var(--a3-border)] px-5 py-4">
-          <div>
+        <div className="flex flex-col items-start justify-between gap-3 border-b border-[var(--a3-border)] px-5 py-4 sm:flex-row sm:gap-4">
+          <div className="min-w-0">
             {title && <h2 className="text-[17px] font-semibold text-[var(--a3-text)]">{title}</h2>}
             {subtitle && <p className="mt-1 text-sm text-[var(--a3-text-muted)]">{subtitle}</p>}
           </div>
-          {action}
+          {action && <div className="shrink-0">{action}</div>}
         </div>
       )}
       <div className="p-5">{children}</div>

@@ -19,6 +19,7 @@ from backend.apps.profiles.profile_signals import append_profile_signal
 
 
 SESSION_SCHEMA_VERSION = "a3.profile-interview-session.v1"
+PROFILE_INTERVIEW_PROFILE_SCHEMA_VERSION = "a3.profile-interview.profile.v2"
 
 EMPTY_PROFILE_INTERVIEW_SESSION = {
     "schemaVersion": SESSION_SCHEMA_VERSION,
@@ -541,6 +542,8 @@ def _commit_profile(profile: LearnerProfile, extracted: dict, raw_text: str) -> 
         ("learningGoals", "learning_goals"),
         ("weakPoints", "weak_points"),
         ("resourcePreferences", "expected_resources"),
+        ("cognitiveStyle", "cognitiveStyle"),
+        ("learningHistory", "learningHistory"),
         ("motivationRisk", "motivationRisk"),
         ("mistakePatterns", "mistakePatterns"),
     ):
@@ -658,6 +661,7 @@ def _public_interview_profile(profile: LearnerProfile) -> dict:
     extra = profile.extra_profile or {}
     learning_preferences = profile.learning_preferences if isinstance(profile.learning_preferences, dict) else {}
     return {
+        "schemaVersion": PROFILE_INTERVIEW_PROFILE_SCHEMA_VERSION,
         "grade": profile.grade,
         "majorDirection": profile.major_direction,
         "foundationLevel": profile.foundation_level,

@@ -1,6 +1,6 @@
 'use client';
 
-import { Camera, FileSearch, Focus, Mic, MonitorUp, Phone, PhoneOff, Radio, ShieldCheck, VolumeX, Waves } from 'lucide-react';
+import { Camera, FileSearch, Focus, Loader2, Mic, MonitorUp, Phone, PhoneOff, Radio, ShieldCheck, VolumeX, Waves } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { resolveA3Endpoint } from '@/lib/a3/api-client';
@@ -35,6 +35,7 @@ export function RealtimeCoachingCall() {
     interruptAssistant,
     microphoneEnabled,
     retrieveEvidence,
+    retrievalProgress,
     screenEnabled,
     screenVideoRef,
     session,
@@ -79,7 +80,7 @@ export function RealtimeCoachingCall() {
             <Phone className="size-4" />
             开始
           </Button>
-          <Button type="button" variant="outline" onClick={end} disabled={status === 'idle' || status === 'ended' || status === 'ending'}>
+          <Button data-testid="a3-realtime-end-summary" type="button" variant="outline" onClick={end} disabled={status === 'idle' || status === 'ended' || status === 'ending'}>
             <PhoneOff className="size-4" />
             结束并总结
           </Button>
@@ -214,6 +215,7 @@ export function RealtimeCoachingCall() {
             <div className="mt-3 flex gap-2">
               <input
                 aria-label="实时检索问题"
+                data-testid="a3-realtime-retrieval-input"
                 value={toolQuery}
                 onChange={(event) => setToolQuery(event.target.value)}
                 onKeyDown={(event) => {
@@ -222,10 +224,23 @@ export function RealtimeCoachingCall() {
                 placeholder="输入要检索的知识点"
                 className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
               />
-              <Button type="button" size="sm" variant="outline" onClick={() => retrieveEvidence(toolQuery || evidenceQueryFallback)}>
-                <FileSearch className="size-4" />
-                检索
+              <Button data-testid="a3-realtime-retrieval-submit" type="button" size="sm" variant="outline" disabled={retrievalProgress.status === 'running'} onClick={() => retrieveEvidence(toolQuery || evidenceQueryFallback)}>
+                {retrievalProgress.status === 'running' ? <Loader2 className="size-4 animate-spin" /> : <FileSearch className="size-4" />}
+                {retrievalProgress.status === 'running' ? '检索中' : '检索'}
               </Button>
+            </div>
+            <div
+              data-testid="a3-qa-retrieval-progress"
+              className={cn(
+                'mt-3 rounded-lg border px-3 py-2 text-xs leading-5',
+                retrievalProgress.status === 'failed'
+                  ? 'border-rose-200 bg-rose-50 text-rose-700'
+                  : retrievalProgress.status === 'succeeded'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : 'border-blue-100 bg-blue-50 text-blue-700',
+              )}
+            >
+              {retrievalProgress.status === 'idle' ? '正在检索本地资料前，会先展示检索阶段和命中数量。' : retrievalProgress.message}
             </div>
             <EvidenceList evidence={evidence} />
           </div>
@@ -242,7 +257,7 @@ export function RealtimeCoachingCall() {
                 <p className="rounded-lg bg-[var(--a3-surface-muted)] px-3 py-2 text-[var(--a3-text-muted)]">开始通话后，这里显示 provider 状态、字幕和工具调用结果。</p>
               )}
             </div>
-            {error && <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>}
+            {error && <p data-testid="a3-realtime-error" className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>}
           </div>
         </div>
       </div>

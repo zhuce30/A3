@@ -100,6 +100,11 @@ async function startOpenMAICJob(
     return apiError('UPSTREAM_ERROR', 502, job.error || 'OpenMAIC 课堂生成任务创建失败');
   }
 
+  const pollUrl = normalizePollUrl(job.pollUrl, request.nextUrl.origin);
+  if (!pollUrl) {
+    return apiError('UPSTREAM_ERROR', 502, 'OpenMAIC 课堂任务已创建，但没有返回可轮询的任务地址。');
+  }
+
   const artifactPayload = buildA3OpenMAICArtifactPayload({
     jobId: job.jobId,
     status: job.status || 'queued',
@@ -118,12 +123,26 @@ async function startOpenMAICJob(
     status: job.status || 'queued',
     step: job.step || 'queued',
     message: job.message || 'OpenMAIC 课堂生成任务已创建',
-    pollUrl: job.pollUrl,
+    pollUrl,
     pollIntervalMs: job.pollIntervalMs ?? 5000,
     startedAt,
     artifact: persisted.artifact,
     traceId: persisted.traceId,
   }, 202);
+}
+
+function normalizePollUrl(pollUrl: string | undefined, requestOrigin: string): string {
+  const value = String(pollUrl || '').trim();
+  if (!value) return '';
+  try {
+    const parsed = new URL(value, requestOrigin);
+    if (parsed.pathname.startsWith('/api/generate-classroom/')) {
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    }
+  } catch {
+    return '';
+  }
+  return '';
 }
 
 function hasServerTTSProvider(): boolean {

@@ -37,6 +37,7 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
 
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
+        self.assertEqual(payload["profile"]["schemaVersion"], "a3.profile-interview.profile.v2")
         self.assertEqual(payload["profile"]["grade"], "大三")
         self.assertEqual(payload["profile"]["majorDirection"], "智能控制与机器人")
         self.assertIn("状态空间", payload["profile"]["weakPoints"])
@@ -47,6 +48,11 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertEqual(dynamic_profile["schemaVersion"], "a3.dynamic-learner-profile.v1")
         self.assertEqual(dynamic_profile["llm"]["provider"], "dashscope")
         self.assertIn("符号方向混淆", dynamic_profile["mistakePatterns"])
+        snapshot = refreshed.extra_profile["profileSnapshot"]
+        self.assertEqual(snapshot["dimensions"]["cognitiveStyle"]["value"], "先看结构图再做例题")
+        self.assertEqual(snapshot["dimensions"]["learningHistory"]["value"], "学过自动控制原理但状态空间掌握不稳")
+        self.assertEqual(snapshot["dimensions"]["motivationRisk"]["value"], "项目截止时间近，存在拖延风险")
+        self.assertIn("符号方向混淆", snapshot["dimensions"]["mistakePatterns"]["value"])
 
     def test_profile_interview_records_stable_dynamic_profile_schema(self):
         with patch("backend.apps.compat.profile_interview._llm_extract_profile_dimensions") as extract:
@@ -498,6 +504,10 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertGreaterEqual(len(by_type["mind_map"]["content"]["nodes"]), 5)
         self.assertGreaterEqual(len(by_type["practice_set"]["content"]["questions"]), 8)
         self.assertGreaterEqual(len(by_type["micro_video_script"]["content"]["shots"]), 7)
+        visual_text = " ".join(str(shot.get("visual") or "") for shot in by_type["micro_video_script"]["content"]["shots"])
+        for banned in ("标题 +", "本地资料摘录", "板书结构", "白板上写", "屏幕文字", "字幕显示", "公式展示", "密集小字", "随机英文"):
+            self.assertNotIn(banned, visual_text)
+        self.assertIn("不出现", visual_text)
         self.assertGreaterEqual(len(by_type["code_lab"]["content"]["steps"]), 5)
         self.assertGreaterEqual(len(by_type["code_lab"]["content"]["checkpoints"]), 4)
         self.assertIn("extension", by_type["code_lab"]["content"])
@@ -505,6 +515,98 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertTrue(all(item["content"]["schemaVersion"] == "a3.resource-content.rich.v1" for item in pack["resources"]))
         self.assertTrue(all(len(item["citations"]) >= 3 for item in pack["resources"]))
         self.assertTrue(all(item["synthesis"]["mode"] in {"rules", "llm"} for item in pack["resources"]))
+
+    def test_deadlock_mind_map_uses_os_specific_exam_structure(self):
+        response = self.client.post(
+            "/api/resources/generate/",
+            data=json.dumps({"goal": "我要学操作系统死锁，画思维导图", "topK": 3, "resourceType": "mind_map"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        pack = response.json()["resourcePack"]
+        mind_map = pack["resources"][0]["content"]
+        labels = [node["label"] for node in mind_map["nodes"]]
+        all_text = json.dumps(mind_map, ensure_ascii=False)
+
+        for expected in ("四个必要条件", "资源分配图", "银行家算法", "检测与解除", "题型路径"):
+            self.assertIn(expected, labels)
+        self.assertIn("markdown", mind_map)
+        self.assertIn("mermaid", mind_map)
+        self.assertIn("请求边", all_text)
+        self.assertIn("安全序列", all_text)
+        self.assertIn("sourceIds", mind_map["nodes"][0])
+
+    @patch.dict("os.environ", {"A3_RESOURCE_LLM_ENABLED": "1", "A3_LLM_API_KEY": "test-key"})
+    def test_mind_map_llm_generation_has_explicit_schema_requirements(self):
+        with patch("backend.apps.compat.resource_generation.chat_completion") as chat:
+            chat.return_value = {
+                "content": json.dumps(
+                    {
+                        "nodes": [
+                            {"label": "四个必要条件", "children": ["互斥", "占有并等待", "不可抢占"], "sourceIds": ["S1"]},
+                            {"label": "资源分配图", "children": ["请求边", "分配边", "有环判断"], "sourceIds": ["S1"]},
+                            {"label": "银行家算法", "children": ["Need", "Available", "安全序列"], "sourceIds": ["S1"]},
+                            {"label": "检测与解除", "children": ["检测", "撤销", "回滚"], "sourceIds": ["S1"]},
+                            {"label": "题型路径", "children": ["概念题", "判断题", "算法题"], "sourceIds": ["S1"]},
+                        ],
+                        "markdown": "# 死锁\n## 四个必要条件\n- 互斥",
+                        "mermaid": "mindmap\n  root((死锁))",
+                    },
+                    ensure_ascii=False,
+                ),
+                "provider": "dashscope",
+                "model": "qwen-plus",
+                "finishReason": "stop",
+            }
+
+            response = self.client.post(
+                "/api/resources/generate/",
+                data=json.dumps({"goal": "操作系统死锁思维导图", "topK": 3, "resourceType": "mind_map"}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(response.json()["resourcePack"]["resources"][0]["synthesis"]["mode"], "llm")
+        llm_payload = json.loads(chat.call_args.args[0][1]["content"])
+        self.assertEqual(llm_payload["resourceType"], "mind_map")
+        self.assertIn("markdown", llm_payload["requirements"]["nodes"])
+        self.assertIn("银行家算法", llm_payload["requirements"]["nodes"])
+
+    @patch.dict("os.environ", {"A3_RESOURCE_LLM_ENABLED": "1", "A3_LLM_API_KEY": "test-key"})
+    def test_mind_map_llm_output_is_repaired_instead_of_degraded_when_markdown_missing(self):
+        with patch("backend.apps.compat.resource_generation.chat_completion") as chat:
+            chat.return_value = {
+                "content": json.dumps(
+                    {
+                        "root": "操作系统死锁",
+                        "nodes": [
+                            {"label": "四个必要条件", "children": ["互斥", "占有并等待", "不可抢占"], "sourceIds": ["S1"]},
+                            {"label": "资源分配图", "children": ["请求边", "分配边", "有环判断"], "sourceIds": ["S1"]},
+                            {"label": "银行家算法", "children": ["Need", "Available", "安全序列"], "sourceIds": ["S1"]},
+                            {"label": "检测与解除", "children": ["检测", "撤销", "回滚"], "sourceIds": ["S1"]},
+                            {"label": "题型路径", "children": ["概念题", "判断题", "算法题"], "sourceIds": ["S1"]},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                "provider": "dashscope",
+                "model": "qwen-plus",
+                "finishReason": "stop",
+            }
+
+            response = self.client.post(
+                "/api/resources/generate/",
+                data=json.dumps({"goal": "操作系统死锁思维导图", "topK": 3, "resourceType": "mind_map"}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        resource = response.json()["resourcePack"]["resources"][0]
+        self.assertEqual(resource["synthesis"]["mode"], "llm")
+        self.assertFalse(resource["synthesis"]["degraded"])
+        self.assertIn("markdown", resource["content"])
+        self.assertIn("mermaid", resource["content"])
 
     @patch.dict("os.environ", {"A3_RESOURCE_LLM_ENABLED": "auto", "A3_RESOURCE_LLM_FULL_PACK_ENABLED": "0", "A3_LLM_API_KEY": "test-key"})
     def test_full_resource_pack_does_not_call_llm_by_default(self):
@@ -695,6 +797,78 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         for step in run.steps.order_by("order"):
             self.assertIn("runtimePolicy", step.metadata)
             self.assertEqual(step.metadata["outputSchema"]["mode"], "agent_output")
+
+    def test_openmaic_video_writeback_truncates_long_resource_pack_log_titles(self):
+        long_goal = "deadlock video " + ("resource generation requirements " * 12)
+        pack_response = self.client.post(
+            "/api/resources/generate/",
+            data=json.dumps({"goal": long_goal, "topK": 3, "resourceType": "micro_video_script"}),
+            content_type="application/json",
+        )
+        self.assertEqual(pack_response.status_code, 201, pack_response.content)
+        pack_id = pack_response.json()["resourcePack"]["resourcePackId"]
+
+        response = self.client.post(
+            f"/api/resources/packs/{pack_id}/openmaic-video/",
+            data=json.dumps(
+                {
+                    "status": "succeeded",
+                    "provider": "seedance",
+                    "resourceType": "micro_video_script",
+                    "videoUrl": "https://example.com/" + ("a" * 260) + ".mp4",
+                    "duration": 10,
+                    "width": 1920,
+                    "height": 1080,
+                    "elapsedMs": 1000,
+                    "degradedReason": "",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        log = ResourcePackLog.objects.get(user=self.user, task_id=f"resource-pack:{pack_id}")
+        self.assertLessEqual(len(log.task_title), 160)
+        self.assertLessEqual(len(log.learning_goal), 160)
+        self.assertEqual(log.payload["multimodalArtifacts"][0]["status"], "succeeded")
+        self.assertIn("videoUrl", log.payload["multimodalArtifacts"][0])
+
+    def test_openmaic_video_writeback_preserves_segmented_partial_artifact(self):
+        pack_response = self.client.post(
+            "/api/resources/generate/",
+            data=json.dumps({"goal": "操作系统死锁 1 分钟讲解视频", "topK": 3, "resourceType": "micro_video_script"}),
+            content_type="application/json",
+        )
+        self.assertEqual(pack_response.status_code, 201, pack_response.content)
+        pack_id = pack_response.json()["resourcePack"]["resourcePackId"]
+
+        response = self.client.post(
+            f"/api/resources/packs/{pack_id}/openmaic-video/",
+            data=json.dumps(
+                {
+                    "status": "partial",
+                    "provider": "seedance",
+                    "resourceType": "micro_video_script",
+                    "videoUrl": "https://example.com/segment-1.mp4",
+                    "duration": 50,
+                    "width": 1920,
+                    "height": 1080,
+                    "elapsedMs": 60000,
+                    "degradedReason": "1 分钟视频分段生成完成：5/6 段成功",
+                    "segments": [
+                        {"index": 1, "title": "导入", "status": "succeeded", "videoUrl": "https://example.com/segment-1.mp4", "duration": 10, "width": 1920, "height": 1080, "degradedReason": ""},
+                        {"index": 2, "title": "概念", "status": "failed", "videoUrl": "", "duration": 10, "width": 0, "height": 0, "degradedReason": "provider timeout"},
+                    ],
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        artifact = response.json()["artifact"]
+        self.assertEqual(artifact["status"], "partial")
+        self.assertEqual(len(artifact["segments"]), 2)
+        self.assertEqual(artifact["segments"][1]["degradedReason"], "provider timeout")
 
     def test_openmaic_pptx_export_artifact_is_written_back_to_resource_pack(self):
         pack_response = self.client.post(

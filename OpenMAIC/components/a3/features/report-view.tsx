@@ -34,6 +34,15 @@ import type { A3ApiResponse, StudyPlan, StudyPlanAdjustment } from '@/lib/a3/lea
 import { A3Card, A3Pill } from '../ui/a3-card';
 import { DynamicProfileInsightPanel } from '@/components/a3/profile/dynamic-profile-insight-panel';
 import type { DynamicProfileInsight } from '@/components/a3/profile/dynamic-profile-insight-panel';
+import {
+  profileSourceLabel,
+  profileStatusLabel,
+  profileStatusTone,
+  summarizeProfileTimelineEntry,
+  summarizeProfileUpdateEvidence,
+  type DynamicProfileFeedResponse,
+  type ProfileTimelineEntry,
+} from '@/lib/a3/profile-timeline';
 
 echarts.use([BarChart, LineChart, RadarChart, GridComponent, LegendComponent, RadarComponent, TooltipComponent, SVGRenderer]);
 
@@ -164,15 +173,6 @@ type LearningEffectTrend = {
   };
 };
 
-type ProfileSnapshotResponse = {
-  success: boolean;
-  error?: string;
-  profile?: {
-    extraProfile?: {
-      dynamicProfile?: DynamicProfileInsight;
-    };
-  };
-};
 type StudyPlanResponse = A3ApiResponse<{ plan: StudyPlan }>;
 type StudyPlanRelationship = NonNullable<StudyPlan['planContext']>['relationship'];
 type ReportPeriod = '7d' | '30d' | 'term';
@@ -193,6 +193,7 @@ export function ReportView() {
   const [optimizationDecisionHistory, setOptimizationDecisionHistory] = useState<OptimizationPolicyDecision[]>([]);
   const [studyPlan, setStudyPlan] = useState<StudyPlan | null>(null);
   const [dynamicProfile, setDynamicProfile] = useState<DynamicProfileInsight | null>(null);
+  const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [reportLoading, setReportLoading] = useState(false);
   const [error, setError] = useState('');
@@ -228,9 +229,12 @@ export function ReportView() {
       if (!active) return;
       if (result.success) setStudyPlan(result.plan ?? null);
     });
-    void a3GetJson<ProfileSnapshotResponse>('/api/profiles/me/').then((result) => {
+    void a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/').then((result) => {
       if (!active) return;
-      if (result.success) setDynamicProfile(result.profile?.extraProfile?.dynamicProfile ?? null);
+      if (result.success) {
+        setProfileFeed(result);
+        setDynamicProfile(result.dynamicProfile ?? null);
+      }
     });
     return () => {
       active = false;
@@ -410,6 +414,7 @@ export function ReportView() {
         <div className="space-y-5" data-testid="a3-report-dynamic-profile">
           <WrongQuestionPanel report={report} />
           <DynamicProfileInsightPanel dynamicProfile={dynamicProfile} compact />
+          <ReportProfileTimelinePanel feed={profileFeed} />
         </div>
       </section>
 
@@ -964,6 +969,66 @@ function WrongQuestionPanel({ report }: { report: LearningReport }) {
       </Button>
     </A3Card>
   );
+}
+
+function ReportProfileTimelinePanel({ feed }: { feed: DynamicProfileFeedResponse | null }) {
+  const timeline = feed?.timeline ?? [];
+  const pending = feed?.confirmationQueue ?? [];
+  return (
+    <A3Card title="画像变化时间线">
+      <div data-testid="a3-report-profile-timeline" className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm leading-6 text-slate-600">报告会同步展示画像随学习行为更新的证据。</p>
+          <A3Pill tone={pending.length ? 'orange' : timeline.length ? 'green' : 'slate'}>
+            {pending.length ? `${pending.length} 条待确认` : timeline.length ? '已记录' : '暂无变化'}
+          </A3Pill>
+        </div>
+        {timeline.length > 0 ? (
+          <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white">
+            {timeline.slice(0, 5).map((item) => (
+              <ReportProfileTimelineItem key={`${item.id}-${item.versionId || item.createdAt}`} item={item} />
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-xl bg-slate-50 px-3 py-3 text-sm leading-6 text-slate-600">
+            完成入学诊断、测评、错题复盘或 AI 课堂后，画像变化会进入这里。
+          </div>
+        )}
+        {pending.length > 0 && (
+          <Button asChild variant="outline" className="w-full">
+            <Link href="/a3/profile-setup">去确认画像变化</Link>
+          </Button>
+        )}
+      </div>
+    </A3Card>
+  );
+}
+
+function ReportProfileTimelineItem({ item }: { item: ProfileTimelineEntry }) {
+  return (
+    <div className="p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-slate-900">{profileSourceLabel(item.source)}</span>
+        <span className={reportProfileStatusClass(item.status)}>{profileStatusLabel(item.status)}</span>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-slate-700">{summarizeProfileTimelineEntry(item)}</p>
+      <p className="mt-1 text-xs leading-5 text-slate-500">{summarizeProfileUpdateEvidence(item)}</p>
+      <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
+        <span>置信度 {Math.round((item.confidence ?? 0) * 100)}%</span>
+        {item.versionNumber ? <span>画像版本 v{item.versionNumber}</span> : null}
+        {item.createdAt && <span>{new Date(item.createdAt).toLocaleDateString('zh-CN')}</span>}
+      </div>
+    </div>
+  );
+}
+
+function reportProfileStatusClass(status: ProfileTimelineEntry['status']) {
+  const tone = profileStatusTone(status);
+  if (tone === 'green') return 'rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700';
+  if (tone === 'orange') return 'rounded-full bg-orange-50 px-2 py-0.5 text-xs font-semibold text-orange-700';
+  if (tone === 'red') return 'rounded-full bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700';
+  if (tone === 'blue') return 'rounded-full bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-700';
+  return 'rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600';
 }
 
 function LearningEffectPanel({ effect, decisionHistory }: { effect: LearningEffectReport; decisionHistory: OptimizationPolicyDecision[] }) {

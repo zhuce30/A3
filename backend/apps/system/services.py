@@ -41,6 +41,7 @@ def build_system_health() -> dict:
         _vector_index_check(),
         _verification_code_check(),
         _celery_check(),
+        _celery_beat_check(),
         _security_check(),
     ]
     statuses = {item["status"] for item in checks}
@@ -127,6 +128,31 @@ def _celery_check() -> dict:
     if broker_url.startswith("redis://") or broker_url == "filesystem://":
         return _check("celery", "ok", "Celery broker is configured", {"broker": _mask_url(broker_url)})
     return _check("celery", "warning", "Celery broker configuration should be reviewed", {"broker": _mask_url(broker_url)})
+
+
+def _celery_beat_check() -> dict:
+    schedule = getattr(settings, "CELERY_BEAT_SCHEDULE", {})
+    entry = schedule.get("a3-evaluate-optimization-policy-outcomes-daily") if isinstance(schedule, dict) else None
+    if not isinstance(entry, dict):
+        return _check(
+            "celeryBeat",
+            "warning",
+            "Optimization policy outcome beat schedule is not registered",
+            {"expectedTask": "learning.evaluate_optimization_policy_outcomes"},
+        )
+    task = str(entry.get("task") or "")
+    kwargs = entry.get("kwargs") if isinstance(entry.get("kwargs"), dict) else {}
+    schedule_value = entry.get("schedule")
+    detail = {
+        "entry": "a3-evaluate-optimization-policy-outcomes-daily",
+        "task": task,
+        "schedule": str(schedule_value),
+        "kwargs": kwargs,
+        "deployment": "docker compose service celery-beat or equivalent scheduler",
+    }
+    if task == "learning.evaluate_optimization_policy_outcomes":
+        return _check("celeryBeat", "ok", "Optimization policy outcome beat schedule is registered", detail)
+    return _check("celeryBeat", "warning", "Optimization policy beat task name should be reviewed", detail)
 
 
 def _security_check() -> dict:

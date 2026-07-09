@@ -20,6 +20,8 @@ PROFILE_SNAPSHOT_DIMENSIONS = [
     "learningGoals",
     "weakPoints",
     "resourcePreferences",
+    "cognitiveStyle",
+    "learningHistory",
     "mistakePatterns",
     "motivationRisk",
     "learningPace",
@@ -64,6 +66,10 @@ _DIMENSION_ALIASES = {
     "expected_resources": "resourcePreferences",
     "preference": "resourcePreferences",
     "preferences": "resourcePreferences",
+    "cognitivestyle": "cognitiveStyle",
+    "cognitive_style": "cognitiveStyle",
+    "learninghistory": "learningHistory",
+    "learning_history": "learningHistory",
     "mistakepatterns": "mistakePatterns",
     "mistake_patterns": "mistakePatterns",
     "mistakepattern": "mistakePatterns",
@@ -160,6 +166,13 @@ def _stable_profile_value(profile: LearnerProfile, dimension: str) -> Any:
             return _merge_unique(expected, preferred_formats, limit=12)
         return expected or _clean_list(preferences, limit=12)
     extra = profile.extra_profile if isinstance(getattr(profile, "extra_profile", None), dict) else {}
+    preferences = getattr(profile, "learning_preferences", {})
+    if dimension == "cognitiveStyle":
+        if isinstance(preferences, dict):
+            return _clean_text(extra.get("cognitiveStyle") or preferences.get("cognitiveStyle") or preferences.get("style") or "")
+        return _clean_text(extra.get("cognitiveStyle", ""))
+    if dimension == "learningHistory":
+        return _clean_text(extra.get("learningHistory", ""))
     if dimension == "mistakePatterns":
         return _clean_list(extra.get("mistakePatterns"), limit=12)
     if dimension == "motivationRisk":

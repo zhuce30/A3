@@ -8,6 +8,7 @@ type DjangoJsonResponse<T> = T & {
 export async function fetchA3DjangoJson<T>(
   path: string,
   cookieHeader: string | null,
+  options: { signal?: AbortSignal } = {},
 ): Promise<DjangoJsonResponse<T>> {
   const response = await fetch(resolveA3DjangoEndpoint(path), {
     method: 'GET',
@@ -16,6 +17,7 @@ export async function fetchA3DjangoJson<T>(
       Accept: 'application/json',
     },
     cache: 'no-store',
+    signal: options.signal,
   });
 
   const data = await response.json().catch(() => ({})) as DjangoJsonResponse<T>;
