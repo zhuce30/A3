@@ -7,6 +7,7 @@ import { DigitalHumanAvatar } from '@/components/a3/features/coaching/digital-hu
 import styles from './a3-product-homepage.module.css';
 
 export const A3_HOMEPAGE_TEACHER_ROOT_MARGIN = '160px';
+export const A3_HOMEPAGE_TEACHER_STABILITY_MS = 120;
 
 const TERMINAL_TEACHER_RENDERERS = new Set([
   'vrm',
@@ -32,6 +33,18 @@ export function shouldActivateTeacherStage(
 
 export function isTerminalTeacherRenderer(renderer: string | null) {
   return renderer !== null && TERMINAL_TEACHER_RENDERERS.has(renderer);
+}
+
+export function deriveTeacherHandoffState(renderer: string | null) {
+  const rendererReady = isTerminalTeacherRenderer(renderer);
+  return { fallbackRequired: !rendererReady, rendererReady };
+}
+
+export function shouldDismissTeacherFallback(
+  rendererReady: boolean,
+  _trigger: 'transition_end' | 'transition_cancel' | 'timeout',
+) {
+  return rendererReady;
 }
 
 export function A3HomepageTeacherStage() {
@@ -62,11 +75,46 @@ export function A3HomepageTeacherStage() {
     const root = rootRef.current;
     if (!active || !root || typeof MutationObserver === 'undefined') return;
 
+    let stabilityTimeoutId: number | null = null;
+    let terminalConfirmed = false;
+    const cancelStabilityCheck = () => {
+      if (stabilityTimeoutId === null) return;
+      window.clearTimeout(stabilityTimeoutId);
+      stabilityTimeoutId = null;
+    };
+    const restoreFallback = () => {
+      cancelStabilityCheck();
+      terminalConfirmed = false;
+      const fallback = root.querySelector<HTMLElement>(
+        '[data-testid="a3-homepage-teacher-fallback"]',
+      );
+      fallback?.classList.remove(styles.teacherFallbackHidden);
+      fallback?.setAttribute('aria-hidden', 'false');
+      setRendererReady(false);
+      setFallbackVisible(true);
+    };
     const updateRendererState = () => {
       const renderer = root.querySelector<HTMLElement>('[data-avatar-renderer]');
-      if (isTerminalTeacherRenderer(renderer?.dataset.avatarRenderer ?? null)) {
-        setRendererReady(true);
+      const handoffState = deriveTeacherHandoffState(renderer?.dataset.avatarRenderer ?? null);
+      if (handoffState.fallbackRequired) {
+        restoreFallback();
+        return;
       }
+      if (terminalConfirmed || stabilityTimeoutId !== null) return;
+
+      stabilityTimeoutId = window.setTimeout(() => {
+        stabilityTimeoutId = null;
+        const currentRenderer = root.querySelector<HTMLElement>('[data-avatar-renderer]');
+        const currentState = deriveTeacherHandoffState(
+          currentRenderer?.dataset.avatarRenderer ?? null,
+        );
+        if (currentState.fallbackRequired) {
+          restoreFallback();
+          return;
+        }
+        terminalConfirmed = true;
+        setRendererReady(true);
+      }, A3_HOMEPAGE_TEACHER_STABILITY_MS);
     };
     const mutationObserver = new MutationObserver(updateRendererState);
 
@@ -78,8 +126,25 @@ export function A3HomepageTeacherStage() {
     });
     updateRendererState();
 
-    return () => mutationObserver.disconnect();
+    return () => {
+      cancelStabilityCheck();
+      mutationObserver.disconnect();
+    };
   }, [active]);
+
+  useEffect(() => {
+    if (!rendererReady) return;
+
+    const timeoutId = window.setTimeout(() => {
+      if (shouldDismissTeacherFallback(rendererReady, 'timeout')) setFallbackVisible(false);
+    }, 350);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [rendererReady]);
+
+  const dismissFallback = (trigger: 'transition_end' | 'transition_cancel') => {
+    if (shouldDismissTeacherFallback(rendererReady, trigger)) setFallbackVisible(false);
+  };
 
   return (
     <div
@@ -98,9 +163,11 @@ export function A3HomepageTeacherStage() {
           <div
             className={`${styles.teacherFallback} ${rendererReady ? styles.teacherFallbackHidden : ''}`}
             data-testid="a3-homepage-teacher-fallback"
+            aria-hidden={rendererReady}
             onTransitionEnd={(event) => {
-              if (rendererReady && event.propertyName === 'opacity') setFallbackVisible(false);
+              if (event.propertyName === 'opacity') dismissFallback('transition_end');
             }}
+            onTransitionCancel={() => dismissFallback('transition_cancel')}
           >
             <Image
               src="/a3/assets/homepage/teacher-fallback.webp"

@@ -62,6 +62,7 @@ const storyApi = storyModule as typeof storyModule & {
 };
 const teacherApi = teacherModule as typeof teacherModule & {
   A3_HOMEPAGE_TEACHER_ROOT_MARGIN?: string;
+  A3_HOMEPAGE_TEACHER_STABILITY_MS?: number;
   A3_HOMEPAGE_TEACHER_DEMO_PROPS?: {
     state: string;
     mode: string;
@@ -72,6 +73,14 @@ const teacherApi = teacherModule as typeof teacherModule & {
     entry: Pick<IntersectionObserverEntry, 'isIntersecting'>,
   ) => boolean;
   isTerminalTeacherRenderer?: (renderer: string | null) => boolean;
+  shouldDismissTeacherFallback?: (
+    rendererReady: boolean,
+    trigger: 'transition_end' | 'transition_cancel' | 'timeout',
+  ) => boolean;
+  deriveTeacherHandoffState?: (renderer: string | null) => {
+    fallbackRequired: boolean;
+    rendererReady: boolean;
+  };
 };
 
 describe('A3 product homepage learning story modules', () => {
@@ -182,6 +191,39 @@ describe('A3 product homepage learning story modules', () => {
     expect(teacherSource).toContain('MutationObserver');
     expect(teacherSource).toContain('mutationObserver.disconnect()');
     expect(teacherSource).toContain('data-testid="a3-homepage-teacher-fallback"');
+  });
+
+  it('removes a hidden fallback on transition cancel or the safety timeout', () => {
+    expect(teacherApi.shouldDismissTeacherFallback).toBeTypeOf('function');
+    expect(teacherApi.shouldDismissTeacherFallback?.(false, 'transition_cancel')).toBe(false);
+    expect(teacherApi.shouldDismissTeacherFallback?.(true, 'transition_cancel')).toBe(true);
+    expect(teacherApi.shouldDismissTeacherFallback?.(true, 'timeout')).toBe(true);
+    expect(teacherSource).toContain('onTransitionCancel');
+    expect(teacherSource).toContain('window.setTimeout');
+    expect(teacherSource).toContain('350');
+    expect(teacherSource).toContain('window.clearTimeout(timeoutId)');
+    expect(teacherSource).toContain('aria-hidden={rendererReady}');
+    expect(homepageCss).toMatch(/\.teacherFallbackHidden\s*\{[^}]*pointer-events:\s*none/);
+    expect(homepageCss).toMatch(
+      /\.teacherFallbackHidden\s*\{[^}]*transition:\s*opacity 220ms ease/,
+    );
+  });
+
+  it('restores the fallback if a renderer returns to loading during handoff', () => {
+    expect(teacherApi.A3_HOMEPAGE_TEACHER_STABILITY_MS).toBe(120);
+    expect(teacherApi.deriveTeacherHandoffState).toBeTypeOf('function');
+    expect(teacherApi.deriveTeacherHandoffState?.('primitive')).toEqual({
+      fallbackRequired: false,
+      rendererReady: true,
+    });
+    expect(teacherApi.deriveTeacherHandoffState?.('loading')).toEqual({
+      fallbackRequired: true,
+      rendererReady: false,
+    });
+    expect(teacherApi.deriveTeacherHandoffState?.(null)).toEqual({
+      fallbackRequired: true,
+      rendererReady: false,
+    });
   });
 
   it('server-renders a useful teacher fallback before the lazy renderer activates', () => {

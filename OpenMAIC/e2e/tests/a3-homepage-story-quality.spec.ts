@@ -1,7 +1,50 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import sharp from 'sharp';
 
 const TERMINAL_RENDERERS = ['vrm', 'vrm_idle_animation', 'primitive', 'static_fallback'];
+
+type HandoffSample = {
+  empty: boolean;
+  fallbackInDom: boolean;
+  loadingExposed: boolean;
+  renderer: string;
+};
+
+async function readCompositedPixelStats(locator: Locator) {
+  const screenshot = await locator.screenshot();
+  const { data } = await sharp(screenshot)
+    .resize(32, 32, { fit: 'fill' })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  let opaque = 0;
+  let minimum = 255;
+  let maximum = 0;
+
+  for (let index = 0; index < data.length; index += 4) {
+    const lightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
+    if (data[index + 3] > 0) opaque += 1;
+    minimum = Math.min(minimum, lightness);
+    maximum = Math.max(maximum, lightness);
+  }
+
+  return { opaque, variance: maximum - minimum };
+}
+
+async function delayTeacherRendererChunk(page: Page) {
+  let delayedRequests = 0;
+
+  await page.route('**/*', async (route) => {
+    const url = decodeURIComponent(route.request().url());
+    if (url.includes('digital-human-three-stage') && /\.js(?:\?|$)/.test(url)) {
+      delayedRequests += 1;
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+    }
+    await route.continue();
+  });
+
+  return () => delayedRequests;
+}
 
 async function installDormantIntersectionObserver(page: Page) {
   await page.addInitScript(() => {
@@ -26,10 +69,10 @@ async function installDormantIntersectionObserver(page: Page) {
 }
 
 async function assertContainedTeacherPortrait(page: Page, screenshotName: string) {
-  const stage = page.getByTestId('a3-homepage-teacher-stage');
+  const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
   await stage.scrollIntoViewIfNeeded();
-  const visual = page.getByTestId('a3-homepage-teacher-visual');
-  const fallback = page.getByTestId('a3-homepage-teacher-fallback');
+  const visual = stage.getByTestId('a3-homepage-teacher-visual');
+  const fallback = stage.getByTestId('a3-homepage-teacher-fallback');
   const image = fallback.locator('img');
 
   await expect(fallback).toBeVisible();
@@ -94,26 +137,28 @@ test('desktop and mobile keep the full real teacher portrait visible before acti
 });
 
 test('teacher fallback covers loading and hands off without an empty frame', async ({ page }) => {
+  const delayedRendererRequests = await delayTeacherRendererChunk(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto('/a3');
-  const stage = page.getByTestId('a3-homepage-teacher-stage');
+  await page.goto('/a3', { waitUntil: 'domcontentloaded' });
+  const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
   await stage.scrollIntoViewIfNeeded();
 
-  const samples = await stage.evaluate(async (root, terminalRenderers) => {
-    const results: Array<{ empty: boolean; loadingExposed: boolean }> = [];
-    const visible = (element: Element | null) => {
-      if (!(element instanceof HTMLElement)) return false;
-      const style = getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      return (
-        style.display !== 'none' &&
-        Number(style.opacity) > 0.05 &&
-        rect.width > 0 &&
-        rect.height > 0
-      );
-    };
+  const samples: HandoffSample[] = [];
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const sample = await stage.evaluate((root, terminalRenderers) => {
+      const visible = (element: Element | null) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return (
+          style.display !== 'none' &&
+          Number(style.opacity) > 0.05 &&
+          rect.width > 0 &&
+          rect.height > 0
+        );
+      };
 
-    for (let index = 0; index < 50; index += 1) {
       const fallback = root.querySelector('[data-testid="a3-homepage-teacher-fallback"]');
       const renderer = root.querySelector('[data-avatar-renderer]');
       const rendererName = renderer?.getAttribute('data-avatar-renderer') ?? '';
@@ -129,22 +174,54 @@ test('teacher fallback covers loading and hands off without an empty frame', asy
         loadingExposed = top === renderer || renderer.contains(top);
       }
 
-      results.push({ empty: !visible(fallback) && !terminalVisible, loadingExposed });
-      await new Promise((resolve) => window.setTimeout(resolve, 50));
-    }
-    return results;
-  }, TERMINAL_RENDERERS);
+      return {
+        empty: !visible(fallback) && !terminalVisible,
+        fallbackInDom: fallback !== null,
+        loadingExposed,
+        renderer: rendererName,
+      };
+    }, TERMINAL_RENDERERS);
+    samples.push(sample);
+    if (!sample.fallbackInDom) break;
+    await page.waitForTimeout(50);
+  }
 
-  expect(samples.some((sample) => sample.empty)).toBe(false);
-  expect(samples.some((sample) => sample.loadingExposed)).toBe(false);
-  await expect(stage.locator('[data-avatar-renderer]').first()).toHaveAttribute(
-    'data-avatar-renderer',
-    new RegExp(TERMINAL_RENDERERS.join('|')),
-    { timeout: 30_000 },
+  expect(delayedRendererRequests()).toBeGreaterThan(0);
+  expect(samples.at(-1)?.fallbackInDom).toBe(false);
+  const observedStates = samples.map((sample) => sample.renderer).filter(Boolean);
+  const loadingIndex = observedStates.indexOf('loading');
+  const terminalIndex = observedStates.findIndex((renderer) =>
+    TERMINAL_RENDERERS.includes(renderer),
   );
-  await expect(page.getByTestId('a3-homepage-teacher-fallback')).toHaveCount(0, {
-    timeout: 5_000,
-  });
+  expect(loadingIndex).toBeGreaterThanOrEqual(0);
+  expect(terminalIndex).toBeGreaterThan(loadingIndex);
+  const emptySamples = samples.filter((item) => item.fallbackInDom && item.empty);
+  expect(emptySamples, JSON.stringify(samples)).toEqual([]);
+  for (const sample of samples.filter((item) => item.fallbackInDom)) {
+    expect(sample.loadingExposed).toBe(false);
+  }
+
+  const terminalRenderer = observedStates.at(-1);
+  expect(TERMINAL_RENDERERS).toContain(terminalRenderer);
+  if (terminalRenderer === 'static_fallback') {
+    const staticFallback = stage.getByTestId('a3-digital-human-static-fallback');
+    await expect(staticFallback).toBeVisible();
+    const stats = await readCompositedPixelStats(staticFallback);
+    expect(stats.opaque).toBeGreaterThan(700);
+    expect(stats.variance).toBeGreaterThan(8);
+  } else {
+    const canvas = stage.getByTestId('a3-digital-human-three-canvas');
+    await expect(canvas).toBeVisible();
+    await expect
+      .poll(
+        async () => {
+          const stats = await readCompositedPixelStats(canvas);
+          return stats.opaque > 700 && stats.variance > 8;
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+  }
 });
 
 test('homepage anchor navigation clears the sticky header', async ({ page }) => {

@@ -551,11 +551,12 @@
   z-index: 2;
   background: #151a1d;
   opacity: 1;
-  transition: opacity 220ms ease;
 }
 
 .teacherFallbackHidden {
   opacity: 0;
+  pointer-events: none;
+  transition: opacity 220ms ease;
 }
 
 .teacherFallback img {
