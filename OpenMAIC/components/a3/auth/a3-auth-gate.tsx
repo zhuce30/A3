@@ -4,31 +4,21 @@ import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { a3GetJson } from '@/lib/a3/api-client';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
+import {
+  A3_FLOW_PATHS,
+  A3_GUEST_PATHS,
+  A3_PUBLIC_PATHS,
+  getA3AuthTarget,
+} from '@/lib/a3/auth-navigation';
 
-const publicPaths = new Set(['/a3']);
-const guestPaths = new Set(['/a3/login', '/a3/register', '/a3/forgot-password']);
-const flowPaths = new Set([
-  '/a3/role-selection',
-  '/a3/phone-binding',
-  '/a3/welcome',
-  '/a3/privacy',
-  '/a3/profile-setup',
-]);
+const publicPaths = A3_PUBLIC_PATHS;
+const guestPaths = A3_GUEST_PATHS;
+const flowPaths = A3_FLOW_PATHS;
 
 const A3CurrentUserContext = createContext<A3PublicUser | null>(null);
 
 export function useA3CurrentUser() {
   return useContext(A3CurrentUserContext);
-}
-
-function nextPathForUser(user: A3PublicUser) {
-  if (!user.role) return '/a3/role-selection';
-  if (user.onboardingStep === 'role') return '/a3/role-selection';
-  if (!user.phoneBound) return '/a3/phone-binding';
-  if (user.onboardingStep === 'welcome') return '/a3/welcome';
-  if (!user.privacyAccepted) return '/a3/privacy';
-  if (!user.profileCompleted) return '/a3/profile-setup';
-  return '/a3/dashboard';
 }
 
 export function A3AuthGate({ children }: { children: React.ReactNode }) {
@@ -68,17 +58,15 @@ export function A3AuthGate({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener('a3-auth-user-updated', handleUserUpdated);
   }, []);
 
-  const target = useMemo(() => {
-    if (isPublicPath) return null;
-    if (user === undefined) return null;
-    if (!user) {
-      return isGuestPath ? null : `/a3/login?next=${encodeURIComponent(pathname)}`;
-    }
-    const nextPath = nextPathForUser(user);
-    if (isGuestPath) return nextPath;
-    if (!isFlowPath && nextPath !== '/a3/dashboard') return nextPath;
-    return null;
-  }, [isFlowPath, isGuestPath, isPublicPath, pathname, user]);
+  const target = useMemo(
+    () =>
+      getA3AuthTarget(pathname, user, {
+        isPublicPath,
+        isGuestPath,
+        isFlowPath,
+      }),
+    [isFlowPath, isGuestPath, isPublicPath, pathname, user],
+  );
 
   useEffect(() => {
     if (target && target !== pathname) router.replace(target);
@@ -107,8 +95,4 @@ export function A3AuthGate({ children }: { children: React.ReactNode }) {
   );
 }
 
-export const A3_SHELL_BYPASS_PATHS = new Set([
-  ...publicPaths,
-  ...guestPaths,
-  ...flowPaths,
-]);
+export { A3_SHELL_BYPASS_PATHS } from '@/lib/a3/auth-navigation';
