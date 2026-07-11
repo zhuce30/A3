@@ -37,7 +37,7 @@ export function isTerminalTeacherRenderer(renderer: string | null) {
 
 export function deriveTeacherHandoffState(renderer: string | null) {
   const rendererReady = isTerminalTeacherRenderer(renderer);
-  return { fallbackRequired: !rendererReady, rendererReady };
+  return { fallbackRequired: !rendererReady || renderer === 'primitive', rendererReady };
 }
 
 export function shouldDismissTeacherFallback(
@@ -72,10 +72,12 @@ export function A3HomepageTeacherStage() {
   const rootRef = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState(false);
   const [rendererReady, setRendererReady] = useState(false);
+  const [preserveFallback, setPreserveFallback] = useState(false);
   const [fallbackVisible, setFallbackVisible] = useState(true);
   const resetToStaticFallback = useCallback(() => {
     setActive(false);
     setRendererReady(false);
+    setPreserveFallback(false);
     setFallbackVisible(true);
   }, []);
   const reducedMotion = useHomepageReducedMotion(resetToStaticFallback);
@@ -120,16 +122,22 @@ export function A3HomepageTeacherStage() {
       fallback?.classList.remove(styles.teacherFallbackHidden);
       fallback?.setAttribute('aria-hidden', 'false');
       setRendererReady(false);
+      setPreserveFallback(false);
       setFallbackVisible(true);
     };
     const updateRendererState = () => {
       const renderer = root.querySelector<HTMLElement>('[data-avatar-renderer]');
       const handoffState = deriveTeacherHandoffState(renderer?.dataset.avatarRenderer ?? null);
-      if (handoffState.fallbackRequired) {
+      if (!handoffState.rendererReady) {
         restoreFallback();
         return;
       }
-      if (terminalConfirmed || stabilityTimeoutId !== null) return;
+      if (terminalConfirmed) {
+        setPreserveFallback(handoffState.fallbackRequired);
+        if (handoffState.fallbackRequired) setFallbackVisible(true);
+        return;
+      }
+      if (stabilityTimeoutId !== null) return;
 
       stabilityTimeoutId = window.setTimeout(() => {
         stabilityTimeoutId = null;
@@ -137,11 +145,13 @@ export function A3HomepageTeacherStage() {
         const currentState = deriveTeacherHandoffState(
           currentRenderer?.dataset.avatarRenderer ?? null,
         );
-        if (currentState.fallbackRequired) {
+        if (!currentState.rendererReady) {
           restoreFallback();
           return;
         }
         terminalConfirmed = true;
+        setPreserveFallback(currentState.fallbackRequired);
+        if (currentState.fallbackRequired) setFallbackVisible(true);
         setRendererReady(true);
       }, A3_HOMEPAGE_TEACHER_STABILITY_MS);
     };
@@ -162,14 +172,14 @@ export function A3HomepageTeacherStage() {
   }, [active, reducedMotion]);
 
   useEffect(() => {
-    if (reducedMotion || !rendererReady) return;
+    if (reducedMotion || !rendererReady || preserveFallback) return;
 
     const timeoutId = window.setTimeout(() => {
       if (shouldDismissTeacherFallback(rendererReady, 'timeout')) setFallbackVisible(false);
     }, 350);
 
     return () => window.clearTimeout(timeoutId);
-  }, [reducedMotion, rendererReady]);
+  }, [preserveFallback, reducedMotion, rendererReady]);
 
   const dismissFallback = (trigger: 'transition_end' | 'transition_cancel') => {
     if (shouldDismissTeacherFallback(rendererReady, trigger)) setFallbackVisible(false);
@@ -190,9 +200,9 @@ export function A3HomepageTeacherStage() {
         ) : null}
         {fallbackVisible ? (
           <div
-            className={`${styles.teacherFallback} ${rendererReady ? styles.teacherFallbackHidden : ''}`}
+            className={`${styles.teacherFallback} ${rendererReady && !preserveFallback ? styles.teacherFallbackHidden : ''}`}
             data-testid="a3-homepage-teacher-fallback"
-            aria-hidden={rendererReady}
+            aria-hidden={rendererReady && !preserveFallback}
             onTransitionEnd={(event) => {
               if (event.propertyName === 'opacity') dismissFallback('transition_end');
             }}

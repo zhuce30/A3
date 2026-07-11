@@ -8,6 +8,7 @@ type HandoffSample = {
   fallbackInDom: boolean;
   loadingExposed: boolean;
   renderer: string;
+  stageRenderer: string;
 };
 
 async function readCompositedPixelStats(locator: Locator) {
@@ -179,15 +180,25 @@ test('teacher fallback covers loading and hands off without an empty frame', asy
         fallbackInDom: fallback !== null,
         loadingExposed,
         renderer: rendererName,
+        stageRenderer: root.getAttribute('data-renderer') ?? '',
       };
     }, TERMINAL_RENDERERS);
     samples.push(sample);
-    if (!sample.fallbackInDom) break;
+    if (
+      !sample.fallbackInDom ||
+      (sample.renderer === 'primitive' && sample.stageRenderer === 'terminal')
+    ) {
+      break;
+    }
     await page.waitForTimeout(50);
   }
 
   expect(delayedRendererRequests()).toBeGreaterThan(0);
-  expect(samples.at(-1)?.fallbackInDom).toBe(false);
+  const finalSample = samples.at(-1);
+  expect(
+    !finalSample?.fallbackInDom ||
+      (finalSample.renderer === 'primitive' && finalSample.stageRenderer === 'terminal'),
+  ).toBe(true);
   const observedStates = samples.map((sample) => sample.renderer).filter(Boolean);
   const loadingIndex = observedStates.indexOf('loading');
   const terminalIndex = observedStates.findIndex((renderer) =>
@@ -203,7 +214,13 @@ test('teacher fallback covers loading and hands off without an empty frame', asy
 
   const terminalRenderer = observedStates.at(-1);
   expect(TERMINAL_RENDERERS).toContain(terminalRenderer);
-  if (terminalRenderer === 'static_fallback') {
+  if (terminalRenderer === 'primitive') {
+    const homepageFallback = stage.getByTestId('a3-homepage-teacher-fallback');
+    await expect(homepageFallback).toBeVisible();
+    const stats = await readCompositedPixelStats(homepageFallback);
+    expect(stats.opaque).toBeGreaterThan(700);
+    expect(stats.variance).toBeGreaterThan(8);
+  } else if (terminalRenderer === 'static_fallback') {
     const staticFallback = stage.getByTestId('a3-digital-human-static-fallback');
     await expect(staticFallback).toBeVisible();
     const stats = await readCompositedPixelStats(staticFallback);

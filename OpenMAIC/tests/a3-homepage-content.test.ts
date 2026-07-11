@@ -232,7 +232,7 @@ describe('A3 product homepage learning story modules', () => {
     expect(teacherSource).toContain('window.setTimeout');
     expect(teacherSource).toContain('350');
     expect(teacherSource).toContain('window.clearTimeout(timeoutId)');
-    expect(teacherSource).toContain('aria-hidden={rendererReady}');
+    expect(teacherSource).toContain('aria-hidden={rendererReady && !preserveFallback}');
     expect(homepageCss).toMatch(/\.teacherFallbackHidden\s*\{[^}]*pointer-events:\s*none/);
     expect(homepageCss).toMatch(
       /\.teacherFallbackHidden\s*\{[^}]*transition:\s*opacity 220ms ease/,
@@ -243,7 +243,7 @@ describe('A3 product homepage learning story modules', () => {
     expect(teacherApi.A3_HOMEPAGE_TEACHER_STABILITY_MS).toBe(120);
     expect(teacherApi.deriveTeacherHandoffState).toBeTypeOf('function');
     expect(teacherApi.deriveTeacherHandoffState?.('primitive')).toEqual({
-      fallbackRequired: false,
+      fallbackRequired: true,
       rendererReady: true,
     });
     expect(teacherApi.deriveTeacherHandoffState?.('loading')).toEqual({

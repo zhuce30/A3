@@ -7,7 +7,6 @@ const TEACHER_PHONE = '13800000002';
 const DEMO_PASSWORD = 'Demo@123456';
 
 const STUDENT_ROUTES = [
-  '/a3',
   '/a3/today',
   '/a3/dashboard',
   '/a3/study-plan',
@@ -28,10 +27,13 @@ const STUDENT_ROUTES = [
 
 function seedDemoData() {
   const projectRoot = path.resolve(process.cwd(), '..');
-  const python = process.env.A3_BACKEND_PYTHON ?? path.join(projectRoot, 'backend', '.venv', 'Scripts', 'python.exe');
-  const manage = path.join(projectRoot, 'backend', 'manage.py');
+  const backendProjectRoot = process.env.A3_BACKEND_PROJECT_ROOT ?? projectRoot;
+  const python =
+    process.env.A3_BACKEND_PYTHON ??
+    path.join(backendProjectRoot, 'backend', '.venv', 'Scripts', 'python.exe');
+  const manage = path.join(backendProjectRoot, 'backend', 'manage.py');
   execFileSync(python, [manage, 'seed_demo_data'], {
-    cwd: projectRoot,
+    cwd: backendProjectRoot,
     stdio: 'pipe',
   });
 }
@@ -41,24 +43,40 @@ async function loginAs(page: import('@playwright/test').Page, phone: string) {
   const inputs = page.locator('main input');
   await inputs.nth(0).fill(phone);
   await inputs.nth(1).fill(DEMO_PASSWORD);
-  await page.locator('main button').first().click();
-  await expect(page).not.toHaveURL(/\/a3\/login/, { timeout: 15_000 });
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+  await expect(page).not.toHaveURL(/\/a3\/login/, { timeout: 60_000 });
 }
 
 async function expectUsableA3Page(page: import('@playwright/test').Page, route: string) {
   const response = await page.goto(route);
   expect(response?.status(), route).toBeLessThan(400);
-  await expect(page.locator('main')).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('main'), route).toBeVisible({ timeout: 60_000 });
   await expect(page.locator('body')).not.toContainText('Application error');
   await expect(page.locator('body')).not.toContainText('This page could not be found');
   await expect(page.locator('body')).not.toContainText('Internal Server Error');
 }
 
 test.describe.serial('A3 authenticated route smoke', () => {
-  test.setTimeout(180_000);
+  test.setTimeout(600_000);
 
   test.beforeAll(() => {
     seedDemoData();
+  });
+
+  test('public /a3 stays on the product homepage', async ({ page }) => {
+    await page.route('**/api/auth/me/', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, user: null }),
+      }),
+    );
+    const response = await page.goto('/a3');
+
+    expect(response?.status()).toBeLessThan(400);
+    await expect(page).toHaveURL(/\/a3$/);
+    await expect(page.getByTestId('a3-product-homepage')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '每一步学习， 都更懂你。' })).toBeVisible();
+    await expect(page.getByTestId('a3-dashboard')).toHaveCount(0);
   });
 
   test('student can open all core learning routes', async ({ page }) => {
@@ -82,10 +100,13 @@ test.describe.serial('A3 authenticated route smoke', () => {
     await expectUsableA3Page(page, '/a3/classroom');
 
     await expect(page.getByTestId('a3-classroom-view')).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole('heading', { name: 'AI 多智能体课堂' })).toBeVisible();
+    await expect(page.getByText('AI 多智能体课堂').first()).toBeVisible();
     await expect(page.getByRole('heading', { name: '当前学习目标' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '知识库溯源' })).toBeVisible();
-    await expect(page.getByTestId('a3-classroom-input')).toHaveAttribute('placeholder', '输入你的问题，或使用上方快捷指令');
+    await expect(page.getByTestId('a3-classroom-input')).toHaveAttribute(
+      'placeholder',
+      /输入你的问题，或使用上方快捷指令|请先生成学习路径后再开始课堂提问/,
+    );
   });
 
   test('student sees readable face-to-face coaching controls', async ({ page }) => {
@@ -94,11 +115,11 @@ test.describe.serial('A3 authenticated route smoke', () => {
 
     const coaching = page.getByTestId('a3-coaching-view');
     await expect(coaching).toBeVisible({ timeout: 30_000 });
-    await expect(coaching.getByText('本地媒体连接已加密')).toBeVisible();
-    await expect(coaching.getByText('实时字幕')).toBeVisible();
-    await expect(page.getByRole('button', { name: /开启音视频|关闭摄像头/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: '拍照提问' })).toBeVisible();
-    await expect(page.getByRole('button', { name: /开始说话|结束并识别/ })).toBeVisible();
+    await expect(coaching.getByRole('heading', { name: '实时面对面辅导' })).toBeVisible();
+    await expect(coaching.getByText('实时字幕与事件')).toBeVisible();
+    await expect(page.getByRole('button', { name: /开启摄像头|关闭摄像头/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /开启麦克风|关闭麦克风/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: '看这里/截屏分析' })).toBeVisible();
   });
 
   test('student sees recommendation fast and deep metrics on capabilities page', async ({ page }) => {

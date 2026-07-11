@@ -141,8 +141,8 @@
 
 .hero {
   position: relative;
-  min-height: calc(100svh - 72px);
-  min-height: calc(100dvh - 72px);
+  min-height: max(660px, calc(100svh - 200px));
+  min-height: max(660px, calc(100dvh - 200px));
   overflow: hidden;
   isolation: isolate;
 }
@@ -332,6 +332,11 @@
   align-items: center;
   gap: clamp(48px, 7vw, 112px);
   padding: 148px 0;
+}
+
+.storySection[data-story='profile'] {
+  align-items: start;
+  padding-top: 48px;
 }
 
 .storySection[data-story='diagnostic'] {
@@ -841,9 +846,9 @@
   }
 
   .hero {
-    height: 760px;
-    min-height: 680px;
-    max-height: 760px;
+    height: 700px;
+    min-height: 660px;
+    max-height: 700px;
   }
 
   .heroCopy {
@@ -939,6 +944,10 @@
 
   .storySection[data-story='diagnostic'] .fullProductFrame {
     grid-row: 2;
+  }
+
+  .storySection[data-story='profile'] {
+    padding-top: 24px;
   }
 
   .storySection[data-story='knowledge'] {
