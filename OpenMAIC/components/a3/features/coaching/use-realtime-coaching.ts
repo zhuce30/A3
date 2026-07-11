@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   A3RealtimeCoachingSession,
   A3RealtimeEvidence,
@@ -55,10 +55,17 @@ type RetrievalProgress = {
   sourceCount?: number;
 };
 
-type RemoteAudioSpeakingTarget = Pick<
-  HTMLAudioElement,
-  'addEventListener' | 'removeEventListener'
->;
+type RemoteAudioSpeakingTarget = {
+  addEventListener: (eventName: string, listener: EventListener) => void;
+  removeEventListener: (eventName: string, listener: EventListener) => void;
+};
+
+type RemoteAudioPlaybackTarget = RemoteAudioSpeakingTarget & {
+  play: () => Promise<void>;
+  pause: () => void;
+  remove: () => void;
+  srcObject: MediaProvider | null;
+};
 
 export function bindRemoteAudioSpeakingState(
   audio: RemoteAudioSpeakingTarget,
@@ -79,6 +86,47 @@ export function bindRemoteAudioSpeakingState(
   };
 }
 
+export function createRemoteAudioSpeakingController(
+  onSpeakingChange: (speaking: boolean) => void,
+) {
+  let generation = 0;
+  let activeAudio: RemoteAudioPlaybackTarget | null = null;
+  let removeSpeakingListeners: (() => void) | null = null;
+
+  const releaseAudio = (audio: RemoteAudioPlaybackTarget) => {
+    audio.pause();
+    audio.srcObject = null;
+    audio.remove();
+  };
+
+  return {
+    attach(audio: RemoteAudioPlaybackTarget) {
+      const currentGeneration = ++generation;
+      removeSpeakingListeners?.();
+      if (activeAudio && activeAudio !== audio) releaseAudio(activeAudio);
+      activeAudio = audio;
+      removeSpeakingListeners = bindRemoteAudioSpeakingState(audio, (speaking) => {
+        if (generation === currentGeneration && activeAudio === audio) {
+          onSpeakingChange(speaking);
+        }
+      });
+      void audio.play().catch(() => {
+        if (generation === currentGeneration && activeAudio === audio) {
+          onSpeakingChange(false);
+        }
+      });
+    },
+    dispose(notify = true) {
+      generation += 1;
+      removeSpeakingListeners?.();
+      removeSpeakingListeners = null;
+      if (activeAudio) releaseAudio(activeAudio);
+      activeAudio = null;
+      if (notify) onSpeakingChange(false);
+    },
+  };
+}
+
 export function useRealtimeCoaching() {
   const [status, setStatus] = useState<A3RealtimeStatus>('idle');
   const [session, setSession] = useState<A3RealtimeCoachingSession | null>(null);
@@ -96,6 +144,8 @@ export function useRealtimeCoaching() {
     status: 'idle',
     message: '等待检索本地资料',
   });
+  const mountedRef = useRef(true);
+  const assistantSpeakingRef = useRef(false);
   const coachingSessionId = session?.coachingSessionId;
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -105,7 +155,9 @@ export function useRealtimeCoaching() {
   const videoSenderRef = useRef<RTCRtpSender | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
-  const remoteAudioSpeakingCleanupRef = useRef<(() => void) | null>(null);
+  const remoteAudioSpeakingControllerRef = useRef<ReturnType<
+    typeof createRemoteAudioSpeakingController
+  > | null>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -121,6 +173,11 @@ export function useRealtimeCoaching() {
   const pendingSpeechCommitRef = useRef(false);
   const speechCommitTimerRef = useRef<number | null>(null);
   const lastAudioLevelUpdateRef = useRef(0);
+
+  const updateAssistantSpeaking = useCallback((speaking: boolean) => {
+    assistantSpeakingRef.current = speaking;
+    if (mountedRef.current) setAssistantSpeaking(speaking);
+  }, []);
 
   const attachCameraStream = useCallback(() => {
     if (cameraVideoRef.current) cameraVideoRef.current.srcObject = cameraStreamRef.current;
@@ -175,17 +232,17 @@ export function useRealtimeCoaching() {
     source.buffer = audioBuffer;
     source.connect(audioContext.destination);
     activePlaybackSourcesRef.current.add(source);
-    setAssistantSpeaking(true);
+    updateAssistantSpeaking(true);
     source.onended = () => {
       activePlaybackSourcesRef.current.delete(source);
-      if (!activePlaybackSourcesRef.current.size) setAssistantSpeaking(false);
+      if (!activePlaybackSourcesRef.current.size) updateAssistantSpeaking(false);
     };
     const startAt = Math.max(audioContext.currentTime + 0.02, playbackCursorRef.current);
     source.start(startAt);
     playbackCursorRef.current = startAt + audioBuffer.duration;
-  }, []);
+  }, [updateAssistantSpeaking]);
 
-  const stopRealtimePlayback = useCallback(() => {
+  const stopRealtimePlayback = useCallback((resetUi = true) => {
     activePlaybackSourcesRef.current.forEach((source) => {
       try {
         source.stop(0);
@@ -195,8 +252,8 @@ export function useRealtimeCoaching() {
     });
     activePlaybackSourcesRef.current.clear();
     playbackCursorRef.current = 0;
-    setAssistantSpeaking(false);
-  }, []);
+    if (resetUi) updateAssistantSpeaking(false);
+  }, [updateAssistantSpeaking]);
 
   const sendRealtimeCancel = useCallback(() => {
     const event = JSON.stringify({
@@ -345,17 +402,16 @@ export function useRealtimeCoaching() {
         const audio = remoteAudioRef.current || document.createElement('audio');
         audio.autoplay = true;
         audio.srcObject = event.streams[0];
-        remoteAudioSpeakingCleanupRef.current?.();
-        remoteAudioSpeakingCleanupRef.current = bindRemoteAudioSpeakingState(
-          audio,
-          setAssistantSpeaking,
-        );
+        const speakingController =
+          remoteAudioSpeakingControllerRef.current ||
+          createRemoteAudioSpeakingController(updateAssistantSpeaking);
+        remoteAudioSpeakingControllerRef.current = speakingController;
         if (!remoteAudioRef.current) {
           audio.style.display = 'none';
           document.body.appendChild(audio);
           remoteAudioRef.current = audio;
         }
-        void audio.play().catch(() => setAssistantSpeaking(false));
+        speakingController.attach(audio);
       };
       const dataChannel = peer.createDataChannel('a3-realtime-events');
       dataChannelRef.current = dataChannel;
@@ -369,9 +425,15 @@ export function useRealtimeCoaching() {
       videoSenderRef.current = null;
       return false;
     }
-  }, [ensureAudioStream, exchangePeerSdp, getActiveVideoTrack, handleRealtimeEvent]);
+  }, [
+    ensureAudioStream,
+    exchangePeerSdp,
+    getActiveVideoTrack,
+    handleRealtimeEvent,
+    updateAssistantSpeaking,
+  ]);
 
-  const stopDashScopeAudioStreaming = useCallback(() => {
+  const stopDashScopeAudioStreaming = useCallback((resetUi = true) => {
     audioStreamingRef.current = false;
     clearManualAudioCommitTimer();
     pendingSpeechCommitRef.current = false;
@@ -389,9 +451,11 @@ export function useRealtimeCoaching() {
     playbackAudioContextRef.current = null;
     playbackCursorRef.current = 0;
     activePlaybackSourcesRef.current.clear();
-    setAssistantSpeaking(false);
-    setAudioLevel(0);
-  }, [clearManualAudioCommitTimer]);
+    if (resetUi) {
+      updateAssistantSpeaking(false);
+      setAudioLevel(0);
+    }
+  }, [clearManualAudioCommitTimer, updateAssistantSpeaking]);
 
   const startDashScopeAudioStreaming = useCallback(async (socket: WebSocket) => {
     if (audioStreamingRef.current) return true;
@@ -567,16 +631,31 @@ export function useRealtimeCoaching() {
     setStatus(connected ? 'live' : 'degraded');
   }, [connectRealtimePeer, connectRealtimeWebSocket]);
 
-  const stopMediaTracks = useCallback(() => {
-    stopRealtimePlayback();
+  const stopMediaTracks = useCallback((resetUi = true) => {
+    stopRealtimePlayback(resetUi);
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
     screenStreamRef.current?.getTracks().forEach((track) => track.stop());
+    if (peerRef.current) peerRef.current.ontrack = null;
     peerRef.current?.close();
+    if (dataChannelRef.current) dataChannelRef.current.onmessage = null;
+    dataChannelRef.current?.close();
+    if (websocketRef.current) {
+      websocketRef.current.onopen = null;
+      websocketRef.current.onmessage = null;
+      websocketRef.current.onerror = null;
+      websocketRef.current.onclose = null;
+    }
     websocketRef.current?.close();
-    stopDashScopeAudioStreaming();
-    remoteAudioSpeakingCleanupRef.current?.();
-    remoteAudioSpeakingCleanupRef.current = null;
-    remoteAudioRef.current?.remove();
+    stopDashScopeAudioStreaming(resetUi);
+    if (remoteAudioSpeakingControllerRef.current) {
+      remoteAudioSpeakingControllerRef.current.dispose();
+    } else if (remoteAudioRef.current) {
+      remoteAudioRef.current.pause();
+      remoteAudioRef.current.srcObject = null;
+      remoteAudioRef.current.remove();
+    }
+    remoteAudioSpeakingControllerRef.current = null;
+    updateAssistantSpeaking(false);
     cameraStreamRef.current = null;
     screenStreamRef.current = null;
     peerRef.current = null;
@@ -586,10 +665,20 @@ export function useRealtimeCoaching() {
     remoteAudioRef.current = null;
     if (cameraVideoRef.current) cameraVideoRef.current.srcObject = null;
     if (screenVideoRef.current) screenVideoRef.current.srcObject = null;
-    setCameraEnabled(false);
-    setMicrophoneEnabled(false);
-    setScreenEnabled(false);
-  }, [stopDashScopeAudioStreaming, stopRealtimePlayback]);
+    if (resetUi) {
+      setCameraEnabled(false);
+      setMicrophoneEnabled(false);
+      setScreenEnabled(false);
+    }
+  }, [stopDashScopeAudioStreaming, stopRealtimePlayback, updateAssistantSpeaking]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stopMediaTracks(false);
+    };
+  }, [stopMediaTracks]);
 
   const persistRealtimeTranscript = useCallback(async () => {
     if (!session?.coachingSessionId) return;

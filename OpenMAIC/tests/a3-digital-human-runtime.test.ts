@@ -129,4 +129,17 @@ describe('A3 digital teacher runtime decisions', () => {
       "import { DigitalHumanThreeStage } from './digital-human-three-stage'",
     );
   });
+
+  it('registers a component-unmount teardown that does not update dead UI state', () => {
+    const hookSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'components/a3/features/coaching/use-realtime-coaching.ts'),
+      'utf8',
+    );
+
+    expect(hookSource).toMatch(
+      /useEffect\(\(\) => \{[\s\S]*mountedRef\.current = false;[\s\S]*stopMediaTracks\(false\);/,
+    );
+    expect(hookSource).toContain('dataChannelRef.current?.close()');
+    expect(hookSource).toContain('remoteAudioSpeakingControllerRef.current.dispose()');
+  });
 });

@@ -66,6 +66,12 @@ test.describe('A3 digital teacher resilience', () => {
       const stage = page.getByTestId('a3-digital-human-three-stage');
       await expect(avatar).toBeVisible({ timeout: 60_000 });
       await expect(stage).toBeVisible({ timeout: 60_000 });
+      await expect(stage).not.toHaveAttribute('data-avatar-renderer', 'loading', {
+        timeout: 60_000,
+      });
+      expect(['vrm', 'vrm_idle_animation', 'primitive', 'static_fallback']).toContain(
+        await stage.getAttribute('data-avatar-renderer'),
+      );
 
       const avatarBox = await avatar.boundingBox();
       const stageBox = await stage.boundingBox();
