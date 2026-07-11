@@ -45,6 +45,38 @@ describe('DigitalHumanAvatar', () => {
     expect(html).toContain('scaleY(1.72)');
   });
 
+  it('keeps the listening avatar silent when stale speech cues remain', () => {
+    const html = renderToStaticMarkup(createElement(DigitalHumanAvatar, {
+      state: 'listening',
+      mode: 'local_vrm',
+      audioLevel: 0.8,
+      assistantSpeaking: false,
+      providerLabel: 'openai_realtime_webrtc',
+      modelLabel: 'gpt-realtime-2',
+      speechCues: [{
+        id: 'stale-cue',
+        source: 'tts_viseme',
+        startsAtMs: 0,
+        endsAtMs: 1_000,
+        viseme: 'aa',
+        energy: 1,
+      }],
+    }));
+    const stageSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'components/a3/features/coaching/digital-human-three-stage.tsx'),
+      'utf8',
+    );
+    const resolverSource = stageSource.slice(
+      stageSource.indexOf('function resolveVrmSpeechVisemes'),
+      stageSource.indexOf('function resolveBlinkWeight'),
+    );
+
+    expect(html).toContain('data-state="listening"');
+    expect(html).toContain('scaleY(0.35)');
+    expect(resolverSource.indexOf('if (!signal.assistantSpeaking) return visemeWeights;'))
+      .toBeLessThan(resolverSource.indexOf('resolveSpeechCueVisemeWeights'));
+  });
+
   it('renders a Three.js stage for the local 3D avatar route', () => {
     const html = renderToStaticMarkup(createElement(DigitalHumanAvatar, {
       state: 'listening',

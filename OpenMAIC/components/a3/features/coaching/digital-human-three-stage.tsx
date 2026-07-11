@@ -282,14 +282,13 @@ function resolveSpeechCueVisemeWeights(speechCues: A3DigitalHumanSpeechCue[], no
 }
 
 function resolveVrmSpeechVisemes(signal: AvatarSignal, elapsedSeconds: number): Record<VrmMouthExpression, number> {
+  const visemeWeights = emptyVisemeWeights();
+  if (!signal.assistantSpeaking) return visemeWeights;
+
   const cueWeights = typeof performance !== 'undefined'
     ? resolveSpeechCueVisemeWeights(signal.speechCues, performance.now())
     : null;
   if (cueWeights) return cueWeights;
-
-  const visemeWeights = emptyVisemeWeights();
-
-  if (!signal.assistantSpeaking) return visemeWeights;
 
   const normalizedLevel = clampAudioLevel(signal.audioLevel);
   const envelope = Math.max(normalizedLevel, 0.16 + (Math.sin(elapsedSeconds * 18) + 1) * 0.06);
