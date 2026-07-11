@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
+import { installCaptureRequestPolicy } from './a3-homepage-capture-policy.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = path.resolve(scriptDir, '..');
@@ -11,8 +12,7 @@ const baseURL = (process.env.A3_CAPTURE_BASE_URL ?? 'http://127.0.0.1:3000').rep
 const password = process.env.A3_CAPTURE_PASSWORD ?? 'Demo@123456';
 const defaultViewport = { width: 1440, height: 1000 };
 
-const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-const capturedWrites = [];
+const blockedWrites = [];
 const failedResponses = [];
 const browserErrors = [];
 
@@ -102,13 +102,6 @@ const teacherAssets = [
 
 function watchPage(page) {
   let monitorFailedResponses = false;
-
-  page.on('request', (request) => {
-    if (!unsafeMethods.has(request.method())) return;
-    const pathname = new URL(request.url()).pathname;
-    if (pathname === '/api/auth/login/' || pathname.startsWith('/__nextjs_')) return;
-    capturedWrites.push(`${request.method()} ${request.url()}`);
-  });
 
   page.on('pageerror', (error) => {
     if (monitorFailedResponses) browserErrors.push(error.message);
@@ -223,6 +216,9 @@ async function captureForAccount(browser, identifier, assets) {
     reducedMotion: 'reduce',
     colorScheme: 'light',
   });
+  await installCaptureRequestPolicy(context, {
+    onBlockedWrite: (write) => blockedWrites.push(write),
+  });
   const page = await context.newPage();
   const monitorFailedResponses = watchPage(page);
 
@@ -245,8 +241,12 @@ try {
   await browser.close();
 }
 
-if (capturedWrites.length) {
-  throw new Error(`Capture attempted forbidden business writes:\n${capturedWrites.join('\n')}`);
+if (blockedWrites.length) {
+  throw new Error(
+    `Capture blocked forbidden business writes before sending:\n${blockedWrites
+      .map((write) => `${write.method} ${write.url}`)
+      .join('\n')}`,
+  );
 }
 
 if (failedResponses.length) {
