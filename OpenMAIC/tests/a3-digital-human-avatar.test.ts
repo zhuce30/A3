@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { DigitalHumanAvatar } from '@/components/a3/features/coaching/digital-human-avatar';
+import { DigitalHumanThreeStage } from '@/components/a3/features/coaching/digital-human-three-stage';
 import {
   A3_DIGITAL_HUMAN_AVATAR_MODES,
   A3_DIGITAL_HUMAN_AVATAR_STATES,
@@ -38,7 +39,7 @@ describe('DigitalHumanAvatar', () => {
   });
 
   it('marks the avatar as speaking when assistant audio is active', () => {
-    const html = renderToStaticMarkup(
+    const avatarHtml = renderToStaticMarkup(
       createElement(DigitalHumanAvatar, {
         state: 'speaking',
         mode: 'local_3d',
@@ -48,14 +49,21 @@ describe('DigitalHumanAvatar', () => {
         modelLabel: 'gpt-realtime-2',
       }),
     );
+    const stageHtml = renderToStaticMarkup(
+      createElement(DigitalHumanThreeStage, {
+        state: 'speaking',
+        audioLevel: 0.72,
+        assistantSpeaking: true,
+      }),
+    );
 
-    expect(html).toContain('data-state="speaking"');
-    expect(html).toContain('data-testid="a3-digital-human-mouth"');
-    expect(html).toContain('scaleY(1.72)');
+    expect(avatarHtml).toContain('data-state="speaking"');
+    expect(stageHtml).toContain('data-testid="a3-digital-human-mouth"');
+    expect(stageHtml).toContain('scaleY(1.72)');
   });
 
   it('keeps the listening avatar silent when stale speech cues remain', () => {
-    const html = renderToStaticMarkup(
+    const avatarHtml = renderToStaticMarkup(
       createElement(DigitalHumanAvatar, {
         state: 'listening',
         mode: 'local_vrm',
@@ -63,6 +71,23 @@ describe('DigitalHumanAvatar', () => {
         assistantSpeaking: false,
         providerLabel: 'openai_realtime_webrtc',
         modelLabel: 'gpt-realtime-2',
+        speechCues: [
+          {
+            id: 'stale-cue',
+            source: 'tts_viseme',
+            startsAtMs: 0,
+            endsAtMs: 1_000,
+            viseme: 'aa',
+            energy: 1,
+          },
+        ],
+      }),
+    );
+    const stageHtml = renderToStaticMarkup(
+      createElement(DigitalHumanThreeStage, {
+        state: 'listening',
+        audioLevel: 0.8,
+        assistantSpeaking: false,
         speechCues: [
           {
             id: 'stale-cue',
@@ -84,8 +109,8 @@ describe('DigitalHumanAvatar', () => {
       stageSource.indexOf('function resolveBlinkWeight'),
     );
 
-    expect(html).toContain('data-state="listening"');
-    expect(html).toContain('scaleY(0.35)');
+    expect(avatarHtml).toContain('data-state="listening"');
+    expect(stageHtml).toContain('scaleY(0.35)');
     expect(
       resolverSource.indexOf('if (!signal.assistantSpeaking) return visemeWeights;'),
     ).toBeLessThan(resolverSource.indexOf('resolveSpeechCueVisemeWeights'));
@@ -93,13 +118,10 @@ describe('DigitalHumanAvatar', () => {
 
   it('renders a Three.js stage for the local 3D avatar route', () => {
     const html = renderToStaticMarkup(
-      createElement(DigitalHumanAvatar, {
+      createElement(DigitalHumanThreeStage, {
         state: 'listening',
-        mode: 'local_3d',
         audioLevel: 0.24,
         assistantSpeaking: false,
-        providerLabel: 'dashscope_qwen_omni_realtime',
-        modelLabel: 'qwen3.5-omni-plus-realtime',
       }),
     );
 

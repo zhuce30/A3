@@ -75,7 +75,7 @@ type DigitalHumanThreeStageProps = {
   speechCues?: A3DigitalHumanSpeechCue[];
 };
 
-type ActiveAvatarRenderer = 'vrm' | 'vrm_idle_animation' | 'primitive';
+type ActiveAvatarRenderer = 'vrm' | 'vrm_idle_animation' | 'primitive' | 'static_fallback';
 type IdleAnimationState = 'pending' | 'loaded' | 'missing' | 'unavailable';
 type TeacherActionState = 'pending' | 'loaded' | 'missing' | 'unavailable';
 
@@ -608,6 +608,7 @@ export function DigitalHumanThreeStage({
   const [idleAnimationState, setIdleAnimationState] = useState<IdleAnimationState>('pending');
   const [activeAction, setActiveAction] = useState<TeacherVrmActionKey>('idle');
   const [activeActionState, setActiveActionState] = useState<TeacherActionState>('pending');
+  const [webglUnavailable, setWebglUnavailable] = useState(false);
   const normalizedLevel = clampAudioLevel(audioLevel);
   const mouthScale = assistantSpeaking ? 1 + normalizedLevel : 0.35;
 
@@ -630,7 +631,16 @@ export function DigitalHumanThreeStage({
     setIdleAnimationState('pending');
     setActiveActionState('pending');
 
-    const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    } catch {
+      setActiveRenderer('static_fallback');
+      setIdleAnimationState('unavailable');
+      setActiveActionState('unavailable');
+      setWebglUnavailable(true);
+      return;
+    }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(canvas.clientWidth || 360, canvas.clientHeight || 280, false);
 
@@ -856,12 +866,28 @@ export function DigitalHumanThreeStage({
       data-avatar-action-state={activeActionState}
       className="relative z-10 h-[420px] w-full max-w-[820px] overflow-hidden bg-transparent md:h-[500px] xl:h-[560px]"
     >
-      <canvas
-        ref={canvasRef}
-        data-testid="a3-digital-human-three-canvas"
-        className="mx-auto block h-full w-full md:w-[46%] md:min-w-[360px] md:max-w-[460px]"
-        aria-label="3D 数字助教"
-      />
+      {webglUnavailable ? (
+        <div
+          data-testid="a3-digital-human-static-fallback"
+          role="img"
+          aria-label="静态数字助教"
+          className="flex h-full w-full flex-col items-center justify-center px-6 text-white"
+        >
+          <div className="flex size-32 items-center justify-center rounded-full border border-white/35 bg-slate-950/35 text-4xl font-semibold shadow-[0_20px_70px_rgba(15,23,42,0.3)] backdrop-blur-xl">
+            智
+          </div>
+          <p className="mt-4 rounded-full border border-white/20 bg-slate-950/40 px-4 py-2 text-xs backdrop-blur-lg">
+            当前设备暂以静态教师形象显示
+          </p>
+        </div>
+      ) : (
+        <canvas
+          ref={canvasRef}
+          data-testid="a3-digital-human-three-canvas"
+          className="mx-auto block h-full w-full md:w-[46%] md:min-w-[360px] md:max-w-[460px]"
+          aria-label="3D 数字助教"
+        />
+      )}
       <div className="pointer-events-none absolute left-4 top-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-slate-950/55 px-3 py-1.5 text-xs text-slate-200 shadow-lg shadow-slate-950/20">
         <span
           className={cn(

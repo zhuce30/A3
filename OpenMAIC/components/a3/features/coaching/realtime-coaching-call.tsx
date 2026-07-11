@@ -149,8 +149,8 @@ export function RealtimeCoachingCall() {
         </div>
       </div>
 
-      <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_360px] 2xl:grid-cols-[minmax(0,1fr)_420px]">
-        <div className="bg-slate-950 p-5 text-white">
+      <div className="grid gap-0 min-[1800px]:grid-cols-[minmax(0,1fr)_420px]">
+        <div className="bg-slate-950 p-2 text-white sm:p-5">
           <div className="relative flex min-h-[620px] flex-col overflow-hidden rounded-[22px] border border-white/10 bg-[#080f1f] shadow-inner">
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_18%,rgba(37,99,235,0.30),transparent_34%),linear-gradient(180deg,rgba(15,23,42,0),rgba(2,6,23,0.78))]" />
             <div className="absolute inset-x-8 top-20 h-px bg-gradient-to-r from-transparent via-white/12 to-transparent" />
@@ -184,7 +184,7 @@ export function RealtimeCoachingCall() {
               </div>
             </div>
 
-            <div className="relative z-10 grid flex-1 gap-4 p-5 xl:grid-cols-[minmax(0,1fr)_210px]">
+            <div className="relative z-10 grid flex-1 gap-4 p-3 sm:p-5 xl:grid-cols-[minmax(0,1fr)_210px]">
               <div className="relative min-h-[420px] overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035] text-center">
                 <DigitalHumanAvatar
                   state={avatarState}

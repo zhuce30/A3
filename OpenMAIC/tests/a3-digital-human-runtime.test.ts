@@ -113,4 +113,20 @@ describe('A3 digital teacher runtime decisions', () => {
     expect(stageSource).toContain('disposeTeacherAction');
     expect(a3EntrySource).not.toMatch(/(?:from|require\()[^\n]*digital-human/);
   });
+
+  it('loads the Three stage client-side behind a fixed-size semantic fallback', () => {
+    const avatarSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'components/a3/features/coaching/digital-human-avatar.tsx'),
+      'utf8',
+    );
+
+    expect(avatarSource).toMatch(/dynamic\(\s*\(\) => import\('\.\/digital-human-three-stage'\)/);
+    expect(avatarSource).toContain('ssr: false');
+    expect(avatarSource).toContain('data-avatar-renderer="loading"');
+    expect(avatarSource).toContain('data-testid="a3-digital-human-three-stage"');
+    expect(avatarSource).toContain('h-[420px]');
+    expect(avatarSource).not.toContain(
+      "import { DigitalHumanThreeStage } from './digital-human-three-stage'",
+    );
+  });
 });

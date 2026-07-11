@@ -1,8 +1,32 @@
 'use client';
 
+import dynamic from 'next/dynamic';
 import { cn } from '@/lib/utils';
 import type { A3DigitalHumanAvatarProps } from '@/lib/a3/digital-human-types';
-import { DigitalHumanThreeStage } from './digital-human-three-stage';
+
+const DigitalHumanThreeStage = dynamic(
+  () => import('./digital-human-three-stage').then((module) => module.DigitalHumanThreeStage),
+  {
+    ssr: false,
+    loading: DigitalHumanStageLoading,
+  },
+);
+
+function DigitalHumanStageLoading() {
+  return (
+    <div
+      data-testid="a3-digital-human-three-stage"
+      data-avatar-renderer="loading"
+      role="status"
+      aria-label="数字助教加载中"
+      className="relative z-10 flex h-[420px] w-full max-w-[820px] items-center justify-center bg-transparent md:h-[500px] xl:h-[560px]"
+    >
+      <span className="rounded-full border border-white/20 bg-slate-950/40 px-4 py-2 text-xs text-white backdrop-blur-lg">
+        数字助教加载中
+      </span>
+    </div>
+  );
+}
 
 const stateCopy: Record<string, string> = {
   idle: '待开始',
@@ -37,14 +61,28 @@ export function DigitalHumanAvatar({
     >
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_28%,rgba(255,255,255,0.34),transparent_24%),radial-gradient(circle_at_82%_22%,rgba(30,64,175,0.20),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.08),rgba(15,23,42,0.26))]" />
       <div className="absolute left-5 top-5 z-20 flex items-center gap-2 rounded-full border border-white/30 bg-slate-950/42 px-3 py-1.5 text-xs text-white shadow-lg backdrop-blur-xl">
-        <span className={cn('size-2 rounded-full', state === 'speaking' ? 'bg-emerald-400' : state === 'error' ? 'bg-rose-400' : 'bg-slate-500')} />
+        <span
+          className={cn(
+            'size-2 rounded-full',
+            state === 'speaking'
+              ? 'bg-emerald-400'
+              : state === 'error'
+                ? 'bg-rose-400'
+                : 'bg-slate-500',
+          )}
+        />
         {displayState}
       </div>
       <div className="absolute left-5 top-14 z-20 max-w-[72%] truncate rounded-full border border-white/25 bg-white/18 px-3 py-1.5 text-xs text-white shadow-lg backdrop-blur-xl md:left-auto md:right-5 md:top-5 md:max-w-[46%]">
         {providerLabel} · {modelLabel}
       </div>
 
-      <DigitalHumanThreeStage state={state} audioLevel={audioLevel} assistantSpeaking={assistantSpeaking} speechCues={speechCues} />
+      <DigitalHumanThreeStage
+        state={state}
+        audioLevel={audioLevel}
+        assistantSpeaking={assistantSpeaking}
+        speechCues={speechCues}
+      />
 
       <div className="sr-only">
         <div className="text-base font-semibold text-white">数字助教</div>
