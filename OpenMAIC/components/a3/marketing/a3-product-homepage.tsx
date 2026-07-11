@@ -11,6 +11,7 @@ import {
   A3_HOMEPAGE_ROUTES,
 } from './a3-homepage-content';
 import { A3HomepageHero } from './a3-homepage-hero';
+import { A3HomepageStory } from './a3-homepage-story';
 import styles from './a3-product-homepage.module.css';
 
 export function A3ProductHomepage() {
@@ -113,6 +114,7 @@ export function A3ProductHomepage() {
 
       <main>
         <A3HomepageHero />
+        <A3HomepageStory />
       </main>
     </div>
   );

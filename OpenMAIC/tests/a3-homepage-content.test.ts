@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createElement } from 'react';
+import { Children, createElement } from 'react';
+import type { ButtonHTMLAttributes, ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import sharp from 'sharp';
 import { describe, expect, it, vi } from 'vitest';
@@ -13,6 +14,8 @@ import {
   A3_HOMEPAGE_STORY,
 } from '@/components/a3/marketing/a3-homepage-content';
 import { A3HomepageHero } from '@/components/a3/marketing/a3-homepage-hero';
+import * as storyModule from '@/components/a3/marketing/a3-homepage-story';
+import * as teacherModule from '@/components/a3/marketing/a3-homepage-teacher-stage';
 import { A3ProductHomepage } from '@/components/a3/marketing/a3-product-homepage';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
 
@@ -31,6 +34,175 @@ const expectedAssets = [
   'teacher-workbench.webp',
   'teacher-fallback.webp',
 ];
+
+const marketingDir = path.resolve(process.cwd(), 'components/a3/marketing');
+const homepageSource = fs.readFileSync(path.join(marketingDir, 'a3-product-homepage.tsx'), 'utf8');
+const storySource = fs.readFileSync(path.join(marketingDir, 'a3-homepage-story.tsx'), 'utf8');
+const teacherSource = fs.readFileSync(
+  path.join(marketingDir, 'a3-homepage-teacher-stage.tsx'),
+  'utf8',
+);
+const homepageCss = fs.readFileSync(
+  path.join(marketingDir, 'a3-product-homepage.module.css'),
+  'utf8',
+);
+
+type ClassroomMode = 'lesson' | 'citations';
+type ClassroomControlProps = {
+  mode: ClassroomMode;
+  onChange: (mode: ClassroomMode) => void;
+};
+type ClassroomControlElement = ReactElement<{
+  children: ReactElement<ButtonHTMLAttributes<HTMLButtonElement>>[];
+}>;
+
+const storyApi = storyModule as typeof storyModule & {
+  A3ClassroomModeControl?: (props: ClassroomControlProps) => ClassroomControlElement;
+  A3ClassroomModeDetails?: (props: { mode: ClassroomMode }) => ReactElement;
+};
+const teacherApi = teacherModule as typeof teacherModule & {
+  A3_HOMEPAGE_TEACHER_ROOT_MARGIN?: string;
+  A3_HOMEPAGE_TEACHER_DEMO_PROPS?: {
+    state: string;
+    mode: string;
+    audioLevel: number;
+    assistantSpeaking: boolean;
+  };
+  shouldActivateTeacherStage?: (
+    entry: Pick<IntersectionObserverEntry, 'isIntersecting'>,
+  ) => boolean;
+};
+
+describe('A3 product homepage learning story modules', () => {
+  it('provides dedicated story and lazy teacher-stage modules', () => {
+    expect(fs.existsSync(path.join(marketingDir, 'a3-homepage-story.tsx'))).toBe(true);
+    expect(fs.existsSync(path.join(marketingDir, 'a3-homepage-teacher-stage.tsx'))).toBe(true);
+  });
+
+  it('renders the approved story sequence, anchors and real routes in the homepage', () => {
+    authState.user = null;
+    const markup = renderToStaticMarkup(createElement(A3ProductHomepage));
+    const orderedIds = [
+      'profile',
+      'diagnostic',
+      'knowledge',
+      'classroom',
+      'coaching',
+      'evidence',
+      'teacher',
+    ];
+    const positions = orderedIds.map((id) => markup.indexOf(`data-testid="a3-homepage-${id}"`));
+
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
+    for (const anchor of ['capabilities', 'learning-loop', 'evidence', 'contact']) {
+      expect(markup).toContain(`id="${anchor}"`);
+    }
+    expect(markup).toContain('href="/a3/coaching"');
+    expect(markup).toContain('href="/a3/teacher"');
+    expect(markup).toContain('href="/a3/register"');
+  });
+
+  it('keeps product screenshots complete and the page horizontally contained', () => {
+    expect(homepageCss).toMatch(/\.fullProductFrame\s*\{[^}]*aspect-ratio:/);
+    expect(homepageCss).toMatch(/\.fullProductFrame img\s*\{[^}]*object-fit:\s*contain/);
+    expect(homepageCss).toMatch(/\.page\s*\{[^}]*overflow-x:\s*clip/);
+    expect(homepageCss).not.toMatch(/font-size:\s*[^;]*(vw|cqw)/);
+  });
+
+  it('shows the knowledge base as the source-to-learning visual center', () => {
+    const Story = storyModule.A3HomepageStory;
+    const markup = renderToStaticMarkup(createElement(Story));
+
+    expect(markup).toContain('aria-label="知识库学习依据流向"');
+    for (const label of [
+      '操作系统课本',
+      '课程 PPT',
+      '知识总结',
+      '本地知识库',
+      '课堂',
+      '引用',
+      '学习计划',
+    ]) {
+      expect(markup).toContain(label);
+    }
+    expect(storySource).not.toContain('<svg');
+  });
+
+  it('changes the read-only classroom presentation without calling a product API', () => {
+    expect(storyApi.A3ClassroomModeControl).toBeTypeOf('function');
+    expect(storyApi.A3ClassroomModeDetails).toBeTypeOf('function');
+    if (!storyApi.A3ClassroomModeControl || !storyApi.A3ClassroomModeDetails) return;
+
+    const onChange = vi.fn();
+    const control = storyApi.A3ClassroomModeControl({ mode: 'lesson', onChange });
+    const buttons = Children.toArray(control.props.children) as ReactElement<
+      ButtonHTMLAttributes<HTMLButtonElement>
+    >[];
+
+    expect(buttons.map((button) => button.props['aria-pressed'])).toEqual([true, false]);
+    buttons[1]?.props.onClick?.({} as React.MouseEvent<HTMLButtonElement>);
+    expect(onChange).toHaveBeenCalledWith('citations');
+
+    const citationMarkup = renderToStaticMarkup(
+      storyApi.A3ClassroomModeDetails({ mode: 'citations' }),
+    );
+    expect(citationMarkup).toContain('操作系统 / 第 3 章 / 课程 PPT');
+    expect(citationMarkup).toContain('进程调度 / 知识总结');
+    expect(storySource).not.toContain('a3PostJson');
+    expect(storySource).not.toContain('/api/resources/generate/');
+  });
+
+  it('activates the silent local teacher only when the stage approaches the viewport', () => {
+    expect(teacherApi.A3_HOMEPAGE_TEACHER_ROOT_MARGIN).toBe('160px');
+    expect(teacherApi.shouldActivateTeacherStage).toBeTypeOf('function');
+    expect(teacherApi.shouldActivateTeacherStage?.({ isIntersecting: false })).toBe(false);
+    expect(teacherApi.shouldActivateTeacherStage?.({ isIntersecting: true })).toBe(true);
+    expect(teacherApi.A3_HOMEPAGE_TEACHER_DEMO_PROPS).toMatchObject({
+      state: 'listening',
+      mode: 'local_vrm',
+      audioLevel: 0,
+      assistantSpeaking: false,
+    });
+    expect(teacherSource).toContain('IntersectionObserver');
+    expect(teacherSource).toContain('ssr: false');
+  });
+
+  it('server-renders a useful teacher fallback before the lazy renderer activates', () => {
+    const markup = renderToStaticMarkup(createElement(teacherModule.A3HomepageTeacherStage));
+
+    expect(markup).toContain('%2Fa3%2Fassets%2Fhomepage%2Fteacher-fallback.webp');
+    expect(markup).toContain('正在倾听：进程调度为什么会发生饥饿？');
+    expect(markup).toContain('href="/a3/coaching"');
+    expect(markup).toContain('data-testid="a3-homepage-teacher-stage"');
+  });
+
+  it('uses only approved evidence and keeps team details in the footer', () => {
+    authState.user = null;
+    const markup = renderToStaticMarkup(createElement(A3ProductHomepage));
+    const footerStart = markup.indexOf('<footer');
+
+    expect(storySource).toContain('A3_HOMEPAGE_EVIDENCE.map');
+    expect(markup).toContain('每一步，<br/>都有据可循。');
+    for (const value of A3_HOMEPAGE_EVIDENCE.map((item) => item.value)) {
+      expect(markup.match(new RegExp(value, 'g'))).toHaveLength(1);
+    }
+    expect(markup.indexOf(A3_HOMEPAGE_FOOTER.team)).toBeGreaterThan(footerStart);
+    expect(markup.indexOf(A3_HOMEPAGE_FOOTER.competition)).toBeGreaterThan(footerStart);
+    expect(markup).toContain(`href="mailto:${A3_HOMEPAGE_FOOTER.email}"`);
+  });
+
+  it('keeps private implementation details and capture APIs out of the public story', () => {
+    const combined = `${homepageSource}\n${storySource}\n${teacherSource}`;
+
+    expect(combined).not.toContain('OpenMAIC');
+    expect(combined).not.toMatch(/[A-Z]:\\\\/);
+    expect(combined).not.toContain('signedUrl');
+    expect(combined).not.toMatch(
+      /getUserMedia|mediaDevices|AudioContext|webkitAudioContext|new Audio\(|<audio/i,
+    );
+  });
+});
 
 describe('A3 product homepage assets', () => {
   it('ships every real product image used by the homepage', () => {
