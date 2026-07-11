@@ -30,6 +30,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { A3ReviewLoginPanel } from '@/components/a3/auth/a3-review-login-panel';
 import { A3TopActions } from '@/components/a3/layout/a3-top-actions';
 import { useVerificationCode } from '@/components/a3/auth/use-verification-code';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
@@ -388,7 +389,20 @@ function ErrorBox({ message }: { message: string }) {
   return <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{message}</div>;
 }
 
-export function LoginPage() {
+export function getA3LoginDestination(
+  user: ApiResult['user'],
+  returnTo: string | null,
+) {
+  return user?.profileCompleted && returnTo ? returnTo : nextPath(user);
+}
+
+export function LoginPage({
+  reviewMode = false,
+  returnTo = null,
+}: {
+  reviewMode?: boolean;
+  returnTo?: string | null;
+}) {
   const router = useRouter();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
@@ -396,64 +410,76 @@ export function LoginPage() {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  function fillDemoAccount(role: 'student' | 'teacher') {
-    setError('');
-    if (role === 'student') {
-      setIdentifier('13800000001');
-      setPassword('Demo@123456');
-      return;
-    }
-    setIdentifier('13800000002');
-    setPassword('Demo@123456');
-  }
-
   async function submit() {
     setError('');
+    if (!identifier.trim() || !password.trim()) {
+      setError('请输入账号和密码后再登录');
+      return;
+    }
     setSubmitting(true);
     const result = await postJson('/api/auth/login/', { identifier, password });
     setSubmitting(false);
     if (!result.success) return setError(result.error ?? '登录失败');
     syncA3User(result.user);
-    router.push(nextPath(result.user));
+    router.push(getA3LoginDestination(result.user, returnTo));
   }
 
   return (
     <AuthFrame>
-      <FormCard title="欢迎回来" subtitle="登录后继续今日学习、AI 辅导和错题复盘。">
+      <FormCard
+        title={reviewMode ? '进入评审体验' : '欢迎回来'}
+        subtitle={
+          reviewMode
+            ? '登录预置学生账号，查看从诊断到反馈的完整学习过程。'
+            : '使用已开通的账号，继续今天的学习。'
+        }
+      >
+        {reviewMode ? (
+          <A3ReviewLoginPanel
+            onFill={({ identifier: nextIdentifier, password: nextPassword }) => {
+              setIdentifier(nextIdentifier);
+              setPassword(nextPassword);
+              setError('');
+            }}
+          />
+        ) : null}
         <div className="space-y-5">
-          <div className="relative">
-            <FieldIcon icon={User} />
-            <Input className="h-14 pl-12 text-base" value={identifier} onChange={(event) => setIdentifier(event.target.value)} placeholder="手机号 / 邮箱 / 学号" />
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold text-slate-900">演示账号</div>
-                <div className="mt-0.5 text-xs text-slate-500">一键填入，便于本地测试和答辩演示。</div>
-              </div>
-              <div className="flex shrink-0 gap-2">
-                <Button data-testid="a3-login-demo-student" type="button" variant="outline" className="h-9 rounded-lg bg-white px-3 text-sm" onClick={() => fillDemoAccount('student')}>
-                  学生
-                </Button>
-                <Button data-testid="a3-login-demo-teacher" type="button" variant="outline" className="h-9 rounded-lg bg-white px-3 text-sm" onClick={() => fillDemoAccount('teacher')}>
-                  教师
-                </Button>
-              </div>
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-700">账号</span>
+            <div className="relative">
+              <FieldIcon icon={User} />
+              <Input
+                className="h-14 pl-12 text-base"
+                value={identifier}
+                onChange={(event) => setIdentifier(event.target.value)}
+                placeholder="手机号 / 邮箱 / 学号"
+                autoComplete="username"
+              />
             </div>
-          </div>
-          <div className="relative">
-            <FieldIcon icon={Lock} />
-            <Input className="h-14 pl-12 pr-14 text-base" type={showPassword ? 'text' : 'password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="密码" />
-            <button
-              type="button"
-              aria-label={showPassword ? '隐藏密码' : '显示密码'}
-              aria-pressed={showPassword}
-              onClick={() => setShowPassword((current) => !current)}
-              className="absolute right-3 top-1/2 flex size-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-            >
-              {showPassword ? <EyeOff className="size-5" /> : <Eye className="size-5" />}
-            </button>
-          </div>
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-700">密码</span>
+            <div className="relative">
+              <FieldIcon icon={Lock} />
+              <Input
+                className="h-14 pl-12 pr-14 text-base"
+                type={showPassword ? 'text' : 'password'}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="密码"
+                autoComplete="current-password"
+              />
+              <button
+                type="button"
+                aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                aria-pressed={showPassword}
+                onClick={() => setShowPassword((current) => !current)}
+                className="absolute right-3 top-1/2 flex size-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                {showPassword ? <EyeOff className="size-5" /> : <Eye className="size-5" />}
+              </button>
+            </div>
+          </label>
           <div className="flex items-center justify-between text-sm">
             <label className="flex items-center gap-2 text-slate-600">
               <input type="checkbox" defaultChecked className="size-4 accent-blue-600" />
@@ -462,8 +488,8 @@ export function LoginPage() {
             <Link href="/a3/forgot-password" className="font-medium text-blue-600">忘记密码？</Link>
           </div>
           <ErrorBox message={error} />
-          <Button disabled={submitting} onClick={submit} className="h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg hover:from-blue-700 hover:to-violet-700">
-            {submitting ? '登录中...' : '登录'}
+          <Button type="button" disabled={submitting} onClick={() => void submit()} className="h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg hover:from-blue-700 hover:to-violet-700">
+            {submitting ? <><Loader2 className="size-4 animate-spin" />登录中...</> : '登录'}
           </Button>
           <div className="text-center text-sm text-slate-500">
             还没有账号？ <Link href="/a3/register" className="font-semibold text-blue-600">立即注册</Link>
