@@ -1,16 +1,33 @@
 import { chromium } from '@playwright/test';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
+import {
+  hasHeaderClearance,
+  inspectRasterBuffer,
+  runAtomicAssetCapture,
+  validateHomepageAssetDirectory,
+} from './a3-homepage-asset-pipeline.mjs';
 import { installCaptureRequestPolicy } from './a3-homepage-capture-policy.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = path.resolve(scriptDir, '..');
 const outputDir = path.join(projectDir, 'public/a3/assets/homepage');
-const baseURL = (process.env.A3_CAPTURE_BASE_URL ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
+const temporaryRoot = path.join(projectDir, '.tmp');
+const baseURL = (process.env.A3_CAPTURE_BASE_URL ?? 'http://localhost:3002').replace(/\/$/, '');
+const loginOrigin = new URL(process.env.A3_CAPTURE_LOGIN_ORIGIN ?? 'http://localhost:8000').origin;
+const studentIdentifier = process.env.A3_CAPTURE_STUDENT_IDENTIFIER ?? '13800000001';
+const teacherIdentifier = process.env.A3_CAPTURE_TEACHER_IDENTIFIER ?? '13800000002';
 const password = process.env.A3_CAPTURE_PASSWORD ?? 'Demo@123456';
 const defaultViewport = { width: 1440, height: 1000 };
+const expectedAssets = [
+  'profile.webp',
+  'diagnostic.webp',
+  'knowledge-base.webp',
+  'classroom.webp',
+  'teacher-workbench.webp',
+  'teacher-fallback.webp',
+];
 
 const blockedWrites = [];
 const failedResponses = [];
@@ -46,6 +63,7 @@ const studentAssets = [
     testId: 'a3-classroom-view',
     focusTestId: 'a3-classroom-dialogue',
     focusAncestor: 'section',
+    avoidStickyHeader: true,
     viewport: { width: 1920, height: 1080 },
     ready: async (page) => {
       await page.getByTestId('a3-classroom-input').waitFor({ timeout: 60_000 });
@@ -121,8 +139,33 @@ function watchPage(page) {
   };
 }
 
+async function openVerifiedLoginPage(page) {
+  try {
+    await page.goto(`${baseURL}/a3/login`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  } catch (error) {
+    throw new Error(
+      `无法访问 A3 截图服务 ${baseURL}。请确认目标实例已启动，并通过 A3_CAPTURE_BASE_URL 显式选择实例。${error instanceof Error ? ` ${error.message}` : ''}`,
+    );
+  }
+  if (new URL(page.url()).origin !== new URL(baseURL).origin) {
+    throw new Error(`A3 截图服务发生跨 origin 跳转：${page.url()}`);
+  }
+  try {
+    await page
+      .getByTestId('a3-login-learning-preview')
+      .waitFor({ state: 'visible', timeout: 15_000 });
+    await page.locator('main input').nth(1).waitFor({ state: 'visible', timeout: 15_000 });
+    await page.getByRole('button', { name: '登录', exact: true }).waitFor({
+      state: 'visible',
+      timeout: 15_000,
+    });
+  } catch {
+    throw new Error(`目标 ${baseURL} 不是可用的 A3 登录实例：缺少智学引擎产品标记或真实登录表单。`);
+  }
+}
+
 async function login(page, identifier) {
-  await page.goto(`${baseURL}/a3/login`, { waitUntil: 'domcontentloaded' });
+  await openVerifiedLoginPage(page);
   const inputs = page.locator('main input');
   await inputs.nth(0).fill(identifier);
   await inputs.nth(1).fill(password);
@@ -130,7 +173,64 @@ async function login(page, identifier) {
   await page.waitForURL((url) => !url.pathname.endsWith('/a3/login'), { timeout: 60_000 });
 }
 
-async function capture(page, asset) {
+async function positionBelowStickyHeader(page, target, filename) {
+  const header = page.locator('header').first();
+  if (!(await header.isVisible().catch(() => false))) return;
+  const initialHeaderBox = await header.boundingBox();
+  if (!initialHeaderBox) return;
+  const offset = Math.ceil(initialHeaderBox.height + 16);
+  await target.evaluate((element, scrollMarginTop) => {
+    element.style.scrollMarginTop = `${scrollMarginTop}px`;
+    element.scrollIntoView({ block: 'start', inline: 'nearest' });
+  }, offset);
+  await page.waitForTimeout(150);
+
+  let targetBox = await target.boundingBox();
+  let headerBox = await header.boundingBox();
+  if (!targetBox || !headerBox) throw new Error(`${filename} geometry could not be measured`);
+  let headerBottom = headerBox.y + headerBox.height;
+  if (!hasHeaderClearance(targetBox.y, headerBottom, 8)) {
+    const correction = headerBottom + 8 - targetBox.y;
+    await page.evaluate((pixels) => window.scrollBy(0, -pixels), correction);
+    await page.waitForTimeout(100);
+    targetBox = await target.boundingBox();
+    headerBox = await header.boundingBox();
+    if (!targetBox || !headerBox) throw new Error(`${filename} geometry could not be remeasured`);
+    headerBottom = headerBox.y + headerBox.height;
+  }
+  if (!hasHeaderClearance(targetBox.y, headerBottom, 8)) {
+    throw new Error(
+      `${filename} overlaps the sticky header (targetTop=${targetBox.y}, headerBottom=${headerBottom})`,
+    );
+  }
+}
+
+async function captureWebglCanvas(page, testId, filename) {
+  const canvas = page.getByTestId(testId);
+  await canvas.waitFor({ state: 'visible', timeout: 60_000 });
+  let lastInspection = { alphaRatio: 0, luminanceVariance: 0, valid: false };
+
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    const dataUrl = await canvas.evaluate(
+      (element) =>
+        new Promise((resolve) => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => resolve(element.toDataURL('image/png')));
+          });
+        }),
+    );
+    const png = Buffer.from(dataUrl.split(',', 2)[1], 'base64');
+    lastInspection = await inspectRasterBuffer(png);
+    if (lastInspection.valid) return png;
+    await page.waitForTimeout(250 * attempt);
+  }
+
+  throw new Error(
+    `${filename} WebGL canvas stayed blank after retries (alpha=${lastInspection.alphaRatio.toFixed(3)}, variance=${lastInspection.luminanceVariance.toFixed(2)})`,
+  );
+}
+
+async function capture(page, asset, assetOutputDir) {
   await page.setViewportSize(asset.viewport ?? defaultViewport);
   await page.goto(`${baseURL}${asset.route}`, { waitUntil: 'domcontentloaded' });
   const pageTarget = page.getByTestId(asset.testId).first();
@@ -148,7 +248,11 @@ async function capture(page, asset) {
   }
   await target.waitFor({ state: 'visible', timeout: 60_000 });
   await page.evaluate(() => document.fonts.ready);
-  await target.scrollIntoViewIfNeeded();
+  if (asset.avoidStickyHeader) {
+    await positionBelowStickyHeader(page, target, asset.filename);
+  } else {
+    await target.scrollIntoViewIfNeeded();
+  }
   await page.waitForTimeout(asset.filename === 'teacher-fallback.webp' ? 2_000 : 400);
 
   const targetText = await target.innerText();
@@ -177,13 +281,7 @@ async function capture(page, asset) {
 
   let png;
   if (asset.canvasTestId) {
-    const dataUrl = await page.getByTestId(asset.canvasTestId).evaluate(
-      (canvas) =>
-        new Promise((resolve) => {
-          requestAnimationFrame(() => resolve(canvas.toDataURL('image/png')));
-        }),
-    );
-    png = Buffer.from(dataUrl.split(',', 2)[1], 'base64');
+    png = await captureWebglCanvas(page, asset.canvasTestId, asset.filename);
   } else {
     png = await target.screenshot({ type: 'png', animations: 'disabled' });
   }
@@ -195,8 +293,8 @@ async function capture(page, asset) {
   const height = Math.min(asset.height, metadata.height - top);
   if (height < 360) throw new Error(`${asset.filename} crop is only ${height}px tall`);
 
-  const outputPath = path.join(outputDir, asset.filename);
-  await sharp(png)
+  const outputPath = path.join(assetOutputDir, asset.filename);
+  const result = await sharp(png)
     .extract({ left: 0, top, width: metadata.width, height })
     .resize({
       width: asset.resizeWidth ?? 1440,
@@ -204,20 +302,20 @@ async function capture(page, asset) {
     })
     .webp({ quality: 84, effort: 5 })
     .toFile(outputPath);
-
-  const result = await sharp(outputPath).metadata();
   console.log(`${asset.filename}: ${result.width}x${result.height}`);
 }
 
-async function captureForAccount(browser, identifier, assets) {
+async function captureForAccount(browser, identifier, assets, assetOutputDir) {
   const context = await browser.newContext({
     viewport: defaultViewport,
     deviceScaleFactor: 1,
     reducedMotion: 'reduce',
     colorScheme: 'light',
+    serviceWorkers: 'block',
   });
   await installCaptureRequestPolicy(context, {
-    allowedOrigin: new URL(baseURL).origin,
+    captureOrigin: new URL(baseURL).origin,
+    loginOrigin,
     onBlockedWrite: (write) => blockedWrites.push(write),
   });
   const page = await context.newPage();
@@ -226,34 +324,40 @@ async function captureForAccount(browser, identifier, assets) {
   try {
     await login(page, identifier);
     monitorFailedResponses();
-    for (const asset of assets) await capture(page, asset);
+    for (const asset of assets) await capture(page, asset, assetOutputDir);
   } finally {
     await context.close();
   }
 }
 
-await fs.mkdir(outputDir, { recursive: true });
-const browser = await chromium.launch();
+await runAtomicAssetCapture({
+  outputDir,
+  temporaryRoot,
+  captureAssets: async (temporaryDir) => {
+    const browser = await chromium.launch();
+    try {
+      await captureForAccount(browser, studentIdentifier, studentAssets, temporaryDir);
+      await captureForAccount(browser, teacherIdentifier, teacherAssets, temporaryDir);
+    } finally {
+      await browser.close();
+    }
 
-try {
-  await captureForAccount(browser, '13800000001', studentAssets);
-  await captureForAccount(browser, '13800000002', teacherAssets);
-} finally {
-  await browser.close();
-}
-
-if (blockedWrites.length) {
-  throw new Error(
-    `Capture blocked forbidden business writes before sending:\n${blockedWrites
-      .map((write) => `${write.method} ${write.url}`)
-      .join('\n')}`,
-  );
-}
-
-if (failedResponses.length) {
-  throw new Error(`Capture observed failed page or API responses:\n${failedResponses.join('\n')}`);
-}
-
-if (browserErrors.length) {
-  throw new Error(`Capture observed browser errors:\n${browserErrors.join('\n')}`);
-}
+    if (blockedWrites.length) {
+      throw new Error(
+        `Capture blocked forbidden business writes before sending:\n${blockedWrites
+          .map((write) => `${write.method} ${write.url}`)
+          .join('\n')}`,
+      );
+    }
+    if (failedResponses.length) {
+      throw new Error(
+        `Capture observed failed page or API responses:\n${failedResponses.join('\n')}`,
+      );
+    }
+    if (browserErrors.length) {
+      throw new Error(`Capture observed browser errors:\n${browserErrors.join('\n')}`);
+    }
+  },
+  validateAssets: async (temporaryDir) =>
+    validateHomepageAssetDirectory({ assetDir: temporaryDir, expectedAssets }),
+});

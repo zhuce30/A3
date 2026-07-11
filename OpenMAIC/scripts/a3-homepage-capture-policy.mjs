@@ -1,33 +1,40 @@
-const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const LOGIN_PATH = '/api/auth/login/';
 const ALLOWED_INTERNAL_WRITE_PATHS = new Set(['/__nextjs_original-stack-frames']);
 
-export function classifyCaptureRequest(method, url, { allowedOrigin } = {}) {
+export function classifyCaptureRequest(method, url, { captureOrigin, loginOrigin } = {}) {
   const normalizedMethod = String(method).toUpperCase();
-  if (!WRITE_METHODS.has(normalizedMethod)) {
+  if (READ_METHODS.has(normalizedMethod)) {
     return { action: 'continue', reason: 'read' };
   }
 
-  const requestUrl = new URL(url);
-  const normalizedAllowedOrigin = allowedOrigin ? new URL(allowedOrigin).origin : '';
-  if (!normalizedAllowedOrigin || requestUrl.origin !== normalizedAllowedOrigin) {
+  if (normalizedMethod !== 'POST') {
     return { action: 'abort', reason: 'forbidden-write' };
   }
 
+  const requestUrl = new URL(url);
   const pathname = requestUrl.pathname;
-  if (normalizedMethod === 'POST' && pathname === LOGIN_PATH) {
+  const normalizedCaptureOrigin = captureOrigin ? new URL(captureOrigin).origin : '';
+  const normalizedLoginOrigin = loginOrigin ? new URL(loginOrigin).origin : '';
+  if (pathname === LOGIN_PATH && requestUrl.origin === normalizedLoginOrigin) {
     return { action: 'continue', reason: 'login' };
   }
-  if (normalizedMethod === 'POST' && ALLOWED_INTERNAL_WRITE_PATHS.has(pathname)) {
+  if (ALLOWED_INTERNAL_WRITE_PATHS.has(pathname) && requestUrl.origin === normalizedCaptureOrigin) {
     return { action: 'continue', reason: 'internal' };
   }
   return { action: 'abort', reason: 'forbidden-write' };
 }
 
-export async function installCaptureRequestPolicy(context, { allowedOrigin, onBlockedWrite }) {
+export async function installCaptureRequestPolicy(
+  context,
+  { captureOrigin, loginOrigin, onBlockedWrite },
+) {
   await context.route('**/*', async (route) => {
     const request = route.request();
-    const policy = classifyCaptureRequest(request.method(), request.url(), { allowedOrigin });
+    const policy = classifyCaptureRequest(request.method(), request.url(), {
+      captureOrigin,
+      loginOrigin,
+    });
     if (policy.action === 'abort') {
       onBlockedWrite({ method: request.method(), url: request.url() });
       await route.abort('blockedbyclient');
