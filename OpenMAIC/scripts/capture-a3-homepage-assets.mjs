@@ -217,6 +217,7 @@ async function captureForAccount(browser, identifier, assets) {
     colorScheme: 'light',
   });
   await installCaptureRequestPolicy(context, {
+    allowedOrigin: new URL(baseURL).origin,
     onBlockedWrite: (write) => blockedWrites.push(write),
   });
   const page = await context.newPage();

@@ -14,10 +14,17 @@ type BlockedWrite = {
 
 async function loadCapturePolicy() {
   return (await import('../scripts/a3-homepage-capture-policy.mjs')) as {
-    classifyCaptureRequest: (method: string, url: string) => CaptureRequestPolicy;
+    classifyCaptureRequest: (
+      method: string,
+      url: string,
+      options: { allowedOrigin: string },
+    ) => CaptureRequestPolicy;
     installCaptureRequestPolicy: (
       context: import('@playwright/test').BrowserContext,
-      options: { onBlockedWrite: (write: BlockedWrite) => void },
+      options: {
+        allowedOrigin: string;
+        onBlockedWrite: (write: BlockedWrite) => void;
+      },
     ) => Promise<void>;
   };
 }
@@ -25,29 +32,55 @@ async function loadCapturePolicy() {
 describe('A3 homepage capture request policy', () => {
   it('allows reads and the exact login endpoint while denying other writes', async () => {
     const { classifyCaptureRequest } = await loadCapturePolicy();
+    const classify = (method: string, url: string) =>
+      classifyCaptureRequest(method, url, { allowedOrigin: 'http://127.0.0.1' });
 
-    expect(classifyCaptureRequest('GET', 'http://127.0.0.1/api/learning/classroom/')).toEqual({
+    expect(classify('GET', 'http://127.0.0.1/api/learning/classroom/')).toEqual({
       action: 'continue',
       reason: 'read',
     });
-    expect(classifyCaptureRequest('POST', 'http://127.0.0.1/api/auth/login/')).toEqual({
+    expect(classify('POST', 'http://127.0.0.1/api/auth/login/')).toEqual({
       action: 'continue',
       reason: 'login',
     });
+    expect(classify('POST', 'http://127.0.0.1/__nextjs_original-stack-frames')).toEqual({
+      action: 'continue',
+      reason: 'internal',
+    });
+    expect(classify('DELETE', 'http://127.0.0.1/__nextjs_original-stack-frames')).toEqual({
+      action: 'abort',
+      reason: 'forbidden-write',
+    });
+    expect(classify('POST', 'http://127.0.0.1/api/business-write')).toEqual({
+      action: 'abort',
+      reason: 'forbidden-write',
+    });
+    expect(classify('PATCH', 'http://127.0.0.1/api/auth/login/')).toEqual({
+      action: 'abort',
+      reason: 'forbidden-write',
+    });
+  });
+
+  it('blocks a login POST sent to a different origin', async () => {
+    const { classifyCaptureRequest } = await loadCapturePolicy();
+
     expect(
-      classifyCaptureRequest('POST', 'http://127.0.0.1/__nextjs_original-stack-frames'),
-    ).toEqual({ action: 'continue', reason: 'internal' });
-    expect(
-      classifyCaptureRequest('DELETE', 'http://127.0.0.1/__nextjs_original-stack-frames'),
+      classifyCaptureRequest('POST', 'https://capture-attacker.invalid/api/auth/login/', {
+        allowedOrigin: 'http://127.0.0.1:3000',
+      }),
     ).toEqual({ action: 'abort', reason: 'forbidden-write' });
-    expect(classifyCaptureRequest('POST', 'http://127.0.0.1/api/business-write')).toEqual({
-      action: 'abort',
-      reason: 'forbidden-write',
-    });
-    expect(classifyCaptureRequest('PATCH', 'http://127.0.0.1/api/auth/login/')).toEqual({
-      action: 'abort',
-      reason: 'forbidden-write',
-    });
+  });
+
+  it('blocks an internal POST sent to a different origin', async () => {
+    const { classifyCaptureRequest } = await loadCapturePolicy();
+
+    expect(
+      classifyCaptureRequest(
+        'POST',
+        'https://capture-attacker.invalid/__nextjs_original-stack-frames',
+        { allowedOrigin: 'http://127.0.0.1:3000' },
+      ),
+    ).toEqual({ action: 'abort', reason: 'forbidden-write' });
   });
 
   it('aborts a business POST before the server receives it while allowing login', async () => {
@@ -80,6 +113,7 @@ describe('A3 homepage capture request policy', () => {
 
     try {
       await installCaptureRequestPolicy(context, {
+        allowedOrigin: `http://127.0.0.1:${address.port}`,
         onBlockedWrite: (write) => blockedWrites.push(write),
       });
       const page = await context.newPage();
