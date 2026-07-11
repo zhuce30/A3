@@ -20,14 +20,11 @@ export const A3_SHELL_BYPASS_PATHS: ReadonlySet<string> = new Set([
   ...A3_FLOW_PATHS,
 ]);
 
-const blockedReturnPaths = new Set([
-  '/a3',
-  '/a3/login',
-  '/a3/register',
-  '/a3/forgot-password',
-]);
+const blockedReturnPaths = new Set(['/a3', '/a3/login', '/a3/register', '/a3/forgot-password']);
 
 const returnPathBase = 'https://a3.local';
+
+type A3SearchParams = Pick<URLSearchParams, 'toString'> | string | null | undefined;
 
 type A3AuthPathState = {
   isPublicPath: boolean;
@@ -43,6 +40,22 @@ function nextPathForUser(user: A3PublicUser) {
   if (!user.privacyAccepted) return '/a3/privacy';
   if (!user.profileCompleted) return '/a3/profile-setup';
   return '/a3/dashboard';
+}
+
+export function getInitialA3Hash(): string {
+  return typeof window === 'undefined' ? '' : window.location.hash;
+}
+
+export function buildA3CurrentPath(
+  pathname: string,
+  searchParams?: A3SearchParams,
+  hash = '',
+): string {
+  const search = (
+    typeof searchParams === 'string' ? searchParams : (searchParams?.toString() ?? '')
+  ).replace(/^\?/, '');
+  const normalizedHash = hash && hash !== '#' ? (hash.startsWith('#') ? hash : `#${hash}`) : '';
+  return `${pathname}${search ? `?${search}` : ''}${normalizedHash}`;
 }
 
 export function normalizeA3ReturnPath(value?: string | null): string | null {

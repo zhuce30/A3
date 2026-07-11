@@ -1,14 +1,16 @@
 'use client';
 
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { createContext, Suspense, useContext, useEffect, useMemo, useState } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { a3GetJson } from '@/lib/a3/api-client';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
 import {
   A3_FLOW_PATHS,
   A3_GUEST_PATHS,
   A3_PUBLIC_PATHS,
+  buildA3CurrentPath,
   getA3AuthTarget,
+  getInitialA3Hash,
 } from '@/lib/a3/auth-navigation';
 
 const publicPaths = A3_PUBLIC_PATHS;
@@ -22,13 +24,35 @@ export function useA3CurrentUser() {
 }
 
 export function A3AuthGate({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense fallback={<A3AuthGateFallback>{children}</A3AuthGateFallback>}>
+      <A3AuthGateWithLocation>{children}</A3AuthGateWithLocation>
+    </Suspense>
+  );
+}
+
+function A3AuthGateFallback({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  if (publicPaths.has(pathname)) {
+    return <A3CurrentUserContext.Provider value={null}>{children}</A3CurrentUserContext.Provider>;
+  }
+  return <A3AuthLoading />;
+}
+
+function A3AuthGateWithLocation({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const router = useRouter();
   const [user, setUser] = useState<A3PublicUser | null | undefined>(undefined);
+  const [initialHash] = useState(getInitialA3Hash);
 
   const isPublicPath = publicPaths.has(pathname);
   const isGuestPath = guestPaths.has(pathname);
   const isFlowPath = flowPaths.has(pathname);
+  const currentPath = useMemo(
+    () => buildA3CurrentPath(pathname, searchParams, initialHash),
+    [initialHash, pathname, searchParams],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -51,7 +75,9 @@ export function A3AuthGate({ children }: { children: React.ReactNode }) {
         setUser(null);
         return;
       }
-      setUser((current) => (current ? { ...current, ...updatedUser } : (updatedUser as A3PublicUser)));
+      setUser((current) =>
+        current ? { ...current, ...updatedUser } : (updatedUser as A3PublicUser),
+      );
     }
 
     window.addEventListener('a3-auth-user-updated', handleUserUpdated);
@@ -60,12 +86,12 @@ export function A3AuthGate({ children }: { children: React.ReactNode }) {
 
   const target = useMemo(
     () =>
-      getA3AuthTarget(pathname, user, {
+      getA3AuthTarget(currentPath, user, {
         isPublicPath,
         isGuestPath,
         isFlowPath,
       }),
-    [isFlowPath, isGuestPath, isPublicPath, pathname, user],
+    [currentPath, isFlowPath, isGuestPath, isPublicPath, user],
   );
 
   useEffect(() => {
@@ -74,24 +100,22 @@ export function A3AuthGate({ children }: { children: React.ReactNode }) {
 
   if (isPublicPath) {
     return (
-      <A3CurrentUserContext.Provider value={user ?? null}>
-        {children}
-      </A3CurrentUserContext.Provider>
+      <A3CurrentUserContext.Provider value={user ?? null}>{children}</A3CurrentUserContext.Provider>
     );
   }
 
   if (user === undefined || target) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-[#f4f7fc] text-sm text-slate-500">
-        正在进入智学引擎...
-      </div>
-    );
+    return <A3AuthLoading />;
   }
 
+  return <A3CurrentUserContext.Provider value={user}>{children}</A3CurrentUserContext.Provider>;
+}
+
+function A3AuthLoading() {
   return (
-    <A3CurrentUserContext.Provider value={user}>
-      {children}
-    </A3CurrentUserContext.Provider>
+    <div className="flex min-h-screen items-center justify-center bg-[#f4f7fc] text-sm text-slate-500">
+      正在进入智学引擎...
+    </div>
   );
 }
 
