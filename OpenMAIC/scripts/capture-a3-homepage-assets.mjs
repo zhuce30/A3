@@ -3,8 +3,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import {
+  A3_DIGITAL_HUMAN_CAPTURE_STYLE,
+  captureCanvasCompositor,
   hasHeaderClearance,
-  inspectRasterBuffer,
   runAtomicAssetCapture,
   validateHomepageAssetDirectory,
 } from './a3-homepage-asset-pipeline.mjs';
@@ -205,31 +206,6 @@ async function positionBelowStickyHeader(page, target, filename) {
   }
 }
 
-async function captureWebglCanvas(page, testId, filename) {
-  const canvas = page.getByTestId(testId);
-  await canvas.waitFor({ state: 'visible', timeout: 60_000 });
-  let lastInspection = { alphaRatio: 0, luminanceVariance: 0, valid: false };
-
-  for (let attempt = 1; attempt <= 6; attempt += 1) {
-    const dataUrl = await canvas.evaluate(
-      (element) =>
-        new Promise((resolve) => {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => resolve(element.toDataURL('image/png')));
-          });
-        }),
-    );
-    const png = Buffer.from(dataUrl.split(',', 2)[1], 'base64');
-    lastInspection = await inspectRasterBuffer(png);
-    if (lastInspection.valid) return png;
-    await page.waitForTimeout(250 * attempt);
-  }
-
-  throw new Error(
-    `${filename} WebGL canvas stayed blank after retries (alpha=${lastInspection.alphaRatio.toFixed(3)}, variance=${lastInspection.luminanceVariance.toFixed(2)})`,
-  );
-}
-
 async function capture(page, asset, assetOutputDir) {
   await page.setViewportSize(asset.viewport ?? defaultViewport);
   await page.goto(`${baseURL}${asset.route}`, { waitUntil: 'domcontentloaded' });
@@ -281,7 +257,12 @@ async function capture(page, asset, assetOutputDir) {
 
   let png;
   if (asset.canvasTestId) {
-    png = await captureWebglCanvas(page, asset.canvasTestId, asset.filename);
+    png = await captureCanvasCompositor(page.getByTestId(asset.canvasTestId), {
+      maxAttempts: 6,
+      retryDelayMs: 250,
+      label: asset.filename,
+      screenshotStyle: A3_DIGITAL_HUMAN_CAPTURE_STYLE,
+    });
   } else {
     png = await target.screenshot({ type: 'png', animations: 'disabled' });
   }

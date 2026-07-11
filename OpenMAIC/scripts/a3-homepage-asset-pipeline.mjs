@@ -14,6 +14,23 @@ async function exists(target) {
 
 const transientFileErrorCodes = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY']);
 
+export const A3_DIGITAL_HUMAN_CAPTURE_STYLE = `
+  [data-testid="a3-digital-human-avatar"] > :not([data-testid="a3-digital-human-three-stage"]) {
+    visibility: hidden !important;
+  }
+  [data-testid="a3-digital-human-three-stage"] {
+    z-index: 2147483646 !important;
+  }
+  [data-testid="a3-digital-human-three-stage"] > :not([data-testid="a3-digital-human-three-canvas"]) {
+    visibility: hidden !important;
+  }
+  [data-testid="a3-digital-human-three-canvas"] {
+    background: linear-gradient(135deg, #dbeafe 0%, #9fb7da 42%, #516b91 100%) !important;
+    position: relative !important;
+    z-index: 2147483647 !important;
+  }
+`;
+
 export async function retryTransientFileOperation(
   operation,
   { maxAttempts = 8, retryDelayMs = 150 } = {},
@@ -40,56 +57,95 @@ async function renameTree(source, target) {
   await retryTransientFileOperation(() => fs.rename(source, target));
 }
 
-export async function replaceFileAtomically(source, target) {
-  const staged = `${target}.publish-${randomUUID()}`;
-  try {
-    await fs.copyFile(source, staged);
-    await renameTree(staged, target);
-  } finally {
-    if (await exists(staged)) await removeTree(staged);
-  }
+async function copyTree(source, target) {
+  await fs.cp(source, target, { recursive: true, errorOnExist: true, force: false });
 }
 
-async function publishAssetFiles(sourceDir, targetDir, replaceFile = replaceFileAtomically) {
-  const filenames = (await fs.readdir(sourceDir)).sort();
-  const originals = new Map();
-  for (const filename of filenames) {
-    const target = path.join(targetDir, filename);
-    originals.set(filename, (await exists(target)) ? await fs.readFile(target) : null);
-  }
+function aggregateErrors(primaryError, secondaryErrors, context) {
+  if (!secondaryErrors.length) return primaryError;
+  const details = secondaryErrors.map((error) => error?.message ?? String(error)).join('; ');
+  return new AggregateError(
+    [primaryError, ...secondaryErrors],
+    `${primaryError?.message ?? context}; ${context}: ${details}`,
+    { cause: primaryError },
+  );
+}
+
+async function publishAssetDirectoryTransaction({
+  sourceDir,
+  outputDir,
+  validateAssets,
+  fileOperations,
+  onSwitchStep,
+}) {
+  const parentDir = path.dirname(outputDir);
+  const basename = path.basename(outputDir);
+  const nextDir = path.join(parentDir, `.${basename}-next-${randomUUID()}`);
+  const backupDir = path.join(parentDir, `.${basename}-backup-${randomUUID()}`);
+  const removeTreeOperation = fileOperations.removeTree ?? removeTree;
+  const renameTreeOperation = fileOperations.renameTree ?? renameTree;
+  const copyTreeOperation = fileOperations.copyTree ?? copyTree;
+  let primaryError;
+  let oldDetached = false;
+  let nextActivated = false;
 
   try {
-    for (const filename of filenames) {
-      await replaceFile(path.join(sourceDir, filename), path.join(targetDir, filename));
-    }
-  } catch (publishError) {
-    const rollbackErrors = [];
-    for (const [filename, original] of originals) {
-      const target = path.join(targetDir, filename);
-      try {
-        if (original === null) {
-          if (await exists(target)) await removeTree(target);
-        } else {
-          const restoreSource = path.join(sourceDir, `.restore-${randomUUID()}-${filename}`);
-          await fs.writeFile(restoreSource, original);
-          try {
-            await replaceFile(restoreSource, target);
-          } finally {
-            if (await exists(restoreSource)) await removeTree(restoreSource);
-          }
-        }
-      } catch (rollbackError) {
-        rollbackErrors.push(rollbackError);
+    await copyTreeOperation(sourceDir, nextDir);
+    await validateAssets(nextDir);
+    await onSwitchStep?.('before-switch');
+
+    try {
+      if (await exists(outputDir)) {
+        await renameTreeOperation(outputDir, backupDir);
+        oldDetached = true;
       }
+      await onSwitchStep?.('old-detached');
+      await renameTreeOperation(nextDir, outputDir);
+      nextActivated = true;
+      await onSwitchStep?.('new-activated');
+    } catch (switchError) {
+      const restoreErrors = [];
+      if (oldDetached && !nextActivated) {
+        try {
+          await renameTreeOperation(backupDir, outputDir);
+          oldDetached = false;
+        } catch (restoreError) {
+          restoreErrors.push(restoreError);
+        }
+      }
+      throw aggregateErrors(switchError, restoreErrors, 'directory switch rollback failed');
     }
-    if (rollbackErrors.length) {
-      throw new AggregateError(
-        [publishError, ...rollbackErrors],
-        'Asset publication failed and rollback was incomplete',
-        { cause: publishError },
-      );
+
+    if (oldDetached) {
+      await removeTreeOperation(backupDir);
+      oldDetached = false;
     }
-    throw publishError;
+  } catch (error) {
+    primaryError = error;
+  }
+
+  const cleanupErrors = [];
+  if (await exists(nextDir)) {
+    try {
+      await removeTreeOperation(nextDir);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (!oldDetached && (await exists(backupDir))) {
+    try {
+      await removeTreeOperation(backupDir);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+
+  if (primaryError) {
+    throw aggregateErrors(primaryError, cleanupErrors, 'directory transaction cleanup failed');
+  }
+  if (cleanupErrors.length === 1) throw cleanupErrors[0];
+  if (cleanupErrors.length > 1) {
+    throw new AggregateError(cleanupErrors, 'Directory transaction cleanup failed');
   }
 }
 
@@ -127,6 +183,31 @@ export async function inspectRasterBuffer(buffer) {
     luminanceVariance,
     valid: alphaRatio >= 0.05 && luminanceVariance >= 16,
   };
+}
+
+export async function captureCanvasCompositor(
+  canvas,
+  { maxAttempts = 6, retryDelayMs = 250, label = 'WebGL canvas', screenshotStyle } = {},
+) {
+  await canvas.waitFor({ state: 'visible', timeout: 60_000 });
+  let lastInspection = { alphaRatio: 0, luminanceVariance: 0, valid: false };
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const png = await canvas.screenshot({
+      type: 'png',
+      animations: 'disabled',
+      style: screenshotStyle,
+    });
+    lastInspection = await inspectRasterBuffer(png);
+    if (lastInspection.valid) return png;
+    if (attempt < maxAttempts && retryDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+    }
+  }
+
+  throw new Error(
+    `${label} stayed blank after ${maxAttempts} attempts (alpha=${lastInspection.alphaRatio.toFixed(3)}, variance=${lastInspection.luminanceVariance.toFixed(2)})`,
+  );
 }
 
 export async function validateHomepageAssetDirectory({
@@ -167,9 +248,9 @@ export async function runAtomicAssetCapture({
   captureAssets,
   validateAssets,
   fileOperations = {},
+  onSwitchStep,
 }) {
   const removeTreeOperation = fileOperations.removeTree ?? removeTree;
-  const replaceFileOperation = fileOperations.replaceFile ?? replaceFileAtomically;
   const parentDir = path.dirname(outputDir);
   await fs.mkdir(parentDir, { recursive: true });
   await fs.mkdir(temporaryRoot, { recursive: true });
@@ -186,19 +267,27 @@ export async function runAtomicAssetCapture({
   try {
     await captureAssets(temporaryDir);
     await validateAssets(temporaryDir);
-    await publishAssetFiles(temporaryDir, outputDir, replaceFileOperation);
+    await publishAssetDirectoryTransaction({
+      sourceDir: temporaryDir,
+      outputDir,
+      validateAssets,
+      fileOperations,
+      onSwitchStep,
+    });
   } catch (error) {
     primaryError = error;
-    throw error;
-  } finally {
-    try {
-      await removeTreeOperation(temporaryDir);
-    } catch (cleanupError) {
-      if (primaryError) {
-        primaryError.cleanupError = cleanupError;
-      } else {
-        throw cleanupError;
-      }
-    }
+  }
+
+  const cleanupErrors = [];
+  try {
+    await removeTreeOperation(temporaryDir);
+  } catch (cleanupError) {
+    cleanupErrors.push(cleanupError);
+  }
+  if (primaryError) {
+    throw aggregateErrors(primaryError, cleanupErrors, 'capture cleanup failed');
+  }
+  if (cleanupErrors.length) {
+    throw cleanupErrors[0];
   }
 }

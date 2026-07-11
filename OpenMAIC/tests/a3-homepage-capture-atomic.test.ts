@@ -12,17 +12,21 @@ async function loadAssetPipeline() {
       luminanceVariance: number;
       valid: boolean;
     }>;
-    retryTransientFileOperation: <T>(operation: () => Promise<T>) => Promise<T>;
-    replaceFileAtomically: (source: string, target: string) => Promise<void>;
+    retryTransientFileOperation: <T>(
+      operation: () => Promise<T>,
+      options?: { maxAttempts?: number; retryDelayMs?: number },
+    ) => Promise<T>;
     runAtomicAssetCapture: (options: {
       outputDir: string;
       temporaryRoot: string;
       captureAssets: (temporaryDir: string) => Promise<void>;
       validateAssets: (temporaryDir: string) => Promise<void>;
       fileOperations?: {
-        removeTree: (target: string) => Promise<void>;
-        replaceFile: (source: string, target: string) => Promise<void>;
+        removeTree?: (target: string) => Promise<void>;
+        renameTree?: (source: string, target: string) => Promise<void>;
+        copyTree?: (source: string, target: string) => Promise<void>;
       };
+      onSwitchStep?: (step: 'before-switch' | 'old-detached' | 'new-activated') => Promise<void>;
     }) => Promise<void>;
   };
 }
@@ -154,7 +158,6 @@ describe('A3 homepage atomic asset capture', () => {
               cleanupAttempts += 1;
               throw Object.assign(new Error('cleanup locked'), { code: 'EBUSY' });
             },
-            replaceFile: async () => undefined,
           },
         }),
       ).rejects.toThrow('primary capture failure');
@@ -164,47 +167,167 @@ describe('A3 homepage atomic asset capture', () => {
     }
   });
 
-  it('captures outside the published public directory and rolls back partial publication', async () => {
-    const { replaceFileAtomically, runAtomicAssetCapture } = await loadAssetPipeline();
+  it('publishes a complete generation when outputDir does not exist yet', async () => {
+    const { runAtomicAssetCapture } = await loadAssetPipeline();
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'a3-homepage-publish-'));
+    const outputDir = path.join(root, 'public', 'homepage');
+    const temporaryRoot = path.join(root, '.tmp');
+
+    try {
+      await runAtomicAssetCapture({
+        outputDir,
+        temporaryRoot,
+        captureAssets: async (temporaryDir) => {
+          await fs.writeFile(path.join(temporaryDir, 'profile.webp'), 'new-profile');
+          await fs.writeFile(path.join(temporaryDir, 'classroom.webp'), 'new-classroom');
+        },
+        validateAssets: async () => undefined,
+      });
+
+      await expect(fs.readFile(path.join(outputDir, 'profile.webp'), 'utf8')).resolves.toBe(
+        'new-profile',
+      );
+      await expect(fs.readFile(path.join(outputDir, 'classroom.webp'), 'utf8')).resolves.toBe(
+        'new-classroom',
+      );
+      expect(
+        (await fs.readdir(path.dirname(outputDir))).filter((name) => name.startsWith('.homepage-')),
+      ).toEqual([]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('switches whole directories so observers never see a mixed asset generation', async () => {
+    const { runAtomicAssetCapture } = await loadAssetPipeline();
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'a3-homepage-observer-'));
     const outputDir = path.join(root, 'public', 'homepage');
     const temporaryRoot = path.join(root, '.tmp');
     await fs.mkdir(outputDir, { recursive: true });
     await fs.writeFile(path.join(outputDir, 'profile.webp'), 'old-profile');
     await fs.writeFile(path.join(outputDir, 'classroom.webp'), 'old-classroom');
+    const observations: string[] = [];
+    const observe = async () => {
+      try {
+        const profile = await fs.readFile(path.join(outputDir, 'profile.webp'), 'utf8');
+        const classroom = await fs.readFile(path.join(outputDir, 'classroom.webp'), 'utf8');
+        observations.push(`${profile}|${classroom}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        observations.push('missing');
+      }
+    };
 
     try {
-      let observedTemporaryDir = '';
-      let replacements = 0;
+      await observe();
+      await runAtomicAssetCapture({
+        outputDir,
+        temporaryRoot,
+        captureAssets: async (temporaryDir) => {
+          await fs.writeFile(path.join(temporaryDir, 'profile.webp'), 'new-profile');
+          await fs.writeFile(path.join(temporaryDir, 'classroom.webp'), 'new-classroom');
+        },
+        validateAssets: async () => undefined,
+        onSwitchStep: async () => observe(),
+      });
+
+      expect(observations).toContain('old-profile|old-classroom');
+      expect(observations).toContain('missing');
+      expect(observations).toContain('new-profile|new-classroom');
+      expect(observations).not.toContain('old-profile|new-classroom');
+      expect(observations).not.toContain('new-profile|old-classroom');
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('restores the complete old directory when activating the next generation fails', async () => {
+    const { runAtomicAssetCapture } = await loadAssetPipeline();
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'a3-homepage-restore-'));
+    const outputDir = path.join(root, 'public', 'homepage');
+    const temporaryRoot = path.join(root, '.tmp');
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.writeFile(path.join(outputDir, 'profile.webp'), 'old-profile');
+    await fs.writeFile(path.join(outputDir, 'classroom.webp'), 'old-classroom');
+    let renameAttempts = 0;
+
+    try {
       await expect(
         runAtomicAssetCapture({
           outputDir,
           temporaryRoot,
           captureAssets: async (temporaryDir) => {
-            observedTemporaryDir = temporaryDir;
             await fs.writeFile(path.join(temporaryDir, 'profile.webp'), 'new-profile');
             await fs.writeFile(path.join(temporaryDir, 'classroom.webp'), 'new-classroom');
           },
           validateAssets: async () => undefined,
           fileOperations: {
-            removeTree: async (target) => fs.rm(target, { recursive: true, force: true }),
-            replaceFile: async (source, target) => {
-              replacements += 1;
-              if (replacements === 2) throw new Error('second replacement failed');
-              await replaceFileAtomically(source, target);
+            renameTree: async (source, target) => {
+              renameAttempts += 1;
+              if (renameAttempts === 2) throw new Error('next activation failed');
+              await fs.rename(source, target);
             },
           },
         }),
-      ).rejects.toThrow('second replacement failed');
+      ).rejects.toThrow('next activation failed');
 
-      expect(
-        path.resolve(observedTemporaryDir).startsWith(`${path.resolve(temporaryRoot)}${path.sep}`),
-      ).toBe(true);
       await expect(fs.readFile(path.join(outputDir, 'profile.webp'), 'utf8')).resolves.toBe(
         'old-profile',
       );
       await expect(fs.readFile(path.join(outputDir, 'classroom.webp'), 'utf8')).resolves.toBe(
         'old-classroom',
+      );
+      expect(
+        (await fs.readdir(path.dirname(outputDir))).filter((name) => name.startsWith('.homepage-')),
+      ).toEqual([]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports exhausted rename and cleanup failures together without losing the primary error', async () => {
+    const { retryTransientFileOperation, runAtomicAssetCapture } = await loadAssetPipeline();
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'a3-homepage-errors-'));
+    const outputDir = path.join(root, 'public', 'homepage');
+    const temporaryRoot = path.join(root, '.tmp');
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.writeFile(path.join(outputDir, 'profile.webp'), 'old-profile');
+
+    try {
+      const failure = await runAtomicAssetCapture({
+        outputDir,
+        temporaryRoot,
+        captureAssets: async (temporaryDir) => {
+          await fs.writeFile(path.join(temporaryDir, 'profile.webp'), 'new-profile');
+        },
+        validateAssets: async () => undefined,
+        fileOperations: {
+          renameTree: async () =>
+            retryTransientFileOperation(
+              async () => {
+                throw Object.assign(new Error('rename stayed locked'), { code: 'EBUSY' });
+              },
+              { maxAttempts: 2, retryDelayMs: 1 },
+            ),
+          removeTree: async (target) => {
+            if (path.basename(target).startsWith('a3-homepage-capture-')) {
+              throw Object.assign(new Error('cleanup denied'), { code: 'EPERM' });
+            }
+            await fs.rm(target, { recursive: true, force: true });
+          },
+        },
+      }).then(
+        () => null,
+        (error) => error,
+      );
+
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect(failure.cause).toMatchObject({ code: 'EBUSY', message: 'rename stayed locked' });
+      expect(failure.errors).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ code: 'EBUSY', message: 'rename stayed locked' }),
+          expect.objectContaining({ code: 'EPERM', message: 'cleanup denied' }),
+        ]),
       );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
