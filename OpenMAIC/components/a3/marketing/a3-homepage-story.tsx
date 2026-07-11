@@ -17,11 +17,9 @@ function isProductStoryItem(item: StoryItem): item is ProductStoryItem {
 
 function ProductStorySection({
   item,
-  priority = false,
   action,
 }: {
   item: ProductStoryItem;
-  priority?: boolean;
   action?: { href: string; label: string };
 }) {
   return (
@@ -42,13 +40,7 @@ function ProductStorySection({
         ) : null}
       </div>
       <figure className={styles.fullProductFrame}>
-        <Image
-          src={item.media}
-          alt={item.alt}
-          fill
-          priority={priority}
-          sizes="(max-width: 768px) 92vw, 64vw"
-        />
+        <Image src={item.media} alt={item.alt} fill sizes="(max-width: 768px) 92vw, 64vw" />
       </figure>
     </section>
   );
@@ -182,7 +174,7 @@ export function A3HomepageStory() {
 
   return (
     <div id="capabilities" className={styles.story}>
-      <ProductStorySection item={profile} priority />
+      <ProductStorySection item={profile} />
       <ProductStorySection item={diagnostic} />
 
       <div id="learning-loop" className={styles.knowledgeBand}>

@@ -71,6 +71,7 @@ const teacherApi = teacherModule as typeof teacherModule & {
   shouldActivateTeacherStage?: (
     entry: Pick<IntersectionObserverEntry, 'isIntersecting'>,
   ) => boolean;
+  isTerminalTeacherRenderer?: (renderer: string | null) => boolean;
 };
 
 describe('A3 product homepage learning story modules', () => {
@@ -165,7 +166,22 @@ describe('A3 product homepage learning story modules', () => {
       assistantSpeaking: false,
     });
     expect(teacherSource).toContain('IntersectionObserver');
-    expect(teacherSource).toContain('ssr: false');
+    expect(teacherSource).not.toContain("from 'next/dynamic'");
+    expect(teacherSource).toContain(
+      "import { DigitalHumanAvatar } from '@/components/a3/features/coaching/digital-human-avatar'",
+    );
+  });
+
+  it('keeps the real teacher fallback above loading until a terminal renderer is ready', () => {
+    expect(teacherApi.isTerminalTeacherRenderer).toBeTypeOf('function');
+    for (const renderer of ['vrm', 'vrm_idle_animation', 'primitive', 'static_fallback']) {
+      expect(teacherApi.isTerminalTeacherRenderer?.(renderer), renderer).toBe(true);
+    }
+    expect(teacherApi.isTerminalTeacherRenderer?.('loading')).toBe(false);
+    expect(teacherApi.isTerminalTeacherRenderer?.(null)).toBe(false);
+    expect(teacherSource).toContain('MutationObserver');
+    expect(teacherSource).toContain('mutationObserver.disconnect()');
+    expect(teacherSource).toContain('data-testid="a3-homepage-teacher-fallback"');
   });
 
   it('server-renders a useful teacher fallback before the lazy renderer activates', () => {
@@ -201,6 +217,17 @@ describe('A3 product homepage learning story modules', () => {
     expect(combined).not.toMatch(
       /getUserMedia|mediaDevices|AudioContext|webkitAudioContext|new Audio\(|<audio/i,
     );
+  });
+
+  it('keeps below-fold story media non-priority and offsets anchor targets below the header', () => {
+    expect(storySource).not.toContain('priority');
+    expect(homepageCss).toMatch(/scroll-margin-top:\s*88px/);
+    expect(homepageCss).toMatch(/scroll-margin-top:\s*76px/);
+  });
+
+  it('contains the portrait fallback on a stable neutral stage', () => {
+    expect(homepageCss).toMatch(/\.teacherFallback img\s*\{[^}]*object-fit:\s*contain/);
+    expect(homepageCss).toMatch(/\.teacherVisual\s*\{[^}]*background:\s*#151a1d/);
   });
 });
 
