@@ -16,7 +16,11 @@ import {
 import { A3HomepageHero } from '@/components/a3/marketing/a3-homepage-hero';
 import * as storyModule from '@/components/a3/marketing/a3-homepage-story';
 import * as teacherModule from '@/components/a3/marketing/a3-homepage-teacher-stage';
-import { A3ProductHomepage } from '@/components/a3/marketing/a3-product-homepage';
+import {
+  A3ProductHomepage,
+  cancelA3HomepageFocusFrame,
+  scheduleA3HomepageFocusFrame,
+} from '@/components/a3/marketing/a3-product-homepage';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
 
 const authState = vi.hoisted(() => ({ user: null as A3PublicUser | null }));
@@ -141,6 +145,9 @@ describe('A3 product homepage learning story modules', () => {
     expect(mobileCss).not.toMatch(/translateX|translate3d/);
     expect(homepageCss).toMatch(/\.page a:focus-visible/);
     expect(homepageCss).toMatch(/\.page button:focus-visible/);
+    expect(homepageCss).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.page \.heroScreen\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translate3d\(0, -50%, 0\)/,
+    );
   });
 
   it('shows the knowledge base as the source-to-learning visual center', () => {
@@ -509,6 +516,43 @@ describe('A3 product homepage hero and navigation', () => {
     expect(homepageSource.match(/onClick=\{closeMenu\}/g)?.length).toBeGreaterThanOrEqual(2);
     expect(homepageSource).toContain('onClick={closeMenuAndRestoreFocus}');
     expect(homepageSource).toContain("event.key !== 'Escape'");
+  });
+
+  it('cancels superseded and unmounted mobile-menu focus frames', () => {
+    const callbacks = new Map<number, FrameRequestCallback>();
+    const cancelled: number[] = [];
+    const frameRef = { current: null as number | null };
+    let nextFrame = 1;
+    const requestFrame = (callback: FrameRequestCallback) => {
+      const frame = nextFrame++;
+      callbacks.set(frame, callback);
+      return frame;
+    };
+    const cancelFrame = (frame: number) => {
+      cancelled.push(frame);
+      callbacks.delete(frame);
+    };
+    const staleFocus = vi.fn();
+    const currentFocus = vi.fn();
+    const unmountedFocus = vi.fn();
+
+    scheduleA3HomepageFocusFrame(frameRef, requestFrame, cancelFrame, staleFocus);
+    scheduleA3HomepageFocusFrame(frameRef, requestFrame, cancelFrame, currentFocus);
+
+    expect(cancelled).toEqual([1]);
+    expect(callbacks.has(1)).toBe(false);
+    callbacks.get(2)?.(0);
+    expect(staleFocus).not.toHaveBeenCalled();
+    expect(currentFocus).toHaveBeenCalledOnce();
+    expect(frameRef.current).toBeNull();
+
+    scheduleA3HomepageFocusFrame(frameRef, requestFrame, cancelFrame, unmountedFocus);
+    cancelA3HomepageFocusFrame(frameRef, cancelFrame);
+
+    expect(cancelled).toEqual([1, 3]);
+    expect(callbacks.has(3)).toBe(false);
+    expect(unmountedFocus).not.toHaveBeenCalled();
+    expect(frameRef.current).toBeNull();
   });
 
   it('publishes the approved page metadata', () => {

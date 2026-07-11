@@ -2,7 +2,7 @@
 
 import { Menu, X } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import {
   A3_HOMEPAGE_ACTIONS,
@@ -14,17 +14,53 @@ import { A3HomepageHero } from './a3-homepage-hero';
 import { A3HomepageStory } from './a3-homepage-story';
 import styles from './a3-product-homepage.module.css';
 
+type FocusFrameRef = { current: number | null };
+
+export function cancelA3HomepageFocusFrame(
+  frameRef: FocusFrameRef,
+  cancelFrame: (frame: number) => void,
+) {
+  if (frameRef.current === null) return;
+  cancelFrame(frameRef.current);
+  frameRef.current = null;
+}
+
+export function scheduleA3HomepageFocusFrame(
+  frameRef: FocusFrameRef,
+  requestFrame: (callback: FrameRequestCallback) => number,
+  cancelFrame: (frame: number) => void,
+  focus: () => void,
+) {
+  cancelA3HomepageFocusFrame(frameRef, cancelFrame);
+  frameRef.current = requestFrame(() => {
+    frameRef.current = null;
+    focus();
+  });
+}
+
 export function A3ProductHomepage() {
   const user = useA3CurrentUser();
   const [menuOpen, setMenuOpen] = useState(false);
   const brandRef = useRef<HTMLAnchorElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const mobileNavRef = useRef<HTMLElement>(null);
+  const focusFrameRef = useRef<number | null>(null);
   const closeMenu = () => setMenuOpen(false);
-  const closeMenuAndRestoreFocus = () => {
+  const cancelPendingFocusFrame = useCallback(() => {
+    cancelA3HomepageFocusFrame(focusFrameRef, (frame) => window.cancelAnimationFrame(frame));
+  }, []);
+  const scheduleFocus = useCallback((target: () => HTMLElement | null) => {
+    scheduleA3HomepageFocusFrame(
+      focusFrameRef,
+      (callback) => window.requestAnimationFrame(callback),
+      (frame) => window.cancelAnimationFrame(frame),
+      () => target()?.focus({ preventScroll: true }),
+    );
+  }, []);
+  const closeMenuAndRestoreFocus = useCallback(() => {
     setMenuOpen(false);
-    window.requestAnimationFrame(() => menuButtonRef.current?.focus({ preventScroll: true }));
-  };
+    scheduleFocus(() => menuButtonRef.current);
+  }, [scheduleFocus]);
   const workspaceHref = user ? A3_HOMEPAGE_ROUTES.workspace : A3_HOMEPAGE_ROUTES.login;
   const workspaceLabel = user
     ? A3_HOMEPAGE_ACTIONS.signedInWorkspace
@@ -32,7 +68,6 @@ export function A3ProductHomepage() {
 
   useEffect(() => {
     const desktopLayout = window.matchMedia('(min-width: 1121px)');
-    let focusFrame: number | null = null;
 
     function closeMenuForDesktop(event: MediaQueryListEvent | MediaQueryList) {
       if (!event.matches) return;
@@ -44,7 +79,7 @@ export function A3ProductHomepage() {
 
       setMenuOpen(false);
       if (shouldMoveFocus) {
-        focusFrame = window.requestAnimationFrame(() => brandRef.current?.focus());
+        scheduleFocus(() => brandRef.current);
       }
     }
 
@@ -52,9 +87,10 @@ export function A3ProductHomepage() {
     desktopLayout.addEventListener('change', closeMenuForDesktop);
     return () => {
       desktopLayout.removeEventListener('change', closeMenuForDesktop);
-      if (focusFrame !== null) window.cancelAnimationFrame(focusFrame);
     };
-  }, []);
+  }, [scheduleFocus]);
+
+  useEffect(() => cancelPendingFocusFrame, [cancelPendingFocusFrame]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -67,7 +103,7 @@ export function A3ProductHomepage() {
 
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [menuOpen]);
+  }, [closeMenuAndRestoreFocus, menuOpen]);
 
   return (
     <div className={styles.page} data-testid="a3-product-homepage">

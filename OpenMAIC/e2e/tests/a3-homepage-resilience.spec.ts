@@ -94,6 +94,51 @@ test('does not initialize the teacher renderer or observer with reduced motion',
   ).toBe(0);
 });
 
+test('keeps the static reduced-motion hero screen framed on desktop and mobile', async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+
+  for (const viewport of [
+    { width: 1440, height: 1000 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/a3');
+
+    const screens = page.getByTestId('a3-homepage-hero-stage').locator('figure');
+    const firstScreen = screens.first();
+    await expect(firstScreen).toBeVisible();
+    await expect(screens.nth(1)).toBeHidden();
+
+    const geometry = await firstScreen.evaluate((screen) => {
+      const screenBox = screen.getBoundingClientRect();
+      const heroBox = screen.closest('section')?.getBoundingClientRect();
+      if (!heroBox) return null;
+      const visibleWidth = Math.max(
+        0,
+        Math.min(screenBox.right, heroBox.right) - Math.max(screenBox.left, heroBox.left),
+      );
+      const visibleHeight = Math.max(
+        0,
+        Math.min(screenBox.bottom, heroBox.bottom) - Math.max(screenBox.top, heroBox.top),
+      );
+      return {
+        heroTop: heroBox.top,
+        heroBottom: heroBox.bottom,
+        screenTop: screenBox.top,
+        screenBottom: screenBox.bottom,
+        visibleRatio: (visibleWidth * visibleHeight) / (screenBox.width * screenBox.height),
+      };
+    });
+
+    expect(geometry).not.toBeNull();
+    expect(geometry?.screenTop).toBeGreaterThanOrEqual((geometry?.heroTop ?? 0) - 1);
+    expect(geometry?.screenBottom).toBeLessThanOrEqual((geometry?.heroBottom ?? 0) + 2);
+    expect(geometry?.visibleRatio).toBeGreaterThanOrEqual(0.8);
+  }
+});
+
 test('reacts to reduced-motion changes and cleans up the pending observer', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.addInitScript(() => {
