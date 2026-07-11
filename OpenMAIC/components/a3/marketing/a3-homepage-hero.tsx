@@ -1,6 +1,5 @@
 'use client';
 
-import Image from 'next/image';
 import Link from 'next/link';
 import { motion, useReducedMotion } from 'motion/react';
 import {
@@ -8,6 +7,7 @@ import {
   A3_HOMEPAGE_HERO_MEDIA,
   A3_HOMEPAGE_ROUTES,
 } from './a3-homepage-content';
+import { A3HomepageProductMedia } from './a3-homepage-product-media';
 import styles from './a3-product-homepage.module.css';
 
 export function A3HomepageHero() {
@@ -38,12 +38,11 @@ export function A3HomepageHero() {
       >
         {A3_HOMEPAGE_HERO_MEDIA.map((item, index) => (
           <figure key={item.src} className={styles.heroScreen} data-screen={index + 1}>
-            <Image
+            <A3HomepageProductMedia
               src={item.src}
               alt={item.alt}
-              fill
               priority={index === 0}
-              sizes="(max-width: 767px) 112vw, (min-width: 1600px) 920px, 68vw"
+              sizes="(max-width: 767px) calc(100vw - 62px), (min-width: 1600px) 920px, 68vw"
             />
           </figure>
         ))}

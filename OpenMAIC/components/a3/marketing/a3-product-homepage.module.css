@@ -89,6 +89,13 @@
   transform: translateY(-1px);
 }
 
+.headerCta:active,
+.primaryCta:active,
+.menuButton:active,
+.segmentedControl button:active {
+  transform: scale(0.98);
+}
+
 .menuButton {
   display: none;
   width: 40px;
@@ -267,6 +274,31 @@
 .heroScreen img {
   object-fit: cover;
   object-position: left top;
+}
+
+.mediaFallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  background: #171c1f;
+  color: #f0f3ed;
+  text-align: center;
+}
+
+.mediaFallback strong {
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.mediaFallback span {
+  color: #abb2a8;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .heroStage:hover .heroScreen,
@@ -479,16 +511,22 @@
 .segmentedControl button {
   min-width: 84px;
   min-height: 40px;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
   color: #aeb5ab;
   font-size: 14px;
   font-weight: 700;
   cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
 }
 
 .segmentedControl button[aria-pressed='true'] {
+  border-color: #ecffad;
   background: #d9ff62;
   color: #11140d;
 }
@@ -683,21 +721,9 @@
   text-decoration: none;
 }
 
-.brand:focus-visible,
-.desktopNav a:focus-visible,
-.secondaryAction:focus-visible,
-.headerCta:focus-visible,
-.primaryCta:focus-visible,
-.menuButton:focus-visible,
-.mobileNav a:focus-visible {
-  outline: 2px solid #d9ff62;
-  outline-offset: 4px;
-}
-
-.segmentedControl button:focus-visible,
-.teacherLink:focus-visible,
-.sectionLink:focus-visible,
-.footer a:focus-visible {
+.page a:focus-visible,
+.page button:focus-visible,
+.heroStage:focus-visible {
   outline: 2px solid #d9ff62;
   outline-offset: 4px;
 }
@@ -815,8 +841,9 @@
   }
 
   .hero {
-    min-height: max(760px, calc(100svh - 64px));
-    min-height: max(760px, calc(100dvh - 64px));
+    height: 760px;
+    min-height: 680px;
+    max-height: 760px;
   }
 
   .heroCopy {
@@ -844,11 +871,43 @@
   }
 
   .heroStage {
-    inset: 388px -19% 34px 8%;
+    inset: 370px 16px 28px;
   }
 
   .heroScreen {
-    width: min(720px, 112vw);
+    top: 48%;
+    left: 0;
+    width: calc(100% - 28px);
+    animation: none;
+    opacity: 1;
+    transform: translateY(-50%) rotate(-1deg);
+  }
+
+  .heroScreen:nth-child(1) {
+    left: 0;
+    z-index: 4;
+    transform: translateY(-50%) rotate(-1deg);
+  }
+
+  .heroScreen:nth-child(2) {
+    left: 9px;
+    z-index: 3;
+    opacity: 0.58;
+    transform: translateY(calc(-50% + 10px)) rotate(-2deg);
+  }
+
+  .heroScreen:nth-child(3) {
+    left: 18px;
+    z-index: 2;
+    opacity: 0.38;
+    transform: translateY(calc(-50% + 20px)) rotate(-3deg);
+  }
+
+  .heroScreen:nth-child(4) {
+    left: 28px;
+    z-index: 1;
+    opacity: 0.2;
+    transform: translateY(calc(-50% + 30px)) rotate(-4deg);
   }
 
   .story,
@@ -913,6 +972,10 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 14px;
     margin-top: 42px;
+  }
+
+  .fullProductFrame {
+    aspect-ratio: 4 / 3;
   }
 
   .knowledgeInputs {
@@ -1032,20 +1095,30 @@
     scroll-behavior: auto;
   }
 
-  .headerCta,
-  .primaryCta,
-  .desktopNav a,
-  .secondaryAction {
+  .page .headerCta,
+  .page .primaryCta,
+  .page .desktopNav a,
+  .page .secondaryAction,
+  .page .menuButton,
+  .page .segmentedControl button,
+  .page .teacherFallbackHidden,
+  .page .teacherLink,
+  .page .sectionLink {
     transition: none;
   }
 
-  .heroScreen {
+  .page .heroScreen {
     animation: none;
-    opacity: 1;
-    transform: translate3d(0, -50%, 0);
   }
 
-  .heroScreen:not(:first-child) {
+  .page .heroScreen:not(:first-child) {
     display: none;
+  }
+
+  .page .headerCta:active,
+  .page .primaryCta:active,
+  .page .menuButton:active,
+  .page .segmentedControl button:active {
+    transform: none;
   }
 }

@@ -1,10 +1,10 @@
 'use client';
 
-import Image from 'next/image';
 import Link from 'next/link';
 import { useState } from 'react';
 import { A3_HOMEPAGE_EVIDENCE, A3_HOMEPAGE_FOOTER, A3_HOMEPAGE_STORY } from './a3-homepage-content';
 import { A3HomepageTeacherStage } from './a3-homepage-teacher-stage';
+import { A3HomepageProductMedia } from './a3-homepage-product-media';
 import styles from './a3-product-homepage.module.css';
 
 type StoryItem = (typeof A3_HOMEPAGE_STORY)[number];
@@ -40,7 +40,11 @@ function ProductStorySection({
         ) : null}
       </div>
       <figure className={styles.fullProductFrame}>
-        <Image src={item.media} alt={item.alt} fill sizes="(max-width: 768px) 92vw, 64vw" />
+        <A3HomepageProductMedia
+          src={item.media}
+          alt={item.alt}
+          sizes="(max-width: 767px) calc(100vw - 36px), 64vw"
+        />
       </figure>
     </section>
   );

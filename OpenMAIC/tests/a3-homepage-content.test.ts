@@ -120,6 +120,29 @@ describe('A3 product homepage learning story modules', () => {
     expect(homepageCss).not.toMatch(/font-size:\s*[^;]*(vw|cqw)/);
   });
 
+  it('defines scoped responsive and reduced-motion resilience contracts', () => {
+    const mobileCss = homepageCss
+      .split('@media (max-width: 767px)')[1]
+      ?.split('@media (max-width: 390px)')[0];
+
+    expect(mobileCss).toBeDefined();
+    expect(homepageCss).not.toContain('112vw');
+    expect(homepageCss).toMatch(/@media \(max-width: 767px\)/);
+    expect(homepageCss).toMatch(/@media \(prefers-reduced-motion: reduce\)/);
+    expect(homepageCss).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.page\s*\{[\s\S]*?scroll-behavior:\s*auto/,
+    );
+    expect(homepageCss).not.toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\*::?(?:before|after)?\s*\{/,
+    );
+    expect(homepageCss).toMatch(
+      /@media \(max-width: 767px\)[\s\S]*?\.fullProductFrame\s*\{[\s\S]*?aspect-ratio:\s*4\s*\/\s*3/,
+    );
+    expect(mobileCss).not.toMatch(/translateX|translate3d/);
+    expect(homepageCss).toMatch(/\.page a:focus-visible/);
+    expect(homepageCss).toMatch(/\.page button:focus-visible/);
+  });
+
   it('shows the knowledge base as the source-to-learning visual center', () => {
     const Story = storyModule.A3HomepageStory;
     const markup = renderToStaticMarkup(createElement(Story));
@@ -434,11 +457,13 @@ describe('A3 product homepage hero and navigation', () => {
     expect(markup).not.toContain('eyebrow');
   });
 
-  it('requests enough image width for the oversized mobile hero composition', () => {
+  it('requests a contained image width for the mobile hero composition', () => {
     const markup = renderToStaticMarkup(createElement(A3HomepageHero));
 
-    expect(markup).toContain('sizes="(max-width: 767px) 112vw, (min-width: 1600px) 920px, 68vw"');
-    expect(markup).not.toContain('(max-width: 767px) 92vw');
+    expect(markup).toContain(
+      'sizes="(max-width: 767px) calc(100vw - 62px), (min-width: 1600px) 920px, 68vw"',
+    );
+    expect(markup).not.toContain('112vw');
   });
 
   it('renders anonymous navigation with review, login and persistent registration routes', () => {
@@ -481,7 +506,9 @@ describe('A3 product homepage hero and navigation', () => {
 
     expect(homepageSource).toContain('aria-expanded={menuOpen}');
     expect(homepageSource).toContain("aria-label={menuOpen ? '关闭导航' : '打开导航'}");
-    expect(homepageSource.match(/onClick=\{closeMenu\}/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(homepageSource.match(/onClick=\{closeMenu\}/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(homepageSource).toContain('onClick={closeMenuAndRestoreFocus}');
+    expect(homepageSource).toContain("event.key !== 'Escape'");
   });
 
   it('publishes the approved page metadata', () => {

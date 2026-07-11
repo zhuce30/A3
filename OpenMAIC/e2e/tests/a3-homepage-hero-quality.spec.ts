@@ -26,7 +26,7 @@ test('closes the mobile menu when the viewport crosses into the desktop layout',
   await expect(mobileNav).toHaveCount(0);
   await expect(page.getByRole('navigation', { name: '首页导航' })).toBeVisible();
   await expect(page.getByRole('link', { name: '智学引擎首页' })).toBeFocused();
-  await page.getByRole('link', { name: '开启我的智学旅程' }).click({ trial: true });
+  await page.getByRole('link', { name: '开启我的智学旅程' }).first().click({ trial: true });
   await page.getByRole('navigation', { name: '首页导航' }).getByRole('link').first().click({
     trial: true,
   });

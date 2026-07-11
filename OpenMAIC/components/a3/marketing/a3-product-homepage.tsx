@@ -21,6 +21,10 @@ export function A3ProductHomepage() {
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const mobileNavRef = useRef<HTMLElement>(null);
   const closeMenu = () => setMenuOpen(false);
+  const closeMenuAndRestoreFocus = () => {
+    setMenuOpen(false);
+    window.requestAnimationFrame(() => menuButtonRef.current?.focus({ preventScroll: true }));
+  };
   const workspaceHref = user ? A3_HOMEPAGE_ROUTES.workspace : A3_HOMEPAGE_ROUTES.login;
   const workspaceLabel = user
     ? A3_HOMEPAGE_ACTIONS.signedInWorkspace
@@ -51,6 +55,19 @@ export function A3ProductHomepage() {
       if (focusFrame !== null) window.cancelAnimationFrame(focusFrame);
     };
   }, []);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      closeMenuAndRestoreFocus();
+    };
+
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [menuOpen]);
 
   return (
     <div className={styles.page} data-testid="a3-product-homepage">
@@ -99,7 +116,7 @@ export function A3ProductHomepage() {
           aria-label="移动端首页导航"
         >
           {A3_HOMEPAGE_NAV.map((item) => (
-            <a key={item.href} href={item.href} onClick={closeMenu}>
+            <a key={item.href} href={item.href} onClick={closeMenuAndRestoreFocus}>
               {item.label}
             </a>
           ))}

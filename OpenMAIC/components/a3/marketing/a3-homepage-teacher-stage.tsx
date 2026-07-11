@@ -1,9 +1,9 @@
 'use client';
 
-import Image from 'next/image';
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { DigitalHumanAvatar } from '@/components/a3/features/coaching/digital-human-avatar';
+import { A3HomepageProductMedia } from './a3-homepage-product-media';
 import styles from './a3-product-homepage.module.css';
 
 export const A3_HOMEPAGE_TEACHER_ROOT_MARGIN = '160px';
@@ -47,13 +47,42 @@ export function shouldDismissTeacherFallback(
   return rendererReady;
 }
 
+function useHomepageReducedMotion(onReduce: () => void) {
+  const [reducedMotion, setReducedMotion] = useState(() =>
+    typeof window === 'undefined'
+      ? false
+      : window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  );
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const updatePreference = (event: MediaQueryListEvent) => {
+      setReducedMotion(event.matches);
+      if (event.matches) onReduce();
+    };
+
+    media.addEventListener('change', updatePreference);
+    return () => media.removeEventListener('change', updatePreference);
+  }, [onReduce]);
+
+  return reducedMotion;
+}
+
 export function A3HomepageTeacherStage() {
   const rootRef = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState(false);
   const [rendererReady, setRendererReady] = useState(false);
   const [fallbackVisible, setFallbackVisible] = useState(true);
+  const resetToStaticFallback = useCallback(() => {
+    setActive(false);
+    setRendererReady(false);
+    setFallbackVisible(true);
+  }, []);
+  const reducedMotion = useHomepageReducedMotion(resetToStaticFallback);
 
   useEffect(() => {
+    if (reducedMotion) return;
+
     const root = rootRef.current;
     if (!root || typeof IntersectionObserver === 'undefined') return;
 
@@ -69,11 +98,11 @@ export function A3HomepageTeacherStage() {
 
     observer.observe(root);
     return () => observer.disconnect();
-  }, []);
+  }, [reducedMotion]);
 
   useEffect(() => {
     const root = rootRef.current;
-    if (!active || !root || typeof MutationObserver === 'undefined') return;
+    if (reducedMotion || !active || !root || typeof MutationObserver === 'undefined') return;
 
     let stabilityTimeoutId: number | null = null;
     let terminalConfirmed = false;
@@ -130,17 +159,17 @@ export function A3HomepageTeacherStage() {
       cancelStabilityCheck();
       mutationObserver.disconnect();
     };
-  }, [active]);
+  }, [active, reducedMotion]);
 
   useEffect(() => {
-    if (!rendererReady) return;
+    if (reducedMotion || !rendererReady) return;
 
     const timeoutId = window.setTimeout(() => {
       if (shouldDismissTeacherFallback(rendererReady, 'timeout')) setFallbackVisible(false);
     }, 350);
 
     return () => window.clearTimeout(timeoutId);
-  }, [rendererReady]);
+  }, [reducedMotion, rendererReady]);
 
   const dismissFallback = (trigger: 'transition_end' | 'transition_cancel') => {
     if (shouldDismissTeacherFallback(rendererReady, trigger)) setFallbackVisible(false);
@@ -154,7 +183,7 @@ export function A3HomepageTeacherStage() {
       data-renderer={rendererReady ? 'terminal' : active ? 'loading' : 'fallback'}
     >
       <div className={styles.teacherVisual} data-testid="a3-homepage-teacher-visual">
-        {active ? (
+        {active && !reducedMotion ? (
           <div className={styles.teacherRenderer}>
             <DigitalHumanAvatar {...A3_HOMEPAGE_TEACHER_DEMO_PROPS} />
           </div>
@@ -169,11 +198,11 @@ export function A3HomepageTeacherStage() {
             }}
             onTransitionCancel={() => dismissFallback('transition_cancel')}
           >
-            <Image
+            <A3HomepageProductMedia
               src="/a3/assets/homepage/teacher-fallback.webp"
               alt="数字教师实时辅导界面"
-              fill
               sizes="(max-width: 768px) 100vw, 92vw"
+              fallbackKind="teacher"
             />
           </div>
         ) : null}
