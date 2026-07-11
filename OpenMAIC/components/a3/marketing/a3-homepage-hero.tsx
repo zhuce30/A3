@@ -43,7 +43,7 @@ export function A3HomepageHero() {
               alt={item.alt}
               fill
               priority={index === 0}
-              sizes="(max-width: 767px) 92vw, 62vw"
+              sizes="(max-width: 767px) 112vw, (min-width: 1600px) 920px, 68vw"
             />
           </figure>
         ))}

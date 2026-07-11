@@ -109,9 +109,9 @@
 
 .mobileNav {
   position: fixed;
-  inset: 64px 0 auto;
+  inset: 72px 0 auto;
   z-index: 49;
-  display: grid;
+  display: none;
   padding: 12px 18px 20px;
   border-bottom: 1px solid rgb(245 247 242 / 14%);
   background: #0b0e10;
@@ -193,6 +193,14 @@
 }
 
 .heroScreen {
+  --layer-x: 18px;
+  --layer-y: 12px;
+  --layer-z: -24px;
+  --layer-scale: 0.99;
+  --layer-opacity: 0.28;
+  --layer-rotate: -3deg;
+  --layer-order: 3;
+
   position: absolute;
   top: 50%;
   left: 0;
@@ -209,18 +217,50 @@
 }
 
 .heroScreen:nth-child(1) {
+  --layer-x: 18px;
+  --layer-y: 12px;
+  --layer-z: -24px;
+  --layer-scale: 0.99;
+  --layer-opacity: 0.28;
+  --layer-rotate: -3deg;
+  --layer-order: 3;
+
   animation-delay: 0s;
 }
 
 .heroScreen:nth-child(2) {
+  --layer-x: 38px;
+  --layer-y: 26px;
+  --layer-z: -52px;
+  --layer-scale: 0.97;
+  --layer-opacity: 0.24;
+  --layer-rotate: -4deg;
+  --layer-order: 2;
+
   animation-delay: -12s;
 }
 
 .heroScreen:nth-child(3) {
+  --layer-x: 60px;
+  --layer-y: 40px;
+  --layer-z: -80px;
+  --layer-scale: 0.95;
+  --layer-opacity: 0.2;
+  --layer-rotate: -5deg;
+  --layer-order: 1;
+
   animation-delay: -8s;
 }
 
 .heroScreen:nth-child(4) {
+  --layer-x: 82px;
+  --layer-y: 54px;
+  --layer-z: -108px;
+  --layer-scale: 0.93;
+  --layer-opacity: 0.18;
+  --layer-rotate: -6deg;
+  --layer-order: 0;
+
   animation-delay: -4s;
 }
 
@@ -248,20 +288,21 @@
 @keyframes a3HeroCycle {
   0%,
   20% {
-    z-index: 4;
+    z-index: 10;
     opacity: 1;
     transform: translate3d(0, -50%, 0) rotateY(-2deg) scale(1);
   }
 
   25%,
   95% {
-    z-index: 1;
-    opacity: 0.1;
-    transform: translate3d(34px, calc(-50% + 24px), -80px) rotateY(-5deg) scale(0.97);
+    z-index: var(--layer-order);
+    opacity: var(--layer-opacity);
+    transform: translate3d(var(--layer-x), calc(-50% + var(--layer-y)), var(--layer-z))
+      rotateY(var(--layer-rotate)) scale(var(--layer-scale));
   }
 
   100% {
-    z-index: 4;
+    z-index: 10;
     opacity: 1;
     transform: translate3d(0, -50%, 0) rotateY(-2deg) scale(1);
   }
@@ -290,6 +331,10 @@
 
   .menuButton {
     display: inline-flex;
+  }
+
+  .mobileNav {
+    display: grid;
   }
 
   .heroCopy {
@@ -324,6 +369,10 @@
     min-height: 38px;
     padding: 0 13px;
     font-size: 13px;
+  }
+
+  .mobileNav {
+    inset: 64px 0 auto;
   }
 
   .hero {

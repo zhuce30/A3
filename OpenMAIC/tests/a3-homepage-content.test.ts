@@ -193,6 +193,13 @@ describe('A3 product homepage hero and navigation', () => {
     expect(markup).not.toContain('eyebrow');
   });
 
+  it('requests enough image width for the oversized mobile hero composition', () => {
+    const markup = renderToStaticMarkup(createElement(A3HomepageHero));
+
+    expect(markup).toContain('sizes="(max-width: 767px) 112vw, (min-width: 1600px) 920px, 68vw"');
+    expect(markup).not.toContain('(max-width: 767px) 92vw');
+  });
+
   it('renders anonymous navigation with review, login and persistent registration routes', () => {
     authState.user = null;
     const markup = renderToStaticMarkup(createElement(A3ProductHomepage));

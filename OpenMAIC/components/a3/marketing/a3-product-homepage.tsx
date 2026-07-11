@@ -2,7 +2,7 @@
 
 import { Menu, X } from 'lucide-react';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import {
   A3_HOMEPAGE_ACTIONS,
@@ -16,16 +16,45 @@ import styles from './a3-product-homepage.module.css';
 export function A3ProductHomepage() {
   const user = useA3CurrentUser();
   const [menuOpen, setMenuOpen] = useState(false);
+  const brandRef = useRef<HTMLAnchorElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileNavRef = useRef<HTMLElement>(null);
   const closeMenu = () => setMenuOpen(false);
   const workspaceHref = user ? A3_HOMEPAGE_ROUTES.workspace : A3_HOMEPAGE_ROUTES.login;
   const workspaceLabel = user
     ? A3_HOMEPAGE_ACTIONS.signedInWorkspace
     : A3_HOMEPAGE_ACTIONS.anonymousWorkspace;
 
+  useEffect(() => {
+    const desktopLayout = window.matchMedia('(min-width: 1121px)');
+    let focusFrame: number | null = null;
+
+    function closeMenuForDesktop(event: MediaQueryListEvent | MediaQueryList) {
+      if (!event.matches) return;
+
+      const activeElement = document.activeElement;
+      const shouldMoveFocus =
+        activeElement === menuButtonRef.current ||
+        (activeElement instanceof Node && mobileNavRef.current?.contains(activeElement));
+
+      setMenuOpen(false);
+      if (shouldMoveFocus) {
+        focusFrame = window.requestAnimationFrame(() => brandRef.current?.focus());
+      }
+    }
+
+    closeMenuForDesktop(desktopLayout);
+    desktopLayout.addEventListener('change', closeMenuForDesktop);
+    return () => {
+      desktopLayout.removeEventListener('change', closeMenuForDesktop);
+      if (focusFrame !== null) window.cancelAnimationFrame(focusFrame);
+    };
+  }, []);
+
   return (
     <div className={styles.page} data-testid="a3-product-homepage">
       <header className={styles.header}>
-        <Link href="/a3" className={styles.brand} aria-label="智学引擎首页">
+        <Link ref={brandRef} href="/a3" className={styles.brand} aria-label="智学引擎首页">
           {A3_HOMEPAGE_BRAND}
         </Link>
 
@@ -48,6 +77,7 @@ export function A3ProductHomepage() {
             {A3_HOMEPAGE_ACTIONS.registerShort}
           </Link>
           <button
+            ref={menuButtonRef}
             className={styles.menuButton}
             type="button"
             aria-label={menuOpen ? '关闭导航' : '打开导航'}
@@ -61,7 +91,12 @@ export function A3ProductHomepage() {
       </header>
 
       {menuOpen ? (
-        <nav id="a3-homepage-mobile-nav" className={styles.mobileNav} aria-label="移动端首页导航">
+        <nav
+          ref={mobileNavRef}
+          id="a3-homepage-mobile-nav"
+          className={styles.mobileNav}
+          aria-label="移动端首页导航"
+        >
           {A3_HOMEPAGE_NAV.map((item) => (
             <a key={item.href} href={item.href} onClick={closeMenu}>
               {item.label}
