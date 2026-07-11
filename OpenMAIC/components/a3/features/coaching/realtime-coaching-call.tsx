@@ -1,11 +1,26 @@
 'use client';
 
-import { Camera, FileSearch, Focus, Loader2, Mic, MonitorUp, Phone, PhoneOff, Radio, ShieldCheck, VolumeX, Waves } from 'lucide-react';
+import {
+  Camera,
+  FileSearch,
+  Focus,
+  Loader2,
+  Mic,
+  MonitorUp,
+  Phone,
+  PhoneOff,
+  Radio,
+  ShieldCheck,
+  VolumeX,
+  Waves,
+} from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { resolveA3Endpoint } from '@/lib/a3/api-client';
+import type { A3DigitalHumanAvatarState } from '@/lib/a3/digital-human-types';
 import { cn } from '@/lib/utils';
 import type { A3RealtimeEvidence, A3RealtimeStatus } from '@/lib/a3/realtime-coaching-types';
+import { DigitalHumanAvatar } from './digital-human-avatar';
 import { useRealtimeCoaching } from './use-realtime-coaching';
 
 const statusCopy: Record<A3RealtimeStatus, string> = {
@@ -19,6 +34,25 @@ const statusCopy: Record<A3RealtimeStatus, string> = {
   ended: '通话已结束',
   error: '连接失败',
 };
+
+const realtimeAvatarState: Record<Exclude<A3RealtimeStatus, 'live'>, A3DigitalHumanAvatarState> = {
+  idle: 'idle',
+  requesting_permission: 'connecting',
+  connecting: 'connecting',
+  visual_focus: 'visual_focus',
+  degraded: 'degraded',
+  ending: 'thinking',
+  ended: 'ended',
+  error: 'error',
+};
+
+export function resolveRealtimeAvatarState(
+  status: A3RealtimeStatus,
+  assistantSpeaking: boolean,
+): A3DigitalHumanAvatarState {
+  if (status === 'live') return assistantSpeaking ? 'speaking' : 'listening';
+  return realtimeAvatarState[status];
+}
 
 export function RealtimeCoachingCall() {
   const realtime = useRealtimeCoaching();
@@ -51,11 +85,15 @@ export function RealtimeCoachingCall() {
   } = realtime;
   const provider = session?.provider || 'local_fallback_record_then_respond';
   const fallbackReason = session?.fallbackReason;
+  const avatarState = resolveRealtimeAvatarState(status, assistantSpeaking);
 
   const evidenceQueryFallback = session?.instructions.targetTitle || '当前知识点';
 
   return (
-    <section data-testid="a3-realtime-coaching-call" className="overflow-hidden rounded-2xl border border-slate-200 bg-[var(--a3-surface-solid)] shadow-[0_24px_70px_rgba(15,23,42,0.10)]">
+    <section
+      data-testid="a3-realtime-coaching-call"
+      className="overflow-hidden rounded-2xl border border-slate-200 bg-[var(--a3-surface-solid)] shadow-[0_24px_70px_rgba(15,23,42,0.10)]"
+    >
       <div className="flex flex-col gap-4 border-b border-slate-200 bg-slate-50/80 px-6 py-5 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
@@ -64,7 +102,10 @@ export function RealtimeCoachingCall() {
             </span>
             <div>
               <h2 className="text-xl font-semibold text-[var(--a3-text)]">实时面对面辅导</h2>
-              <div data-testid="a3-realtime-status" className="mt-1 text-sm text-[var(--a3-text-muted)]">
+              <div
+                data-testid="a3-realtime-status"
+                className="mt-1 text-sm text-[var(--a3-text-muted)]"
+              >
                 {statusCopy[status]} · {provider} · {session?.model || '未连接'}
               </div>
             </div>
@@ -76,15 +117,32 @@ export function RealtimeCoachingCall() {
           )}
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button data-testid="a3-realtime-start" type="button" onClick={start} disabled={status === 'connecting' || status === 'live'}>
+          <Button
+            data-testid="a3-realtime-start"
+            type="button"
+            onClick={start}
+            disabled={status === 'connecting' || status === 'live'}
+          >
             <Phone className="size-4" />
             开始
           </Button>
-          <Button data-testid="a3-realtime-end-summary" type="button" variant="outline" onClick={end} disabled={status === 'idle' || status === 'ended' || status === 'ending'}>
+          <Button
+            data-testid="a3-realtime-end-summary"
+            type="button"
+            variant="outline"
+            onClick={end}
+            disabled={status === 'idle' || status === 'ended' || status === 'ending'}
+          >
             <PhoneOff className="size-4" />
             结束并总结
           </Button>
-          <Button data-testid="a3-realtime-end-only" type="button" variant="outline" onClick={endWithoutSummary} disabled={status === 'idle' || status === 'ended' || status === 'ending'}>
+          <Button
+            data-testid="a3-realtime-end-only"
+            type="button"
+            variant="outline"
+            onClick={endWithoutSummary}
+            disabled={status === 'idle' || status === 'ended' || status === 'ending'}
+          >
             <PhoneOff className="size-4" />
             只结束
           </Button>
@@ -103,9 +161,17 @@ export function RealtimeCoachingCall() {
                 <Pill active={screenEnabled}>屏幕共享</Pill>
                 <Pill active={status === 'live'}>低延迟</Pill>
               </div>
-              <div data-testid="a3-realtime-audio-level" className="min-w-[180px] rounded-full border border-white/10 bg-white/10 px-3 py-2">
+              <div
+                data-testid="a3-realtime-audio-level"
+                className="min-w-[180px] rounded-full border border-white/10 bg-white/10 px-3 py-2"
+              >
                 <div className="flex items-center gap-2 text-xs text-slate-200">
-                  <span className={cn('size-2 rounded-full', microphoneEnabled ? 'bg-emerald-400' : 'bg-slate-500')} />
+                  <span
+                    className={cn(
+                      'size-2 rounded-full',
+                      microphoneEnabled ? 'bg-emerald-400' : 'bg-slate-500',
+                    )}
+                  />
                   <span className="shrink-0">输入</span>
                   <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
                     <div
@@ -119,29 +185,39 @@ export function RealtimeCoachingCall() {
             </div>
 
             <div className="relative z-10 grid flex-1 gap-4 p-5 xl:grid-cols-[minmax(0,1fr)_210px]">
-              <div className="relative flex min-h-[420px] flex-col items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035] p-6 text-center">
-                <div className="absolute left-5 top-5 flex items-center gap-2 rounded-full border border-white/10 bg-white/8 px-3 py-1.5 text-xs text-slate-300">
-                  <span className={cn('size-2 rounded-full', status === 'live' ? 'bg-emerald-400' : status === 'error' ? 'bg-rose-400' : 'bg-slate-500')} />
-                  {statusCopy[status]}
-                </div>
-                <div className="absolute right-5 top-5 rounded-full border border-white/10 bg-white/8 px-3 py-1.5 text-xs text-slate-300">
-                  {assistantSpeaking ? 'AI 正在回答' : '等待输入'}
-                </div>
-                <div className={cn('relative flex size-32 items-center justify-center rounded-full bg-blue-600 text-5xl font-bold shadow-[0_0_90px_rgba(37,99,235,0.46)] transition-transform duration-200', assistantSpeaking && 'scale-105')}>
-                  {assistantSpeaking && <span className="absolute inset-[-16px] rounded-full border border-blue-300/40" />}
-                  AI
-                </div>
-                <div className="mt-7 flex items-center gap-2 text-sm font-medium text-slate-100">
-                  <Waves className="size-4 text-blue-300" />
-                  多模态实时辅导
-                </div>
-                <p className="mt-3 max-w-[560px] text-sm leading-6 text-slate-300">
-                  语音、屏幕画面、知识库证据和视觉帧会合并为同一次会话上下文。
-                </p>
-                <div className="mt-6 grid w-full max-w-[560px] gap-2 text-xs text-slate-300 sm:grid-cols-3">
-                  <span className="rounded-xl border border-white/10 bg-white/8 px-3 py-2">回答可打断</span>
-                  <span className="rounded-xl border border-white/10 bg-white/8 px-3 py-2">证据可追溯</span>
-                  <span className="rounded-xl border border-white/10 bg-white/8 px-3 py-2">不保存原始视频</span>
+              <div className="relative min-h-[420px] overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035] text-center">
+                <DigitalHumanAvatar
+                  state={avatarState}
+                  audioLevel={audioLevel}
+                  assistantSpeaking={assistantSpeaking}
+                  providerLabel={provider}
+                  modelLabel={session?.model || '未连接'}
+                  fallbackReason={fallbackReason}
+                />
+                <div className="pointer-events-none absolute inset-x-5 bottom-5 z-20 rounded-2xl border border-white/15 bg-slate-950/62 p-4 text-left shadow-xl backdrop-blur-xl">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-sm font-medium text-slate-100">
+                    <span className="inline-flex items-center gap-2">
+                      <Waves className="size-4 text-blue-300" />
+                      多模态实时辅导
+                    </span>
+                    <span className="text-xs text-slate-300">
+                      {assistantSpeaking ? 'AI 正在回答' : '等待输入'}
+                    </span>
+                  </div>
+                  <p className="mt-2 max-w-[560px] text-sm leading-6 text-slate-300">
+                    语音、屏幕画面、知识库证据和视觉帧会合并为同一次会话上下文。
+                  </p>
+                  <div className="mt-3 grid gap-2 text-xs text-slate-300 sm:grid-cols-3">
+                    <span className="rounded-xl border border-white/10 bg-white/8 px-3 py-2">
+                      回答可打断
+                    </span>
+                    <span className="rounded-xl border border-white/10 bg-white/8 px-3 py-2">
+                      证据可追溯
+                    </span>
+                    <span className="rounded-xl border border-white/10 bg-white/8 px-3 py-2">
+                      不保存原始视频
+                    </span>
+                  </div>
                 </div>
               </div>
               <div className="grid gap-3">
@@ -152,7 +228,10 @@ export function RealtimeCoachingCall() {
                     autoPlay
                     playsInline
                     muted
-                    className={cn('size-full rounded-xl bg-black object-cover', !cameraEnabled && 'opacity-40')}
+                    className={cn(
+                      'size-full rounded-xl bg-black object-cover',
+                      !cameraEnabled && 'opacity-40',
+                    )}
                   />
                 </PreviewTile>
                 <PreviewTile active={screenEnabled} label="屏幕">
@@ -162,7 +241,10 @@ export function RealtimeCoachingCall() {
                     autoPlay
                     playsInline
                     muted
-                    className={cn('size-full rounded-xl bg-black object-cover', !screenEnabled && 'opacity-40')}
+                    className={cn(
+                      'size-full rounded-xl bg-black object-cover',
+                      !screenEnabled && 'opacity-40',
+                    )}
                   />
                 </PreviewTile>
               </div>
@@ -193,7 +275,14 @@ export function RealtimeCoachingCall() {
                   <Focus className="size-4" />
                   看这里/截屏分析
                 </Button>
-                <Button data-testid="a3-realtime-interrupt" type="button" variant="secondary" size="sm" onClick={interruptAssistant} disabled={status !== 'live' && !assistantSpeaking}>
+                <Button
+                  data-testid="a3-realtime-interrupt"
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={interruptAssistant}
+                  disabled={status !== 'live' && !assistantSpeaking}
+                >
                   <VolumeX className="size-4" />
                   打断AI
                 </Button>
@@ -208,7 +297,9 @@ export function RealtimeCoachingCall() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-[var(--a3-text)]">实时知识库证据</div>
-                <p className="mt-1 text-xs text-[var(--a3-text-muted)]">检索文本 chunk 与 visual_vector 缩略图证据。</p>
+                <p className="mt-1 text-xs text-[var(--a3-text-muted)]">
+                  检索文本 chunk 与 visual_vector 缩略图证据。
+                </p>
               </div>
               <ShieldCheck className="size-5 text-emerald-600" />
             </div>
@@ -224,8 +315,19 @@ export function RealtimeCoachingCall() {
                 placeholder="输入要检索的知识点"
                 className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
               />
-              <Button data-testid="a3-realtime-retrieval-submit" type="button" size="sm" variant="outline" disabled={retrievalProgress.status === 'running'} onClick={() => retrieveEvidence(toolQuery || evidenceQueryFallback)}>
-                {retrievalProgress.status === 'running' ? <Loader2 className="size-4 animate-spin" /> : <FileSearch className="size-4" />}
+              <Button
+                data-testid="a3-realtime-retrieval-submit"
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={retrievalProgress.status === 'running'}
+                onClick={() => retrieveEvidence(toolQuery || evidenceQueryFallback)}
+              >
+                {retrievalProgress.status === 'running' ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <FileSearch className="size-4" />
+                )}
                 {retrievalProgress.status === 'running' ? '检索中' : '检索'}
               </Button>
             </div>
@@ -240,7 +342,9 @@ export function RealtimeCoachingCall() {
                     : 'border-blue-100 bg-blue-50 text-blue-700',
               )}
             >
-              {retrievalProgress.status === 'idle' ? '正在检索本地资料前，会先展示检索阶段和命中数量。' : retrievalProgress.message}
+              {retrievalProgress.status === 'idle'
+                ? '正在检索本地资料前，会先展示检索阶段和命中数量。'
+                : retrievalProgress.message}
             </div>
             <EvidenceList evidence={evidence} />
           </div>
@@ -248,16 +352,32 @@ export function RealtimeCoachingCall() {
           <div className="rounded-xl border border-slate-200 bg-[var(--a3-surface-solid)] p-4 shadow-sm">
             <div className="text-sm font-semibold text-[var(--a3-text)]">实时字幕与事件</div>
             <div className="mt-3 max-h-[300px] space-y-2 overflow-auto text-sm">
-              {transcript.length ? transcript.slice(-6).map((item) => (
-                <div key={item.id} className="rounded-lg bg-[var(--a3-surface-muted)] px-3 py-2 text-[var(--a3-text-muted)]">
-                  <span className="font-medium text-[var(--a3-text)]">{item.role === 'assistant' ? 'AI' : item.role === 'user' ? '你' : '系统'}：</span>
-                  {item.content}
-                </div>
-              )) : (
-                <p className="rounded-lg bg-[var(--a3-surface-muted)] px-3 py-2 text-[var(--a3-text-muted)]">开始通话后，这里显示 provider 状态、字幕和工具调用结果。</p>
+              {transcript.length ? (
+                transcript.slice(-6).map((item) => (
+                  <div
+                    key={item.id}
+                    className="rounded-lg bg-[var(--a3-surface-muted)] px-3 py-2 text-[var(--a3-text-muted)]"
+                  >
+                    <span className="font-medium text-[var(--a3-text)]">
+                      {item.role === 'assistant' ? 'AI' : item.role === 'user' ? '你' : '系统'}：
+                    </span>
+                    {item.content}
+                  </div>
+                ))
+              ) : (
+                <p className="rounded-lg bg-[var(--a3-surface-muted)] px-3 py-2 text-[var(--a3-text-muted)]">
+                  开始通话后，这里显示 provider 状态、字幕和工具调用结果。
+                </p>
               )}
             </div>
-            {error && <p data-testid="a3-realtime-error" className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>}
+            {error && (
+              <p
+                data-testid="a3-realtime-error"
+                className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700"
+              >
+                {error}
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -265,20 +385,27 @@ export function RealtimeCoachingCall() {
   );
 }
 
-function SummaryCard({ summary }: { summary: {
-  questionCount?: number;
-  assistantReplyCount?: number;
-  verifiedReplyCount?: number;
-  citationCount?: number;
-  visualEvidenceCount?: number;
-  latestQuestions?: string[];
-  recommendedReviewTasks?: Array<{ title?: string; href?: string; reason?: string }>;
-  nextAction?: { label?: string; href?: string; reason?: string };
-  generatedAt?: string;
-} }) {
+function SummaryCard({
+  summary,
+}: {
+  summary: {
+    questionCount?: number;
+    assistantReplyCount?: number;
+    verifiedReplyCount?: number;
+    citationCount?: number;
+    visualEvidenceCount?: number;
+    latestQuestions?: string[];
+    recommendedReviewTasks?: Array<{ title?: string; href?: string; reason?: string }>;
+    nextAction?: { label?: string; href?: string; reason?: string };
+    generatedAt?: string;
+  };
+}) {
   const nextHref = summary.nextAction?.href || '/a3/today';
   return (
-    <div data-testid="a3-realtime-summary" className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 shadow-sm">
+    <div
+      data-testid="a3-realtime-summary"
+      className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 shadow-sm"
+    >
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-emerald-900">本次实时辅导总结</div>
@@ -298,12 +425,17 @@ function SummaryCard({ summary }: { summary: {
         <div className="mt-3 rounded-lg bg-white/70 p-3">
           <div className="text-xs font-medium text-emerald-900">最近问题</div>
           <ul className="mt-2 space-y-1 text-xs leading-5 text-emerald-800">
-            {summary.latestQuestions.slice(-3).map((question, index) => <li key={`${question}-${index}`}>· {question}</li>)}
+            {summary.latestQuestions.slice(-3).map((question, index) => (
+              <li key={`${question}-${index}`}>· {question}</li>
+            ))}
           </ul>
         </div>
       ) : null}
       {summary.nextAction?.label && (
-        <a href={nextHref} className="mt-3 inline-flex h-9 items-center rounded-lg bg-emerald-600 px-3 text-xs font-medium text-white hover:bg-emerald-700">
+        <a
+          href={nextHref}
+          className="mt-3 inline-flex h-9 items-center rounded-lg bg-emerald-600 px-3 text-xs font-medium text-white hover:bg-emerald-700"
+        >
           {summary.nextAction.label}
         </a>
       )}
@@ -322,13 +454,26 @@ function Metric({ label, value }: { label: string; value: number }) {
 
 function Pill({ active, children }: { active: boolean; children: ReactNode }) {
   return (
-    <span className={cn('rounded-full px-3 py-1 text-xs font-medium', active ? 'bg-emerald-400 text-slate-950' : 'bg-white/10 text-slate-300')}>
+    <span
+      className={cn(
+        'rounded-full px-3 py-1 text-xs font-medium',
+        active ? 'bg-emerald-400 text-slate-950' : 'bg-white/10 text-slate-300',
+      )}
+    >
       {children}
     </span>
   );
 }
 
-function PreviewTile({ active, label, children }: { active: boolean; label: string; children: ReactNode }) {
+function PreviewTile({
+  active,
+  label,
+  children,
+}: {
+  active: boolean;
+  label: string;
+  children: ReactNode;
+}) {
   return (
     <div className="relative min-h-[160px] overflow-hidden rounded-2xl border border-white/10 bg-black">
       <div className="absolute left-3 top-3 z-10 rounded-full bg-slate-950/75 px-3 py-1 text-xs font-medium text-white">
@@ -346,21 +491,40 @@ function PreviewTile({ active, label, children }: { active: boolean; label: stri
 
 function EvidenceList({ evidence }: { evidence: A3RealtimeEvidence[] }) {
   if (!evidence.length) {
-    return <div className="mt-3 rounded-lg border border-dashed border-slate-300 p-3 text-sm text-[var(--a3-text-muted)]">暂无实时证据。开始检索后会展示引用和 previewUrl 缩略图。</div>;
+    return (
+      <div className="mt-3 rounded-lg border border-dashed border-slate-300 p-3 text-sm text-[var(--a3-text-muted)]">
+        暂无实时证据。开始检索后会展示引用和 previewUrl 缩略图。
+      </div>
+    );
   }
   return (
     <div className="mt-3 space-y-2" data-testid="a3-realtime-evidence-list">
       {evidence.slice(0, 5).map((item, index) => (
-        <div key={`${item.title}-${index}`} className="flex gap-3 rounded-lg border border-slate-200 bg-white p-2">
+        <div
+          key={`${item.title}-${index}`}
+          className="flex gap-3 rounded-lg border border-slate-200 bg-white p-2"
+        >
           {item.previewUrl ? (
-            <img src={resolvePreviewUrl(item.previewUrl)} alt="" className="h-16 w-24 shrink-0 rounded-md border border-slate-200 object-cover" />
+            <img
+              src={resolvePreviewUrl(item.previewUrl)}
+              alt=""
+              className="h-16 w-24 shrink-0 rounded-md border border-slate-200 object-cover"
+            />
           ) : (
-            <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded-md bg-slate-100 text-xs text-slate-500">文本</div>
+            <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded-md bg-slate-100 text-xs text-slate-500">
+              文本
+            </div>
           )}
           <div className="min-w-0">
-            <div className="line-clamp-1 text-sm font-semibold text-[var(--a3-text)]">{item.title}</div>
-            <div className="mt-1 text-xs text-blue-700">{item.sourceType || 'text'} · {item.location || '本地知识库'}</div>
-            <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--a3-text-muted)]">{item.snippet}</p>
+            <div className="line-clamp-1 text-sm font-semibold text-[var(--a3-text)]">
+              {item.title}
+            </div>
+            <div className="mt-1 text-xs text-blue-700">
+              {item.sourceType || 'text'} · {item.location || '本地知识库'}
+            </div>
+            <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--a3-text-muted)]">
+              {item.snippet}
+            </p>
           </div>
         </div>
       ))}
