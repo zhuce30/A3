@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { a3GetJson } from '@/lib/a3/api-client';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
 
+const publicPaths = new Set(['/a3']);
 const guestPaths = new Set(['/a3/login', '/a3/register', '/a3/forgot-password']);
 const flowPaths = new Set([
   '/a3/role-selection',
@@ -35,6 +36,7 @@ export function A3AuthGate({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [user, setUser] = useState<A3PublicUser | null | undefined>(undefined);
 
+  const isPublicPath = publicPaths.has(pathname);
   const isGuestPath = guestPaths.has(pathname);
   const isFlowPath = flowPaths.has(pathname);
 
@@ -67,17 +69,28 @@ export function A3AuthGate({ children }: { children: React.ReactNode }) {
   }, []);
 
   const target = useMemo(() => {
+    if (isPublicPath) return null;
     if (user === undefined) return null;
-    if (!user) return isGuestPath ? null : '/a3/login';
+    if (!user) {
+      return isGuestPath ? null : `/a3/login?next=${encodeURIComponent(pathname)}`;
+    }
     const nextPath = nextPathForUser(user);
     if (isGuestPath) return nextPath;
     if (!isFlowPath && nextPath !== '/a3/dashboard') return nextPath;
     return null;
-  }, [isFlowPath, isGuestPath, user]);
+  }, [isFlowPath, isGuestPath, isPublicPath, pathname, user]);
 
   useEffect(() => {
     if (target && target !== pathname) router.replace(target);
   }, [pathname, router, target]);
+
+  if (isPublicPath) {
+    return (
+      <A3CurrentUserContext.Provider value={user ?? null}>
+        {children}
+      </A3CurrentUserContext.Provider>
+    );
+  }
 
   if (user === undefined || target) {
     return (
@@ -94,4 +107,8 @@ export function A3AuthGate({ children }: { children: React.ReactNode }) {
   );
 }
 
-export const A3_AUTH_FLOW_PATHS = new Set([...guestPaths, ...flowPaths]);
+export const A3_SHELL_BYPASS_PATHS = new Set([
+  ...publicPaths,
+  ...guestPaths,
+  ...flowPaths,
+]);

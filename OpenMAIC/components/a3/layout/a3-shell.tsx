@@ -4,7 +4,10 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { ChevronDown, LogOut, Repeat2, Settings, UserRound } from 'lucide-react';
 import { useState } from 'react';
-import { A3_AUTH_FLOW_PATHS, useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
+import {
+  A3_SHELL_BYPASS_PATHS,
+  useA3CurrentUser,
+} from '@/components/a3/auth/a3-auth-gate';
 import { A3GlobalSearch } from '@/components/a3/layout/a3-global-search';
 import { A3TopActions } from '@/components/a3/layout/a3-top-actions';
 import { a3PostJson } from '@/lib/a3/api-client';
@@ -17,7 +20,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
   const user = useA3CurrentUser();
   const { messages } = useA3Locale();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  if (A3_AUTH_FLOW_PATHS.has(pathname)) return <>{children}</>;
+  if (A3_SHELL_BYPASS_PATHS.has(pathname)) return <>{children}</>;
 
   const displayName = user?.displayName?.trim() || messages.unnamedUser;
   const userInitial = displayName.slice(0, 1);
