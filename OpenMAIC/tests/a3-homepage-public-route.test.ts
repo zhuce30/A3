@@ -50,6 +50,14 @@ const onboardingUser: A3PublicUser = {
   updatedAt: '2026-07-11T00:00:00Z',
 };
 
+const completedUser: A3PublicUser = {
+  ...onboardingUser,
+  phoneBound: true,
+  privacyAccepted: true,
+  profileCompleted: true,
+  onboardingStep: 'complete',
+};
+
 describe('A3 product homepage route boundary', () => {
   it('renders the public homepage immediately while authentication is pending', () => {
     navigationState.pathname = '/a3';
@@ -110,6 +118,24 @@ describe('A3 product homepage route boundary', () => {
       `/a3/login?next=${encodeURIComponent(currentPath)}`,
     );
     expect(getA3AuthTarget('/a3/login', null)).toBeNull();
+  });
+
+  it('lets the guest redirect consume a safe login return target once authenticated', () => {
+    const guestState = { isPublicPath: false, isGuestPath: true, isFlowPath: false };
+
+    expect(
+      getA3AuthTarget(
+        '/a3/login?mode=review&next=%2Fa3%2Fcoaching%3Fsource%3Dreview',
+        completedUser,
+        guestState,
+      ),
+    ).toBe('/a3/coaching?source=review');
+    expect(
+      getA3AuthTarget('/a3/login?next=https%3A%2F%2Fevil.example%2Fa3', completedUser, guestState),
+    ).toBe('/a3/dashboard');
+    expect(getA3AuthTarget('/a3/login?next=%2Fa3%2Fcoaching', onboardingUser, guestState)).toBe(
+      '/a3/phone-binding',
+    );
   });
 
   it('reads the initial hash safely on the server and in the browser', () => {

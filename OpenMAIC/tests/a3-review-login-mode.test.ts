@@ -3,6 +3,7 @@ import path from 'node:path';
 import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
+import type { A3PublicUser } from '@/lib/a3/auth-types';
 
 const routerPush = vi.hoisted(() => vi.fn());
 
@@ -89,25 +90,39 @@ describe('A3 review login mode', () => {
     });
   });
 
-  it('prefers an approved return target only after profile onboarding', async () => {
-    const authPages = await import('@/components/a3/auth/a3-auth-pages');
-    const getDestination = (
-      authPages as typeof authPages & {
-        getA3LoginDestination?: (
-          user: { profileCompleted?: boolean; onboardingStep?: string } | undefined,
-          returnTo: string | null,
-        ) => string;
-      }
-    ).getA3LoginDestination;
+  it('lets the auth gate prefer an approved return target only after onboarding', async () => {
+    const { getA3AuthTarget } = await import('@/lib/a3/auth-navigation');
+    const guestState = { isPublicPath: false, isGuestPath: true, isFlowPath: false };
+    const completedUser: A3PublicUser = {
+      id: 'review-student',
+      role: 'student' as const,
+      displayName: '评审学生',
+      phoneBound: true,
+      privacyAccepted: true,
+      profileCompleted: true,
+      onboardingStep: 'complete',
+      createdAt: '2026-07-11T00:00:00Z',
+      updatedAt: '2026-07-11T00:00:00Z',
+    };
 
-    expect(getDestination).toBeTypeOf('function');
-    if (!getDestination) return;
-
-    expect(getDestination({ profileCompleted: true }, '/a3/coaching')).toBe('/a3/coaching');
     expect(
-      getDestination({ profileCompleted: false, onboardingStep: 'privacy' }, '/a3/coaching'),
+      getA3AuthTarget('/a3/login?mode=review&next=%2Fa3%2Fcoaching', completedUser, guestState),
+    ).toBe('/a3/coaching');
+    expect(
+      getA3AuthTarget('/a3/login?next=https%3A%2F%2Fevil.example%2Fa3', completedUser, guestState),
+    ).toBe('/a3/dashboard');
+    expect(
+      getA3AuthTarget(
+        '/a3/login?next=%2Fa3%2Fcoaching',
+        {
+          ...completedUser,
+          privacyAccepted: false,
+          profileCompleted: false,
+          onboardingStep: 'privacy',
+        },
+        guestState,
+      ),
     ).toBe('/a3/privacy');
-    expect(getDestination({ profileCompleted: true }, null)).toBe('/a3/dashboard');
   });
 
   it('keeps fixed review credentials in the review-only component', () => {

@@ -42,6 +42,18 @@ function nextPathForUser(user: A3PublicUser) {
   return '/a3/dashboard';
 }
 
+function loginReturnPath(currentPath: string, user: A3PublicUser): string | null {
+  if (!user.profileCompleted) return null;
+
+  try {
+    const parsed = new URL(currentPath, returnPathBase);
+    if (parsed.origin !== returnPathBase || parsed.pathname !== '/a3/login') return null;
+    return normalizeA3ReturnPath(parsed.searchParams.get('next'));
+  } catch {
+    return null;
+  }
+}
+
 export function getInitialA3Hash(): string {
   return typeof window === 'undefined' ? '' : window.location.hash;
 }
@@ -108,7 +120,7 @@ export function getA3AuthTarget(
   }
 
   const nextPath = nextPathForUser(user);
-  if (pathState.isGuestPath) return nextPath;
+  if (pathState.isGuestPath) return loginReturnPath(pathname, user) ?? nextPath;
   if (!pathState.isFlowPath && nextPath !== '/a3/dashboard') return nextPath;
   return null;
 }

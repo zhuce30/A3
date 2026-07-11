@@ -386,29 +386,49 @@ function FieldIcon({ icon: Icon }: { icon: LucideIcon }) {
 
 function ErrorBox({ message }: { message: string }) {
   if (!message) return null;
-  return <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{message}</div>;
+  return <div role="alert" aria-live="assertive" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{message}</div>;
 }
 
-export function getA3LoginDestination(
-  user: ApiResult['user'],
-  returnTo: string | null,
-) {
-  return user?.profileCompleted && returnTo ? returnTo : nextPath(user);
+type ExecuteA3LoginOptions = {
+  request: () => Promise<ApiResult>;
+  onSuccess: (result: ApiResult) => void;
+  onError: (message: string) => void;
+  onSubmittingChange: (submitting: boolean) => void;
+};
+
+export async function executeA3Login({
+  request,
+  onSuccess,
+  onError,
+  onSubmittingChange,
+}: ExecuteA3LoginOptions) {
+  onSubmittingChange(true);
+  try {
+    const result = await request();
+    if (!result.success) {
+      onError(result.error ?? '登录失败');
+      return;
+    }
+    onSuccess(result);
+  } catch {
+    onError('登录请求失败，请检查网络后重试');
+  } finally {
+    onSubmittingChange(false);
+  }
 }
 
 export function LoginPage({
   reviewMode = false,
-  returnTo = null,
 }: {
   reviewMode?: boolean;
   returnTo?: string | null;
 }) {
-  const router = useRouter();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [reviewAccountFilled, setReviewAccountFilled] = useState(false);
 
   async function submit() {
     setError('');
@@ -416,12 +436,18 @@ export function LoginPage({
       setError('请输入账号和密码后再登录');
       return;
     }
-    setSubmitting(true);
-    const result = await postJson('/api/auth/login/', { identifier, password });
-    setSubmitting(false);
-    if (!result.success) return setError(result.error ?? '登录失败');
-    syncA3User(result.user);
-    router.push(getA3LoginDestination(result.user, returnTo));
+    await executeA3Login({
+      request: () => postJson('/api/auth/login/', { identifier, password }),
+      onSubmittingChange: setSubmitting,
+      onError: setError,
+      onSuccess: (result) => {
+        if (!result.user) {
+          setError('登录状态更新失败，请重新登录');
+          return;
+        }
+        syncA3User(result.user);
+      },
+    });
   }
 
   return (
@@ -440,8 +466,14 @@ export function LoginPage({
               setIdentifier(nextIdentifier);
               setPassword(nextPassword);
               setError('');
+              setReviewAccountFilled(true);
             }}
           />
+        ) : null}
+        {reviewMode ? (
+          <p role="status" aria-live="polite" className="sr-only">
+            {reviewAccountFilled ? '评审账号已填入，可以登录。' : ''}
+          </p>
         ) : null}
         <div className="space-y-5">
           <label className="block">
