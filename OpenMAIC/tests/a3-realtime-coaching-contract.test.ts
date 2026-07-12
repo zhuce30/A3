@@ -81,7 +81,10 @@ describe('A3 realtime coaching contracts', () => {
     expect(hook).toContain('RTCPeerConnection');
     expect(hook).toContain('/api/a3/coaching/realtime/sdp');
     expect(hook).toContain('connectRealtimeWebSocket');
-    expect(hook).toContain('new WebSocket(connectionUrl)');
+    expect(hook).toContain('localizeRealtimeWebSocketUrl');
+    expect(hook).toContain('window.location.hostname');
+    expect(hook).toContain('new WebSocket(localizedConnectionUrl)');
+    expect(hook).not.toContain('new WebSocket(connectionUrl)');
     expect(hook).toContain('input_audio_buffer.append');
     expect(hook).toContain('input_audio_buffer.commit');
     expect(hook).toContain('response.create');

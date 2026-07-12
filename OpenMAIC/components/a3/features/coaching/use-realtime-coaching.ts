@@ -72,6 +72,27 @@ type ProviderSpeechCueItem = {
 
 const REALTIME_FRAME_SLOW_FEEDBACK_MS = 8000;
 
+function isLoopbackHostname(hostname: string) {
+  return hostname === 'localhost'
+    || hostname === '127.0.0.1'
+    || hostname === '[::1]'
+    || hostname === '::1';
+}
+
+export function localizeRealtimeWebSocketUrl(connectionUrl: string, pageHostname: string) {
+  if (!isLoopbackHostname(pageHostname)) return connectionUrl;
+  try {
+    const parsed = new URL(connectionUrl);
+    if (isLoopbackHostname(parsed.hostname) && parsed.hostname !== pageHostname) {
+      parsed.hostname = pageHostname;
+      return parsed.toString();
+    }
+  } catch {
+    return connectionUrl;
+  }
+  return connectionUrl;
+}
+
 type RemoteAudioSpeakingTarget = {
   addEventListener: (eventName: string, listener: EventListener) => void;
   removeEventListener: (eventName: string, listener: EventListener) => void;
@@ -796,7 +817,11 @@ export function useRealtimeCoaching() {
           finish(false);
           return;
         }
-        socket = new WebSocket(connectionUrl);
+        const localizedConnectionUrl = localizeRealtimeWebSocketUrl(
+          connectionUrl,
+          window.location.hostname,
+        );
+        socket = new WebSocket(localizedConnectionUrl);
         websocketRef.current = socket;
         operation.controller.signal.addEventListener('abort', handleAbort, { once: true });
         timeout = window.setTimeout(() => {
