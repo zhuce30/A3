@@ -272,13 +272,21 @@ export function TeacherWorkbenchView() {
         </div>
       </div>
 
-      <div className="grid gap-5 xl:grid-cols-2">
-        <WeakPointsCard weakPoints={workbench?.weakPoints ?? []} />
+      <div
+        className="grid gap-5 xl:grid-cols-2"
+        data-testid="a3-teacher-homepage-evidence"
+      >
+        <WeakPointsCard weakPoints={workbench?.weakPoints ?? []} showEmpty={!loading} />
         <A3Card title="课堂任务队列">
           <div className="space-y-3">
             {(workbench?.tasks ?? []).map((task, index) => (
               <TaskRow key={`${task.type}-${task.title}-${index}`} task={task} executing={executingTask === task.type} onExecute={() => executeTask(task.type)} />
             ))}
+            {!loading && !(workbench?.tasks ?? []).length && (
+              <div data-testid="a3-teacher-tasks-empty" className="rounded-xl bg-[var(--a3-surface-muted)] p-4 text-sm text-[var(--a3-text-muted)]">
+                当前没有待执行的课堂任务。
+              </div>
+            )}
           </div>
         </A3Card>
       </div>
@@ -669,7 +677,7 @@ function RiskStudentsCard({ students }: { students: TeacherWorkbenchStudent[] })
   );
 }
 
-function WeakPointsCard({ weakPoints }: { weakPoints: NonNullable<TeacherWorkbench['weakPoints']> }) {
+function WeakPointsCard({ weakPoints, showEmpty }: { weakPoints: NonNullable<TeacherWorkbench['weakPoints']>; showEmpty: boolean }) {
   return (
     <A3Card
       title="班级薄弱知识点"
@@ -677,7 +685,7 @@ function WeakPointsCard({ weakPoints }: { weakPoints: NonNullable<TeacherWorkben
     >
       <div className="space-y-4">
         {weakPoints.map((item) => (
-          <div key={item.label} className="space-y-2">
+          <div key={item.label} className="space-y-2" data-testid="a3-teacher-weak-point-row">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="truncate text-sm font-medium text-[var(--a3-text)]">{item.label}</div>
@@ -696,6 +704,11 @@ function WeakPointsCard({ weakPoints }: { weakPoints: NonNullable<TeacherWorkben
             </div>
           </div>
         ))}
+        {showEmpty && !weakPoints.length && (
+          <div data-testid="a3-teacher-weak-points-empty" className="rounded-xl bg-[var(--a3-surface-muted)] p-4 text-sm text-[var(--a3-text-muted)]">
+            当前没有需要班级集中巩固的知识点。
+          </div>
+        )}
       </div>
       {weakPoints.some((item) => item.tone === 'red') && (
         <div className="mt-4 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-xs leading-5 text-rose-800">
@@ -767,7 +780,7 @@ function EvidenceMetric({ label, value, detail }: { label: string; value: string
 
 function TaskRow({ task, executing, onExecute }: { task: TeacherTask; executing: boolean; onExecute: () => void }) {
   return (
-    <div className="flex items-center justify-between rounded-xl border border-[var(--a3-border)] p-4">
+    <div data-testid="a3-teacher-task-row" className="flex items-center justify-between rounded-xl border border-[var(--a3-border)] p-4">
       <div className="flex min-w-0 items-center gap-3">
         <BookOpen className="size-4 shrink-0 text-blue-600" />
         <span className="truncate text-sm font-medium text-[var(--a3-text)]">{task.title}</span>

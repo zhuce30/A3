@@ -22,6 +22,7 @@
     "test:e2e:a3-classroom": "playwright test e2e/tests/a3-openmaic-bridge.spec.ts --project=chromium --workers=1 -g \"resource pack queues OpenMAIC classroom\" && playwright test e2e/tests/a3-openmaic-bridge.spec.ts --project=chromium --workers=1 -g \"failed OpenMAIC classroom job\" && playwright test e2e/tests/a3-openmaic-bridge.spec.ts --project=chromium --workers=1 -g \"micro video script\" && playwright test e2e/tests/a3-classroom-note.spec.ts e2e/tests/a3-classroom-embedded-practice-sync.spec.ts --project=chromium --workers=1",
     "test:e2e:ui": "playwright test --ui",
     "realtime:dashscope-proxy": "node scripts/a3-dashscope-realtime-proxy.mjs",
+    "capture:a3-homepage": "node scripts/capture-a3-homepage-assets.mjs",
     "smoke:a3-video": "node scripts/a3-real-video-smoke.mjs",
     "eval:whiteboard": "tsx eval/whiteboard-layout/runner.ts",
     "eval:outline-language": "tsx eval/outline-language/runner.ts"

@@ -1,10 +1,16 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { DigitalHumanAvatar } from '@/components/a3/features/coaching/digital-human-avatar';
-import { A3_DIGITAL_HUMAN_AVATAR_MODES, A3_DIGITAL_HUMAN_AVATAR_STATES } from '@/lib/a3/digital-human-types';
+import { DigitalHumanThreeStage } from '@/components/a3/features/coaching/digital-human-three-stage';
+import {
+  A3_DIGITAL_HUMAN_AVATAR_MODES,
+  A3_DIGITAL_HUMAN_AVATAR_STATES,
+} from '@/lib/a3/digital-human-types';
 
 describe('A3 digital human avatar types', () => {
   it('defines stable avatar states and modes', () => {
@@ -16,14 +22,16 @@ describe('A3 digital human avatar types', () => {
 
 describe('DigitalHumanAvatar', () => {
   it('renders a digital human instead of a static AI label', () => {
-    const html = renderToStaticMarkup(createElement(DigitalHumanAvatar, {
-      state: 'idle',
-      mode: 'local_3d',
-      audioLevel: 0,
-      assistantSpeaking: false,
-      providerLabel: 'dashscope_qwen_omni_realtime',
-      modelLabel: 'qwen3.5-omni-plus-realtime',
-    }));
+    const html = renderToStaticMarkup(
+      createElement(DigitalHumanAvatar, {
+        state: 'idle',
+        mode: 'local_3d',
+        audioLevel: 0,
+        assistantSpeaking: false,
+        providerLabel: 'dashscope_qwen_omni_realtime',
+        modelLabel: 'qwen3.5-omni-plus-realtime',
+      }),
+    );
 
     expect(html).toContain('data-testid="a3-digital-human-avatar"');
     expect(html).toContain('数字助教');
@@ -31,29 +39,91 @@ describe('DigitalHumanAvatar', () => {
   });
 
   it('marks the avatar as speaking when assistant audio is active', () => {
-    const html = renderToStaticMarkup(createElement(DigitalHumanAvatar, {
-      state: 'speaking',
-      mode: 'local_3d',
-      audioLevel: 0.72,
-      assistantSpeaking: true,
-      providerLabel: 'openai_realtime_webrtc',
-      modelLabel: 'gpt-realtime-2',
-    }));
+    const avatarHtml = renderToStaticMarkup(
+      createElement(DigitalHumanAvatar, {
+        state: 'speaking',
+        mode: 'local_3d',
+        audioLevel: 0.72,
+        assistantSpeaking: true,
+        providerLabel: 'openai_realtime_webrtc',
+        modelLabel: 'gpt-realtime-2',
+      }),
+    );
+    const stageHtml = renderToStaticMarkup(
+      createElement(DigitalHumanThreeStage, {
+        state: 'speaking',
+        audioLevel: 0.72,
+        assistantSpeaking: true,
+      }),
+    );
 
-    expect(html).toContain('data-state="speaking"');
-    expect(html).toContain('data-testid="a3-digital-human-mouth"');
-    expect(html).toContain('scaleY(1.72)');
+    expect(avatarHtml).toContain('data-state="speaking"');
+    expect(stageHtml).toContain('data-testid="a3-digital-human-mouth"');
+    expect(stageHtml).toContain('scaleY(1.72)');
+  });
+
+  it('keeps the listening avatar silent when stale speech cues remain', () => {
+    const avatarHtml = renderToStaticMarkup(
+      createElement(DigitalHumanAvatar, {
+        state: 'listening',
+        mode: 'local_vrm',
+        audioLevel: 0.8,
+        assistantSpeaking: false,
+        providerLabel: 'openai_realtime_webrtc',
+        modelLabel: 'gpt-realtime-2',
+        speechCues: [
+          {
+            id: 'stale-cue',
+            source: 'tts_viseme',
+            startsAtMs: 0,
+            endsAtMs: 1_000,
+            viseme: 'aa',
+            energy: 1,
+          },
+        ],
+      }),
+    );
+    const stageHtml = renderToStaticMarkup(
+      createElement(DigitalHumanThreeStage, {
+        state: 'listening',
+        audioLevel: 0.8,
+        assistantSpeaking: false,
+        speechCues: [
+          {
+            id: 'stale-cue',
+            source: 'tts_viseme',
+            startsAtMs: 0,
+            endsAtMs: 1_000,
+            viseme: 'aa',
+            energy: 1,
+          },
+        ],
+      }),
+    );
+    const stageSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'components/a3/features/coaching/digital-human-three-stage.tsx'),
+      'utf8',
+    );
+    const resolverSource = stageSource.slice(
+      stageSource.indexOf('function resolveVrmSpeechVisemes'),
+      stageSource.indexOf('function resolveBlinkWeight'),
+    );
+
+    expect(avatarHtml).toContain('data-state="listening"');
+    expect(stageHtml).toContain('scaleY(0.35)');
+    expect(
+      resolverSource.indexOf('if (!signal.assistantSpeaking) return visemeWeights;'),
+    ).toBeLessThan(resolverSource.indexOf('resolveSpeechCueVisemeWeights'));
   });
 
   it('renders a Three.js stage for the local 3D avatar route', () => {
-    const html = renderToStaticMarkup(createElement(DigitalHumanAvatar, {
-      state: 'listening',
-      mode: 'local_3d',
-      audioLevel: 0.24,
-      assistantSpeaking: false,
-      providerLabel: 'dashscope_qwen_omni_realtime',
-      modelLabel: 'qwen3.5-omni-plus-realtime',
-    }));
+    const html = renderToStaticMarkup(
+      createElement(DigitalHumanThreeStage, {
+        state: 'listening',
+        audioLevel: 0.24,
+        assistantSpeaking: false,
+      }),
+    );
 
     expect(html).toContain('data-testid="a3-digital-human-three-stage"');
     expect(html).toContain('data-avatar-renderer="primitive"');
@@ -61,7 +131,9 @@ describe('DigitalHumanAvatar', () => {
   });
 
   it('declares Three.js as the browser 3D avatar renderer dependency', () => {
-    const packageJson = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8')) as {
+    const packageJson = JSON.parse(
+      fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8'),
+    ) as {
       dependencies?: Record<string, string>;
     };
 
@@ -69,7 +141,9 @@ describe('DigitalHumanAvatar', () => {
   });
 
   it('declares the VRM runtime and default teacher avatar asset path', () => {
-    const packageJson = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8')) as {
+    const packageJson = JSON.parse(
+      fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8'),
+    ) as {
       dependencies?: Record<string, string>;
     };
     const stageSource = fs.readFileSync(
@@ -122,6 +196,78 @@ describe('DigitalHumanAvatar', () => {
     expect(readme).toContain('generate-a3-idle-vrma.mjs');
   });
 
+  it('publishes a sanitized project-scoped teacher VRM without personal metadata', () => {
+    const avatarDirectory = path.resolve(process.cwd(), 'public/a3/assets/teacher-avatar');
+    const teacherPath = path.join(avatarDirectory, 'teacher.vrm');
+    const teacherBuffer = fs.readFileSync(teacherPath);
+    const teacherJson = readGlbJson(teacherPath);
+    const meta = teacherJson.extensions?.VRMC_vrm?.meta as Record<string, unknown>;
+    const model = teacherJson as typeof teacherJson & {
+      buffers: Array<{ byteLength: number }>;
+      bufferViews: Array<{ byteOffset?: number; byteLength: number }>;
+      images: Array<{ bufferView?: number }>;
+      textures: Array<{ source?: number; sampler?: number }>;
+      samplers: unknown[];
+    };
+
+    expect(teacherBuffer.readUInt32LE(8)).toBe(teacherBuffer.length);
+    expect(readGlbChunkLengths(teacherBuffer).every((length) => length % 4 === 0)).toBe(true);
+    expect(meta.authors).toEqual(['A3 project team']);
+    expect(meta).not.toHaveProperty('contactInformation');
+    expect(meta).not.toHaveProperty('thumbnailImage');
+    expect(meta.avatarPermission).toBe('onlySeparatelyLicensedPerson');
+    expect(meta.allowRedistribution).toBe(false);
+    expect(meta.commercialUsage).toBe('personalNonProfit');
+    expect(meta.modification).toBe('prohibited');
+    expect(fs.statSync(teacherPath).size).toBeLessThan(17_000_000);
+    expect(
+      model.images.every(
+        (image) => image.bufferView === undefined || image.bufferView < model.bufferViews.length,
+      ),
+    ).toBe(true);
+    expect(
+      model.textures.every(
+        (texture) =>
+          (texture.source === undefined || texture.source < model.images.length) &&
+          (texture.sampler === undefined || texture.sampler < model.samplers.length),
+      ),
+    ).toBe(true);
+    expect(
+      model.bufferViews.every(
+        (view) => (view.byteOffset || 0) + view.byteLength <= model.buffers[0].byteLength,
+      ),
+    ).toBe(true);
+
+    for (const entry of fs.readdirSync(avatarDirectory, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const filePath = path.join(avatarDirectory, entry.name);
+      const searchable = /\.vrma?$/.test(entry.name)
+        ? JSON.stringify(readGlbJson(filePath))
+        : fs.readFileSync(filePath, 'utf8');
+      expect(searchable).not.toMatch(/1[3-9]\d{9}/);
+    }
+  });
+
+  it('reproduces the sanitized teacher VRM byte for byte', () => {
+    const teacherPath = path.resolve(process.cwd(), 'public/a3/assets/teacher-avatar/teacher.vrm');
+    const sanitizerPath = path.resolve(process.cwd(), 'scripts/sanitize-a3-teacher-vrm.mjs');
+    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'a3-teacher-vrm-'));
+    const outputPath = path.join(temporaryDirectory, 'teacher.vrm');
+
+    try {
+      execFileSync(process.execPath, [
+        sanitizerPath,
+        '--input',
+        teacherPath,
+        '--output',
+        outputPath,
+      ]);
+      expect(Buffer.compare(fs.readFileSync(outputPath), fs.readFileSync(teacherPath))).toBe(0);
+    } finally {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
   it('uses a face-to-face VRM camera profile and richer speech expressions', () => {
     const stageSource = fs.readFileSync(
       path.resolve(process.cwd(), 'components/a3/features/coaching/digital-human-three-stage.tsx'),
@@ -132,9 +278,11 @@ describe('DigitalHumanAvatar', () => {
     expect(stageSource).toContain('A3_VRM_CAMERA_PROFILE');
     expect(stageSource).toContain("import('@pixiv/three-vrm')");
     expect(stageSource).toContain("import('three/examples/jsm/loaders/GLTFLoader.js')");
-    expect(stageSource).not.toContain("import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'");
-    expect(stageSource).not.toContain("import { VRMLoaderPlugin");
-    expect(stageSource).toContain('framing: \'portrait_face_to_face\'');
+    expect(stageSource).not.toContain(
+      "import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'",
+    );
+    expect(stageSource).not.toContain('import { VRMLoaderPlugin');
+    expect(stageSource).toContain("framing: 'portrait_face_to_face'");
     expect(stageSource).toContain('A3_VRM_MOUTH_EXPRESSIONS');
     expect(stageSource).toContain("'aa'");
     expect(stageSource).toContain("'ih'");
@@ -150,7 +298,9 @@ describe('DigitalHumanAvatar', () => {
     expect(stageSource).not.toContain("'rightUpperArm'");
     expect(stageSource).toContain('vrm.springBoneManager?.reset()');
     expect(stageSource).toContain('vrm.update(1 / 60)');
-    expect(fs.readFileSync(readmePath, 'utf8')).toContain('Source: VRoid Studio self-created model');
+    expect(fs.readFileSync(readmePath, 'utf8')).toContain(
+      'Source: VRoid Studio self-created model',
+    );
   });
 
   it('drives VRM lip sync and micro motion from the realtime coaching state', () => {
@@ -234,7 +384,6 @@ describe('DigitalHumanAvatar', () => {
       path.resolve(process.cwd(), 'components/a3/features/coaching/realtime-coaching-call.tsx'),
       'utf8',
     );
-
     expect(avatarSource).toContain('min-h-[580px]');
     expect(stageSource).toContain('h-[420px]');
     expect(stageSource).toContain('md:h-[500px]');
@@ -254,3 +403,38 @@ describe('DigitalHumanAvatar', () => {
     expect(callSource).not.toContain('2xl:grid-cols-[minmax(0,1fr)_210px]');
   });
 });
+
+function readGlbJson(filePath: string) {
+  const buffer = fs.readFileSync(filePath);
+  expect(buffer.subarray(0, 4).toString('utf8')).toBe('glTF');
+  expect(buffer.readUInt32LE(4)).toBe(2);
+
+  let offset = 12;
+  while (offset < buffer.length) {
+    const chunkLength = buffer.readUInt32LE(offset);
+    const chunkType = buffer.toString('ascii', offset + 4, offset + 8);
+    if (chunkType === 'JSON') {
+      return JSON.parse(
+        buffer
+          .subarray(offset + 8, offset + 8 + chunkLength)
+          .toString('utf8')
+          .trimEnd(),
+      ) as {
+        extensions?: { VRMC_vrm?: { meta?: Record<string, unknown> } };
+      };
+    }
+    offset += 8 + chunkLength;
+  }
+
+  throw new Error(`GLB JSON chunk missing: ${filePath}`);
+}
+
+function readGlbChunkLengths(buffer: Buffer) {
+  const lengths: number[] = [];
+  for (let offset = 12; offset < buffer.length; ) {
+    const chunkLength = buffer.readUInt32LE(offset);
+    lengths.push(chunkLength);
+    offset += 8 + chunkLength;
+  }
+  return lengths;
+}

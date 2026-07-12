@@ -30,6 +30,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { A3ReviewLoginPanel } from '@/components/a3/auth/a3-review-login-panel';
 import { A3TopActions } from '@/components/a3/layout/a3-top-actions';
 import { useVerificationCode } from '@/components/a3/auth/use-verification-code';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
@@ -37,6 +38,7 @@ import { DynamicProfileInsightPanel } from '@/components/a3/profile/dynamic-prof
 import type { DynamicProfileInsight } from '@/components/a3/profile/dynamic-profile-insight-panel';
 import { AgentDecisionEvidence } from '@/components/a3/ui/agent-decision-evidence';
 import { a3GetJson, a3PatchJson, a3PostJson } from '@/lib/a3/api-client';
+import { getA3NextPathForUser, resolveA3LoginDestination } from '@/lib/a3/auth-navigation';
 import { mergeInterviewProfile, normalizeLearningProfileForOptions } from '@/lib/a3/profile-setup';
 import {
   pendingProfileUpdateCount,
@@ -226,17 +228,6 @@ async function patchJson(url: string, body: unknown): Promise<ApiResult> {
   return a3PatchJson<ApiResult>(url, body);
 }
 
-function nextPath(user?: ApiResult['user']) {
-  if (!user) return '/a3/login';
-  if (user.profileCompleted) return '/a3/dashboard';
-  if (user.onboardingStep === 'role') return '/a3/role-selection';
-  if (user.onboardingStep === 'phone') return '/a3/phone-binding';
-  if (user.onboardingStep === 'welcome') return '/a3/welcome';
-  if (user.onboardingStep === 'privacy') return '/a3/privacy';
-  if (user.onboardingStep === 'profile') return '/a3/profile-setup';
-  return '/a3/dashboard';
-}
-
 function syncA3User(user?: ApiResult['user']) {
   if (user) window.dispatchEvent(new CustomEvent('a3-auth-user-updated', { detail: user }));
 }
@@ -367,16 +358,51 @@ function FieldIcon({ icon: Icon }: { icon: LucideIcon }) {
 
 function ErrorBox({ message }: { message: string }) {
   if (!message) return null;
-  return <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{message}</div>;
+  return <div role="alert" aria-live="assertive" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{message}</div>;
 }
 
-export function LoginPage() {
+type ExecuteA3LoginOptions = {
+  request: () => Promise<ApiResult>;
+  onSuccess: (result: ApiResult) => void;
+  onError: (message: string) => void;
+  onSubmittingChange: (submitting: boolean) => void;
+};
+
+export async function executeA3Login({
+  request,
+  onSuccess,
+  onError,
+  onSubmittingChange,
+}: ExecuteA3LoginOptions) {
+  onSubmittingChange(true);
+  try {
+    const result = await request();
+    if (!result.success) {
+      onError(result.error ?? '登录失败');
+      return;
+    }
+    onSuccess(result);
+  } catch {
+    onError('登录请求失败，请检查网络后重试');
+  } finally {
+    onSubmittingChange(false);
+  }
+}
+
+export function LoginPage({
+  reviewMode = false,
+  returnTo = null,
+}: {
+  reviewMode?: boolean;
+  returnTo?: string | null;
+}) {
   const router = useRouter();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [reviewAccountFilled, setReviewAccountFilled] = useState(false);
 
   async function submit() {
     setError('');
@@ -384,17 +410,46 @@ export function LoginPage() {
       setError('请输入账号和密码后再登录');
       return;
     }
-    setSubmitting(true);
-    const result = await postJson('/api/auth/login/', { identifier, password });
-    setSubmitting(false);
-    if (!result.success) return setError(result.error ?? '登录失败');
-    syncA3User(result.user);
-    router.push(nextPath(result.user));
+    await executeA3Login({
+      request: () => postJson('/api/auth/login/', { identifier, password }),
+      onSubmittingChange: setSubmitting,
+      onError: setError,
+      onSuccess: (result) => {
+        if (!result.user) {
+          setError('登录状态更新失败，请重新登录');
+          return;
+        }
+        syncA3User(result.user);
+        router.push(resolveA3LoginDestination(result.user as A3PublicUser, returnTo));
+      },
+    });
   }
 
   return (
     <AuthFrame>
-      <FormCard title="欢迎回来" subtitle="使用已开通的学生、教师或管理员账号进入对应学习工作区。">
+      <FormCard
+        title={reviewMode ? '进入评审体验' : '欢迎回来'}
+        subtitle={
+          reviewMode
+            ? '登录预置学生账号，查看从诊断到反馈的完整学习过程。'
+            : '使用已开通的学生、教师或管理员账号进入对应学习工作区。'
+        }
+      >
+        {reviewMode ? (
+          <A3ReviewLoginPanel
+            onFill={({ identifier: nextIdentifier, password: nextPassword }) => {
+              setIdentifier(nextIdentifier);
+              setPassword(nextPassword);
+              setError('');
+              setReviewAccountFilled(true);
+            }}
+          />
+        ) : null}
+        {reviewMode ? (
+          <p role="status" aria-live="polite" className="sr-only">
+            {reviewAccountFilled ? '评审账号已填入，可以登录。' : ''}
+          </p>
+        ) : null}
         <div className="space-y-5">
           <label className="block">
             <span className="mb-2 block text-sm font-semibold text-slate-700">账号</span>
@@ -441,12 +496,14 @@ export function LoginPage() {
             <Link href="/a3/forgot-password" className="font-medium text-blue-600">忘记密码？</Link>
           </div>
           <ErrorBox message={error} />
-          <Button disabled={submitting} onClick={submit} className="h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg hover:from-blue-700 hover:to-violet-700">
-            {submitting ? '登录中...' : '登录'}
+          <Button type="button" disabled={submitting} onClick={() => void submit()} className="h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg hover:from-blue-700 hover:to-violet-700">
+            {submitting ? <><Loader2 className="size-4 animate-spin" />登录中...</> : '登录'}
           </Button>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-500">
-            账号由注册流程或管理员开通产生；本页面不会填入固定测试账号。
-          </div>
+          {!reviewMode ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-500">
+              账号由注册流程或管理员开通产生；普通登录不会填入固定测试账号。
+            </div>
+          ) : null}
           <div className="text-center text-sm text-slate-500">
             还没有账号？ <Link href="/a3/register" className="font-semibold text-blue-600">立即注册</Link>
           </div>
@@ -475,8 +532,9 @@ export function RegisterPage() {
     const result = await postJson('/api/auth/register/', { role: 'student', displayName, email, code, password, confirmPassword, school });
     setSubmitting(false);
     if (!result.success) return setError(result.error ?? '注册失败');
+    if (!result.user) return setError('注册状态更新失败，请重新登录');
     syncA3User(result.user);
-    router.push('/a3/role-selection');
+    router.push(getA3NextPathForUser(result.user as A3PublicUser));
   }
 
   return (
@@ -606,7 +664,7 @@ export function RoleSelectionPage() {
     }
     const nextUser = { ...user, ...result.user, role };
     syncA3User(nextUser);
-    router.push(nextPath(nextUser));
+    router.push(getA3NextPathForUser(nextUser));
   }
 
   return (
@@ -655,8 +713,9 @@ export function PhoneBindingPage() {
     setError('');
     const result = await patchJson('/api/profiles/me/', { phone, code });
     if (!result.success) return setError(result.error ?? '绑定失败');
+    if (!result.user) return setError('绑定状态更新失败，请重新登录');
     syncA3User(result.user);
-    router.push(nextPath(result.user));
+    router.push(getA3NextPathForUser(result.user as A3PublicUser));
   }
 
   return (
@@ -701,8 +760,12 @@ export function WelcomePage() {
       setError(result.error ?? '首启状态保存失败，请稍后重试');
       return;
     }
+    if (!result.user) {
+      setError('首启状态更新失败，请重新登录');
+      return;
+    }
     syncA3User(result.user);
-    router.push('/a3/privacy');
+    router.push(getA3NextPathForUser(result.user as A3PublicUser));
   }
 
   return (
@@ -744,6 +807,7 @@ export function WelcomePage() {
 export function PrivacyPage() {
   const router = useRouter();
   const [accepted, setAccepted] = useState(false);
+  const [error, setError] = useState('');
   const permissions = [
     ['账号基础信息', '用于登录、身份识别和学习空间展示。', '必要'],
     ['学习行为数据', '用于生成计划、推荐资源、错题复盘和学习报告。', '必要'],
@@ -752,12 +816,15 @@ export function PrivacyPage() {
   ];
 
   async function submit() {
+    setError('');
     const result = await patchJson('/api/profiles/me/', {
       privacyAccepted: true,
       consents: { learningAnalytics: true, notifications: true, personalization: true },
     });
+    if (!result.success) return setError(result.error ?? '隐私授权保存失败，请稍后重试');
+    if (!result.user) return setError('授权状态更新失败，请重新登录');
     syncA3User(result.user);
-    router.push('/a3/profile-setup');
+    router.push(getA3NextPathForUser(result.user as A3PublicUser));
   }
 
   return (
@@ -781,6 +848,7 @@ export function PrivacyPage() {
           <input type="checkbox" checked={accepted} onChange={(event) => setAccepted(event.target.checked)} className="mt-1 size-5 accent-blue-600" />
           我已阅读并同意《用户协议》《隐私政策》，授权系统处理必要学习数据以生成学习计划、AI 辅导反馈和学习报告。
         </label>
+        <ErrorBox message={error} />
         <Button disabled={!accepted} onClick={submit} className="mt-7 h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg">同意并继续</Button>
       </div>
     </SimpleFlowFrame>

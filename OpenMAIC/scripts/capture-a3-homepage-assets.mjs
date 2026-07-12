@@ -1,0 +1,379 @@
+import { chromium } from '@playwright/test';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import sharp from 'sharp';
+import {
+  A3_DIGITAL_HUMAN_CAPTURE_STYLE,
+  captureCanvasCompositor,
+  hasHeaderClearance,
+  runAtomicAssetCapture,
+  validateTeacherEvidenceText,
+  validateHomepageAssetDirectory,
+} from './a3-homepage-asset-pipeline.mjs';
+import { installCaptureRequestPolicy } from './a3-homepage-capture-policy.mjs';
+
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const projectDir = path.resolve(scriptDir, '..');
+const outputDir = path.join(projectDir, 'public/a3/assets/homepage');
+const temporaryRoot = path.join(projectDir, '.tmp');
+const baseURL = (process.env.A3_CAPTURE_BASE_URL ?? 'http://localhost:3002').replace(/\/$/, '');
+const loginOrigin = new URL(process.env.A3_CAPTURE_LOGIN_ORIGIN ?? 'http://localhost:8000').origin;
+const studentIdentifier = process.env.A3_CAPTURE_STUDENT_IDENTIFIER ?? '13800000001';
+const teacherIdentifier = process.env.A3_CAPTURE_TEACHER_IDENTIFIER ?? '13800000002';
+const password = process.env.A3_CAPTURE_PASSWORD ?? 'Demo@123456';
+const defaultViewport = { width: 1440, height: 1000 };
+const expectedAssets = [
+  'profile.webp',
+  'diagnostic.webp',
+  'knowledge-base.webp',
+  'classroom.webp',
+  'teacher-workbench.webp',
+  'teacher-fallback.webp',
+];
+
+const blockedWrites = [];
+const failedResponses = [];
+const browserErrors = [];
+
+const studentAssets = [
+  {
+    route: '/a3/profile-setup',
+    filename: 'profile.webp',
+    testId: 'a3-profile-setup-view',
+    ready: async (page) => page.getByText('已同步', { exact: true }).waitFor({ timeout: 60_000 }),
+    height: 920,
+  },
+  {
+    route: '/a3/admission-diagnostic',
+    filename: 'diagnostic.webp',
+    testId: 'a3-admission-diagnostic-view',
+    ready: async (page) =>
+      page.getByTestId('a3-admission-question').first().waitFor({ timeout: 60_000 }),
+    height: 920,
+  },
+  {
+    route: '/a3/knowledge-base',
+    filename: 'knowledge-base.webp',
+    testId: 'a3-knowledge-base-view',
+    ready: async (page) =>
+      page.getByTestId('a3-kb-resource-row').first().waitFor({ timeout: 60_000 }),
+    height: 960,
+  },
+  {
+    route: '/a3/classroom',
+    filename: 'classroom.webp',
+    testId: 'a3-classroom-view',
+    focusTestId: 'a3-classroom-dialogue',
+    focusAncestor: 'section',
+    avoidStickyHeader: true,
+    viewport: { width: 1920, height: 1080 },
+    ready: async (page) => {
+      await page.getByTestId('a3-classroom-input').waitFor({ timeout: 60_000 });
+      await page
+        .getByTestId('a3-classroom-view')
+        .locator('.animate-spin')
+        .first()
+        .waitFor({ state: 'detached', timeout: 60_000 });
+    },
+    height: 900,
+  },
+  {
+    route: '/a3/coaching',
+    filename: 'teacher-fallback.webp',
+    testId: 'a3-digital-human-avatar',
+    canvasTestId: 'a3-digital-human-three-canvas',
+    resizeWidth: 720,
+    allowEnlargement: true,
+    ready: async (page) => {
+      const stage = page.getByTestId('a3-digital-human-three-stage');
+      await stage.waitFor({ timeout: 60_000 });
+      await page.waitForFunction(
+        () => {
+          const element = document.querySelector('[data-testid="a3-digital-human-three-stage"]');
+          return element?.getAttribute('data-avatar-renderer')?.startsWith('vrm');
+        },
+        undefined,
+        { timeout: 60_000 },
+      );
+      await page.getByTestId('a3-digital-human-three-canvas').waitFor({ timeout: 60_000 });
+    },
+    height: 700,
+  },
+];
+
+const teacherAssets = [
+  {
+    route: '/a3/teacher',
+    filename: 'teacher-workbench.webp',
+    testId: 'a3-teacher-homepage-evidence',
+    ready: async (page) => {
+      const weakPointRows = page.getByTestId('a3-teacher-weak-point-row');
+      const taskRows = page.getByTestId('a3-teacher-task-row');
+      await Promise.all([
+        Promise.race([
+          weakPointRows.first().waitFor({ timeout: 60_000 }),
+          page.getByTestId('a3-teacher-weak-points-empty').waitFor({ timeout: 60_000 }),
+        ]),
+        Promise.race([
+          taskRows.first().waitFor({ timeout: 60_000 }),
+          page.getByTestId('a3-teacher-tasks-empty').waitFor({ timeout: 60_000 }),
+        ]),
+      ]);
+    },
+    captureStyle: `
+      [data-testid='a3-teacher-homepage-evidence'] {
+        min-height: 360px !important;
+        background: var(--a3-bg, #f8fafc) !important;
+      }
+    `,
+    height: 430,
+    resizeWidth: 1440,
+    allowEnlargement: true,
+  },
+];
+
+function watchPage(page) {
+  let monitorFailedResponses = false;
+
+  page.on('pageerror', (error) => {
+    if (monitorFailedResponses) browserErrors.push(error.message);
+  });
+
+  page.on('response', (response) => {
+    if (!monitorFailedResponses) return;
+    if (response.status() < 400) return;
+    const url = response.url();
+    if (url.startsWith(baseURL) || url.includes('/api/')) {
+      failedResponses.push(`${response.status()} ${url}`);
+    }
+  });
+
+  return () => {
+    monitorFailedResponses = true;
+  };
+}
+
+async function openVerifiedLoginPage(page) {
+  try {
+    await page.goto(`${baseURL}/a3/login`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  } catch (error) {
+    throw new Error(
+      `无法访问 A3 截图服务 ${baseURL}。请确认目标实例已启动，并通过 A3_CAPTURE_BASE_URL 显式选择实例。${error instanceof Error ? ` ${error.message}` : ''}`,
+    );
+  }
+  if (new URL(page.url()).origin !== new URL(baseURL).origin) {
+    throw new Error(`A3 截图服务发生跨 origin 跳转：${page.url()}`);
+  }
+  try {
+    await page
+      .getByTestId('a3-login-learning-preview')
+      .waitFor({ state: 'visible', timeout: 15_000 });
+    await page.locator('main input').nth(1).waitFor({ state: 'visible', timeout: 15_000 });
+    await page.getByRole('button', { name: '登录', exact: true }).waitFor({
+      state: 'visible',
+      timeout: 15_000,
+    });
+  } catch {
+    throw new Error(`目标 ${baseURL} 不是可用的 A3 登录实例：缺少智学引擎产品标记或真实登录表单。`);
+  }
+}
+
+async function login(page, identifier) {
+  await openVerifiedLoginPage(page);
+  const inputs = page.locator('main input');
+  await inputs.nth(0).fill(identifier);
+  await inputs.nth(1).fill(password);
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+  await page.waitForURL((url) => !url.pathname.endsWith('/a3/login'), { timeout: 60_000 });
+}
+
+async function positionBelowStickyHeader(page, target, filename) {
+  const header = page.locator('header').first();
+  if (!(await header.isVisible().catch(() => false))) return;
+  const initialHeaderBox = await header.boundingBox();
+  if (!initialHeaderBox) return;
+  const offset = Math.ceil(initialHeaderBox.height + 16);
+  await target.evaluate((element, scrollMarginTop) => {
+    element.style.scrollMarginTop = `${scrollMarginTop}px`;
+    element.scrollIntoView({ block: 'start', inline: 'nearest' });
+  }, offset);
+  await page.waitForTimeout(150);
+
+  let targetBox = await target.boundingBox();
+  let headerBox = await header.boundingBox();
+  if (!targetBox || !headerBox) throw new Error(`${filename} geometry could not be measured`);
+  let headerBottom = headerBox.y + headerBox.height;
+  if (!hasHeaderClearance(targetBox.y, headerBottom, 8)) {
+    const correction = headerBottom + 8 - targetBox.y;
+    await page.evaluate((pixels) => window.scrollBy(0, -pixels), correction);
+    await page.waitForTimeout(100);
+    targetBox = await target.boundingBox();
+    headerBox = await header.boundingBox();
+    if (!targetBox || !headerBox) throw new Error(`${filename} geometry could not be remeasured`);
+    headerBottom = headerBox.y + headerBox.height;
+  }
+  if (!hasHeaderClearance(targetBox.y, headerBottom, 8)) {
+    throw new Error(
+      `${filename} overlaps the sticky header (targetTop=${targetBox.y}, headerBottom=${headerBottom})`,
+    );
+  }
+}
+
+async function capture(page, asset, assetOutputDir) {
+  await page.setViewportSize(asset.viewport ?? defaultViewport);
+  await page.goto(`${baseURL}${asset.route}`, { waitUntil: 'domcontentloaded' });
+  const pageTarget = page.getByTestId(asset.testId).first();
+  await pageTarget.waitFor({ state: 'visible', timeout: 60_000 });
+  await pageTarget.scrollIntoViewIfNeeded();
+  await asset.ready(page);
+  let target = asset.focusHeading
+    ? pageTarget
+        .getByRole('heading', { name: asset.focusHeading, exact: true })
+        .locator('xpath=ancestor::section[1]')
+    : pageTarget;
+  if (asset.focusTestId) {
+    target = pageTarget.getByTestId(asset.focusTestId).first();
+    if (asset.focusAncestor) target = target.locator(`xpath=ancestor::${asset.focusAncestor}[1]`);
+  }
+  await target.waitFor({ state: 'visible', timeout: 60_000 });
+  await page.evaluate(() => document.fonts.ready);
+  if (asset.avoidStickyHeader) {
+    await positionBelowStickyHeader(page, target, asset.filename);
+  } else {
+    await target.scrollIntoViewIfNeeded();
+  }
+  await page.waitForTimeout(asset.filename === 'teacher-fallback.webp' ? 2_000 : 400);
+
+  const targetText = await target.innerText();
+  if (asset.filename === 'teacher-workbench.webp') {
+    const weakPointRows = await target.getByTestId('a3-teacher-weak-point-row').count();
+    const taskRows = await target.getByTestId('a3-teacher-task-row').count();
+    const emptyStates = await target
+      .locator(
+        '[data-testid="a3-teacher-weak-points-empty"], [data-testid="a3-teacher-tasks-empty"]',
+      )
+      .count();
+    const evidence = validateTeacherEvidenceText({
+      text: targetText,
+      weakPointRows,
+      taskRows,
+      emptyStates,
+    });
+    console.log(
+      `teacher evidence: ${weakPointRows} weak points, ${taskRows} tasks, ${evidence.visibleTextCount} visible text lines`,
+    );
+  }
+  const sensitivePatterns = [
+    /\b1[3-9]\d{9}\b/,
+    /\b[A-Z]:\\/i,
+    /\b[A-Z]:\//i,
+    /(?:api[_-]?key|secret|token)\s*[:=]/i,
+    /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/,
+  ];
+  for (const pattern of sensitivePatterns) {
+    if (pattern.test(targetText)) {
+      throw new Error(`${asset.filename} contains sensitive text matching ${pattern}`);
+    }
+  }
+  if (asset.filename === 'teacher-workbench.webp' && /OpenMAIC/i.test(targetText)) {
+    throw new Error('teacher-workbench.webp includes the hidden platform brand');
+  }
+  if (
+    /正在进入智学引擎|正在准备入学诊断|正在读取资料|数字助教加载中|教师工作台加载失败/.test(
+      targetText,
+    )
+  ) {
+    throw new Error(`${asset.filename} still contains a loading or error state`);
+  }
+
+  let png;
+  if (asset.canvasTestId) {
+    png = await captureCanvasCompositor(page.getByTestId(asset.canvasTestId), {
+      maxAttempts: 6,
+      retryDelayMs: 250,
+      label: asset.filename,
+      screenshotStyle: A3_DIGITAL_HUMAN_CAPTURE_STYLE,
+    });
+  } else {
+    png = await target.screenshot({
+      type: 'png',
+      animations: 'disabled',
+      style: asset.captureStyle,
+    });
+  }
+  const metadata = await sharp(png).metadata();
+  if (!metadata.width || !metadata.height)
+    throw new Error(`Unable to read ${asset.filename} dimensions`);
+
+  const top = Math.min(asset.cropTop ?? 0, Math.max(0, metadata.height - 1));
+  const height = Math.min(asset.height, metadata.height - top);
+  if (height < 360) throw new Error(`${asset.filename} crop is only ${height}px tall`);
+
+  const outputPath = path.join(assetOutputDir, asset.filename);
+  const result = await sharp(png)
+    .extract({ left: 0, top, width: metadata.width, height })
+    .resize({
+      width: asset.resizeWidth ?? 1440,
+      withoutEnlargement: !asset.allowEnlargement,
+    })
+    .webp({ quality: 84, effort: 5 })
+    .toFile(outputPath);
+  console.log(`${asset.filename}: ${result.width}x${result.height}`);
+}
+
+async function captureForAccount(browser, identifier, assets, assetOutputDir) {
+  const context = await browser.newContext({
+    viewport: defaultViewport,
+    deviceScaleFactor: 1,
+    reducedMotion: 'reduce',
+    colorScheme: 'light',
+    serviceWorkers: 'block',
+  });
+  await installCaptureRequestPolicy(context, {
+    captureOrigin: new URL(baseURL).origin,
+    loginOrigin,
+    onBlockedWrite: (write) => blockedWrites.push(write),
+  });
+  const page = await context.newPage();
+  const monitorFailedResponses = watchPage(page);
+
+  try {
+    await login(page, identifier);
+    monitorFailedResponses();
+    for (const asset of assets) await capture(page, asset, assetOutputDir);
+  } finally {
+    await context.close();
+  }
+}
+
+await runAtomicAssetCapture({
+  outputDir,
+  temporaryRoot,
+  captureAssets: async (temporaryDir) => {
+    const browser = await chromium.launch();
+    try {
+      await captureForAccount(browser, studentIdentifier, studentAssets, temporaryDir);
+      await captureForAccount(browser, teacherIdentifier, teacherAssets, temporaryDir);
+    } finally {
+      await browser.close();
+    }
+
+    if (blockedWrites.length) {
+      throw new Error(
+        `Capture blocked forbidden business writes before sending:\n${blockedWrites
+          .map((write) => `${write.method} ${write.url}`)
+          .join('\n')}`,
+      );
+    }
+    if (failedResponses.length) {
+      throw new Error(
+        `Capture observed failed page or API responses:\n${failedResponses.join('\n')}`,
+      );
+    }
+    if (browserErrors.length) {
+      throw new Error(`Capture observed browser errors:\n${browserErrors.join('\n')}`);
+    }
+  },
+  validateAssets: async (temporaryDir) =>
+    validateHomepageAssetDirectory({ assetDir: temporaryDir, expectedAssets }),
+});

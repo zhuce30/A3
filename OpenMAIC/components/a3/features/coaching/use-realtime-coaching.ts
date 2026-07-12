@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   A3DigitalHumanSpeechCue,
   A3DigitalHumanSpeechViseme,
@@ -72,6 +72,176 @@ type ProviderSpeechCueItem = {
 
 const REALTIME_FRAME_SLOW_FEEDBACK_MS = 8000;
 
+type RemoteAudioSpeakingTarget = {
+  addEventListener: (eventName: string, listener: EventListener) => void;
+  removeEventListener: (eventName: string, listener: EventListener) => void;
+};
+
+type RemoteAudioPlaybackTarget = RemoteAudioSpeakingTarget & {
+  play: () => Promise<void>;
+  pause: () => void;
+  remove: () => void;
+  srcObject: MediaProvider | null;
+};
+
+export type RealtimeStartOperation = {
+  generation: number;
+  controller: AbortController;
+};
+
+export function createRealtimeStartOperationController() {
+  let generation = 0;
+  let current: RealtimeStartOperation | null = null;
+
+  const isCurrent = (operation: RealtimeStartOperation) => (
+    current === operation && !operation.controller.signal.aborted
+  );
+
+  return {
+    begin() {
+      current?.controller.abort();
+      current = { generation: ++generation, controller: new AbortController() };
+      return current;
+    },
+    invalidate() {
+      generation += 1;
+      current?.controller.abort();
+      current = null;
+    },
+    isCurrent,
+  };
+}
+
+export async function runRealtimeStartStep<T>(
+  operation: RealtimeStartOperation,
+  isCurrent: (operation: RealtimeStartOperation) => boolean,
+  task: () => Promise<T>,
+  onError?: (error: Error) => void,
+): Promise<{ committed: true; value: T } | { committed: false }> {
+  try {
+    const value = await task();
+    if (!isCurrent(operation)) return { committed: false };
+    return { committed: true, value };
+  } catch (error) {
+    if (isCurrent(operation)) {
+      onError?.(error instanceof Error ? error : new Error('实时辅导启动失败'));
+    }
+    return { committed: false };
+  }
+}
+
+export async function acquireRealtimeStartResource<T>(
+  operation: RealtimeStartOperation,
+  isCurrent: (operation: RealtimeStartOperation) => boolean,
+  acquire: () => Promise<T>,
+  release: (resource: T) => void,
+) {
+  const resource = await acquire();
+  if (isCurrent(operation)) return resource;
+  release(resource);
+  return null;
+}
+
+export function canStartRealtimeCall(status: A3RealtimeStatus) {
+  return status !== 'requesting_permission'
+    && status !== 'connecting'
+    && status !== 'live'
+    && status !== 'ending';
+}
+
+export async function runRealtimeEndLifecycle<T>({
+  operation,
+  isCurrent,
+  stopMedia,
+  persist,
+  requestEnd,
+  commit,
+  onError,
+}: {
+  operation: RealtimeStartOperation;
+  isCurrent: (operation: RealtimeStartOperation) => boolean;
+  stopMedia: () => void;
+  persist: () => Promise<void>;
+  requestEnd: () => Promise<T>;
+  commit: (result: T) => void;
+  onError?: (error: Error) => void;
+}) {
+  stopMedia();
+  try {
+    await persist();
+    if (!isCurrent(operation)) return false;
+    const result = await requestEnd();
+    if (!isCurrent(operation)) return false;
+    commit(result);
+    return true;
+  } catch (error) {
+    if (isCurrent(operation)) {
+      onError?.(error instanceof Error ? error : new Error('实时辅导结束失败'));
+    }
+    return false;
+  }
+}
+
+export function bindRemoteAudioSpeakingState(
+  audio: RemoteAudioSpeakingTarget,
+  onSpeakingChange: (speaking: boolean) => void,
+) {
+  const handlePlaying = () => onSpeakingChange(true);
+  const handleStopped = () => onSpeakingChange(false);
+  const playingEvents = ['play', 'playing'] as const;
+  const stoppedEvents = ['pause', 'ended', 'emptied'] as const;
+
+  playingEvents.forEach((eventName) => audio.addEventListener(eventName, handlePlaying));
+  stoppedEvents.forEach((eventName) => audio.addEventListener(eventName, handleStopped));
+
+  return () => {
+    playingEvents.forEach((eventName) => audio.removeEventListener(eventName, handlePlaying));
+    stoppedEvents.forEach((eventName) => audio.removeEventListener(eventName, handleStopped));
+    onSpeakingChange(false);
+  };
+}
+
+export function createRemoteAudioSpeakingController(
+  onSpeakingChange: (speaking: boolean) => void,
+) {
+  let generation = 0;
+  let activeAudio: RemoteAudioPlaybackTarget | null = null;
+  let removeSpeakingListeners: (() => void) | null = null;
+
+  const releaseAudio = (audio: RemoteAudioPlaybackTarget) => {
+    audio.pause();
+    audio.srcObject = null;
+    audio.remove();
+  };
+
+  return {
+    attach(audio: RemoteAudioPlaybackTarget) {
+      const currentGeneration = ++generation;
+      removeSpeakingListeners?.();
+      if (activeAudio && activeAudio !== audio) releaseAudio(activeAudio);
+      activeAudio = audio;
+      removeSpeakingListeners = bindRemoteAudioSpeakingState(audio, (speaking) => {
+        if (generation === currentGeneration && activeAudio === audio) {
+          onSpeakingChange(speaking);
+        }
+      });
+      void audio.play().catch(() => {
+        if (generation === currentGeneration && activeAudio === audio) {
+          onSpeakingChange(false);
+        }
+      });
+    },
+    dispose(notify = true) {
+      generation += 1;
+      removeSpeakingListeners?.();
+      removeSpeakingListeners = null;
+      if (activeAudio) releaseAudio(activeAudio);
+      activeAudio = null;
+      if (notify) onSpeakingChange(false);
+    },
+  };
+}
+
 export function useRealtimeCoaching() {
   const [status, setStatus] = useState<A3RealtimeStatus>('idle');
   const [session, setSession] = useState<A3RealtimeCoachingSession | null>(null);
@@ -90,6 +260,9 @@ export function useRealtimeCoaching() {
     status: 'idle',
     message: '等待检索本地资料',
   });
+  const mountedRef = useRef(true);
+  const startOperationControllerRef = useRef(createRealtimeStartOperationController());
+  const assistantSpeakingRef = useRef(false);
   const coachingSessionId = session?.coachingSessionId;
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -99,6 +272,9 @@ export function useRealtimeCoaching() {
   const videoSenderRef = useRef<RTCRtpSender | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const remoteAudioSpeakingControllerRef = useRef<ReturnType<
+    typeof createRemoteAudioSpeakingController
+  > | null>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -115,6 +291,15 @@ export function useRealtimeCoaching() {
   const pendingSpeechCommitRef = useRef(false);
   const speechCommitTimerRef = useRef<number | null>(null);
   const lastAudioLevelUpdateRef = useRef(0);
+
+  const updateAssistantSpeaking = useCallback((speaking: boolean) => {
+    assistantSpeakingRef.current = speaking;
+    if (mountedRef.current) setAssistantSpeaking(speaking);
+  }, []);
+
+  const isStartOperationCurrent = useCallback((operation: RealtimeStartOperation) => (
+    mountedRef.current && Boolean(startOperationControllerRef.current?.isCurrent(operation))
+  ), []);
 
   const attachCameraStream = useCallback(() => {
     if (cameraVideoRef.current) cameraVideoRef.current.srcObject = cameraStreamRef.current;
@@ -191,18 +376,18 @@ export function useRealtimeCoaching() {
     source.buffer = audioBuffer;
     source.connect(audioContext.destination);
     activePlaybackSourcesRef.current.add(source);
-    setAssistantSpeaking(true);
+    updateAssistantSpeaking(true);
     source.onended = () => {
       activePlaybackSourcesRef.current.delete(source);
-      if (!activePlaybackSourcesRef.current.size) setAssistantSpeaking(false);
+      if (!activePlaybackSourcesRef.current.size) updateAssistantSpeaking(false);
     };
     const startAt = Math.max(audioContext.currentTime + 0.02, playbackCursorRef.current);
     appendAudioEnergySpeechCue(startAt, audioBuffer.duration, audioContext.currentTime, calculatePcm16Rms(pcm));
     source.start(startAt);
     playbackCursorRef.current = startAt + audioBuffer.duration;
-  }, [appendAudioEnergySpeechCue]);
+  }, [appendAudioEnergySpeechCue, updateAssistantSpeaking]);
 
-  const stopRealtimePlayback = useCallback(() => {
+  const stopRealtimePlayback = useCallback((resetUi = true) => {
     activePlaybackSourcesRef.current.forEach((source) => {
       try {
         source.stop(0);
@@ -212,9 +397,11 @@ export function useRealtimeCoaching() {
     });
     activePlaybackSourcesRef.current.clear();
     playbackCursorRef.current = 0;
-    setAssistantSpeaking(false);
-    setSpeechCues([]);
-  }, []);
+    if (resetUi) {
+      updateAssistantSpeaking(false);
+      setSpeechCues([]);
+    }
+  }, [updateAssistantSpeaking]);
 
   const sendRealtimeCancel = useCallback(() => {
     const event = JSON.stringify({
@@ -341,36 +528,64 @@ export function useRealtimeCoaching() {
     }
   }, [appendTranscriptEvent, markProviderAudioCommitted, playRealtimeAudioDelta]);
 
-  const ensureAudioStream = useCallback(async () => {
+  const ensureAudioStream = useCallback(async (operation?: RealtimeStartOperation) => {
     if (!cameraStreamRef.current || cameraStreamRef.current.getAudioTracks().length === 0) {
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
-      cameraStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: cameraEnabled });
+      cameraStreamRef.current = null;
+      const acquire = () => navigator.mediaDevices.getUserMedia({ audio: true, video: cameraEnabled });
+      const nextStream = operation
+        ? await acquireRealtimeStartResource(
+          operation,
+          isStartOperationCurrent,
+          acquire,
+          (stream) => stream.getTracks().forEach((track) => track.stop()),
+        )
+        : await acquire();
+      if (!nextStream) return null;
+      cameraStreamRef.current = nextStream;
       attachCameraStream();
+    }
+    if (operation && !isStartOperationCurrent(operation)) {
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+      return null;
     }
     setMicrophoneEnabled(true);
     return cameraStreamRef.current;
-  }, [attachCameraStream, cameraEnabled]);
+  }, [attachCameraStream, cameraEnabled, isStartOperationCurrent]);
 
-  const exchangePeerSdp = useCallback(async (peer: RTCPeerConnection, realtime: A3RealtimeCoachingSession) => {
+  const exchangePeerSdp = useCallback(async (
+    peer: RTCPeerConnection,
+    realtime: A3RealtimeCoachingSession,
+    operation?: RealtimeStartOperation,
+  ) => {
     const offer = await peer.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: false });
+    if (operation && !isStartOperationCurrent(operation)) return false;
     await peer.setLocalDescription(offer);
+    if (operation && !isStartOperationCurrent(operation)) return false;
     await waitForIceGatheringComplete(peer);
+    if (operation && !isStartOperationCurrent(operation)) return false;
     const response = await fetch(realtime.connection.connectionUrl || '/api/a3/coaching/realtime/sdp', {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
+      signal: operation?.controller.signal,
       body: JSON.stringify({
         provider: realtime.provider,
         model: realtime.model,
         offerSdp: peer.localDescription?.sdp || offer.sdp,
       }),
     });
-    const result = await response.json().catch(() => ({})) as SdpResponse;
+    if (operation && !isStartOperationCurrent(operation)) return false;
+    const result = await response.json() as SdpResponse;
+    if (operation && !isStartOperationCurrent(operation)) return false;
     if (!response.ok || !result.success || !result.answerSdp) {
       throw new Error(result.error || '实时 provider SDP 交换失败，已降级到录音/文字辅导。');
     }
     await peer.setRemoteDescription({ type: 'answer', sdp: result.answerSdp });
-  }, []);
+    if (operation && !isStartOperationCurrent(operation)) return false;
+    return true;
+  }, [isStartOperationCurrent]);
 
   const getActiveVideoTrack = useCallback(() => {
     const screenTrack = screenStreamRef.current?.getVideoTracks().find((track) => track.readyState === 'live' && track.enabled);
@@ -397,45 +612,75 @@ export function useRealtimeCoaching() {
     }
   }, [exchangePeerSdp, getActiveVideoTrack, session]);
 
-  const connectRealtimePeer = useCallback(async (realtime: A3RealtimeCoachingSession) => {
+  const connectRealtimePeer = useCallback(async (
+    realtime: A3RealtimeCoachingSession,
+    operation: RealtimeStartOperation,
+  ) => {
+    let peer: RTCPeerConnection | null = null;
     try {
+      if (!isStartOperationCurrent(operation)) return false;
       if (!('RTCPeerConnection' in window)) {
         setError('当前浏览器不支持 WebRTC 实时通话');
         return false;
       }
-      const audioStream = await ensureAudioStream();
-      const peer = new RTCPeerConnection();
-      peerRef.current = peer;
-      audioStream.getAudioTracks().forEach((track) => peer.addTrack(track, audioStream));
+      const audioStream = await ensureAudioStream(operation);
+      if (!audioStream || !isStartOperationCurrent(operation)) return false;
+      peer = new RTCPeerConnection();
+      if (!isStartOperationCurrent(operation)) {
+        peer.close();
+        return false;
+      }
+      const activePeer = peer;
+      peerRef.current = activePeer;
+      audioStream.getAudioTracks().forEach((track) => activePeer.addTrack(track, audioStream));
       const activeVideo = getActiveVideoTrack();
       if (activeVideo?.track && activeVideo.stream) {
-        videoSenderRef.current = peer.addTrack(activeVideo.track, activeVideo.stream);
+        videoSenderRef.current = activePeer.addTrack(activeVideo.track, activeVideo.stream);
       }
-      peer.ontrack = (event) => {
+      activePeer.ontrack = (event) => {
         const audio = remoteAudioRef.current || document.createElement('audio');
         audio.autoplay = true;
         audio.srcObject = event.streams[0];
+        const speakingController =
+          remoteAudioSpeakingControllerRef.current ||
+          createRemoteAudioSpeakingController(updateAssistantSpeaking);
+        remoteAudioSpeakingControllerRef.current = speakingController;
         if (!remoteAudioRef.current) {
           audio.style.display = 'none';
           document.body.appendChild(audio);
           remoteAudioRef.current = audio;
         }
+        speakingController.attach(audio);
       };
-      const dataChannel = peer.createDataChannel('a3-realtime-events');
+      const dataChannel = activePeer.createDataChannel('a3-realtime-events');
       dataChannelRef.current = dataChannel;
       dataChannel.onmessage = (event) => handleRealtimeEvent(event.data);
-      await exchangePeerSdp(peer, realtime);
+      const exchanged = await exchangePeerSdp(activePeer, realtime, operation);
+      if (!exchanged || !isStartOperationCurrent(operation)) {
+        activePeer.close();
+        if (peerRef.current === activePeer) peerRef.current = null;
+        return false;
+      }
       return true;
     } catch (connectError) {
-      setError(connectError instanceof Error ? connectError.message : '实时 WebRTC 连接失败，已降级到录音/文字辅导。');
-      peerRef.current?.close();
-      peerRef.current = null;
+      if (isStartOperationCurrent(operation)) {
+        setError(connectError instanceof Error ? connectError.message : '实时 WebRTC 连接失败，已降级到录音/文字辅导。');
+      }
+      peer?.close();
+      if (peerRef.current === peer) peerRef.current = null;
       videoSenderRef.current = null;
       return false;
     }
-  }, [ensureAudioStream, exchangePeerSdp, getActiveVideoTrack, handleRealtimeEvent]);
+  }, [
+    ensureAudioStream,
+    exchangePeerSdp,
+    getActiveVideoTrack,
+    handleRealtimeEvent,
+    isStartOperationCurrent,
+    updateAssistantSpeaking,
+  ]);
 
-  const stopDashScopeAudioStreaming = useCallback(() => {
+  const stopDashScopeAudioStreaming = useCallback((resetUi = true) => {
     audioStreamingRef.current = false;
     clearManualAudioCommitTimer();
     pendingSpeechCommitRef.current = false;
@@ -453,18 +698,24 @@ export function useRealtimeCoaching() {
     playbackAudioContextRef.current = null;
     playbackCursorRef.current = 0;
     activePlaybackSourcesRef.current.clear();
-    setAssistantSpeaking(false);
-    setSpeechCues([]);
-    setAudioLevel(0);
-  }, [clearManualAudioCommitTimer]);
+    if (resetUi) {
+      updateAssistantSpeaking(false);
+      setSpeechCues([]);
+      setAudioLevel(0);
+    }
+  }, [clearManualAudioCommitTimer, updateAssistantSpeaking]);
 
-  const startDashScopeAudioStreaming = useCallback(async (socket: WebSocket) => {
+  const startDashScopeAudioStreaming = useCallback(async (
+    socket: WebSocket,
+    operation?: RealtimeStartOperation,
+  ) => {
     if (audioStreamingRef.current) return true;
     if (!navigator.mediaDevices?.getUserMedia) {
       setError('当前浏览器不支持麦克风访问');
       return false;
     }
-    const stream = await ensureAudioStream();
+    const stream = await ensureAudioStream(operation);
+    if (!stream || (operation && !isStartOperationCurrent(operation))) return false;
     const AudioContextCtor = (window.AudioContext || (window as unknown as { webkitAudioContext?: BrowserAudioContext }).webkitAudioContext);
     if (!AudioContextCtor) {
       setError('当前浏览器不支持实时音频采集');
@@ -513,33 +764,65 @@ export function useRealtimeCoaching() {
     audioStreamingRef.current = true;
     setMicrophoneEnabled(true);
     return true;
-  }, [clearManualAudioCommitTimer, ensureAudioStream, scheduleManualAudioCommit]);
+  }, [clearManualAudioCommitTimer, ensureAudioStream, isStartOperationCurrent, scheduleManualAudioCommit]);
 
-  const connectRealtimeWebSocket = useCallback(async (realtime: A3RealtimeCoachingSession) => {
+  const connectRealtimeWebSocket = useCallback(async (
+    realtime: A3RealtimeCoachingSession,
+    operation: RealtimeStartOperation,
+  ) => {
     return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let socket: WebSocket | null = null;
+      let timeout: number | null = null;
+      const finish = (connected: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (timeout !== null) window.clearTimeout(timeout);
+        operation.controller.signal.removeEventListener('abort', handleAbort);
+        resolve(connected);
+      };
+      const handleAbort = () => {
+        socket?.close();
+        finish(false);
+      };
       try {
+        if (!isStartOperationCurrent(operation)) {
+          finish(false);
+          return;
+        }
         const connectionUrl = realtime.connection.connectionUrl;
         if (!connectionUrl) {
           setError('实时 WebSocket proxy 地址未配置，已降级到录音/文字辅导。');
-          resolve(false);
+          finish(false);
           return;
         }
-        const socket = new WebSocket(connectionUrl);
+        socket = new WebSocket(connectionUrl);
         websocketRef.current = socket;
-        const timeout = window.setTimeout(() => {
-          setError('实时 WebSocket proxy 连接超时，已降级到录音/文字辅导。');
-          socket.close();
-          resolve(false);
+        operation.controller.signal.addEventListener('abort', handleAbort, { once: true });
+        timeout = window.setTimeout(() => {
+          if (isStartOperationCurrent(operation)) {
+            setError('实时 WebSocket proxy 连接超时，已降级到录音/文字辅导。');
+          }
+          socket?.close();
+          finish(false);
         }, 8000);
         socket.onopen = async () => {
-          window.clearTimeout(timeout);
-          const audioStarted = await startDashScopeAudioStreaming(socket).catch((audioError) => {
-            setError(audioError instanceof Error ? audioError.message : '麦克风实时音频采集失败');
+          if (timeout !== null) window.clearTimeout(timeout);
+          if (!socket || !isStartOperationCurrent(operation)) {
+            socket?.close();
+            finish(false);
+            return;
+          }
+          const activeSocket = socket;
+          const audioStarted = await startDashScopeAudioStreaming(activeSocket, operation).catch((audioError) => {
+            if (isStartOperationCurrent(operation)) {
+              setError(audioError instanceof Error ? audioError.message : '麦克风实时音频采集失败');
+            }
             return false;
           });
-          if (!audioStarted) {
-            socket.close();
-            resolve(false);
+          if (!audioStarted || !isStartOperationCurrent(operation)) {
+            activeSocket.close();
+            finish(false);
             return;
           }
           setTranscript((items) => [
@@ -552,94 +835,61 @@ export function useRealtimeCoaching() {
               createdAt: new Date().toISOString(),
             },
           ]);
-          resolve(true);
+          finish(true);
         };
         socket.onmessage = (event) => {
+          if (!isStartOperationCurrent(operation)) return;
           handleRealtimeEvent(typeof event.data === 'string' ? event.data : '');
         };
         socket.onerror = () => {
-          window.clearTimeout(timeout);
+          if (timeout !== null) window.clearTimeout(timeout);
           stopDashScopeAudioStreaming();
-          setError('实时 WebSocket proxy 连接失败，请确认 pnpm realtime:dashscope-proxy 已启动。');
-          resolve(false);
+          if (isStartOperationCurrent(operation)) {
+            setError('实时 WebSocket proxy 连接失败，请确认实时代理服务已启动。');
+          }
+          finish(false);
         };
         socket.onclose = () => {
           stopDashScopeAudioStreaming();
-          websocketRef.current = null;
+          if (websocketRef.current === socket) websocketRef.current = null;
+          finish(false);
         };
       } catch (connectError) {
-        setError(connectError instanceof Error ? connectError.message : '实时 WebSocket proxy 连接失败，已降级到录音/文字辅导。');
-        resolve(false);
+        if (isStartOperationCurrent(operation)) {
+          setError(connectError instanceof Error ? connectError.message : '实时 WebSocket proxy 连接失败，已降级到录音/文字辅导。');
+        }
+        socket?.close();
+        finish(false);
       }
     });
-  }, [handleRealtimeEvent, startDashScopeAudioStreaming, stopDashScopeAudioStreaming]);
+  }, [handleRealtimeEvent, isStartOperationCurrent, startDashScopeAudioStreaming, stopDashScopeAudioStreaming]);
 
-  const start = useCallback(async () => {
-    setStatus('connecting');
-    setError('');
-    setSummary(null);
-    const response = await fetch('/api/a3/coaching/realtime/session', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'voice_video' }),
-    });
-    const result = await response.json().catch(() => ({})) as A3RealtimeCoachingSession;
-    if (!response.ok || !result.success) {
-      setStatus('error');
-      setError(result.error || '实时面对面辅导会话创建失败');
-      return;
-    }
-    setSession(result);
-    await fetch('/api/a3/coaching/realtime/message', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [{
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: result.fallbackReason || `实时 provider 已准备：${result.provider}`,
-          degraded: result.provider === 'local_fallback_record_then_respond' || !result.connection.readyForBrowserMedia,
-          metadata: {
-            realtime: {
-              provider: result.provider,
-              model: result.model,
-              readyForBrowserMedia: result.connection.readyForBrowserMedia,
-            },
-          },
-        }],
-        summary: `${result.instructions.targetTitle}：实时 provider ${result.provider}`,
-      }),
-    }).catch(() => undefined);
-    setTranscript((items) => [
-      ...items,
-      {
-        id: crypto.randomUUID(),
-        role: 'system',
-        content: result.fallbackReason || `已创建 ${result.provider} 会话`,
-        final: true,
-        createdAt: new Date().toISOString(),
-      },
-    ]);
-    if (result.provider === 'local_fallback_record_then_respond' || !result.connection.readyForBrowserMedia) {
-      setStatus('degraded');
-      return;
-    }
-    const connected = result.connection.type === 'websocket_proxy'
-      ? await connectRealtimeWebSocket(result)
-      : await connectRealtimePeer(result);
-    setStatus(connected ? 'live' : 'degraded');
-  }, [connectRealtimePeer, connectRealtimeWebSocket]);
-
-  const stopMediaTracks = useCallback(() => {
-    stopRealtimePlayback();
+  const stopMediaTracks = useCallback((resetUi = true, invalidateOperation = true) => {
+    if (invalidateOperation) startOperationControllerRef.current?.invalidate();
+    stopRealtimePlayback(resetUi);
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
     screenStreamRef.current?.getTracks().forEach((track) => track.stop());
+    if (peerRef.current) peerRef.current.ontrack = null;
     peerRef.current?.close();
+    if (dataChannelRef.current) dataChannelRef.current.onmessage = null;
+    dataChannelRef.current?.close();
+    if (websocketRef.current) {
+      websocketRef.current.onopen = null;
+      websocketRef.current.onmessage = null;
+      websocketRef.current.onerror = null;
+      websocketRef.current.onclose = null;
+    }
     websocketRef.current?.close();
-    stopDashScopeAudioStreaming();
-    remoteAudioRef.current?.remove();
+    stopDashScopeAudioStreaming(resetUi);
+    if (remoteAudioSpeakingControllerRef.current) {
+      remoteAudioSpeakingControllerRef.current.dispose();
+    } else if (remoteAudioRef.current) {
+      remoteAudioRef.current.pause();
+      remoteAudioRef.current.srcObject = null;
+      remoteAudioRef.current.remove();
+    }
+    remoteAudioSpeakingControllerRef.current = null;
+    updateAssistantSpeaking(false);
     cameraStreamRef.current = null;
     screenStreamRef.current = null;
     peerRef.current = null;
@@ -649,14 +899,141 @@ export function useRealtimeCoaching() {
     remoteAudioRef.current = null;
     if (cameraVideoRef.current) cameraVideoRef.current.srcObject = null;
     if (screenVideoRef.current) screenVideoRef.current.srcObject = null;
-    setCameraEnabled(false);
-    setMicrophoneEnabled(false);
-    setScreenEnabled(false);
-  }, [stopDashScopeAudioStreaming, stopRealtimePlayback]);
+    if (resetUi) {
+      setCameraEnabled(false);
+      setMicrophoneEnabled(false);
+      setScreenEnabled(false);
+    }
+  }, [stopDashScopeAudioStreaming, stopRealtimePlayback, updateAssistantSpeaking]);
 
-  const persistRealtimeTranscript = useCallback(async () => {
-    if (!session?.coachingSessionId) return;
-    const messages = transcript
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stopMediaTracks(false);
+    };
+  }, [stopMediaTracks]);
+
+  const start = useCallback(async () => {
+    const lifecycle = startOperationControllerRef.current;
+    if (!lifecycle) return;
+    const operation = lifecycle.begin();
+    setStatus('connecting');
+    setError('');
+    setSummary(null);
+
+    try {
+      let startFailure: Error | null = null;
+      const sessionRequest = await runRealtimeStartStep(
+        operation,
+        isStartOperationCurrent,
+        () => fetch('/api/a3/coaching/realtime/session', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          signal: operation.controller.signal,
+          body: JSON.stringify({ mode: 'voice_video' }),
+        }),
+        (error) => { startFailure = error; },
+      );
+      if (!sessionRequest.committed) {
+        if (startFailure && isStartOperationCurrent(operation)) {
+          throw startFailure;
+        }
+        return;
+      }
+      const response = sessionRequest.value;
+
+      const sessionJson = await runRealtimeStartStep(
+        operation,
+        isStartOperationCurrent,
+        () => response.json() as Promise<A3RealtimeCoachingSession>,
+        (error) => { startFailure = error; },
+      );
+      if (!sessionJson.committed) {
+        if (startFailure && isStartOperationCurrent(operation)) {
+          throw startFailure;
+        }
+        return;
+      }
+      const result = sessionJson.value;
+      if (!response.ok || !result.success) {
+        setStatus('error');
+        setError(result.error || '实时面对面辅导会话创建失败，请稍后重试。');
+        return;
+      }
+
+      setSession(result);
+      try {
+        await fetch('/api/a3/coaching/realtime/message', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          signal: operation.controller.signal,
+          body: JSON.stringify({
+            messages: [{
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              content: result.fallbackReason || `实时 provider 已准备：${result.provider}`,
+              degraded: result.provider === 'local_fallback_record_then_respond' || !result.connection.readyForBrowserMedia,
+              metadata: {
+                realtime: {
+                  provider: result.provider,
+                  model: result.model,
+                  readyForBrowserMedia: result.connection.readyForBrowserMedia,
+                },
+              },
+            }],
+            summary: `${result.instructions.targetTitle}：实时 provider ${result.provider}`,
+          }),
+        });
+      } catch (persistError) {
+        if (!isStartOperationCurrent(operation)) return;
+        if (persistError instanceof DOMException && persistError.name === 'AbortError') return;
+        // Session persistence is best-effort; the live transport can still start.
+      }
+      if (!isStartOperationCurrent(operation)) return;
+
+      setTranscript((items) => [
+        ...items,
+        {
+          id: crypto.randomUUID(),
+          role: 'system',
+          content: result.fallbackReason || `已创建 ${result.provider} 会话`,
+          final: true,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+      if (result.provider === 'local_fallback_record_then_respond' || !result.connection.readyForBrowserMedia) {
+        setStatus('degraded');
+        return;
+      }
+
+      const connected = result.connection.type === 'websocket_proxy'
+        ? await connectRealtimeWebSocket(result, operation)
+        : await connectRealtimePeer(result, operation);
+      if (!isStartOperationCurrent(operation)) return;
+      setStatus(connected ? 'live' : 'degraded');
+    } catch (startError) {
+      if (!isStartOperationCurrent(operation)) return;
+      stopMediaTracks();
+      if (!mountedRef.current) return;
+      setStatus('error');
+      setError(
+        startError instanceof SyntaxError
+          ? '实时辅导服务返回了无法解析的数据，请稍后重试。'
+          : '实时面对面辅导连接失败，请检查网络后重试。',
+      );
+    }
+  }, [connectRealtimePeer, connectRealtimeWebSocket, isStartOperationCurrent, stopMediaTracks]);
+
+  const persistRealtimeTranscript = useCallback(async (
+    sessionSnapshot: A3RealtimeCoachingSession | null,
+    transcriptSnapshot: A3RealtimeTranscriptEvent[],
+    signal?: AbortSignal,
+  ) => {
+    if (!sessionSnapshot?.coachingSessionId) return;
+    const messages = transcriptSnapshot
       .filter((item) => item.role === 'user' || item.role === 'assistant')
       .filter((item) => item.content.trim())
       .slice(-8)
@@ -669,9 +1046,9 @@ export function useRealtimeCoaching() {
         createdAt: item.createdAt,
         metadata: {
           realtime: {
-            provider: session.provider,
-            model: session.model,
-            coachingSessionId: session.coachingSessionId,
+            provider: sessionSnapshot.provider,
+            model: sessionSnapshot.model,
+            coachingSessionId: sessionSnapshot.coachingSessionId,
           },
         },
       }));
@@ -680,28 +1057,50 @@ export function useRealtimeCoaching() {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
+      signal,
       body: JSON.stringify({
         messages,
-        summary: `${session.instructions.targetTitle}：实时辅导进行中`,
+        summary: `${sessionSnapshot.instructions.targetTitle}：实时辅导进行中`,
       }),
     }).catch(() => undefined);
-  }, [session, transcript]);
+  }, []);
 
   const end = useCallback(async () => {
+    const lifecycle = startOperationControllerRef.current;
+    const sessionSnapshot = session;
+    const transcriptSnapshot = [...transcript];
     setStatus('ending');
     sendRealtimeCancel();
-    await persistRealtimeTranscript();
-    stopMediaTracks();
-    if (session?.coachingSessionId) {
-      const response = await fetch('/api/a3/coaching/realtime/end', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ coachingSessionId: session.coachingSessionId }),
-      }).catch(() => null);
-      const result = response ? await response.json().catch(() => ({})) as EndResponse : null;
-      if (response?.ok && result?.success && result.summary) {
-        const summaryPayload = result.summary;
+    lifecycle.invalidate();
+    const operation = lifecycle.begin();
+    await runRealtimeEndLifecycle({
+      operation,
+      isCurrent: isStartOperationCurrent,
+      stopMedia: () => stopMediaTracks(true, false),
+      persist: () => persistRealtimeTranscript(
+        sessionSnapshot,
+        transcriptSnapshot,
+        operation.controller.signal,
+      ),
+      requestEnd: async () => {
+        if (!sessionSnapshot?.coachingSessionId) return null;
+        const response = await fetch('/api/a3/coaching/realtime/end', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          signal: operation.controller.signal,
+          body: JSON.stringify({ coachingSessionId: sessionSnapshot.coachingSessionId }),
+        });
+        if (!isStartOperationCurrent(operation)) return null;
+        const result = await response.json().catch(() => ({})) as EndResponse;
+        if (!isStartOperationCurrent(operation)) return null;
+        return { response, result };
+      },
+      commit: (payload) => {
+        if (!payload) return;
+        const { response, result } = payload;
+        if (response.ok && result.success && result.summary) {
+          const summaryPayload = result.summary;
         setSummary(summaryPayload);
         setTranscript((items) => [
           ...items,
@@ -713,14 +1112,17 @@ export function useRealtimeCoaching() {
             createdAt: new Date().toISOString(),
           },
         ]);
-      } else if (result?.error) {
-        setError(result.error);
-      }
-    }
-    setStatus('ended');
-  }, [persistRealtimeTranscript, sendRealtimeCancel, session, stopMediaTracks]);
+        } else if (result.error) {
+          setError(result.error);
+        }
+      },
+      onError: () => setError('实时辅导已结束，但本次总结生成失败，请稍后在历史记录中重试。'),
+    });
+    if (isStartOperationCurrent(operation)) setStatus('ended');
+  }, [isStartOperationCurrent, persistRealtimeTranscript, sendRealtimeCancel, session, stopMediaTracks, transcript]);
 
   const endWithoutSummary = useCallback(() => {
+    startOperationControllerRef.current?.invalidate();
     setStatus('ending');
     setSummary(null);
     sendRealtimeCancel();

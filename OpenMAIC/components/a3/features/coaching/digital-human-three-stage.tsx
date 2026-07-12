@@ -4,8 +4,19 @@ import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import type { VRM } from '@pixiv/three-vrm';
 import type { VRMAnimation } from '@pixiv/three-vrm-animation';
-import type { A3DigitalHumanAvatarState, A3DigitalHumanSpeechCue } from '@/lib/a3/digital-human-types';
+import type {
+  A3DigitalHumanAvatarState,
+  A3DigitalHumanSpeechCue,
+} from '@/lib/a3/digital-human-types';
 import { cn } from '@/lib/utils';
+import {
+  advanceAvatarFrame,
+  resolveTeacherActionTransition,
+  retainResourceUnlessDisposed,
+  shouldStartAvatarAssetLoad,
+  shouldRunAvatarAnimation,
+  type TeacherVrmActionKey,
+} from './digital-human-runtime';
 
 export const A3_DEFAULT_TEACHER_VRM_PATH = '/a3/assets/teacher-avatar/teacher.vrm';
 export const A3_DEFAULT_TEACHER_IDLE_VRMA_PATH = '/a3/assets/teacher-avatar/idle.vrma';
@@ -64,9 +75,8 @@ type DigitalHumanThreeStageProps = {
   speechCues?: A3DigitalHumanSpeechCue[];
 };
 
-type ActiveAvatarRenderer = 'vrm' | 'vrm_idle_animation' | 'primitive';
+type ActiveAvatarRenderer = 'vrm' | 'vrm_idle_animation' | 'primitive' | 'static_fallback';
 type IdleAnimationState = 'pending' | 'loaded' | 'missing' | 'unavailable';
-type TeacherVrmActionKey = keyof typeof A3_TEACHER_VRMA_ACTIONS;
 type TeacherActionState = 'pending' | 'loaded' | 'missing' | 'unavailable';
 
 type PrimitiveAvatar = {
@@ -260,7 +270,10 @@ function resolveSpeechCueVisemeWeights(speechCues: A3DigitalHumanSpeechCue[], no
   if (!activeCues.length) return null;
 
   activeCues.forEach((cue) => {
-    const cueProgress = Math.max(0, Math.min(1, (nowMs - cue.startsAtMs) / Math.max(1, cue.endsAtMs - cue.startsAtMs)));
+    const cueProgress = Math.max(
+      0,
+      Math.min(1, (nowMs - cue.startsAtMs) / Math.max(1, cue.endsAtMs - cue.startsAtMs)),
+    );
     const envelope = Math.sin(cueProgress * Math.PI);
     const energy = Math.max(0.14, Math.min(1, cue.energy ?? 0.35));
     if (cue.weights) {
@@ -281,22 +294,27 @@ function resolveSpeechCueVisemeWeights(speechCues: A3DigitalHumanSpeechCue[], no
   return visemeWeights;
 }
 
-function resolveVrmSpeechVisemes(signal: AvatarSignal, elapsedSeconds: number): Record<VrmMouthExpression, number> {
-  const cueWeights = typeof performance !== 'undefined'
-    ? resolveSpeechCueVisemeWeights(signal.speechCues, performance.now())
-    : null;
-  if (cueWeights) return cueWeights;
-
+function resolveVrmSpeechVisemes(
+  signal: AvatarSignal,
+  elapsedSeconds: number,
+): Record<VrmMouthExpression, number> {
   const visemeWeights = emptyVisemeWeights();
-
   if (!signal.assistantSpeaking) return visemeWeights;
+
+  const cueWeights =
+    typeof performance !== 'undefined'
+      ? resolveSpeechCueVisemeWeights(signal.speechCues, performance.now())
+      : null;
+  if (cueWeights) return cueWeights;
 
   const normalizedLevel = clampAudioLevel(signal.audioLevel);
   const envelope = Math.max(normalizedLevel, 0.16 + (Math.sin(elapsedSeconds * 18) + 1) * 0.06);
   const speechPhase = Math.floor(elapsedSeconds * 11) % A3_VRM_MOUTH_EXPRESSIONS.length;
   const primaryMouth = A3_VRM_MOUTH_EXPRESSIONS[speechPhase];
-  const secondaryMouth = A3_VRM_MOUTH_EXPRESSIONS[(speechPhase + 1) % A3_VRM_MOUTH_EXPRESSIONS.length];
-  const roundedMouth = A3_VRM_MOUTH_EXPRESSIONS[(speechPhase + 2) % A3_VRM_MOUTH_EXPRESSIONS.length];
+  const secondaryMouth =
+    A3_VRM_MOUTH_EXPRESSIONS[(speechPhase + 1) % A3_VRM_MOUTH_EXPRESSIONS.length];
+  const roundedMouth =
+    A3_VRM_MOUTH_EXPRESSIONS[(speechPhase + 2) % A3_VRM_MOUTH_EXPRESSIONS.length];
   const consonantPulse = 0.5 + Math.sin(elapsedSeconds * 31) * 0.5;
 
   visemeWeights[primaryMouth] = Math.min(1, envelope);
@@ -357,7 +375,10 @@ function createPrimitiveAvatar(signal: AvatarSignal): PrimitiveAvatar {
   const mouthScale = signal.assistantSpeaking ? 1 + normalizedLevel : 0.35;
   const mouth = new THREE.Mesh(
     new THREE.BoxGeometry(0.34, 0.06, 0.035),
-    new THREE.MeshStandardMaterial({ color: signal.assistantSpeaking ? 0xf06d7a : 0x7b2630, roughness: 0.5 }),
+    new THREE.MeshStandardMaterial({
+      color: signal.assistantSpeaking ? 0xf06d7a : 0x7b2630,
+      roughness: 0.5,
+    }),
   );
   mouth.position.set(0, 0.76, 0.68);
   mouth.scale.y = mouthScale;
@@ -365,7 +386,11 @@ function createPrimitiveAvatar(signal: AvatarSignal): PrimitiveAvatar {
 
   const halo = new THREE.Mesh(
     new THREE.TorusGeometry(1.22, 0.012, 8, 80),
-    new THREE.MeshBasicMaterial({ color: resolveHaloColor(signal.state), transparent: true, opacity: 0.45 }),
+    new THREE.MeshBasicMaterial({
+      color: resolveHaloColor(signal.state),
+      transparent: true,
+      opacity: 0.45,
+    }),
   );
   halo.position.y = 0.42;
   halo.rotation.x = Math.PI / 2;
@@ -390,12 +415,17 @@ function disposeObject(object: THREE.Object3D) {
   });
 }
 
-function updatePrimitiveAvatar(avatar: PrimitiveAvatar, signal: AvatarSignal, elapsedSeconds: number) {
+function updatePrimitiveAvatar(
+  avatar: PrimitiveAvatar,
+  signal: AvatarSignal,
+  elapsedSeconds: number,
+) {
   const profile = resolveAvatarMotionProfile(signal);
   const normalizedLevel = clampAudioLevel(signal.audioLevel);
   avatar.root.rotation.y = Math.sin(elapsedSeconds * 0.9) * profile.primitiveYaw;
   avatar.head.position.y = 0.97 + Math.sin(elapsedSeconds * 1.7) * profile.primitiveBounce;
-  avatar.head.rotation.z = profile.headTilt + Math.sin(elapsedSeconds * 0.7) * profile.headTilt * 0.4;
+  avatar.head.rotation.z =
+    profile.headTilt + Math.sin(elapsedSeconds * 0.7) * profile.headTilt * 0.4;
   avatar.head.rotation.x = profile.headPitch + Math.sin(elapsedSeconds * 1.1) * profile.headNod;
   avatar.mouth.scale.y = signal.assistantSpeaking
     ? 1 + Math.max(normalizedLevel, 0.18 + Math.sin(elapsedSeconds * 18) * 0.12)
@@ -441,7 +471,17 @@ function warmUpVrmSpringBones(vrm: VRM) {
   }
 }
 
-async function loadTeacherVrmAction(vrm: VRM, mixer: THREE.AnimationMixer, actionKey: TeacherVrmActionKey) {
+function disposeTeacherAction(mixer: THREE.AnimationMixer, action: THREE.AnimationAction) {
+  action.stop();
+  mixer.uncacheAction(action.getClip(), action.getRoot());
+}
+
+async function loadTeacherVrmAction(
+  vrm: VRM,
+  mixer: THREE.AnimationMixer,
+  actionKey: TeacherVrmActionKey,
+  isDisposed: () => boolean,
+) {
   const [{ GLTFLoader }, { VRMAnimationLoaderPlugin, createVRMAnimationClip }] = await Promise.all([
     import('three/examples/jsm/loaders/GLTFLoader.js'),
     import('@pixiv/three-vrm-animation'),
@@ -450,7 +490,11 @@ async function loadTeacherVrmAction(vrm: VRM, mixer: THREE.AnimationMixer, actio
   const loader = new GLTFLoader();
   loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
 
-  const gltf = await loader.loadAsync(A3_TEACHER_VRMA_ACTIONS[actionKey].url);
+  const loadedGltf = await loader.loadAsync(A3_TEACHER_VRMA_ACTIONS[actionKey].url);
+  const gltf = retainResourceUnlessDisposed(loadedGltf, isDisposed(), (lateGltf) =>
+    disposeObject(lateGltf.scene),
+  );
+  if (!gltf) return null;
   const vrmAnimation = (gltf.userData as { vrmAnimations?: VRMAnimation[] }).vrmAnimations?.[0];
   if (!vrmAnimation) return null;
 
@@ -460,7 +504,9 @@ async function loadTeacherVrmAction(vrm: VRM, mixer: THREE.AnimationMixer, actio
   action.setLoop(THREE.LoopRepeat, Number.POSITIVE_INFINITY);
   action.enabled = true;
   action.setEffectiveWeight(0);
-  return action;
+  return retainResourceUnlessDisposed(action, isDisposed(), (lateAction) =>
+    disposeTeacherAction(mixer, lateAction),
+  );
 }
 
 function resolveTeacherVrmActionKey(signal: AvatarSignal): TeacherVrmActionKey {
@@ -474,16 +520,23 @@ function crossFadeTeacherAction(
   activeActionKey: TeacherVrmActionKey | null,
   nextActionKey: TeacherVrmActionKey,
 ) {
-  const nextAction = actions.get(nextActionKey) || actions.get('wait') || actions.get('idle');
-  if (!nextAction || activeActionKey === nextActionKey) return activeActionKey;
+  const decision = resolveTeacherActionTransition(
+    nextActionKey,
+    new Set(actions.keys()),
+    activeActionKey,
+  );
+  if (!decision.actualActionKey || !decision.shouldTransition) return decision.actualActionKey;
 
+  const nextAction = actions.get(decision.actualActionKey);
+  if (!nextAction) return activeActionKey;
   const previousAction = activeActionKey ? actions.get(activeActionKey) : null;
   nextAction.reset();
   nextAction.setEffectiveWeight(1);
   nextAction.fadeIn(0.22);
   nextAction.play();
-  if (previousAction && previousAction !== nextAction) previousAction.crossFadeTo(nextAction, 0.22, false);
-  return actions.get(nextActionKey) ? nextActionKey : actions.has('wait') ? 'wait' : 'idle';
+  if (previousAction && previousAction !== nextAction)
+    previousAction.crossFadeTo(nextAction, 0.22, false);
+  return decision.actualActionKey;
 }
 
 function resetVrmSpeechAndStateExpressions(vrm: VRM) {
@@ -492,13 +545,19 @@ function resetVrmSpeechAndStateExpressions(vrm: VRM) {
   });
 }
 
-function applyVrmHeadMotion(vrm: VRM, signal: AvatarSignal, elapsedSeconds: number, audioLevel: number) {
+function applyVrmHeadMotion(
+  vrm: VRM,
+  signal: AvatarSignal,
+  elapsedSeconds: number,
+  audioLevel: number,
+) {
   const profile = resolveAvatarMotionProfile(signal);
   const normalizedLevel = clampAudioLevel(audioLevel);
   const speakingNod = signal.assistantSpeaking ? normalizedLevel * 0.018 : 0;
   const head = vrm.humanoid.getNormalizedBoneNode(A3_VRM_HEAD_BONE);
   const neck = vrm.humanoid.getNormalizedBoneNode(A3_VRM_NECK_BONE);
-  const headPitch = profile.headPitch + Math.sin(elapsedSeconds * 2.1) * profile.headNod + speakingNod;
+  const headPitch =
+    profile.headPitch + Math.sin(elapsedSeconds * 2.1) * profile.headNod + speakingNod;
   const headYaw = Math.sin(elapsedSeconds * 0.74) * profile.headYaw;
   const headTilt = profile.headTilt + Math.sin(elapsedSeconds * 0.58) * profile.headTilt * 0.35;
 
@@ -537,13 +596,19 @@ function updateVrmAvatar(vrm: VRM, signal: AvatarSignal, elapsedSeconds: number)
   vrm.scene.rotation.y = Math.sin(elapsedSeconds * 0.45) * profile.primitiveYaw * 0.5;
 }
 
-export function DigitalHumanThreeStage({ state, audioLevel, assistantSpeaking, speechCues = [] }: DigitalHumanThreeStageProps) {
+export function DigitalHumanThreeStage({
+  state,
+  audioLevel,
+  assistantSpeaking,
+  speechCues = [],
+}: DigitalHumanThreeStageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const signalRef = useRef<AvatarSignal>({ state, audioLevel, assistantSpeaking, speechCues });
   const [activeRenderer, setActiveRenderer] = useState<ActiveAvatarRenderer>('primitive');
   const [idleAnimationState, setIdleAnimationState] = useState<IdleAnimationState>('pending');
   const [activeAction, setActiveAction] = useState<TeacherVrmActionKey>('idle');
   const [activeActionState, setActiveActionState] = useState<TeacherActionState>('pending');
+  const [webglUnavailable, setWebglUnavailable] = useState(false);
   const normalizedLevel = clampAudioLevel(audioLevel);
   const mouthScale = assistantSpeaking ? 1 + normalizedLevel : 0.35;
 
@@ -560,12 +625,22 @@ export function DigitalHumanThreeStage({ state, audioLevel, assistantSpeaking, s
     let activeVrm: VRM | null = null;
     let activeMixer: THREE.AnimationMixer | null = null;
     let activeTeacherActionKey: TeacherVrmActionKey | null = null;
+    let avatarLoadStarted = false;
     const teacherActions = new Map<TeacherVrmActionKey, THREE.AnimationAction>();
     let vrmUtils: typeof import('@pixiv/three-vrm').VRMUtils | null = null;
     setIdleAnimationState('pending');
     setActiveActionState('pending');
 
-    const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    } catch {
+      setActiveRenderer('static_fallback');
+      setIdleAnimationState('unavailable');
+      setActiveActionState('unavailable');
+      setWebglUnavailable(true);
+      return;
+    }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(canvas.clientWidth || 360, canvas.clientHeight || 280, false);
 
@@ -593,8 +668,14 @@ export function DigitalHumanThreeStage({ state, audioLevel, assistantSpeaking, s
       loader.load(
         A3_DEFAULT_TEACHER_VRM_PATH,
         async (gltf) => {
-          if (disposed) return;
-          const vrm = gltf.userData.vrm as VRM | undefined;
+          const loadedVrm = gltf.userData.vrm as VRM | undefined;
+          if (!loadedVrm) {
+            if (disposed) disposeObject(gltf.scene);
+            return;
+          }
+          const vrm = retainResourceUnlessDisposed(loadedVrm, disposed, (lateVrm) =>
+            VRMUtils.deepDispose(lateVrm.scene),
+          );
           if (!vrm) return;
           VRMUtils.rotateVRM0(vrm);
           VRMUtils.removeUnnecessaryVertices(vrm.scene);
@@ -608,11 +689,23 @@ export function DigitalHumanThreeStage({ state, audioLevel, assistantSpeaking, s
           activeVrm = vrm;
           activeMixer = new THREE.AnimationMixer(vrm.scene);
           setActiveRenderer('vrm');
-          const idleAction = await loadTeacherVrmAction(vrm, activeMixer, 'idle').catch(() => null);
-          if (disposed) return;
+          const idleAction = await loadTeacherVrmAction(
+            vrm,
+            activeMixer,
+            'idle',
+            () => disposed,
+          ).catch(() => null);
+          if (disposed) {
+            if (idleAction) disposeTeacherAction(activeMixer, idleAction);
+            return;
+          }
           if (idleAction) {
             teacherActions.set('idle', idleAction);
-            activeTeacherActionKey = crossFadeTeacherAction(teacherActions, activeTeacherActionKey, 'idle');
+            activeTeacherActionKey = crossFadeTeacherAction(
+              teacherActions,
+              activeTeacherActionKey,
+              'idle',
+            );
             setActiveAction('idle');
             setActiveActionState('loaded');
             setIdleAnimationState('loaded');
@@ -621,10 +714,22 @@ export function DigitalHumanThreeStage({ state, audioLevel, assistantSpeaking, s
             setActiveActionState('missing');
             setIdleAnimationState('missing');
           }
-          void Promise.all((['wait', 'explain', 'nod'] as TeacherVrmActionKey[]).map(async (actionKey) => {
-            const action = await loadTeacherVrmAction(vrm, activeMixer as THREE.AnimationMixer, actionKey).catch(() => null);
-            if (!disposed && action) teacherActions.set(actionKey, action);
-          }));
+          void Promise.all(
+            (['wait', 'explain', 'nod'] as TeacherVrmActionKey[]).map(async (actionKey) => {
+              const mixer = activeMixer as THREE.AnimationMixer;
+              const action = await loadTeacherVrmAction(
+                vrm,
+                mixer,
+                actionKey,
+                () => disposed,
+              ).catch(() => null);
+              if (!action) return;
+              const retainedAction = retainResourceUnlessDisposed(action, disposed, (lateAction) =>
+                disposeTeacherAction(mixer, lateAction),
+              );
+              if (retainedAction) teacherActions.set(actionKey, retainedAction);
+            }),
+          );
         },
         undefined,
         () => {
@@ -636,13 +741,6 @@ export function DigitalHumanThreeStage({ state, audioLevel, assistantSpeaking, s
       );
     }
 
-    void loadVrmAvatar().catch(() => {
-      if (!disposed) {
-        setActiveRenderer('primitive');
-        setIdleAnimationState('unavailable');
-      }
-    });
-
     const resize = () => {
       const width = canvas.clientWidth || 360;
       const height = canvas.clientHeight || 280;
@@ -652,14 +750,32 @@ export function DigitalHumanThreeStage({ state, audioLevel, assistantSpeaking, s
     };
     resize();
 
-    const clock = new THREE.Clock();
-    const animate = () => {
-      const elapsedSeconds = clock.getElapsedTime();
+    const timer = new THREE.Timer();
+    timer.connect(document);
+    let elapsedSeconds = 0;
+    let intersecting = typeof IntersectionObserver === 'undefined';
+    let documentVisible = document.visibilityState === 'visible';
+
+    const canAnimate = () => shouldRunAvatarAnimation({ disposed, documentVisible, intersecting });
+    const stopAnimation = () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      raf = 0;
+    };
+    const animate = (timestamp: number) => {
+      raf = 0;
+      if (!canAnimate()) return;
+      timer.update(timestamp);
+      const timing = advanceAvatarFrame(elapsedSeconds, timer.getDelta());
+      elapsedSeconds = timing.elapsedSeconds;
+      const delta = timing.deltaSeconds;
       const signal = signalRef.current;
       if (activeVrm) {
-        const delta = clock.getDelta();
         const nextTeacherAction = resolveTeacherVrmActionKey(signal);
-        const resolvedTeacherAction = crossFadeTeacherAction(teacherActions, activeTeacherActionKey, nextTeacherAction);
+        const resolvedTeacherAction = crossFadeTeacherAction(
+          teacherActions,
+          activeTeacherActionKey,
+          nextTeacherAction,
+        );
         if (resolvedTeacherAction !== activeTeacherActionKey) {
           activeTeacherActionKey = resolvedTeacherAction;
           setActiveAction(resolvedTeacherAction || 'wait');
@@ -672,16 +788,67 @@ export function DigitalHumanThreeStage({ state, audioLevel, assistantSpeaking, s
         updatePrimitiveAvatar(primitiveAvatar, signal, elapsedSeconds);
       }
       renderer.render(scene, camera);
-      raf = window.requestAnimationFrame(animate);
+      if (canAnimate()) raf = window.requestAnimationFrame(animate);
     };
-    animate();
+    const syncAnimation = () => {
+      if (!canAnimate()) {
+        stopAnimation();
+        return;
+      }
+      if (
+        shouldStartAvatarAssetLoad({
+          disposed,
+          documentVisible,
+          intersecting,
+          loadStarted: avatarLoadStarted,
+        })
+      ) {
+        avatarLoadStarted = true;
+        void loadVrmAvatar().catch(() => {
+          if (!disposed) {
+            setActiveRenderer('primitive');
+            setIdleAnimationState('unavailable');
+          }
+        });
+      }
+      if (!raf) {
+        timer.reset();
+        raf = window.requestAnimationFrame(animate);
+      }
+    };
+    const handleVisibilityChange = () => {
+      documentVisible = document.visibilityState === 'visible';
+      syncAnimation();
+    };
+    const intersectionObserver =
+      typeof IntersectionObserver === 'undefined'
+        ? null
+        : new IntersectionObserver(
+            (entries) => {
+              intersecting = entries.at(-1)?.isIntersecting ?? false;
+              syncAnimation();
+            },
+            { rootMargin: '200px' },
+          );
+    intersectionObserver?.observe(canvas);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('resize', resize);
+    syncAnimation();
 
     return () => {
       disposed = true;
-      window.cancelAnimationFrame(raf);
+      stopAnimation();
+      intersectionObserver?.disconnect();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('resize', resize);
-      activeMixer?.stopAllAction();
+      timer.dispose();
+      if (activeMixer) {
+        const mixer = activeMixer;
+        mixer.stopAllAction();
+        teacherActions.forEach((action) => disposeTeacherAction(mixer, action));
+        teacherActions.clear();
+        mixer.uncacheRoot(mixer.getRoot());
+      }
       if (activeVrm && vrmUtils) vrmUtils.deepDispose(activeVrm.scene);
       disposeObject(primitiveAvatar.root);
       renderer.dispose();
@@ -699,9 +866,39 @@ export function DigitalHumanThreeStage({ state, audioLevel, assistantSpeaking, s
       data-avatar-action-state={activeActionState}
       className="relative z-10 h-[420px] w-full max-w-[820px] overflow-hidden bg-transparent md:h-[500px] xl:h-[560px]"
     >
-      <canvas ref={canvasRef} data-testid="a3-digital-human-three-canvas" className="mx-auto block h-full w-full md:w-[46%] md:min-w-[360px] md:max-w-[460px]" aria-label="3D 数字助教" />
+      {webglUnavailable ? (
+        <div
+          data-testid="a3-digital-human-static-fallback"
+          role="img"
+          aria-label="静态数字助教"
+          className="flex h-full w-full flex-col items-center justify-center px-6 text-white"
+        >
+          <div className="flex size-32 items-center justify-center rounded-full border border-white/35 bg-slate-950/35 text-4xl font-semibold shadow-[0_20px_70px_rgba(15,23,42,0.3)] backdrop-blur-xl">
+            智
+          </div>
+          <p className="mt-4 rounded-full border border-white/20 bg-slate-950/40 px-4 py-2 text-xs backdrop-blur-lg">
+            当前设备暂以静态教师形象显示
+          </p>
+        </div>
+      ) : (
+        <canvas
+          ref={canvasRef}
+          data-testid="a3-digital-human-three-canvas"
+          className="mx-auto block h-full w-full md:w-[46%] md:min-w-[360px] md:max-w-[460px]"
+          aria-label="3D 数字助教"
+        />
+      )}
       <div className="pointer-events-none absolute left-4 top-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-slate-950/55 px-3 py-1.5 text-xs text-slate-200 shadow-lg shadow-slate-950/20">
-        <span className={cn('size-2 rounded-full', assistantSpeaking ? 'bg-emerald-400' : state === 'degraded' ? 'bg-amber-400' : 'bg-slate-500')} />
+        <span
+          className={cn(
+            'size-2 rounded-full',
+            assistantSpeaking
+              ? 'bg-emerald-400'
+              : state === 'degraded'
+                ? 'bg-amber-400'
+                : 'bg-slate-500',
+          )}
+        />
         <span>
           {activeRenderer === 'vrm_idle_animation'
             ? 'VRM 自然站姿'
