@@ -104,18 +104,20 @@ const teacherAssets = [
   {
     route: '/a3/teacher',
     filename: 'teacher-workbench.webp',
-    testId: 'a3-teacher-workbench',
+    testId: 'a3-teacher-homepage-evidence',
     ready: async (page) => {
-      const heading = page.getByText('班级学情概览', { exact: true });
-      await heading.waitFor({ timeout: 60_000 });
-      await heading
-        .locator('xpath=ancestor::section[1]')
-        .locator('tbody tr')
-        .first()
-        .waitFor({ timeout: 60_000 });
+      await page.getByText('班级薄弱知识点', { exact: true }).waitFor({ timeout: 60_000 });
+      await page.getByText('课堂任务队列', { exact: true }).waitFor({ timeout: 60_000 });
     },
-    focusHeading: '班级学情概览',
+    captureStyle: `
+      [data-testid='a3-teacher-homepage-evidence'] {
+        min-height: 360px !important;
+        background: var(--a3-bg, #f8fafc) !important;
+      }
+    `,
     height: 430,
+    resizeWidth: 1440,
+    allowEnlargement: true,
   },
 ];
 
@@ -264,7 +266,11 @@ async function capture(page, asset, assetOutputDir) {
       screenshotStyle: A3_DIGITAL_HUMAN_CAPTURE_STYLE,
     });
   } else {
-    png = await target.screenshot({ type: 'png', animations: 'disabled' });
+    png = await target.screenshot({
+      type: 'png',
+      animations: 'disabled',
+      style: asset.captureStyle,
+    });
   }
   const metadata = await sharp(png).metadata();
   if (!metadata.width || !metadata.height)

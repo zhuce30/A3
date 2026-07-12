@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
 
 const routerPush = vi.hoisted(() => vi.fn());
@@ -21,6 +21,25 @@ type TestElementProps = {
   onClick?: () => void;
 };
 
+let A3LoginPage: typeof import('@/app/a3/login/page').default;
+let LoginPage: typeof import('@/components/a3/auth/a3-auth-pages').LoginPage;
+let A3ReviewLoginPanel: typeof import('@/components/a3/auth/a3-review-login-panel').A3ReviewLoginPanel;
+let getA3AuthTarget: typeof import('@/lib/a3/auth-navigation').getA3AuthTarget;
+
+beforeAll(async () => {
+  const [loginPageModule, authPagesModule, reviewPanelModule, authNavigationModule] =
+    await Promise.all([
+      import('@/app/a3/login/page'),
+      import('@/components/a3/auth/a3-auth-pages'),
+      import('@/components/a3/auth/a3-review-login-panel'),
+      import('@/lib/a3/auth-navigation'),
+    ]);
+  A3LoginPage = loginPageModule.default;
+  LoginPage = authPagesModule.LoginPage;
+  A3ReviewLoginPanel = reviewPanelModule.A3ReviewLoginPanel;
+  getA3AuthTarget = authNavigationModule.getA3AuthTarget;
+}, 20_000);
+
 function findByTestId(node: ReactNode, testId: string): ReactElement<TestElementProps> | null {
   if (!isValidElement<TestElementProps>(node)) return null;
   if (node.props['data-testid'] === testId) return node;
@@ -35,8 +54,6 @@ function findByTestId(node: ReactNode, testId: string): ReactElement<TestElement
 
 describe('A3 review login mode', () => {
   it('derives review mode and a safe return target from async search params', async () => {
-    const { default: A3LoginPage } = await import('@/app/a3/login/page');
-
     const regular = await A3LoginPage({ searchParams: Promise.resolve({}) });
     expect(regular.props).toMatchObject({ reviewMode: false, returnTo: null });
 
@@ -58,8 +75,6 @@ describe('A3 review login mode', () => {
   });
 
   it('shows the review panel only in review mode', async () => {
-    const { LoginPage } = await import('@/components/a3/auth/a3-auth-pages');
-
     const regularMarkup = renderToStaticMarkup(createElement(LoginPage));
     expect(regularMarkup).toContain('欢迎回来');
     expect(regularMarkup).not.toContain('data-testid="a3-review-login-panel"');
@@ -76,7 +91,6 @@ describe('A3 review login mode', () => {
     const panelPath = path.resolve(process.cwd(), 'components/a3/auth/a3-review-login-panel.tsx');
     expect(fs.existsSync(panelPath), 'review-only panel should exist').toBe(true);
 
-    const { A3ReviewLoginPanel } = await import('@/components/a3/auth/a3-review-login-panel');
     const onFill = vi.fn();
     const panel = A3ReviewLoginPanel({ onFill });
     const fillButton = findByTestId(panel, 'a3-review-fill-account');
@@ -91,7 +105,6 @@ describe('A3 review login mode', () => {
   });
 
   it('lets the auth gate prefer an approved return target only after onboarding', async () => {
-    const { getA3AuthTarget } = await import('@/lib/a3/auth-navigation');
     const guestState = { isPublicPath: false, isGuestPath: true, isFlowPath: false };
     const completedUser: A3PublicUser = {
       id: 'review-student',

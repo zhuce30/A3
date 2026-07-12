@@ -50,6 +50,14 @@ const homepageCss = fs.readFileSync(
   path.join(marketingDir, 'a3-product-homepage.module.css'),
   'utf8',
 );
+const captureSource = fs.readFileSync(
+  path.resolve(process.cwd(), 'scripts/capture-a3-homepage-assets.mjs'),
+  'utf8',
+);
+const teacherWorkbenchSource = fs.readFileSync(
+  path.resolve(process.cwd(), 'components/a3/features/teacher-workbench-view.tsx'),
+  'utf8',
+);
 
 type ClassroomMode = 'lesson' | 'citations';
 type ClassroomControlProps = {
@@ -266,6 +274,13 @@ describe('A3 product homepage learning story modules', () => {
     expect(markup).toContain('正在倾听：进程调度为什么会发生饥饿？');
     expect(markup).toContain('href="/a3/coaching"');
     expect(markup).toContain('data-testid="a3-homepage-teacher-stage"');
+    expect(markup).toContain('data-demo-phase="static"');
+  });
+
+  it('captures a real anonymous teacher intervention region for homepage evidence', () => {
+    expect(teacherWorkbenchSource).toContain('data-testid="a3-teacher-homepage-evidence"');
+    expect(captureSource).toContain("testId: 'a3-teacher-homepage-evidence'");
+    expect(captureSource).not.toContain("focusHeading: '班级学情概览'");
   });
 
   it('uses only approved evidence and keeps team details in the footer', () => {
@@ -417,7 +432,7 @@ describe('A3 product homepage content contract', () => {
         id: 'teacher',
         index: '07 / TEACHER',
         title: '及时看见，也能及时介入。',
-        summary: '教师看见进度和薄弱点，在需要的时候推送任务。',
+        summary: '教师看见班级薄弱点和课堂任务队列，在需要时及时介入。',
         media: '/a3/assets/homepage/teacher-workbench.webp',
         alt: '教师工作台界面',
       },

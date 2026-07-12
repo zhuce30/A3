@@ -8,6 +8,23 @@ import styles from './a3-product-homepage.module.css';
 
 export const A3_HOMEPAGE_TEACHER_ROOT_MARGIN = '160px';
 export const A3_HOMEPAGE_TEACHER_STABILITY_MS = 120;
+export const A3_HOMEPAGE_TEACHER_DEMO_DURATION_MS = 8_000;
+
+export type A3HomepageTeacherDemoPhase = 'appear' | 'listen' | 'question' | 'complete';
+type A3HomepageTeacherRenderPhase = 'static' | A3HomepageTeacherDemoPhase;
+
+const A3_HOMEPAGE_TEACHER_PHASE_BOUNDARIES = [
+  { at: 1_800, phase: 'listen' },
+  { at: 3_600, phase: 'question' },
+  { at: A3_HOMEPAGE_TEACHER_DEMO_DURATION_MS, phase: 'complete' },
+] as const;
+
+export function resolveTeacherDemoPhase(elapsedMs: number): A3HomepageTeacherDemoPhase {
+  if (elapsedMs >= A3_HOMEPAGE_TEACHER_DEMO_DURATION_MS) return 'complete';
+  if (elapsedMs >= 3_600) return 'question';
+  if (elapsedMs >= 1_800) return 'listen';
+  return 'appear';
+}
 
 const TERMINAL_TEACHER_RENDERERS = new Set([
   'vrm',
@@ -70,12 +87,15 @@ function useHomepageReducedMotion(onReduce: () => void) {
 
 export function A3HomepageTeacherStage() {
   const rootRef = useRef<HTMLDivElement>(null);
+  const demoStartedRef = useRef(false);
   const [active, setActive] = useState(false);
+  const [demoPhase, setDemoPhase] = useState<A3HomepageTeacherRenderPhase>('static');
   const [rendererReady, setRendererReady] = useState(false);
   const [preserveFallback, setPreserveFallback] = useState(false);
   const [fallbackVisible, setFallbackVisible] = useState(true);
   const resetToStaticFallback = useCallback(() => {
     setActive(false);
+    setDemoPhase('static');
     setRendererReady(false);
     setPreserveFallback(false);
     setFallbackVisible(true);
@@ -86,11 +106,13 @@ export function A3HomepageTeacherStage() {
     if (reducedMotion) return;
 
     const root = rootRef.current;
-    if (!root || typeof IntersectionObserver === 'undefined') return;
+    if (!root || demoStartedRef.current || typeof IntersectionObserver === 'undefined') return;
 
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry && shouldActivateTeacherStage(entry)) {
+          demoStartedRef.current = true;
+          setDemoPhase('appear');
           setActive(true);
           observer.disconnect();
         }
@@ -101,6 +123,16 @@ export function A3HomepageTeacherStage() {
     observer.observe(root);
     return () => observer.disconnect();
   }, [reducedMotion]);
+
+  useEffect(() => {
+    if (reducedMotion || !active) return;
+
+    const timeoutIds = A3_HOMEPAGE_TEACHER_PHASE_BOUNDARIES.map(({ at }) =>
+      window.setTimeout(() => setDemoPhase(resolveTeacherDemoPhase(at)), at),
+    );
+
+    return () => timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
+  }, [active, reducedMotion]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -191,11 +223,15 @@ export function A3HomepageTeacherStage() {
       className={styles.teacherStage}
       data-testid="a3-homepage-teacher-stage"
       data-renderer={rendererReady ? 'terminal' : active ? 'loading' : 'fallback'}
+      data-demo-phase={demoPhase}
     >
       <div className={styles.teacherVisual} data-testid="a3-homepage-teacher-visual">
         {active && !reducedMotion ? (
           <div className={styles.teacherRenderer}>
-            <DigitalHumanAvatar {...A3_HOMEPAGE_TEACHER_DEMO_PROPS} />
+            <DigitalHumanAvatar
+              {...A3_HOMEPAGE_TEACHER_DEMO_PROPS}
+              state={demoPhase === 'appear' ? 'idle' : 'listening'}
+            />
           </div>
         ) : null}
         {fallbackVisible ? (
@@ -217,7 +253,14 @@ export function A3HomepageTeacherStage() {
           </div>
         ) : null}
       </div>
-      <div className={styles.teacherPrompt}>正在倾听：进程调度为什么会发生饥饿？</div>
+      <div
+        className={styles.teacherPrompt}
+        data-visible={
+          demoPhase === 'static' || demoPhase === 'question' || demoPhase === 'complete'
+        }
+      >
+        正在倾听：进程调度为什么会发生饥饿？
+      </div>
       <Link className={styles.teacherLink} href="/a3/coaching">
         进入实时辅导
       </Link>

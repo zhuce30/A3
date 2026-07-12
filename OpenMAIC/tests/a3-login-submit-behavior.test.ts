@@ -1,19 +1,22 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+type ExecuteA3Login = (options: {
+  request: () => Promise<{ success: boolean; error?: string }>;
+  onSuccess: (result: { success: boolean; error?: string }) => void;
+  onError: (message: string) => void;
+  onSubmittingChange: (submitting: boolean) => void;
+}) => Promise<void>;
+
+let executeA3Login: ExecuteA3Login | undefined;
+
+beforeAll(async () => {
+  const authPages = await import('@/components/a3/auth/a3-auth-pages');
+  executeA3Login = (authPages as typeof authPages & { executeA3Login?: ExecuteA3Login })
+    .executeA3Login;
+}, 20_000);
 
 describe('A3 login submission behavior', () => {
   it('reports a readable error and always resets submitting when the request rejects', async () => {
-    const authPages = await import('@/components/a3/auth/a3-auth-pages');
-    const executeA3Login = (
-      authPages as typeof authPages & {
-        executeA3Login?: (options: {
-          request: () => Promise<{ success: boolean; error?: string }>;
-          onSuccess: (result: { success: boolean; error?: string }) => void;
-          onError: (message: string) => void;
-          onSubmittingChange: (submitting: boolean) => void;
-        }) => Promise<void>;
-      }
-    ).executeA3Login;
-
     expect(executeA3Login).toBeTypeOf('function');
     if (!executeA3Login) return;
 
@@ -35,18 +38,6 @@ describe('A3 login submission behavior', () => {
   });
 
   it('forwards a normal API failure and still resets submitting', async () => {
-    const authPages = await import('@/components/a3/auth/a3-auth-pages');
-    const executeA3Login = (
-      authPages as typeof authPages & {
-        executeA3Login?: (options: {
-          request: () => Promise<{ success: boolean; error?: string }>;
-          onSuccess: (result: { success: boolean; error?: string }) => void;
-          onError: (message: string) => void;
-          onSubmittingChange: (submitting: boolean) => void;
-        }) => Promise<void>;
-      }
-    ).executeA3Login;
-
     expect(executeA3Login).toBeTypeOf('function');
     if (!executeA3Login) return;
 

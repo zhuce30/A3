@@ -92,7 +92,7 @@ export const A3_HOMEPAGE_STORY = [
     id: 'teacher',
     index: '07 / TEACHER',
     title: '及时看见，也能及时介入。',
-    summary: '教师看见进度和薄弱点，在需要的时候推送任务。',
+    summary: '教师看见班级薄弱点和课堂任务队列，在需要时及时介入。',
     media: '/a3/assets/homepage/teacher-workbench.webp',
     alt: '教师工作台界面',
   },

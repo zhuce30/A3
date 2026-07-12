@@ -626,6 +626,17 @@
   font-size: 15px;
   line-height: 1.5;
   z-index: 3;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity 280ms ease,
+    transform 280ms ease;
+}
+
+.teacherPrompt[data-visible='false'] {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
 }
 
 .teacherLink,
@@ -1137,6 +1148,7 @@
   .page .segmentedControl button,
   .page .teacherFallbackHidden,
   .page .teacherLink,
+  .page .teacherPrompt,
   .page .sectionLink {
     transition: none;
   }

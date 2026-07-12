@@ -272,7 +272,10 @@ export function TeacherWorkbenchView() {
         </div>
       </div>
 
-      <div className="grid gap-5 xl:grid-cols-2">
+      <div
+        className="grid gap-5 xl:grid-cols-2"
+        data-testid="a3-teacher-homepage-evidence"
+      >
         <WeakPointsCard weakPoints={workbench?.weakPoints ?? []} />
         <A3Card title="课堂任务队列">
           <div className="space-y-3">

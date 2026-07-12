@@ -34,8 +34,14 @@ describe('A3 homepage WebGL compositor capture', () => {
         const gl = canvas.getContext('webgl', { preserveDrawingBuffer: true });
         if (!gl) throw new Error('WebGL unavailable');
         const render = () => {
-          gl.clearColor(0.08, 0.62, 0.9, 1);
+          gl.enable(gl.SCISSOR_TEST);
+          gl.scissor(0, 0, 64, 128);
+          gl.clearColor(0.04, 0.56, 0.88, 1);
           gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.scissor(64, 0, 64, 128);
+          gl.clearColor(0.95, 0.78, 0.12, 1);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.disable(gl.SCISSOR_TEST);
           requestAnimationFrame(render);
         };
         render();

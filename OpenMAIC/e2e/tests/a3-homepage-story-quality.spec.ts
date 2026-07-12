@@ -90,6 +90,56 @@ async function installDormantIntersectionObserver(page: Page) {
   });
 }
 
+async function installControlledIntersectionObserver(page: Page) {
+  await page.addInitScript(() => {
+    type ControlledWindow = Window & { __triggerA3Intersections?: () => void };
+    const observers = new Set<ControlledIntersectionObserver>();
+
+    class ControlledIntersectionObserver {
+      readonly root = null;
+      readonly rootMargin = '0px';
+      readonly thresholds = [0];
+      private readonly targets = new Set<Element>();
+
+      constructor(private readonly callback: IntersectionObserverCallback) {
+        observers.add(this);
+      }
+
+      disconnect() {
+        this.targets.clear();
+        observers.delete(this);
+      }
+
+      observe(target: Element) {
+        this.targets.add(target);
+      }
+
+      takeRecords() {
+        return [];
+      }
+
+      unobserve(target: Element) {
+        this.targets.delete(target);
+      }
+
+      trigger() {
+        const entries = [...this.targets].map(
+          (target) => ({ isIntersecting: true, target }) as IntersectionObserverEntry,
+        );
+        this.callback(entries, this as unknown as IntersectionObserver);
+      }
+    }
+
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: ControlledIntersectionObserver,
+    });
+    (window as ControlledWindow).__triggerA3Intersections = () => {
+      for (const observer of observers) observer.trigger();
+    };
+  });
+}
+
 async function assertContainedTeacherPortrait(page: Page, screenshotName: string) {
   const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
   await stage.scrollIntoViewIfNeeded();
@@ -361,6 +411,67 @@ test('teacher canvas stays independently nonblank beneath the homepage overlay',
   expect(stats.variance).toBeGreaterThan(12);
   expect(stats.uniqueColors).toBeGreaterThan(6);
   expect(stats.edges).toBeGreaterThan(6);
+});
+
+test('teacher runs one silent eight-second sequence and retains the question', async ({ page }) => {
+  await installControlledIntersectionObserver(page);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/a3', { waitUntil: 'domcontentloaded' });
+  const stage = page.getByTestId('a3-homepage-teacher-stage');
+  await stage.scrollIntoViewIfNeeded();
+
+  const observed = await stage.evaluate(
+    (element) =>
+      new Promise<Array<{ elapsed: number; phase: string | null }>>((resolve, reject) => {
+        type ControlledWindow = Window & { __triggerA3Intersections?: () => void };
+        const samples: Array<{ elapsed: number; phase: string | null }> = [];
+        let startedAt: number | null = null;
+        let previousPhase: string | null = null;
+        let triggerIntervalId: number | null = null;
+        const timeoutId = window.setTimeout(() => {
+          if (triggerIntervalId !== null) window.clearInterval(triggerIntervalId);
+          observer.disconnect();
+          reject(new Error(`Teacher sequence timed out: ${JSON.stringify(samples)}`));
+        }, 10_500);
+        const record = () => {
+          const phase = element.getAttribute('data-demo-phase');
+          if (phase === 'static' || phase === previousPhase) return;
+          if (phase === 'appear') {
+            startedAt = performance.now();
+            if (triggerIntervalId !== null) window.clearInterval(triggerIntervalId);
+          }
+          samples.push({
+            elapsed: startedAt === null ? 0 : performance.now() - startedAt,
+            phase,
+          });
+          previousPhase = phase;
+          if (phase === 'complete') {
+            window.clearTimeout(timeoutId);
+            observer.disconnect();
+            resolve(samples);
+          }
+        };
+        const observer = new MutationObserver(record);
+        observer.observe(element, { attributes: true, attributeFilter: ['data-demo-phase'] });
+        record();
+        const trigger = () => (window as ControlledWindow).__triggerA3Intersections?.();
+        triggerIntervalId = window.setInterval(trigger, 20);
+        trigger();
+      }),
+  );
+
+  expect(observed.map((sample) => sample.phase)).toEqual([
+    'appear',
+    'listen',
+    'question',
+    'complete',
+  ]);
+  const completedAt = observed.at(-1)?.elapsed ?? 0;
+  expect(completedAt).toBeGreaterThanOrEqual(6_000);
+  expect(completedAt).toBeLessThanOrEqual(10_000);
+  await expect(stage.getByText('正在倾听：进程调度为什么会发生饥饿？')).toBeVisible();
+  await page.waitForTimeout(600);
+  await expect(stage).toHaveAttribute('data-demo-phase', 'complete');
 });
 
 test('homepage anchor navigation clears the sticky header', async ({ page }) => {
