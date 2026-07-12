@@ -335,7 +335,7 @@ def _path_recommendations(user, profile: LearnerProfile | None, target: dict) ->
             f"预计 {item.estimated_minutes} 分钟",
         ]
         if weak_match:
-            reason_parts.append(f"命中画像薄弱点：{point.title}")
+            reason_parts.append(f"薄弱点匹配：{point.title}")
         if low_load_match:
             reason_parts.append(_low_load_reason(foundation_level, daily_minutes, item.estimated_minutes))
         ranking_basis = [
@@ -434,9 +434,9 @@ def _apply_resource_effect_attribution(seeds: list[RecommendationSeed], attribut
         if resource_effect.get("effectConfidence") != "low" or legacy_label:
             ranking_basis.extend(
                 [
-                    {"label": "同类资源效果", "value": resource_effect.get("historicalEffectiveness")},
-                    {"label": "是否适合试学", "value": bool(resource_effect.get("explorationRecommended"))},
-                    {"label": "反馈可信度", "value": resource_effect.get("effectConfidence")},
+                    {"label": "历史有效性", "value": resource_effect.get("historicalEffectiveness")},
+                    {"label": "探索推荐", "value": bool(resource_effect.get("explorationRecommended"))},
+                    {"label": "证据置信度", "value": resource_effect.get("effectConfidence")},
                 ]
             )
         if legacy_label:
@@ -487,14 +487,14 @@ def _resource_effect_label(resource_effect: dict) -> str:
     score = _safe_float(resource_effect.get("historicalEffectiveness"), 0)
     confidence = str(resource_effect.get("effectConfidence") or "low")
     if bool(resource_effect.get("explorationRecommended")):
-        return "同类学习记录还不多，先按课程和薄弱点试学"
+        return "历史有效性证据较少，先按课程和薄弱点探索推荐"
     if confidence == "high" and score >= 70:
-        return "同类资源完成效果较好，优先推荐"
+        return "历史有效性较高，同类资源完成效果较好，优先推荐"
     if confidence == "medium":
-        return "已有部分学习反馈，可作为优先参考"
+        return "历史有效性已有部分学习反馈，可作为优先参考"
     if score < 40:
-        return "同类资源反馈一般，建议快速浏览后再决定"
-    return "结合使用反馈和当前学习目标推荐"
+        return "历史有效性偏低，建议快速浏览后再决定"
+    return "结合历史有效性和当前学习目标推荐"
 
 
 def _exploration_resource_effect(resource_type: str) -> dict:
@@ -603,8 +603,8 @@ def _serialize_recommendation(seed: RecommendationSeed, rank: int) -> dict:
     profile_match = evidence.get("profileMatch") if isinstance(evidence.get("profileMatch"), dict) else {}
     ranking_basis = evidence.get("rankingBasis") if isinstance(evidence.get("rankingBasis"), list) else []
     ranking_labels = {str(item.get("label")) for item in ranking_basis if isinstance(item, dict)}
-    if "weakPoint" in (profile_match.get("signals") or []) and "测评错题回流" not in ranking_labels:
-        ranking_basis = [*ranking_basis, {"label": "测评错题回流", "value": True}]
+    if "weakPoint" in (profile_match.get("signals") or []) and "错题薄弱点匹配" not in ranking_labels:
+        ranking_basis = [*ranking_basis, {"label": "错题薄弱点匹配", "value": True}]
         evidence = {**evidence, "rankingBasis": ranking_basis}
     return {
         "id": f"rec-{rank}",

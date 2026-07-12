@@ -12,7 +12,7 @@ from backend.apps.accounts.models import UserRole
 from backend.apps.assessments.models import AssessmentAnswer, AssessmentSession, Question, SessionStatus, WrongQuestion
 from backend.apps.engagement.models import FavoriteType, NotificationType, UserFavorite
 from backend.apps.engagement.services import create_notification
-from backend.apps.knowledge_base.graph_builder import rebuild_resource_graph
+from backend.apps.knowledge_base.graph_builder import safe_rebuild_resource_graph
 from backend.apps.knowledge_base.models import (
     KnowledgeBlock,
     KnowledgeIndexJob,
@@ -277,7 +277,7 @@ def _seed_material_knowledge_graph(student):
         confidence=0.88,
         metadata={"blockType": "text_box", "seed": "a3_demo_material_graph"},
     )
-    rebuild_resource_graph(resource)
+    safe_rebuild_resource_graph(resource)
 
 
 def _repair_global_kb_marker(teacher):

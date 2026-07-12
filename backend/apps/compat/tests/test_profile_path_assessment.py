@@ -42,7 +42,7 @@ class CompatApiTests(CompatApiTestCase):
 
 
     def test_path_generate_alias_uses_existing_planner(self):
-        course = Course.objects.get(code="AUTO-CONTROL-001")
+        course = Course.objects.get(code="OS-001")
 
         response = self.client.post(
             "/api/path/generate/",
@@ -108,7 +108,7 @@ class CompatApiTests(CompatApiTestCase):
 
     @override_settings(A3_AGENT_CIRCUIT_MIN_SAMPLES=999999)
     def test_assess_grade_uses_kernel_trace_agents(self):
-        course = Course.objects.get(code="AUTO-CONTROL-001")
+        course = Course.objects.get(code="OS-001")
         point = course.chapters.first().knowledge_points.first()
         question = Question.objects.create(
             knowledge_point=point,
@@ -153,7 +153,7 @@ class CompatApiTests(CompatApiTestCase):
 
 
     def test_assess_grade_alias_syncs_wrong_point_to_profile(self):
-        course = Course.objects.get(code="AUTO-CONTROL-001")
+        course = Course.objects.get(code="OS-001")
         point = course.chapters.first().knowledge_points.first()
         question = Question.objects.create(
             knowledge_point=point,

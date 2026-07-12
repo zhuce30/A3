@@ -143,6 +143,7 @@ def _rule_based_profile_fallback(text: str, existing_profile: dict | None = None
 
     weak_points = []
     weak_rules = [
+        (("root locus", "根轨迹"), "根轨迹基本规则"),
         (("process scheduling", "cpu scheduling", "调度", "处理机调度"), "处理机调度算法"),
         (("process", "pcb", "进程"), "进程与 PCB"),
         (("thread", "线程"), "线程与并发执行"),

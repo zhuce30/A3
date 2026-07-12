@@ -100,6 +100,26 @@ def _infer_material_type(resource: KnowledgeResource, text: str) -> str:
 def _extract_knowledge_points(name: str, text: str) -> list[str]:
     candidates = []
     normalized = f"{name}\n{text}"
+    domain_suffixes = (
+        "条件",
+        "应力",
+        "系数",
+        "截面",
+        "算法",
+        "定理",
+        "原理",
+        "方法",
+        "模型",
+        "公式",
+        "概念",
+        "调度",
+        "管理",
+        "同步",
+        "置换",
+        "系统",
+    )
+    suffix_pattern = "|".join(re.escape(suffix) for suffix in domain_suffixes)
+    candidates.extend(re.findall(rf"[\u4e00-\u9fff]{{2}}(?:{suffix_pattern})", normalized))
     phrase_patterns = [
         "操作系统",
         "进程管理",

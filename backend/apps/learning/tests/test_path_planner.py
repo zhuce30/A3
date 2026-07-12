@@ -7,7 +7,7 @@ from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 
 from backend.apps.accounts.models import User, UserRole
-from backend.apps.assessments.models import WrongQuestion
+from backend.apps.assessments.models import Question, WrongQuestion
 from backend.apps.compat.models import AgentRun, OpenMAICArtifact
 from backend.apps.engagement.models import UserNotification
 from backend.apps.knowledge_base.models import KnowledgeAsset, KnowledgeBlock, KnowledgePage, KnowledgeResource, ResourceStatus
@@ -44,6 +44,20 @@ class LearningPathTests(TestCase):
             for edge in item.knowledge_point.prerequisite_edges.all():
                 self.assertLess(positions[edge.prerequisite_id], item.order)
         self.assertEqual(path.items.first().status, PathItemStatus.CURRENT)
+
+    def test_repair_default_catalog_restores_missing_assessment_questions(self):
+        Question.objects.filter(knowledge_point__chapter__course=self.course).delete()
+
+        repaired = _repair_default_course_catalog(self.course)
+
+        self.assertEqual(repaired, self.course)
+        self.assertEqual(
+            repaired.chapters.filter(knowledge_points__questions__isnull=False).distinct().count(),
+            repaired.chapters.count(),
+        )
+        self.assertTrue(
+            all(point.questions.exists() for chapter in repaired.chapters.all() for point in chapter.knowledge_points.all())
+        )
 
     def test_force_replan_archives_previous_version(self):
         first = generate_learning_path(self.user, self.course)

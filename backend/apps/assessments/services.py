@@ -85,7 +85,7 @@ def _valid_questions(queryset) -> list[Question]:
     return [question for question in queryset if is_valid_assessment_question(question)]
 
 
-def _ensure_default_assessment_questions() -> None:
+def ensure_default_assessment_questions() -> None:
     from backend.apps.assessments.management.commands.repair_assessment_questions import QUESTION_SPECS
 
     for code, stem, raw_options, answer, explanation, cause, difficulty in QUESTION_SPECS:
@@ -1039,7 +1039,7 @@ def create_assessment(
         if not path_questions and mode == "assessment":
             path_questions = _valid_questions(base_queryset)
             if not path_questions:
-                _ensure_default_assessment_questions()
+                ensure_default_assessment_questions()
                 queryset = _selectable_question_queryset(user, mode=mode).filter(knowledge_point__chapter__course=path.course)
                 path_questions = _valid_questions(queryset.filter(knowledge_point_id__in=point_ids))
         order = {str(point_id): index for index, point_id in enumerate(point_ids)}

@@ -18,7 +18,7 @@ class SeedDemoDataCommandTests(TestCase):
         self.assertTrue(LearningPath.objects.filter(user=student, status="active").exists())
         self.assertGreaterEqual(WrongQuestion.objects.filter(user=student).count(), 1)
         self.assertGreaterEqual(UserNotification.objects.filter(user=student).count(), 1)
-        graph_resource = KnowledgeResource.objects.get(owner=student, original_name="a3-demo-material-graph-control-system.txt")
+        graph_resource = KnowledgeResource.objects.get(owner=student, original_name="a3-demo-material-graph-operating-system.txt")
         self.assertGreaterEqual(KnowledgeGraphEntity.objects.filter(resource=graph_resource).count(), 1)
         self.assertGreaterEqual(KnowledgeGraphRelation.objects.filter(resource=graph_resource).count(), 1)
 
@@ -58,7 +58,7 @@ class SeedDemoDataCommandTests(TestCase):
 
         self.assertEqual(student.display_name, "演示学生")
         self.assertEqual(teacher.display_name, "演示教师")
-        self.assertIn("根轨迹", profile.weak_points[0])
+        self.assertIn("处理机调度", profile.weak_points[0])
 
     def test_seed_demo_data_resets_demo_notifications_to_unread(self):
         call_command("seed_demo_data", verbosity=0)

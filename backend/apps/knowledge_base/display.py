@@ -48,7 +48,7 @@ def format_source_type_label(metadata: dict | None, *, fallback: str = "本地�
     if "pptx" in source_type or "ppt" in source_type or "courseware" in source_type:
         return "PPTX 课件"
     if "pdf" in source_type or "document" in source_type:
-        return "PDF 文档"
+        return "PDF 课件"
     if "qa" in source_type or "question" in source_type or "bank" in source_type:
         return "问答题库"
     file_name = safe_source_filename(metadata.get("original_name") or metadata.get("file_name") or metadata.get("source_path") or "")
@@ -56,7 +56,7 @@ def format_source_type_label(metadata: dict | None, *, fallback: str = "本地�
     if suffix == ".pptx":
         return "PPTX 课件"
     if suffix == ".pdf":
-        return "PDF 文档"
+        return "PDF 课件"
     if suffix == ".xlsx":
         return "问答题库"
     return fallback

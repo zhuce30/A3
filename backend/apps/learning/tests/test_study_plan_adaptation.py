@@ -34,7 +34,6 @@ class StudyPlanAdaptationTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(phone="13800005555", password="TestPassword123")
         LearnerProfile.objects.create(user=self.user, foundation_level="基础", daily_study_time=60)
-        self.course = Course.objects.get(code="AUTO-CONTROL-001")
         self.client = Client()
         self.client.force_login(self.user)
 

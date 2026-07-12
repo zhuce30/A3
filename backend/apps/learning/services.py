@@ -118,6 +118,8 @@ def default_course() -> Course | None:
 
 
 def _repair_default_course_catalog(course: Course | None = None) -> Course | None:
+    if course is not None and course.code != DEFAULT_COURSE_CODE:
+        return course
     if course is None:
         course, _ = Course.objects.get_or_create(
             code=DEFAULT_COURSE_CODE,
@@ -159,6 +161,9 @@ def _repair_default_course_catalog(course: Course | None = None) -> Course | Non
             knowledge_point=points[point_code],
             prerequisite=points[prerequisite_code],
         )
+    from backend.apps.assessments.services import ensure_default_assessment_questions
+
+    ensure_default_assessment_questions()
     return course
 
 
@@ -1022,13 +1027,18 @@ def generate_study_plan(user, *, duration_days: int = 14, force: bool = False) -
     if existing and not force:
         return existing
 
-    course = default_course()
+    path = (
+        LearningPath.objects.filter(user=user, status=LearningPathStatus.ACTIVE)
+        .select_related("course")
+        .order_by("-created_at")
+        .first()
+    )
+    course = path.course if path else default_course()
     if course is None:
         raise ValueError("暂无可用课程")
-    path = LearningPath.objects.filter(user=user, course=course, status=LearningPathStatus.ACTIVE).select_related("course").first()
-    if not path or _learning_path_needs_course_rebuild(path):
+    if not path or (course.code == DEFAULT_COURSE_CODE and _learning_path_needs_course_rebuild(path)):
         path = generate_learning_path(user, course=course, force=True)
-    else:
+    elif course.code == DEFAULT_COURSE_CODE:
         _repair_default_course_catalog(path.course)
     items = list(path.items.select_related("knowledge_point__chapter").order_by("order"))
     wrong_items = list(
@@ -1037,7 +1047,8 @@ def generate_study_plan(user, *, duration_days: int = 14, force: bool = False) -
         .select_related("question__knowledge_point__chapter")
         .order_by("-wrong_count", "-last_wrong_at")[:20]
     )
-    wrong_items = [item for item in wrong_items if _wrong_question_matches_current_catalog(item)]
+    if path.course.code == DEFAULT_COURSE_CODE:
+        wrong_items = [item for item in wrong_items if _wrong_question_matches_current_catalog(item)]
     profile, _ = LearnerProfile.objects.get_or_create(user=user)
     daily_minutes = max(20, int(profile.daily_study_time or 60))
     level = _diagnostic_level(items, wrong_items, profile)

@@ -1036,7 +1036,15 @@ class KnowledgeResourceTests(TestCase):
             file_size=path.stat().st_size,
         )
 
-        def fake_reparse(target):
+        def fake_reparse(target, progress_callback=None):
+            self.assertIsNotNone(progress_callback)
+            progress_callback({
+                "phase": "native_parse",
+                "phaseLabel": "正在解析 PDF",
+                "phaseProgress": 50,
+                "event": "已解析第 1 页",
+                "page": {"current": 1, "total": 1},
+            })
             KnowledgeParseRun.objects.create(
                 resource=target,
                 status="completed",
@@ -1065,6 +1073,7 @@ class KnowledgeResourceTests(TestCase):
         self.assertEqual(resource.status, ResourceStatus.INDEXED)
         self.assertEqual(resource.document_count, 1)
         self.assertEqual(resource.chunk_count, 1)
+        self.assertTrue(any(event["phase"] == "native_parse" for event in job.progress_detail["recentEvents"]))
         self.assertEqual(serialize_index_job(job)["summary"], {"parsed": 1, "indexed": 1, "failed": 0})
 
     @patch("backend.apps.knowledge_base.tasks.close_old_connections")

@@ -1269,12 +1269,20 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         steps = list(run.steps.order_by("order"))
         self.assertEqual(
             [step.name for step in steps],
-            ["ResourceFeedbackAgent", "LearningEffectAgent", "StudyPlanAgent", "MemoryCommitAgent"],
+            [
+                "ResourceFeedbackAgent",
+                "LearningEffectAgent",
+                "LearningEffectAnalyzerAgent",
+                "StudyPlanAgent",
+                "MemoryCommitAgent",
+            ],
         )
         self.assertEqual(steps[0].metadata["inputSummary"]["action"], "completed")
         self.assertEqual(steps[1].metadata["evidence"]["averageFeedbackScore"], 72)
-        self.assertEqual(steps[2].metadata["stateDiff"]["LearnerProfile.extra_profile.studyPlan"], "adjusted")
-        self.assertEqual(steps[2].metadata["quality"]["strategy"], "increase_practice")
+        self.assertIn(steps[2].metadata["outputSummary"]["source"], {"llm", "rules_fallback"})
+        self.assertTrue(steps[2].metadata["quality"]["evidenceBounded"])
+        self.assertEqual(steps[3].metadata["stateDiff"]["LearnerProfile.extra_profile.studyPlan"], "adjusted")
+        self.assertEqual(steps[3].metadata["quality"]["strategy"], "increase_practice")
         for step in steps:
             self.assertIn("runtimePolicy", step.metadata)
             self.assertEqual(step.metadata["outputSchema"]["mode"], "agent_output")
@@ -1326,6 +1334,7 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertLessEqual(lighter_tasks[0]["estimatedMinutes"], 8)
         self.assertIn("轻量", lighter_tasks[0]["title"])
 
+    @patch.dict("os.environ", {"A3_QA_REALTIME_RAG_ENABLED": "1"})
     @patch("backend.apps.compat.agent_kernel.search_knowledge_base")
     def test_qa_interact_uses_realtime_rag_sources_and_exposes_mode(self, search):
         from backend.domains.knowledge_base.schemas import KnowledgeBaseSearchResult
@@ -1352,6 +1361,7 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         retriever = run.steps.get(name="RetrieverAgent")
         self.assertEqual(retriever.metadata["evidence"]["retrievalMode"], "realtime_rag")
 
+    @patch.dict("os.environ", {"A3_QA_REALTIME_RAG_ENABLED": "1"})
     @patch("backend.apps.compat.agent_kernel.search_knowledge_base")
     def test_qa_interact_uses_interactive_retrieval_budget(self, search):
         from backend.domains.knowledge_base.schemas import KnowledgeBaseSearchResult
@@ -1368,12 +1378,12 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
 
         self.assertEqual(response.status_code, 200)
         search.assert_called_once()
-        self.assertEqual(search.call_args.kwargs["top_k"], 3)
+        self.assertEqual(search.call_args.kwargs["top_k"], 5)
         self.assertEqual(search.call_args.kwargs["candidate_multiplier"], 2)
         self.assertTrue(search.call_args.kwargs["force_lexical"])
         self.assertFalse(search.call_args.kwargs["visual_use_embedding"])
         payload = response.json()
         run = AgentRun.objects.get(trace_id=payload["traceId"])
         retriever = run.steps.get(name="RetrieverAgent")
-        self.assertEqual(retriever.metadata["evidence"]["topK"], 3)
+        self.assertEqual(retriever.metadata["evidence"]["topK"], 5)
         self.assertEqual(retriever.metadata["evidence"]["candidateMultiplier"], 2)

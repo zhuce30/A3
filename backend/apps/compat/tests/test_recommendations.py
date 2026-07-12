@@ -108,27 +108,27 @@ class CompatApiTests(CompatApiTestCase):
 
 
     def test_recommend_alias_adapts_path_recommendation_to_foundation_and_daily_time(self):
-        course = Course.objects.create(code="REC-FOUNDATION-PACE", title="鎺ㄨ崘鍩虹涓庤妭濂忔祴璇曡")
-        chapter = Chapter.objects.create(course=course, order=1, title="鍩虹鑺傚绔犺妭")
+        course = Course.objects.create(code="REC-FOUNDATION-PACE", title="推荐基础与节奏测试课")
+        chapter = Chapter.objects.create(course=course, order=1, title="基础节奏章节")
         point = KnowledgePoint.objects.create(
             chapter=chapter,
             code="REC-FOUNDATION-PACE-A",
             order=1,
-            title="浼犻€掑嚱鏁板熀纭€",
+            title="传递函数基础",
             difficulty=2,
             estimated_minutes=45,
         )
         LearnerProfile.objects.update_or_create(
             user=self.user,
             defaults={
-                "foundation_level": "鍩虹杈冨急",
+                "foundation_level": "基础较弱",
                 "daily_study_time": 20,
-                "learning_goals": ["琛ラ綈鑷姩鎺у埗鍩虹"],
+                "learning_goals": ["补齐自动控制基础"],
                 "weak_points": [],
-                "expected_resources": ["鐭ヨ瘑鍗＄墖"],
+                "expected_resources": ["知识卡片"],
             },
         )
-        path = LearningPath.objects.create(user=self.user, course=course, title="鍩虹鑺傚涓€у寲璺緞")
+        path = LearningPath.objects.create(user=self.user, course=course, title="基础节奏个性化路径")
         LearningPathItem.objects.create(
             path=path,
             knowledge_point=point,
@@ -503,7 +503,12 @@ class CompatApiTests(CompatApiTestCase):
         question = Question.objects.create(
             knowledge_point=weak_point,
             stem="根轨迹基本规则练习题",
-            options=["A", "B", "C", "D"],
+            options=[
+                {"key": "A", "text": "先确认开环极点和零点"},
+                {"key": "B", "text": "只看闭环增益"},
+                {"key": "C", "text": "忽略实轴判据"},
+                {"key": "D", "text": "直接绘制伯德图"},
+            ],
             correct_answer="A",
             explanation="根轨迹规则需要先确认开环极点和零点。",
             error_cause="根轨迹基本规则掌握不牢",
@@ -515,9 +520,16 @@ class CompatApiTests(CompatApiTestCase):
             data=json.dumps({"sessionId": str(session.id), "selectedAnswer": "B"}),
             content_type="application/json",
         )
+        self.assertEqual(grade_response.status_code, 200)
+        self.assertTrue(grade_response.json()["success"])
+        self.assertFalse(grade_response.json()["isCorrect"])
+        self.assertIn(weak_point.title, grade_response.json()["profileUpdate"]["weakPoints"])
+        profile = LearnerProfile.objects.get(user=self.user)
+        self.assertIn(weak_point.title, profile.weak_points)
+        self.assertTrue(WrongQuestion.objects.filter(user=self.user, question=question, mastered=False).exists())
+
         recommend_response = self.client.post("/api/recommend/", data="{}", content_type="application/json")
 
-        self.assertEqual(grade_response.status_code, 200)
         self.assertEqual(recommend_response.status_code, 200)
         top = recommend_response.json()["recommendations"][0]
         self.assertIn(weak_point.title, top["title"])
