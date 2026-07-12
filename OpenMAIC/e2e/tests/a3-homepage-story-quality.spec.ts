@@ -53,19 +53,107 @@ async function readCompositedPixelStats(locator: Locator, centerRatio = 1) {
   return { edges, opaque, uniqueColors: colors.size, variance: maximum - minimum };
 }
 
-async function delayTeacherRendererChunk(page: Page) {
+async function delayTeacherRendererChunk(page: Page, delayMs = 3_000) {
   let delayedRequests = 0;
 
   await page.route('**/*', async (route) => {
     const url = decodeURIComponent(route.request().url());
     if (url.includes('digital-human-three-stage') && /\.js(?:\?|$)/.test(url)) {
       delayedRequests += 1;
-      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
     await route.continue();
   });
 
   return () => delayedRequests;
+}
+
+async function delayTeacherModelAsset(page: Page, delayMs: number) {
+  let delayedRequests = 0;
+
+  await page.route('**/*', async (route) => {
+    const url = decodeURIComponent(route.request().url());
+    if (url.includes('/a3/assets/teacher-avatar/teacher.vrm')) {
+      delayedRequests += 1;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    await route.continue();
+  });
+
+  return () => delayedRequests;
+}
+
+type TeacherSequenceSample = {
+  elapsed: number;
+  fallbackVisible: boolean;
+  phase: string | null;
+  promptVisible: boolean;
+  statusText: string;
+  statusVisible: boolean;
+};
+
+async function observeControlledTeacherSequence(stage: Locator) {
+  return stage.evaluate(
+    (element) =>
+      new Promise<TeacherSequenceSample[]>((resolve, reject) => {
+        type ControlledWindow = Window & { __triggerA3Intersections?: () => void };
+        const samples: TeacherSequenceSample[] = [];
+        let startedAt: number | null = null;
+        let previousPhase: string | null = null;
+        let triggerIntervalId: number | null = null;
+        const visible = (node: Element | null) => {
+          if (!(node instanceof HTMLElement)) return false;
+          const style = getComputedStyle(node);
+          const rect = node.getBoundingClientRect();
+          return (
+            style.display !== 'none' &&
+            Number(style.opacity) > 0.05 &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        };
+        const timeoutId = window.setTimeout(() => {
+          if (triggerIntervalId !== null) window.clearInterval(triggerIntervalId);
+          observer.disconnect();
+          reject(
+            new Error(
+              `Teacher sequence timed out: ${JSON.stringify(samples)} active=${element.getAttribute('data-demo-active')} visualReady=${element.getAttribute('data-visual-ready')}`,
+            ),
+          );
+        }, 10_500);
+        const record = () => {
+          const phase = element.getAttribute('data-demo-phase');
+          if (phase === 'static' || phase === previousPhase) return;
+          if (phase === 'appear') {
+            startedAt = performance.now();
+          }
+          const status = element.querySelector('[data-testid="a3-homepage-teacher-status"]');
+          const prompt = element.querySelector('[data-testid="a3-homepage-teacher-prompt"]');
+          const fallback = element.querySelector('[data-testid="a3-homepage-teacher-fallback"]');
+          samples.push({
+            elapsed: startedAt === null ? 0 : performance.now() - startedAt,
+            fallbackVisible: visible(fallback),
+            phase,
+            promptVisible: visible(prompt),
+            statusText: status?.textContent?.trim() ?? '',
+            statusVisible: visible(status),
+          });
+          previousPhase = phase;
+          if (phase === 'complete') {
+            window.clearTimeout(timeoutId);
+            if (triggerIntervalId !== null) window.clearInterval(triggerIntervalId);
+            observer.disconnect();
+            resolve(samples);
+          }
+        };
+        const observer = new MutationObserver(record);
+        observer.observe(element, { attributes: true, attributeFilter: ['data-demo-phase'] });
+        record();
+        const trigger = () => (window as ControlledWindow).__triggerA3Intersections?.();
+        triggerIntervalId = window.setInterval(trigger, 20);
+        trigger();
+      }),
+  );
 }
 
 async function installDormantIntersectionObserver(page: Page) {
@@ -141,8 +229,19 @@ async function installControlledIntersectionObserver(page: Page) {
 }
 
 async function assertContainedTeacherPortrait(page: Page, screenshotName: string) {
+  await page.waitForFunction(() => {
+    const currentStage = document.querySelector<HTMLElement>(
+      'main [data-testid="a3-homepage-teacher-stage"]',
+    );
+    return currentStage?.isConnected && currentStage.getBoundingClientRect().height > 0;
+  });
+  await page.evaluate(() => {
+    document
+      .querySelector<HTMLElement>('main [data-testid="a3-homepage-teacher-stage"]')
+      ?.scrollIntoView({ block: 'center' });
+  });
   const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
-  await stage.scrollIntoViewIfNeeded();
+  await expect(stage).toBeVisible();
   const visual = stage.getByTestId('a3-homepage-teacher-visual');
   const fallback = stage.getByTestId('a3-homepage-teacher-fallback');
   const image = fallback.locator('img');
@@ -229,7 +328,7 @@ test('teacher fallback keeps the user-visible handoff complete and nonblank', as
     if (rect.width <= 0 || rect.height <= 0) throw new Error('Teacher stage has no geometry');
     currentStage.scrollIntoView({ block: 'center' });
   });
-  const stage = page.getByTestId('a3-homepage-teacher-stage');
+  const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
   await expect(stage).toBeVisible();
   const initialFallback = stage.getByTestId('a3-homepage-teacher-fallback');
   const fallbackImage = initialFallback.locator('img');
@@ -376,8 +475,19 @@ test('teacher canvas stays independently nonblank beneath the homepage overlay',
 }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/a3', { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => {
+    const currentStage = document.querySelector<HTMLElement>(
+      'main [data-testid="a3-homepage-teacher-stage"]',
+    );
+    return currentStage?.isConnected && currentStage.getBoundingClientRect().height > 0;
+  });
+  await page.evaluate(() => {
+    document
+      .querySelector<HTMLElement>('main [data-testid="a3-homepage-teacher-stage"]')
+      ?.scrollIntoView({ block: 'center' });
+  });
   const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
-  await stage.scrollIntoViewIfNeeded();
+  await expect(stage).toBeVisible();
   await expect(stage).toHaveAttribute('data-renderer', 'terminal', { timeout: 30_000 });
 
   const renderer = stage.locator('[data-avatar-renderer]');
@@ -417,48 +527,21 @@ test('teacher runs one silent eight-second sequence and retains the question', a
   await installControlledIntersectionObserver(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/a3', { waitUntil: 'domcontentloaded' });
-  const stage = page.getByTestId('a3-homepage-teacher-stage');
-  await stage.scrollIntoViewIfNeeded();
+  await page.waitForFunction(() => {
+    const currentStage = document.querySelector<HTMLElement>(
+      'main [data-testid="a3-homepage-teacher-stage"]',
+    );
+    return currentStage?.isConnected && currentStage.getBoundingClientRect().height > 0;
+  });
+  await page.evaluate(() => {
+    document
+      .querySelector<HTMLElement>('main [data-testid="a3-homepage-teacher-stage"]')
+      ?.scrollIntoView({ block: 'center' });
+  });
+  const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
+  await expect(stage).toBeVisible();
 
-  const observed = await stage.evaluate(
-    (element) =>
-      new Promise<Array<{ elapsed: number; phase: string | null }>>((resolve, reject) => {
-        type ControlledWindow = Window & { __triggerA3Intersections?: () => void };
-        const samples: Array<{ elapsed: number; phase: string | null }> = [];
-        let startedAt: number | null = null;
-        let previousPhase: string | null = null;
-        let triggerIntervalId: number | null = null;
-        const timeoutId = window.setTimeout(() => {
-          if (triggerIntervalId !== null) window.clearInterval(triggerIntervalId);
-          observer.disconnect();
-          reject(new Error(`Teacher sequence timed out: ${JSON.stringify(samples)}`));
-        }, 10_500);
-        const record = () => {
-          const phase = element.getAttribute('data-demo-phase');
-          if (phase === 'static' || phase === previousPhase) return;
-          if (phase === 'appear') {
-            startedAt = performance.now();
-            if (triggerIntervalId !== null) window.clearInterval(triggerIntervalId);
-          }
-          samples.push({
-            elapsed: startedAt === null ? 0 : performance.now() - startedAt,
-            phase,
-          });
-          previousPhase = phase;
-          if (phase === 'complete') {
-            window.clearTimeout(timeoutId);
-            observer.disconnect();
-            resolve(samples);
-          }
-        };
-        const observer = new MutationObserver(record);
-        observer.observe(element, { attributes: true, attributeFilter: ['data-demo-phase'] });
-        record();
-        const trigger = () => (window as ControlledWindow).__triggerA3Intersections?.();
-        triggerIntervalId = window.setInterval(trigger, 20);
-        trigger();
-      }),
-  );
+  const observed = await observeControlledTeacherSequence(stage);
 
   expect(observed.map((sample) => sample.phase)).toEqual([
     'appear',
@@ -474,13 +557,49 @@ test('teacher runs one silent eight-second sequence and retains the question', a
   await expect(stage).toHaveAttribute('data-demo-phase', 'complete');
 });
 
+test('delayed VRM keeps every silent phase visible on the ready fallback', async ({ page }) => {
+  await installControlledIntersectionObserver(page);
+  const delayedRendererRequests = await delayTeacherModelAsset(page, 12_000);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/a3', { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => {
+    const currentStage = document.querySelector<HTMLElement>(
+      'main [data-testid="a3-homepage-teacher-stage"]',
+    );
+    return currentStage?.isConnected && currentStage.getBoundingClientRect().height > 0;
+  });
+  await page.evaluate(() => {
+    document
+      .querySelector<HTMLElement>('main [data-testid="a3-homepage-teacher-stage"]')
+      ?.scrollIntoView({ block: 'center' });
+  });
+  const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
+  await expect(stage).toBeVisible();
+
+  const observed = await observeControlledTeacherSequence(stage);
+  await expect.poll(delayedRendererRequests, { timeout: 5_000 }).toBeGreaterThan(0);
+  expect(observed.map((sample) => sample.phase)).toEqual([
+    'appear',
+    'listen',
+    'question',
+    'complete',
+  ]);
+  expect(observed.every((sample) => sample.fallbackVisible)).toBe(true);
+  const listen = observed.find((sample) => sample.phase === 'listen');
+  expect(listen).toMatchObject({ statusText: '正在倾听', statusVisible: true });
+  const question = observed.find((sample) => sample.phase === 'question');
+  expect(question?.promptVisible).toBe(true);
+  expect(observed.at(-1)?.elapsed).toBeGreaterThanOrEqual(6_000);
+  expect(observed.at(-1)?.elapsed).toBeLessThanOrEqual(10_000);
+});
+
 test('homepage anchor navigation clears the sticky header', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/a3');
-  const header = page.locator('header');
+  const header = page.locator('header').first();
 
   for (const anchor of ['#capabilities', '#learning-loop', '#evidence', '#contact']) {
-    await page.locator(`nav[aria-label="首页导航"] a[href="${anchor}"]`).click();
+    await page.locator(`header nav[aria-label="首页导航"] a[href="${anchor}"]`).first().click();
     await expect
       .poll(async () => {
         const targetTop = await page

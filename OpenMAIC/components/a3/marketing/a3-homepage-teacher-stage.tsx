@@ -26,6 +26,20 @@ export function resolveTeacherDemoPhase(elapsedMs: number): A3HomepageTeacherDem
   return 'appear';
 }
 
+export function shouldStartTeacherDemo({
+  active,
+  reducedMotion,
+  started,
+  visualReady,
+}: {
+  active: boolean;
+  reducedMotion: boolean;
+  started: boolean;
+  visualReady: boolean;
+}) {
+  return active && visualReady && !reducedMotion && !started;
+}
+
 const TERMINAL_TEACHER_RENDERERS = new Set([
   'vrm',
   'vrm_idle_animation',
@@ -87,9 +101,11 @@ function useHomepageReducedMotion(onReduce: () => void) {
 
 export function A3HomepageTeacherStage() {
   const rootRef = useRef<HTMLDivElement>(null);
-  const demoStartedRef = useRef(false);
+  const activationStartedRef = useRef(false);
+  const timelineStartedRef = useRef(false);
   const [active, setActive] = useState(false);
   const [demoPhase, setDemoPhase] = useState<A3HomepageTeacherRenderPhase>('static');
+  const [visualReady, setVisualReady] = useState(false);
   const [rendererReady, setRendererReady] = useState(false);
   const [preserveFallback, setPreserveFallback] = useState(false);
   const [fallbackVisible, setFallbackVisible] = useState(true);
@@ -103,16 +119,41 @@ export function A3HomepageTeacherStage() {
   const reducedMotion = useHomepageReducedMotion(resetToStaticFallback);
 
   useEffect(() => {
+    const root = rootRef.current;
+    if (!root || visualReady) return;
+
+    const updateVisualReady = () => {
+      const image = root.querySelector<HTMLImageElement>(
+        '[data-testid="a3-homepage-teacher-fallback"] img',
+      );
+      if (image?.complete && image.naturalWidth > 0) setVisualReady(true);
+    };
+    const image = root.querySelector<HTMLImageElement>(
+      '[data-testid="a3-homepage-teacher-fallback"] img',
+    );
+    image?.addEventListener('load', updateVisualReady);
+    image?.addEventListener('error', updateVisualReady);
+    const observer = new MutationObserver(updateVisualReady);
+    observer.observe(root, { childList: true, subtree: true });
+    updateVisualReady();
+    return () => {
+      image?.removeEventListener('load', updateVisualReady);
+      image?.removeEventListener('error', updateVisualReady);
+      observer.disconnect();
+    };
+  }, [visualReady]);
+
+  useEffect(() => {
     if (reducedMotion) return;
 
     const root = rootRef.current;
-    if (!root || demoStartedRef.current || typeof IntersectionObserver === 'undefined') return;
+    if (!root || activationStartedRef.current || typeof IntersectionObserver === 'undefined')
+      return;
 
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry && shouldActivateTeacherStage(entry)) {
-          demoStartedRef.current = true;
-          setDemoPhase('appear');
+          activationStartedRef.current = true;
           setActive(true);
           observer.disconnect();
         }
@@ -125,14 +166,23 @@ export function A3HomepageTeacherStage() {
   }, [reducedMotion]);
 
   useEffect(() => {
-    if (reducedMotion || !active) return;
+    if (
+      !shouldStartTeacherDemo({
+        active,
+        reducedMotion,
+        started: timelineStartedRef.current,
+        visualReady,
+      })
+    )
+      return;
 
-    const timeoutIds = A3_HOMEPAGE_TEACHER_PHASE_BOUNDARIES.map(({ at }) =>
+    timelineStartedRef.current = true;
+    const timeoutIds = [{ at: 0 }, ...A3_HOMEPAGE_TEACHER_PHASE_BOUNDARIES].map(({ at }) =>
       window.setTimeout(() => setDemoPhase(resolveTeacherDemoPhase(at)), at),
     );
 
     return () => timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
-  }, [active, reducedMotion]);
+  }, [active, reducedMotion, visualReady]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -216,6 +266,7 @@ export function A3HomepageTeacherStage() {
   const dismissFallback = (trigger: 'transition_end' | 'transition_cancel') => {
     if (shouldDismissTeacherFallback(rendererReady, trigger)) setFallbackVisible(false);
   };
+  const renderPhase = reducedMotion ? 'complete' : demoPhase;
 
   return (
     <div
@@ -223,14 +274,16 @@ export function A3HomepageTeacherStage() {
       className={styles.teacherStage}
       data-testid="a3-homepage-teacher-stage"
       data-renderer={rendererReady ? 'terminal' : active ? 'loading' : 'fallback'}
-      data-demo-phase={demoPhase}
+      data-demo-phase={renderPhase}
+      data-demo-active={active}
+      data-visual-ready={visualReady}
     >
       <div className={styles.teacherVisual} data-testid="a3-homepage-teacher-visual">
         {active && !reducedMotion ? (
           <div className={styles.teacherRenderer}>
             <DigitalHumanAvatar
               {...A3_HOMEPAGE_TEACHER_DEMO_PROPS}
-              state={demoPhase === 'appear' ? 'idle' : 'listening'}
+              state={renderPhase === 'appear' ? 'idle' : 'listening'}
             />
           </div>
         ) : null}
@@ -249,18 +302,21 @@ export function A3HomepageTeacherStage() {
               alt="数字教师实时辅导界面"
               sizes="(max-width: 768px) 100vw, 92vw"
               fallbackKind="teacher"
+              onReady={() => setVisualReady(true)}
             />
           </div>
         ) : null}
       </div>
-      <div
-        className={styles.teacherPrompt}
-        data-visible={
-          demoPhase === 'static' || demoPhase === 'question' || demoPhase === 'complete'
-        }
-      >
-        正在倾听：进程调度为什么会发生饥饿？
-      </div>
+      {renderPhase === 'listen' ? (
+        <div className={styles.teacherStatus} data-testid="a3-homepage-teacher-status">
+          正在倾听
+        </div>
+      ) : null}
+      {renderPhase === 'static' || renderPhase === 'question' || renderPhase === 'complete' ? (
+        <div className={styles.teacherPrompt} data-testid="a3-homepage-teacher-prompt">
+          正在倾听：进程调度为什么会发生饥饿？
+        </div>
+      ) : null}
       <Link className={styles.teacherLink} href="/a3/coaching">
         进入实时辅导
       </Link>

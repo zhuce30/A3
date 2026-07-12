@@ -279,7 +279,14 @@ describe('A3 product homepage learning story modules', () => {
 
   it('captures a real anonymous teacher intervention region for homepage evidence', () => {
     expect(teacherWorkbenchSource).toContain('data-testid="a3-teacher-homepage-evidence"');
+    expect(teacherWorkbenchSource).toContain('data-testid="a3-teacher-weak-point-row"');
+    expect(teacherWorkbenchSource).toContain('data-testid="a3-teacher-task-row"');
+    expect(teacherWorkbenchSource).toContain('data-testid="a3-teacher-weak-points-empty"');
+    expect(teacherWorkbenchSource).toContain('data-testid="a3-teacher-tasks-empty"');
     expect(captureSource).toContain("testId: 'a3-teacher-homepage-evidence'");
+    expect(captureSource).toContain("getByTestId('a3-teacher-weak-point-row')");
+    expect(captureSource).toContain("getByTestId('a3-teacher-task-row')");
+    expect(captureSource).toContain('validateTeacherEvidenceText');
     expect(captureSource).not.toContain("focusHeading: '班级学情概览'");
   });
 

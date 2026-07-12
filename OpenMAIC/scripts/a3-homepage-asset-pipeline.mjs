@@ -153,6 +153,20 @@ export function hasHeaderClearance(targetTop, headerBottom, minimumGap = 8) {
   return targetTop >= headerBottom + minimumGap;
 }
 
+export function validateTeacherEvidenceText({ text, weakPointRows, taskRows, emptyStates }) {
+  const visibleTextCount = String(text ?? '')
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean).length;
+  if (weakPointRows + taskRows === 0 && emptyStates < 2) {
+    throw new Error('教师证据区没有具体条目或明确空状态');
+  }
+  if (visibleTextCount < 4) {
+    throw new Error(`教师证据区可见文本不足：${visibleTextCount}`);
+  }
+  return { visibleTextCount };
+}
+
 export async function inspectRasterBuffer(buffer) {
   const { data, info } = await sharp(buffer)
     .ensureAlpha()

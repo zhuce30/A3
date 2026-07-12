@@ -614,7 +614,8 @@
   border-radius: 0;
 }
 
-.teacherPrompt {
+.teacherPrompt,
+.teacherStatus {
   position: absolute;
   right: clamp(20px, 5vw, 72px);
   bottom: 72px;
@@ -633,10 +634,10 @@
     transform 280ms ease;
 }
 
-.teacherPrompt[data-visible='false'] {
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(8px);
+.teacherStatus {
+  bottom: 78px;
+  color: #d9ff62;
+  font-weight: 720;
 }
 
 .teacherLink,
@@ -1149,6 +1150,7 @@
   .page .teacherFallbackHidden,
   .page .teacherLink,
   .page .teacherPrompt,
+  .page .teacherStatus,
   .page .sectionLink {
     transition: none;
   }

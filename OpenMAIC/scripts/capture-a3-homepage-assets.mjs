@@ -7,6 +7,7 @@ import {
   captureCanvasCompositor,
   hasHeaderClearance,
   runAtomicAssetCapture,
+  validateTeacherEvidenceText,
   validateHomepageAssetDirectory,
 } from './a3-homepage-asset-pipeline.mjs';
 import { installCaptureRequestPolicy } from './a3-homepage-capture-policy.mjs';
@@ -106,8 +107,18 @@ const teacherAssets = [
     filename: 'teacher-workbench.webp',
     testId: 'a3-teacher-homepage-evidence',
     ready: async (page) => {
-      await page.getByText('班级薄弱知识点', { exact: true }).waitFor({ timeout: 60_000 });
-      await page.getByText('课堂任务队列', { exact: true }).waitFor({ timeout: 60_000 });
+      const weakPointRows = page.getByTestId('a3-teacher-weak-point-row');
+      const taskRows = page.getByTestId('a3-teacher-task-row');
+      await Promise.all([
+        Promise.race([
+          weakPointRows.first().waitFor({ timeout: 60_000 }),
+          page.getByTestId('a3-teacher-weak-points-empty').waitFor({ timeout: 60_000 }),
+        ]),
+        Promise.race([
+          taskRows.first().waitFor({ timeout: 60_000 }),
+          page.getByTestId('a3-teacher-tasks-empty').waitFor({ timeout: 60_000 }),
+        ]),
+      ]);
     },
     captureStyle: `
       [data-testid='a3-teacher-homepage-evidence'] {
@@ -234,6 +245,24 @@ async function capture(page, asset, assetOutputDir) {
   await page.waitForTimeout(asset.filename === 'teacher-fallback.webp' ? 2_000 : 400);
 
   const targetText = await target.innerText();
+  if (asset.filename === 'teacher-workbench.webp') {
+    const weakPointRows = await target.getByTestId('a3-teacher-weak-point-row').count();
+    const taskRows = await target.getByTestId('a3-teacher-task-row').count();
+    const emptyStates = await target
+      .locator(
+        '[data-testid="a3-teacher-weak-points-empty"], [data-testid="a3-teacher-tasks-empty"]',
+      )
+      .count();
+    const evidence = validateTeacherEvidenceText({
+      text: targetText,
+      weakPointRows,
+      taskRows,
+      emptyStates,
+    });
+    console.log(
+      `teacher evidence: ${weakPointRows} weak points, ${taskRows} tasks, ${evidence.visibleTextCount} visible text lines`,
+    );
+  }
   const sensitivePatterns = [
     /\b1[3-9]\d{9}\b/,
     /\b[A-Z]:\\/i,

@@ -1,7 +1,7 @@
 'use client';
 
 import Image from 'next/image';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import styles from './a3-product-homepage.module.css';
 
 type A3HomepageProductMediaProps = {
@@ -10,6 +10,7 @@ type A3HomepageProductMediaProps = {
   sizes: string;
   priority?: boolean;
   fallbackKind?: 'product' | 'teacher';
+  onReady?: () => void;
 };
 
 export function A3HomepageProductMedia({
@@ -18,8 +19,15 @@ export function A3HomepageProductMedia({
   sizes,
   priority = false,
   fallbackKind = 'product',
+  onReady,
 }: A3HomepageProductMediaProps) {
   const [failed, setFailed] = useState(false);
+  const imageRef = useRef<HTMLImageElement>(null);
+
+  useEffect(() => {
+    const image = imageRef.current;
+    if (image?.complete && image.naturalWidth > 0) onReady?.();
+  }, [onReady, src]);
 
   if (failed) {
     return (
@@ -32,12 +40,17 @@ export function A3HomepageProductMedia({
 
   return (
     <Image
+      ref={imageRef}
       src={src}
       alt={alt}
       fill
       priority={priority}
       sizes={sizes}
-      onError={() => setFailed(true)}
+      onLoad={onReady}
+      onError={() => {
+        setFailed(true);
+        onReady?.();
+      }}
     />
   );
 }
