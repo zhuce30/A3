@@ -34,6 +34,44 @@ describe('A3 Playwright runtime', () => {
     expect(runtime.port).toBe(3000);
   });
 
+  it('rejects conflicting explicit base URL and managed ports', () => {
+    expect(() =>
+      resolveA3PlaywrightRuntime(
+        {
+          A3_PLAYWRIGHT_BASE_URL: 'http://localhost:3000',
+          A3_PLAYWRIGHT_PORT: '3017',
+        },
+        path.resolve('OpenMAIC'),
+      ),
+    ).toThrow(/A3_PLAYWRIGHT_BASE_URL.*3000.*A3_PLAYWRIGHT_PORT.*3017/);
+  });
+
+  it('writes an explicit port into an HTTPS base URL without one', () => {
+    const runtime = resolveA3PlaywrightRuntime(
+      {
+        A3_PLAYWRIGHT_USE_EXISTING: '1',
+        A3_PLAYWRIGHT_BASE_URL: 'https://preview.example.test/a3',
+        A3_PLAYWRIGHT_PORT: '3443',
+      },
+      path.resolve('OpenMAIC'),
+    );
+
+    expect(runtime.useExistingServers).toBe(true);
+    expect(runtime.port).toBe(3443);
+    expect(runtime.baseURL).toBe('https://preview.example.test:3443/a3');
+  });
+
+  it('writes the default managed port into a base URL without one', () => {
+    const runtime = resolveA3PlaywrightRuntime(
+      { A3_PLAYWRIGHT_BASE_URL: 'http://localhost/a3' },
+      path.resolve('OpenMAIC'),
+    );
+
+    expect(runtime.port).toBe(3002);
+    expect(runtime.baseURL).toBe('http://localhost:3002/a3');
+    expect(runtime.frontendCommand).toContain('-p 3002');
+  });
+
   it('builds backend commands from the configured project root and Python', () => {
     const backendRoot = path.resolve('D:/configured-a3');
     const python = path.resolve('D:/python/python.exe');

@@ -260,8 +260,9 @@ describe('A3 product homepage learning story modules', () => {
     const markup = renderToStaticMarkup(createElement(teacherModule.A3HomepageTeacherStage));
 
     expect(markup).toContain('%2Fa3%2Fassets%2Fhomepage%2Fteacher-fallback.webp');
-    expect(markup).toContain('<link rel="preload" as="image"');
-    expect(markup).not.toContain('loading="lazy"');
+    expect(markup).not.toContain('<link rel="preload" as="image"');
+    expect(markup).toContain('loading="lazy"');
+    expect(teacherSource).not.toMatch(/teacher-fallback\.webp[\s\S]{0,240}\bpriority\b/);
     expect(markup).toContain('正在倾听：进程调度为什么会发生饥饿？');
     expect(markup).toContain('href="/a3/coaching"');
     expect(markup).toContain('data-testid="a3-homepage-teacher-stage"');

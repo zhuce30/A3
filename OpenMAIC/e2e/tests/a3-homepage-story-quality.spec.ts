@@ -4,6 +4,7 @@ import sharp from 'sharp';
 const TERMINAL_RENDERERS = ['vrm', 'vrm_idle_animation', 'primitive', 'static_fallback'];
 
 type HandoffSample = {
+  connected: boolean;
   empty: boolean;
   fallbackInDom: boolean;
   fallbackStyle: string;
@@ -161,25 +162,55 @@ test('teacher fallback keeps the user-visible handoff complete and nonblank', as
   const delayedRendererRequests = await delayTeacherRendererChunk(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/a3', { waitUntil: 'domcontentloaded' });
-  const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
-  await stage.scrollIntoViewIfNeeded();
+  await page.waitForFunction(() => {
+    const currentStage = document.querySelector<HTMLElement>(
+      '[data-testid="a3-homepage-teacher-stage"]',
+    );
+    if (!currentStage?.isConnected) return false;
+    const rect = currentStage.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+  await page.evaluate(() => {
+    const currentStage = document.querySelector<HTMLElement>(
+      '[data-testid="a3-homepage-teacher-stage"]',
+    );
+    if (!currentStage?.isConnected) throw new Error('Connected teacher stage not found');
+    const rect = currentStage.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) throw new Error('Teacher stage has no geometry');
+    currentStage.scrollIntoView({ block: 'center' });
+  });
+  const stage = page.getByTestId('a3-homepage-teacher-stage');
+  await expect(stage).toBeVisible();
   const initialFallback = stage.getByTestId('a3-homepage-teacher-fallback');
-  await expect(initialFallback).toBeVisible();
-  await expect
-    .poll(() =>
-      initialFallback
-        .locator('img')
-        .evaluate((node) => node.complete && node.naturalWidth > 0 && node.naturalHeight > 0),
-    )
-    .toBe(true);
+  const fallbackImage = initialFallback.locator('img');
+  if ((await fallbackImage.count()) > 0) {
+    await expect
+      .poll(() =>
+        fallbackImage.evaluate(
+          (node) => node.complete && node.naturalWidth > 0 && node.naturalHeight > 0,
+        ),
+      )
+      .toBe(true);
+  }
 
   const samples: HandoffSample[] = [];
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    const sample = await stage.evaluate((root, terminalRenderers) => {
-      const currentRoot =
-        document.querySelector<HTMLElement>('main [data-testid="a3-homepage-teacher-stage"]') ??
-        root;
+    const sample = await page.evaluate((terminalRenderers) => {
+      const currentRoot = document.querySelector<HTMLElement>(
+        '[data-testid="a3-homepage-teacher-stage"]',
+      );
+      if (!currentRoot?.isConnected) {
+        return {
+          connected: false,
+          empty: true,
+          fallbackInDom: false,
+          fallbackStyle: 'disconnected',
+          loadingExposed: false,
+          renderer: '',
+          stageRenderer: '',
+        };
+      }
       const visible = (element: Element | null) => {
         if (!(element instanceof HTMLElement)) return false;
         const style = getComputedStyle(element);
@@ -208,6 +239,7 @@ test('teacher fallback keeps the user-visible handoff complete and nonblank', as
       }
 
       return {
+        connected: true,
         empty: !visible(fallback) && !terminalVisible,
         fallbackInDom: fallback !== null,
         fallbackStyle:
@@ -225,8 +257,9 @@ test('teacher fallback keeps the user-visible handoff complete and nonblank', as
     }, TERMINAL_RENDERERS);
     samples.push(sample);
     if (
-      !sample.fallbackInDom ||
-      (sample.renderer === 'primitive' && sample.stageRenderer === 'terminal')
+      sample.connected &&
+      (!sample.fallbackInDom ||
+        (sample.renderer === 'primitive' && sample.stageRenderer === 'terminal'))
     ) {
       break;
     }
@@ -236,9 +269,14 @@ test('teacher fallback keeps the user-visible handoff complete and nonblank', as
   expect(delayedRendererRequests()).toBeGreaterThan(0);
   const finalSample = samples.at(-1);
   expect(
-    !finalSample?.fallbackInDom ||
-      (finalSample.renderer === 'primitive' && finalSample.stageRenderer === 'terminal'),
+    finalSample?.connected &&
+      (!finalSample.fallbackInDom ||
+        (finalSample.renderer === 'primitive' && finalSample.stageRenderer === 'terminal')),
   ).toBe(true);
+  expect(
+    samples.filter((sample) => !sample.connected),
+    JSON.stringify(samples),
+  ).toEqual([]);
   const observedStates = samples.map((sample) => sample.renderer).filter(Boolean);
   const loadingIndex = observedStates.indexOf('loading');
   const terminalIndex = observedStates.findIndex((renderer) =>

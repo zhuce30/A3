@@ -11,6 +11,18 @@ function resolvePort(value?: string) {
   return port;
 }
 
+function readExplicitURLPort(value: string) {
+  const authority = value.match(/^[a-z][a-z\d+.-]*:\/\/([^/?#]+)/i)?.[1];
+  const host = authority?.split('@').at(-1);
+  const port = host?.match(/:(\d+)$/)?.[1];
+  return port ? resolvePort(port) : undefined;
+}
+
+function serializeBaseURL(url: URL) {
+  const value = url.toString();
+  return url.pathname === '/' && !url.search && !url.hash ? value.slice(0, -1) : value;
+}
+
 function quoteCommandPath(value: string) {
   return `"${value.replaceAll('"', '""')}"`;
 }
@@ -19,11 +31,20 @@ export function resolveA3PlaywrightRuntime(
   environment: PlaywrightEnvironment = process.env,
   frontendRoot = process.cwd(),
 ) {
-  const baseURLPort = environment.A3_PLAYWRIGHT_BASE_URL
-    ? new URL(environment.A3_PLAYWRIGHT_BASE_URL).port
+  const explicitPort = environment.A3_PLAYWRIGHT_PORT
+    ? resolvePort(environment.A3_PLAYWRIGHT_PORT)
     : undefined;
-  const port = resolvePort(environment.A3_PLAYWRIGHT_PORT ?? baseURLPort);
-  const baseURL = environment.A3_PLAYWRIGHT_BASE_URL ?? `http://localhost:${port}`;
+  const configuredBaseURL = environment.A3_PLAYWRIGHT_BASE_URL;
+  const parsedBaseURL = new URL(configuredBaseURL ?? 'http://localhost');
+  const baseURLPort = configuredBaseURL ? readExplicitURLPort(configuredBaseURL) : undefined;
+  if (explicitPort && baseURLPort && explicitPort !== baseURLPort) {
+    throw new Error(
+      `A3_PLAYWRIGHT_BASE_URL port ${baseURLPort} conflicts with A3_PLAYWRIGHT_PORT ${explicitPort}`,
+    );
+  }
+  const port = explicitPort ?? baseURLPort ?? 3002;
+  parsedBaseURL.port = String(port);
+  const baseURL = serializeBaseURL(parsedBaseURL);
   const useExistingServers = environment.A3_PLAYWRIGHT_USE_EXISTING === '1';
   const backendProjectRoot = path.resolve(
     environment.A3_BACKEND_PROJECT_ROOT ?? path.resolve(frontendRoot, '..'),
