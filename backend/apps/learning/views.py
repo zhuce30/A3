@@ -8,6 +8,7 @@ from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_http_methods
 
 from backend.apps.learning.effect_events import aggregate_learning_events, ingest_learning_event_v2, ingest_learning_events_batch_v2, list_recent_learning_events, serialize_learning_event
+from backend.apps.learning.report_summaries import create_learning_summary_document, get_learning_summary_document, list_learning_summary_documents
 from backend.apps.learning.resource_attribution import build_resource_effect_attribution
 from backend.apps.learning.models import Course, CourseEnrollment, LearningPath, LearningPathItem, LearningPathStatus
 from backend.apps.accounts.permissions import require_teacher_role
@@ -213,6 +214,43 @@ def resource_attribution(request):
     except (TypeError, ValueError):
         days = 30
     return JsonResponse({"success": True, "attribution": build_resource_effect_attribution(request.user, days=days)})
+
+
+@require_http_methods(["GET", "POST"])
+def report_summaries(request):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    if request.method == "GET":
+        try:
+            limit = int(request.GET.get("limit") or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        return JsonResponse({"success": True, "documents": list_learning_summary_documents(request.user, limit=limit)})
+    try:
+        payload = _body(request)
+        document = create_learning_summary_document(request.user, prompt=str(payload.get("prompt") or ""))
+        return JsonResponse(
+            {
+                "success": True,
+                "document": document,
+                "documents": list_learning_summary_documents(request.user, limit=20),
+            },
+            status=201,
+        )
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["GET"])
+def report_summary_detail(request, document_id):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    document = get_learning_summary_document(request.user, document_id)
+    if not document:
+        return JsonResponse({"success": False, "error": "总结文档不存在"}, status=404)
+    return JsonResponse({"success": True, "document": document})
 
 
 @require_http_methods(["GET", "POST"])

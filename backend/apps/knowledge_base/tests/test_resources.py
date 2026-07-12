@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import json
 import os
+from datetime import timedelta
 from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,14 +12,19 @@ from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from PIL import Image
 from django.test import Client, SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 
 from backend.apps.accounts.models import User, UserRole
 from backend.apps.knowledge_base.models import (
     IndexJobStatus,
     IndexJobType,
     KnowledgeAsset,
+    KnowledgeGraphClaim,
+    KnowledgeGraphEntity,
     KnowledgeIndexJob,
     KnowledgeBlock,
+    KnowledgeConcept,
+    KnowledgeDefinition,
     KnowledgeIndexEntry,
     KnowledgePage,
     KnowledgeParseRun,
@@ -27,7 +33,7 @@ from backend.apps.knowledge_base.models import (
     ResourceStatus,
 )
 from backend.apps.knowledge_base.display import format_source_type_label, source_origin_label
-from backend.apps.knowledge_base.services import create_parse_job, create_upload_index_job, delete_resource, knowledge_base_stats, reparse_resource, retry_index_job, save_and_index_upload, serialize_index_job, serialize_resource
+from backend.apps.knowledge_base.services import clear_text_index_storage, create_parse_job, create_upload_index_job, create_wiki_rebuild_job, delete_resource, knowledge_base_stats, reparse_resource, retry_index_job, save_and_index_upload, serialize_index_job, serialize_resource
 from backend.apps.knowledge_base.tasks import run_index_job
 from backend.domains.knowledge_base.document_parse_v2 import finalize_parse_result
 from backend.domains.knowledge_base.multimodal_parser import BaiduDocumentParserProvider, MultimodalParseResult, ParsedBlock, ParsedPage, QwenOcrDocumentParserProvider, VisionUnderstanding
@@ -254,11 +260,46 @@ class KnowledgeResourceTests(TestCase):
         self.assertEqual(resource.resource_scope, ResourceScope.TEACHER)
         self.assertEqual(resource.visibility, "owner")
 
+    def test_clear_text_index_storage_removes_stale_build_report(self):
+        import backend.apps.knowledge_base.services as services
+
+        faiss_dir = Path(self.temp_dir.name) / "faiss_index"
+        metadata_dir = Path(self.temp_dir.name) / "metadata"
+        faiss_dir.mkdir()
+        metadata_dir.mkdir()
+        (faiss_dir / "default__vector_store.json").write_text("{}", encoding="utf-8")
+        build_report = metadata_dir / "build_report.json"
+        build_report.write_text('{"source_files_seen": 105, "documents_loaded": 7381}', encoding="utf-8")
+
+        with patch.object(services, "FAISS_INDEX_DIR", faiss_dir), patch.object(services, "METADATA_DIR", metadata_dir):
+            clear_text_index_storage()
+
+        self.assertFalse(faiss_dir.exists())
+        self.assertFalse(build_report.exists())
+
     def test_legacy_ppt_is_rejected(self):
         upload = SimpleUploadedFile("legacy.ppt", b"legacy", content_type="application/octet-stream")
 
         with override_settings(KNOWLEDGE_UPLOAD_ROOT=self.temp_dir.name):
-            with self.assertRaisesRegex(ValueError, "pptx"):
+            with self.assertRaisesRegex(ValueError, "旧版 .ppt 不能直接入库，请先转换为 .pptx"):
+                save_and_index_upload(self.user, upload)
+
+        self.assertFalse(KnowledgeResource.objects.exists())
+
+    def test_unsupported_upload_type_returns_readable_chinese_error(self):
+        upload = SimpleUploadedFile("lesson.txt", b"text", content_type="text/plain")
+
+        with override_settings(KNOWLEDGE_UPLOAD_ROOT=self.temp_dir.name):
+            with self.assertRaisesRegex(ValueError, "仅支持 PDF、PPTX、XLSX、PNG、JPG、JPEG、WEBP 文件"):
+                save_and_index_upload(self.user, upload)
+
+        self.assertFalse(KnowledgeResource.objects.exists())
+
+    def test_oversized_upload_returns_readable_chinese_error(self):
+        upload = SimpleUploadedFile("lesson.pdf", b"fake-pdf", content_type="application/pdf")
+
+        with override_settings(KNOWLEDGE_UPLOAD_ROOT=self.temp_dir.name, KNOWLEDGE_UPLOAD_MAX_BYTES=1):
+            with self.assertRaisesRegex(ValueError, "单个文件不能超过 200MB"):
                 save_and_index_upload(self.user, upload)
 
         self.assertFalse(KnowledgeResource.objects.exists())
@@ -1026,6 +1067,116 @@ class KnowledgeResourceTests(TestCase):
         self.assertEqual(resource.chunk_count, 1)
         self.assertEqual(serialize_index_job(job)["summary"], {"parsed": 1, "indexed": 1, "failed": 0})
 
+    @patch("backend.apps.knowledge_base.tasks.close_old_connections")
+    @patch("backend.apps.knowledge_base.wiki_builder.safe_rebuild_resource_wiki")
+    @patch("backend.domains.knowledge_base.index_manager.append_source_file", return_value=(1, 2, []))
+    def test_incremental_job_persists_multimodal_progress_detail(self, _append_source_file, _wiki_builder, _close_connections):
+        path = Path(self.temp_dir.name) / "lesson.pdf"
+        path.write_bytes(b"fake-pdf")
+        job = KnowledgeIndexJob.objects.create(
+            owner=self.user,
+            job_type=IndexJobType.UPLOAD,
+            total_files=1,
+        )
+        resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            index_job=job,
+            original_name="lesson.pdf",
+            stored_path=str(path),
+            file_type=".pdf",
+            file_size=path.stat().st_size,
+        )
+
+        def fake_parse(_source_path, progress_callback=None):
+            self.assertIsNotNone(progress_callback)
+            progress_callback({
+                "phase": "ocr",
+                "phaseLabel": "正在 OCR 第 1/2 页",
+                "page": {"current": 1, "total": 2},
+                "metrics": {"pagesParsed": 1, "warnings": 0},
+                "event": "第 1 页 OCR 完成",
+                "phaseProgress": 40,
+            })
+            progress_callback({
+                "phase": "chunk",
+                "phaseLabel": "正在写入知识块 2/2",
+                "block": {"current": 2, "total": 2},
+                "metrics": {"blocksCreated": 2, "pagesParsed": 2},
+                "event": "已生成 2 个知识块",
+                "phaseProgress": 80,
+            })
+            return MultimodalParseResult(
+                parser="native_pdf",
+                status="completed",
+                pages=[
+                    ParsedPage(page_number=1, blocks=[ParsedBlock(modality="text", text="死锁必要条件")]),
+                    ParsedPage(page_number=2, blocks=[ParsedBlock(modality="text", text="银行家算法")]),
+                ],
+                result={"pages": 2, "textPages": 2, "ocrPages": 1},
+            )
+
+        with patch("backend.apps.knowledge_base.services.parse_resource", side_effect=fake_parse):
+            run_index_job.run(str(job.id))
+
+        job.refresh_from_db()
+        payload = serialize_index_job(job)
+        self.assertEqual(payload["progressDetail"]["phase"], "done")
+        self.assertEqual(payload["progressDetail"]["resourceName"], "lesson.pdf")
+        self.assertEqual(payload["progressDetail"]["page"], {"current": 2, "total": 2})
+        self.assertEqual(payload["progressDetail"]["block"], {"current": 2, "total": 2})
+        self.assertEqual(payload["progressDetail"]["metrics"]["blocksCreated"], 2)
+        self.assertTrue(any("2" in event["message"] for event in payload["progressDetail"]["recentEvents"]))
+        self.assertEqual(payload["progressDetail"]["recentEvents"][-1]["phase"], "done")
+
+    @patch("backend.apps.knowledge_base.tasks.run_index_job.delay")
+    def test_wiki_rebuild_job_is_queued_and_attached_to_indexed_resources(self, delay):
+        delay.return_value.id = "wiki-task-id"
+        resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            original_name="wiki-job.pdf",
+            stored_path=str((Path(self.temp_dir.name) / "wiki-job.pdf").resolve()),
+            file_type=".pdf",
+            file_size=10,
+            status=ResourceStatus.INDEXED,
+        )
+
+        job = create_wiki_rebuild_job(self.user, [resource])
+
+        resource.refresh_from_db()
+        self.assertEqual(job.job_type, IndexJobType.WIKI)
+        self.assertEqual(job.status, IndexJobStatus.QUEUED)
+        self.assertEqual(job.celery_task_id, "wiki-task-id")
+        self.assertEqual(resource.index_job_id, job.id)
+        payload = serialize_index_job(job)
+        self.assertEqual(payload["type"], "wiki")
+        self.assertEqual(payload["summary"], {"rebuilt": 0, "indexed": 1, "failed": 0})
+
+    @patch("backend.apps.knowledge_base.tasks.close_old_connections")
+    def test_wiki_rebuild_job_updates_progress_status_and_summary(self, _close_old_connections):
+        job = KnowledgeIndexJob.objects.create(owner=self.user, job_type=IndexJobType.WIKI, total_files=1)
+        path = Path(self.temp_dir.name) / "wiki-job-run.pdf"
+        path.write_text("Root Locus is a graphical method for analyzing closed-loop pole movement.", encoding="utf-8")
+        resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            index_job=job,
+            original_name="wiki-job-run.pdf",
+            stored_path=str(path.resolve()),
+            file_type=".pdf",
+            file_size=path.stat().st_size,
+            status=ResourceStatus.INDEXED,
+        )
+        page = KnowledgePage.objects.create(resource=resource, page_number=1)
+        KnowledgeBlock.objects.create(resource=resource, page=page, modality="text", text=path.read_text(encoding="utf-8"), confidence=0.9)
+
+        run_index_job.run(str(job.id))
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, IndexJobStatus.SUCCEEDED)
+        self.assertEqual(job.progress, 100)
+        self.assertEqual(job.processed_files, 1)
+        self.assertTrue(KnowledgeConcept.objects.filter(resource=resource, normalized_label="root locus").exists())
+        self.assertEqual(serialize_index_job(job)["summary"], {"rebuilt": 1, "indexed": 1, "failed": 0})
+
     def test_evaluate_document_parsing_reports_quality_metrics(self):
         path = Path(self.temp_dir.name) / "os.pdf"
         path.write_bytes(b"fake-pdf")
@@ -1117,6 +1268,89 @@ class KnowledgeResourceTests(TestCase):
         self.assertEqual(job.error_message, "")
         self.assertEqual(job.celery_task_id, "retry-task-id")
 
+    @override_settings(KNOWLEDGE_INDEX_JOB_STALE_MINUTES=15)
+    def test_resources_api_marks_stale_running_index_job_failed_after_restart(self):
+        path = Path(self.temp_dir.name) / "stale-running.pdf"
+        path.write_bytes(b"fake-pdf")
+        job = KnowledgeIndexJob.objects.create(
+            owner=self.user,
+            job_type=IndexJobType.PARSE,
+            status=IndexJobStatus.RUNNING,
+            progress=81,
+            total_files=1,
+            current_file="stale-running.pdf",
+            progress_detail={
+                "schemaVersion": "a3.kb-progress.v1",
+                "phase": "persist",
+                "phaseLabel": "正在写入解析结果 72/72 页",
+            },
+        )
+        resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            index_job=job,
+            original_name="stale-running.pdf",
+            stored_path=str(path),
+            file_type=".pdf",
+            file_size=path.stat().st_size,
+            status=ResourceStatus.INDEXING,
+        )
+        stale_at = timezone.now() - timedelta(minutes=30)
+        KnowledgeIndexJob.objects.filter(id=job.id).update(started_at=stale_at, updated_at=stale_at)
+        KnowledgeResource.objects.filter(id=resource.id).update(updated_at=stale_at)
+
+        client = Client()
+        client.force_login(self.user)
+        response = client.get("/api/kb/resources/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        resource_payload = next(item for item in payload["resources"] if item["id"] == str(resource.id))
+        self.assertEqual(resource_payload["status"], ResourceStatus.FAILED)
+        self.assertIn("服务重启", resource_payload["error"])
+        job.refresh_from_db()
+        self.assertEqual(job.status, IndexJobStatus.FAILED)
+        self.assertEqual(job.progress, 81)
+        self.assertIn("服务重启", job.error_message)
+        self.assertEqual(job.progress_detail["phase"], "interrupted")
+        self.assertTrue(job.result["interrupted"])
+        self.assertEqual(job.result["failed"][0]["resourceId"], str(resource.id))
+
+    def test_delete_active_resource_cancels_stuck_index_job(self):
+        path = Path(self.temp_dir.name) / "delete-active.pdf"
+        path.write_bytes(b"fake-pdf")
+        job = KnowledgeIndexJob.objects.create(
+            owner=self.user,
+            job_type=IndexJobType.PARSE,
+            status=IndexJobStatus.RUNNING,
+            progress=42,
+            total_files=1,
+            current_file="delete-active.pdf",
+        )
+        resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            index_job=job,
+            original_name="delete-active.pdf",
+            stored_path=str(path),
+            file_type=".pdf",
+            file_size=path.stat().st_size,
+            status=ResourceStatus.INDEXING,
+        )
+
+        client = Client()
+        client.force_login(self.user)
+        response = client.delete(f"/api/kb/resources/{resource.id}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["success"])
+        self.assertFalse(path.exists())
+        self.assertFalse(KnowledgeResource.objects.filter(id=resource.id).exists())
+        job.refresh_from_db()
+        self.assertEqual(job.status, IndexJobStatus.FAILED)
+        self.assertIn("用户删除资料", job.error_message)
+        self.assertEqual(job.progress_detail["phase"], "cancelled")
+        self.assertTrue(job.result["cancelledByDelete"])
+
 
 class KnowledgeBaseApiPermissionTests(TestCase):
     def setUp(self):
@@ -1142,6 +1376,185 @@ class KnowledgeBaseApiPermissionTests(TestCase):
         self.client.force_login(self.teacher)
         response = self.client.get("/api/kb/resources/")
         self.assertEqual(response.status_code, 200)
+
+    @patch("backend.apps.knowledge_base.services.clear_text_index_storage")
+    @patch("backend.apps.knowledge_base.tasks.run_index_job.delay")
+    def test_teacher_can_reset_derived_knowledge_base_without_queueing_reparse(self, delay, clear_text_index_storage):
+        source_path = Path(self.temp_dir.name) / "reset-source.pdf"
+        source_path.write_bytes(b"source")
+        pending_path = Path(self.temp_dir.name) / "pending-source.pdf"
+        pending_path.write_bytes(b"pending")
+        asset_path = Path(self.temp_dir.name) / "reset-asset.png"
+        asset_path.write_bytes(b"asset")
+        resource = KnowledgeResource.objects.create(
+            owner=self.teacher,
+            original_name="reset-source.pdf",
+            stored_path=str(source_path),
+            file_type=".pdf",
+            file_size=source_path.stat().st_size,
+            resource_scope=ResourceScope.TEACHER,
+            status=ResourceStatus.INDEXED,
+            document_count=2,
+            chunk_count=4,
+        )
+        pending_resource = KnowledgeResource.objects.create(
+            owner=self.teacher,
+            original_name="pending-source.pdf",
+            stored_path=str(pending_path),
+            file_type=".pdf",
+            file_size=pending_path.stat().st_size,
+            resource_scope=ResourceScope.TEACHER,
+            status=ResourceStatus.UPLOADED,
+            document_count=0,
+            chunk_count=0,
+        )
+        parse_run = KnowledgeParseRun.objects.create(resource=resource, status="completed", parser="native", pages=1)
+        page = KnowledgePage.objects.create(resource=resource, parse_run=parse_run, page_number=1)
+        asset = KnowledgeAsset.objects.create(resource=resource, page=page, kind="page", storage_path=str(asset_path))
+        block = KnowledgeBlock.objects.create(resource=resource, page=page, asset=asset, modality="text", text="根轨迹", confidence=0.9)
+        KnowledgeIndexEntry.objects.create(block=block, index_type="text_vector", index_backend="faiss", status="indexed")
+        entity = KnowledgeGraphEntity.objects.create(
+            owner=self.teacher,
+            resource=resource,
+            label="根轨迹",
+            normalized_label="根轨迹",
+            entity_type="concept",
+            summary="根轨迹用于控制系统分析。",
+        )
+        KnowledgeGraphClaim.objects.create(
+            owner=self.teacher,
+            resource=resource,
+            text="根轨迹用于分析闭环极点。",
+            entity_ids=[str(entity.id)],
+            verified=True,
+        )
+        concept = KnowledgeConcept.objects.create(
+            owner=self.teacher,
+            resource=resource,
+            preferred_label="根轨迹",
+            normalized_label="根轨迹",
+        )
+        KnowledgeDefinition.objects.create(
+            owner=self.teacher,
+            resource=resource,
+            concept=concept,
+            source_block=block,
+            definition="根轨迹是控制系统分析方法。",
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(
+            "/api/kb/reset/",
+            data=json.dumps({"action": "reset_derived"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["action"], "reset_derived")
+        self.assertEqual(payload["deleted"]["resources"], 0)
+        self.assertEqual(payload["deleted"]["blocks"], 1)
+        self.assertNotIn("job", payload)
+        delay.assert_not_called()
+        clear_text_index_storage.assert_called_once()
+        resource.refresh_from_db()
+        pending_resource.refresh_from_db()
+        self.assertEqual(resource.status, ResourceStatus.UPLOADED)
+        self.assertIsNone(resource.index_job_id)
+        self.assertEqual(pending_resource.status, ResourceStatus.UPLOADED)
+        self.assertIsNone(pending_resource.index_job_id)
+        self.assertTrue(source_path.exists())
+        self.assertTrue(pending_path.exists())
+        self.assertFalse(asset_path.exists())
+        self.assertFalse(resource.blocks.exists())
+        self.assertFalse(resource.graph_entities.exists())
+        self.assertFalse(resource.concepts.exists())
+
+    @patch("backend.apps.knowledge_base.services.clear_text_index_storage")
+    def test_teacher_can_clear_knowledge_base_after_confirmation(self, clear_text_index_storage):
+        source_path = Path(self.temp_dir.name) / "clear-source.pdf"
+        source_path.write_bytes(b"source")
+        resource = KnowledgeResource.objects.create(
+            owner=self.teacher,
+            original_name="clear-source.pdf",
+            stored_path=str(source_path),
+            file_type=".pdf",
+            file_size=source_path.stat().st_size,
+            resource_scope=ResourceScope.TEACHER,
+            status=ResourceStatus.INDEXED,
+        )
+        KnowledgeBlock.objects.create(resource=resource, modality="text", text="调度", confidence=0.9)
+        self.client.force_login(self.teacher)
+
+        rejected = self.client.post(
+            "/api/kb/reset/",
+            data=json.dumps({"action": "clear_all", "confirmText": "清空"}),
+            content_type="application/json",
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertTrue(KnowledgeResource.objects.filter(id=resource.id).exists())
+
+        response = self.client.post(
+            "/api/kb/reset/",
+            data=json.dumps({"action": "clear_all", "confirmText": "清空知识库"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["action"], "clear_all")
+        self.assertEqual(payload["deleted"]["resources"], 1)
+        clear_text_index_storage.assert_called_once()
+        self.assertFalse(KnowledgeResource.objects.filter(id=resource.id).exists())
+        self.assertFalse(source_path.exists())
+
+    @patch("backend.apps.knowledge_base.services.clear_text_index_storage")
+    def test_admin_clear_knowledge_base_removes_student_and_teacher_resources(self, clear_text_index_storage):
+        admin = User.objects.create_superuser(
+            phone="13800139012",
+            password="secure-pass-123",
+            display_name="管理员",
+        )
+        student_path = Path(self.temp_dir.name) / "student-personal.pdf"
+        teacher_path = Path(self.temp_dir.name) / "teacher-owned.pdf"
+        student_path.write_bytes(b"student")
+        teacher_path.write_bytes(b"teacher")
+        student_resource = KnowledgeResource.objects.create(
+            owner=self.student,
+            original_name="student-personal.pdf",
+            stored_path=str(student_path),
+            file_type=".pdf",
+            file_size=student_path.stat().st_size,
+            resource_scope=ResourceScope.PERSONAL,
+            status=ResourceStatus.INDEXED,
+        )
+        teacher_resource = KnowledgeResource.objects.create(
+            owner=self.teacher,
+            original_name="teacher-owned.pdf",
+            stored_path=str(teacher_path),
+            file_type=".pdf",
+            file_size=teacher_path.stat().st_size,
+            resource_scope=ResourceScope.TEACHER,
+            status=ResourceStatus.INDEXED,
+        )
+        self.client.force_login(admin)
+
+        response = self.client.post(
+            "/api/kb/reset/",
+            data=json.dumps({"action": "clear_all", "confirmText": "清空知识库"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["deleted"]["resources"], 2)
+        clear_text_index_storage.assert_called_once()
+        self.assertFalse(KnowledgeResource.objects.filter(id__in=[student_resource.id, teacher_resource.id]).exists())
+        self.assertFalse(student_path.exists())
+        self.assertFalse(teacher_path.exists())
 
     @patch("backend.apps.knowledge_base.tasks.close_old_connections")
     @patch("backend.domains.knowledge_base.index_manager.append_source_file", return_value=(1, 2, []))
@@ -1208,6 +1621,99 @@ class KnowledgeBaseApiPermissionTests(TestCase):
         self.assertIn("os-global-courseware.pdf", names)
         self.assertNotIn("other-teacher-private.pdf", names)
 
+    def test_resource_list_includes_wiki_build_status(self):
+        resource = KnowledgeResource.objects.create(
+            owner=self.teacher,
+            original_name="wiki-ready.pdf",
+            stored_path=str((Path(self.temp_dir.name) / "wiki-ready.pdf").resolve()),
+            file_type=".pdf",
+            file_size=10,
+            resource_scope=ResourceScope.TEACHER,
+            status=ResourceStatus.INDEXED,
+        )
+        concept = KnowledgeConcept.objects.create(
+            owner=self.teacher,
+            resource=resource,
+            preferred_label="Root Locus",
+            normalized_label="root locus",
+            summary="A graph method.",
+            source_count=1,
+            confidence=0.8,
+        )
+        KnowledgeDefinition.objects.create(
+            owner=self.teacher,
+            concept=concept,
+            resource=resource,
+            definition="Root Locus is a graph method.",
+            confidence=0.8,
+        )
+
+        self.client.force_login(self.teacher)
+        response = self.client.get("/api/kb/resources/")
+
+        self.assertEqual(response.status_code, 200)
+        wiki = response.json()["resources"][0]["wiki"]
+        self.assertEqual(wiki["status"], "ready")
+        self.assertEqual(wiki["conceptCount"], 1)
+        self.assertEqual(wiki["definitionCount"], 1)
+
+    def test_teacher_can_rebuild_resource_wiki_from_knowledge_base(self):
+        path = Path(self.temp_dir.name) / "wiki-rebuild.pdf"
+        path.write_text("Root Locus is a graphical method for analyzing closed-loop pole movement.", encoding="utf-8")
+        resource = KnowledgeResource.objects.create(
+            owner=self.teacher,
+            original_name="wiki-rebuild.pdf",
+            stored_path=str(path.resolve()),
+            file_type=".pdf",
+            file_size=path.stat().st_size,
+            resource_scope=ResourceScope.TEACHER,
+            status=ResourceStatus.INDEXED,
+        )
+        page = KnowledgePage.objects.create(resource=resource, page_number=1)
+        KnowledgeBlock.objects.create(resource=resource, page=page, modality="text", text=path.read_text(encoding="utf-8"), confidence=0.9)
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(f"/api/kb/resources/{resource.id}/wiki/rebuild/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["wiki"]["status"], "ready")
+        self.assertTrue(KnowledgeConcept.objects.filter(resource=resource, normalized_label="root locus").exists())
+        self.assertEqual(payload["resource"]["wiki"]["conceptCount"], 1)
+
+    @patch("backend.apps.knowledge_base.tasks.run_index_job.delay")
+    def test_teacher_can_queue_batch_wiki_rebuild_from_knowledge_base(self, delay):
+        delay.return_value.id = "wiki-batch-task-id"
+        KnowledgeResource.objects.create(
+            owner=self.teacher,
+            original_name="teacher-wiki.pdf",
+            stored_path=str((Path(self.temp_dir.name) / "teacher-wiki.pdf").resolve()),
+            file_type=".pdf",
+            file_size=10,
+            resource_scope=ResourceScope.TEACHER,
+            status=ResourceStatus.INDEXED,
+        )
+        KnowledgeResource.objects.create(
+            owner=self.student,
+            original_name="student-private-wiki.pdf",
+            stored_path=str((Path(self.temp_dir.name) / "student-private-wiki.pdf").resolve()),
+            file_type=".pdf",
+            file_size=10,
+            resource_scope=ResourceScope.PERSONAL,
+            status=ResourceStatus.INDEXED,
+        )
+
+        self.client.force_login(self.teacher)
+        response = self.client.post("/api/kb/wiki/rebuild/")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["job"]["type"], "wiki")
+        self.assertEqual(payload["job"]["totalFiles"], 1)
+        self.assertEqual(payload["job"]["status"], "queued")
+
     def test_student_can_view_own_index_jobs_only(self):
         own_job = KnowledgeIndexJob.objects.create(
             owner=self.student,
@@ -1263,6 +1769,56 @@ class KnowledgeBaseApiPermissionTests(TestCase):
         kwargs = search_knowledge_base.call_args.kwargs
         self.assertEqual(kwargs["allowed_source_paths"], {own_path})
         self.assertEqual(kwargs["course"], "自动控制原理")
+
+    @patch("backend.apps.knowledge_base.views.search_knowledge_base", return_value=[])
+    def test_search_passes_second_stage_config_to_real_retriever(self, search_knowledge_base):
+        own_path = str((Path.cwd() / "stage-two.pdf").resolve())
+        KnowledgeResource.objects.create(
+            owner=self.teacher,
+            original_name="stage-two.pdf",
+            stored_path=own_path,
+            file_type=".pdf",
+            file_size=10,
+            status=ResourceStatus.INDEXED,
+        )
+
+        self.client.force_login(self.teacher)
+        response = self.client.get(
+            "/api/kb/search/"
+            "?q=root"
+            "&top_k=6"
+            "&include_assets=1"
+            "&fast=1"
+            "&mode=bm25"
+            "&similarity_threshold=0.42"
+            "&bm25_candidates=37"
+            "&vector_weight=0.65"
+            "&bm25_weight=0.35"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(
+            payload["searchConfig"],
+            {
+                "mode": "bm25",
+                "fast": True,
+                "topK": 6,
+                "includeAssets": True,
+                "similarityThreshold": 0.42,
+                "bm25Candidates": 37,
+                "vectorWeight": 0.65,
+                "bm25Weight": 0.35,
+            },
+        )
+        kwargs = search_knowledge_base.call_args.kwargs
+        self.assertEqual(kwargs["retrieval_mode"], "bm25")
+        self.assertTrue(kwargs["force_lexical"])
+        self.assertEqual(kwargs["similarity_threshold"], 0.42)
+        self.assertEqual(kwargs["bm25_candidate_count"], 37)
+        self.assertEqual(kwargs["vector_weight"], 0.65)
+        self.assertEqual(kwargs["bm25_weight"], 0.35)
 
     @patch("backend.apps.knowledge_base.views.search_knowledge_base")
     def test_search_without_indexed_resources_returns_empty_results(self, search_knowledge_base):
@@ -1345,6 +1901,13 @@ class KnowledgeBaseApiPermissionTests(TestCase):
                 "formatFeatures": ["math"],
             },
         )
+        neighbor_block = KnowledgeBlock.objects.create(
+            resource=resource,
+            page=page,
+            modality="text",
+            text="The context explains how deadlock prevention maps to process scheduling constraints.",
+            confidence=0.72,
+        )
         search_knowledge_base.return_value = [
             KnowledgeBaseSearchResult(
                 score=0.91,
@@ -1369,6 +1932,9 @@ class KnowledgeBaseApiPermissionTests(TestCase):
         self.assertEqual(result["markdownSnippet"], "Root locus equation: $s^2 + 2s + Kg = 0$")
         self.assertEqual(result["contentFormat"], "markdown")
         self.assertEqual(result["formatFeatures"], ["math"])
+        self.assertIn("Root locus equation: $s^2 + 2s + Kg = 0$", result["contextSnippet"])
+        self.assertIn("deadlock prevention", result["contextSnippet"])
+        self.assertEqual([item["blockId"] for item in result["contextBlocks"]], [str(text_block.id), str(neighbor_block.id)])
         self.assertNotIn("internal-slide.png", str(result))
 
     def test_parse_detail_returns_multimodal_pages_and_blocks(self):

@@ -81,7 +81,19 @@ class EvaluateDemoRetrievalCommandTests(TestCase):
         )
         stdout = StringIO()
 
-        with patch("backend.apps.compat.management.commands.evaluate_demo_retrieval.DEFAULT_CASES", demo_cases):
+        with (
+            patch("backend.apps.compat.management.commands.evaluate_demo_retrieval.DEFAULT_CASES", demo_cases),
+            patch("backend.apps.compat.management.commands.evaluate_demo_retrieval.run_deep_retrieval_router") as deep_router,
+        ):
+            deep_router.return_value.graph_evidence = [
+                {
+                    "pathLabels": ["根轨迹", "闭环极点"],
+                    "relations": [{"sourceLabel": "根轨迹", "targetLabel": "闭环极点", "label": "影响"}],
+                    "evidenceCoverage": 1.0,
+                    "hops": 1,
+                }
+            ]
+            deep_router.return_value.plan.route = "graph"
             call_command("evaluate_demo_retrieval", "--top-k", "1", "--json", stdout=stdout)
 
         payload = json.loads(stdout.getvalue())
@@ -90,6 +102,15 @@ class EvaluateDemoRetrievalCommandTests(TestCase):
         self.assertIn("retrievalTop1HitRate", payload["metrics"])
         self.assertIn("retrievalTop3HitRate", payload["metrics"])
         self.assertIn("retrievalTop5HitRate", payload["metrics"])
+        self.assertIn("retrievalHitRateByRoute", payload["metrics"])
+        self.assertIn("graphPathHitRate", payload["metrics"])
+        self.assertIn("graphEvidenceCoverage", payload["metrics"])
+        self.assertIn("graphAverageHops", payload["metrics"])
+        self.assertIn("wiki", payload["metrics"]["retrievalHitRateByRoute"])
+        self.assertIn("retrievalRoute", payload["cases"][0])
+        self.assertIn("graphPathHit", payload["cases"][0])
+        self.assertIn("graphEvidenceCoverage", payload["cases"][0])
+        self.assertIn("graphAverageHops", payload["cases"][0])
         self.assertIn("verifiedCoverage", payload["metrics"])
         self.assertIn("safetyRefusalRate", payload["metrics"])
         self.assertEqual(payload["metrics"]["missingEvidenceCases"], 1)

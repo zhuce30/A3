@@ -1,11 +1,13 @@
 'use client';
 
-import { Camera, FileSearch, Focus, Loader2, Mic, MonitorUp, Phone, PhoneOff, Radio, ShieldCheck, VolumeX, Waves } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { Camera, FileSearch, Focus, Loader2, Mic, MonitorUp, Phone, PhoneOff, Radio, ShieldCheck, VolumeX } from 'lucide-react';
+import { useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { resolveA3Endpoint } from '@/lib/a3/api-client';
 import { cn } from '@/lib/utils';
+import type { A3DigitalHumanAvatarState } from '@/lib/a3/digital-human-types';
 import type { A3RealtimeEvidence, A3RealtimeStatus } from '@/lib/a3/realtime-coaching-types';
+import { DigitalHumanAvatar } from './digital-human-avatar';
 import { useRealtimeCoaching } from './use-realtime-coaching';
 
 const statusCopy: Record<A3RealtimeStatus, string> = {
@@ -20,7 +22,31 @@ const statusCopy: Record<A3RealtimeStatus, string> = {
   error: '连接失败',
 };
 
-export function RealtimeCoachingCall() {
+const panelTabs = [
+  { key: 'dialogue', label: '实时对话' },
+  { key: 'evidence', label: '回答依据' },
+  { key: 'materials', label: '学习资料' },
+] as const;
+
+type PanelTabKey = (typeof panelTabs)[number]['key'];
+
+type RealtimeCoachingCallProps = {
+  rightRail?: ReactNode;
+};
+
+function mapRealtimeStatusToAvatarState(status: A3RealtimeStatus, assistantSpeaking: boolean): A3DigitalHumanAvatarState {
+  if (assistantSpeaking) return 'speaking';
+  if (status === 'connecting' || status === 'requesting_permission') return 'connecting';
+  if (status === 'visual_focus') return 'visual_focus';
+  if (status === 'degraded') return 'degraded';
+  if (status === 'error') return 'error';
+  if (status === 'ended') return 'ended';
+  if (status === 'live') return 'listening';
+  return 'idle';
+}
+
+export function RealtimeCoachingCall({ rightRail }: RealtimeCoachingCallProps = {}) {
+  const [activePanelTab, setActivePanelTab] = useState<PanelTabKey>('dialogue');
   const realtime = useRealtimeCoaching();
   const {
     cameraEnabled,
@@ -32,6 +58,7 @@ export function RealtimeCoachingCall() {
     evidence,
     audioLevel,
     assistantSpeaking,
+    speechCues,
     interruptAssistant,
     microphoneEnabled,
     retrieveEvidence,
@@ -55,8 +82,8 @@ export function RealtimeCoachingCall() {
   const evidenceQueryFallback = session?.instructions.targetTitle || '当前知识点';
 
   return (
-    <section data-testid="a3-realtime-coaching-call" className="overflow-hidden rounded-2xl border border-slate-200 bg-[var(--a3-surface-solid)] shadow-[0_24px_70px_rgba(15,23,42,0.10)]">
-      <div className="flex flex-col gap-4 border-b border-slate-200 bg-slate-50/80 px-6 py-5 lg:flex-row lg:items-center lg:justify-between">
+    <section data-testid="a3-realtime-coaching-call" className="overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_24px_70px_rgba(15,23,42,0.08)]">
+      <div className="flex flex-col gap-4 border-b border-slate-200 bg-white/90 px-6 py-5 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex size-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-[0_10px_24px_rgba(37,99,235,0.22)]">
@@ -91,23 +118,16 @@ export function RealtimeCoachingCall() {
         </div>
       </div>
 
-      <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_360px] 2xl:grid-cols-[minmax(0,1fr)_420px]">
-        <div className="bg-slate-950 p-5 text-white">
-          <div className="relative flex min-h-[620px] flex-col overflow-hidden rounded-[22px] border border-white/10 bg-[#080f1f] shadow-inner">
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_18%,rgba(37,99,235,0.30),transparent_34%),linear-gradient(180deg,rgba(15,23,42,0),rgba(2,6,23,0.78))]" />
-            <div className="absolute inset-x-8 top-20 h-px bg-gradient-to-r from-transparent via-white/12 to-transparent" />
-            <div className="relative z-10 flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
-              <div className="flex flex-wrap items-center gap-2 text-sm">
-                <Pill active={microphoneEnabled}>麦克风</Pill>
-                <Pill active={cameraEnabled}>摄像头</Pill>
-                <Pill active={screenEnabled}>屏幕共享</Pill>
-                <Pill active={status === 'live'}>低延迟</Pill>
-              </div>
-              <div data-testid="a3-realtime-audio-level" className="min-w-[180px] rounded-full border border-white/10 bg-white/10 px-3 py-2">
+      <div className="grid gap-6 bg-[#f7f9fd] p-5 2xl:grid-cols-[minmax(0,1fr)_420px]">
+        <div className="text-white">
+          <div data-testid="a3-realtime-video-surface" className="relative flex min-h-[760px] flex-col overflow-hidden rounded-[30px] bg-slate-900 shadow-[0_28px_80px_rgba(15,23,42,0.18)]">
+            <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(15,23,42,0.18)_62%,rgba(15,23,42,0.52))]" />
+            <div className="absolute bottom-24 left-5 z-20 flex max-w-[calc(100%-2.5rem)] flex-wrap items-center gap-2 text-sm md:bottom-28 md:left-6">
+              <div data-testid="a3-realtime-audio-level" className="w-[164px] rounded-full border border-white/28 bg-slate-950/72 px-3 py-2 text-white shadow-lg backdrop-blur-xl">
                 <div className="flex items-center gap-2 text-xs text-slate-200">
                   <span className={cn('size-2 rounded-full', microphoneEnabled ? 'bg-emerald-400' : 'bg-slate-500')} />
                   <span className="shrink-0">输入</span>
-                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/22">
                     <div
                       className="h-full rounded-full bg-emerald-400 transition-[width] duration-100"
                       style={{ width: `${Math.max(4, Math.round(audioLevel * 100))}%` }}
@@ -118,33 +138,18 @@ export function RealtimeCoachingCall() {
               </div>
             </div>
 
-            <div className="relative z-10 grid flex-1 gap-4 p-5 xl:grid-cols-[minmax(0,1fr)_210px]">
-              <div className="relative flex min-h-[420px] flex-col items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035] p-6 text-center">
-                <div className="absolute left-5 top-5 flex items-center gap-2 rounded-full border border-white/10 bg-white/8 px-3 py-1.5 text-xs text-slate-300">
-                  <span className={cn('size-2 rounded-full', status === 'live' ? 'bg-emerald-400' : status === 'error' ? 'bg-rose-400' : 'bg-slate-500')} />
-                  {statusCopy[status]}
-                </div>
-                <div className="absolute right-5 top-5 rounded-full border border-white/10 bg-white/8 px-3 py-1.5 text-xs text-slate-300">
-                  {assistantSpeaking ? 'AI 正在回答' : '等待输入'}
-                </div>
-                <div className={cn('relative flex size-32 items-center justify-center rounded-full bg-blue-600 text-5xl font-bold shadow-[0_0_90px_rgba(37,99,235,0.46)] transition-transform duration-200', assistantSpeaking && 'scale-105')}>
-                  {assistantSpeaking && <span className="absolute inset-[-16px] rounded-full border border-blue-300/40" />}
-                  AI
-                </div>
-                <div className="mt-7 flex items-center gap-2 text-sm font-medium text-slate-100">
-                  <Waves className="size-4 text-blue-300" />
-                  多模态实时辅导
-                </div>
-                <p className="mt-3 max-w-[560px] text-sm leading-6 text-slate-300">
-                  语音、屏幕画面、知识库证据和视觉帧会合并为同一次会话上下文。
-                </p>
-                <div className="mt-6 grid w-full max-w-[560px] gap-2 text-xs text-slate-300 sm:grid-cols-3">
-                  <span className="rounded-xl border border-white/10 bg-white/8 px-3 py-2">回答可打断</span>
-                  <span className="rounded-xl border border-white/10 bg-white/8 px-3 py-2">证据可追溯</span>
-                  <span className="rounded-xl border border-white/10 bg-white/8 px-3 py-2">不保存原始视频</span>
-                </div>
-              </div>
-              <div className="grid gap-3">
+            <div className="relative z-10 flex flex-1 flex-col">
+              <DigitalHumanAvatar
+                state={mapRealtimeStatusToAvatarState(status, assistantSpeaking)}
+                mode="local_vrm"
+                audioLevel={audioLevel}
+                assistantSpeaking={assistantSpeaking}
+                speechCues={speechCues}
+                providerLabel={provider}
+                modelLabel={session?.model || '未连接'}
+                fallbackReason={fallbackReason}
+              />
+              <div data-testid="a3-realtime-preview-strip" className="z-30 grid gap-3 p-4 md:absolute md:right-6 md:top-24 md:w-[244px] md:p-0">
                 <PreviewTile active={cameraEnabled} label="摄像头">
                   <video
                     ref={cameraVideoRef}
@@ -168,17 +173,17 @@ export function RealtimeCoachingCall() {
               </div>
             </div>
 
-            <div className="relative z-10 border-t border-white/10 bg-slate-950/70 px-5 py-4">
+            <div data-testid="a3-realtime-floating-controls" className="absolute inset-x-4 bottom-4 z-30 rounded-[28px] border border-white/22 bg-slate-950/46 px-4 py-3 shadow-[0_18px_50px_rgba(15,23,42,0.30)] backdrop-blur-xl md:inset-x-6 md:bottom-6">
               <div className="flex flex-wrap justify-center gap-2">
-                <Button type="button" variant="secondary" size="sm" onClick={toggleMic}>
+                <Button type="button" variant="secondary" size="sm" onClick={toggleMic} className="h-11 rounded-full border border-white/18 bg-white/16 px-4 text-white hover:bg-white/24">
                   <Mic className="size-4" />
                   {microphoneEnabled ? '关闭麦克风' : '开启麦克风'}
                 </Button>
-                <Button type="button" variant="secondary" size="sm" onClick={toggleCamera}>
+                <Button type="button" variant="secondary" size="sm" onClick={toggleCamera} className="h-11 rounded-full border border-white/18 bg-white/16 px-4 text-white hover:bg-white/24">
                   <Camera className="size-4" />
                   {cameraEnabled ? '关闭摄像头' : '开启摄像头'}
                 </Button>
-                <Button type="button" variant="secondary" size="sm" onClick={shareScreen}>
+                <Button data-testid="a3-realtime-share-screen" type="button" variant="secondary" size="sm" onClick={shareScreen} className="h-11 rounded-full border border-white/18 bg-white/16 px-4 text-white hover:bg-white/24">
                   <MonitorUp className="size-4" />
                   {screenEnabled ? '停止共享' : '共享屏幕'}
                 </Button>
@@ -188,12 +193,13 @@ export function RealtimeCoachingCall() {
                   variant="secondary"
                   size="sm"
                   onClick={captureFrame}
+                  className="h-11 rounded-full border border-white/18 bg-white/16 px-4 text-white hover:bg-white/24"
                   title="截取当前摄像头或共享屏幕画面，并调用视觉模型分析"
                 >
                   <Focus className="size-4" />
                   看这里/截屏分析
                 </Button>
-                <Button data-testid="a3-realtime-interrupt" type="button" variant="secondary" size="sm" onClick={interruptAssistant} disabled={status !== 'live' && !assistantSpeaking}>
+                <Button data-testid="a3-realtime-interrupt" type="button" variant="secondary" size="sm" onClick={interruptAssistant} disabled={status !== 'live' && !assistantSpeaking} className="h-11 rounded-full border border-white/18 bg-white/16 px-4 text-white hover:bg-white/24 disabled:opacity-45">
                   <VolumeX className="size-4" />
                   打断AI
                 </Button>
@@ -202,9 +208,35 @@ export function RealtimeCoachingCall() {
           </div>
         </div>
 
-        <div className="space-y-4 bg-slate-50/70 p-5">
-          {summary && <SummaryCard summary={summary} />}
-          <div className="rounded-xl border border-slate-200 bg-[var(--a3-surface-solid)] p-4 shadow-sm">
+        <div className="space-y-4 rounded-[24px] border border-slate-200 bg-white p-5 shadow-[0_18px_50px_rgba(15,23,42,0.06)]">
+          <div className="grid grid-cols-3 border-b border-slate-200 text-center text-sm font-semibold text-slate-500">
+            {panelTabs.map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                data-testid={`a3-realtime-panel-tab-${tab.key}`}
+                onClick={() => setActivePanelTab(tab.key)}
+                className={cn(
+                  'min-h-11 border-b-2 border-transparent pb-3 text-center transition-colors hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
+                  activePanelTab === tab.key && 'border-blue-600 text-blue-600',
+                )}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <div className="hidden">
+            <span className="border-b-2 border-blue-600 pb-3 text-blue-600">实时对话</span>
+            <span className="pb-3">回答依据</span>
+            <span className="pb-3">学习资料</span>
+          </div>
+          {activePanelTab === 'materials' && rightRail && (
+            <div data-testid="a3-coaching-merged-side-panel" className="space-y-4">
+              {rightRail}
+            </div>
+          )}
+          {activePanelTab === 'dialogue' && summary && <SummaryCard summary={summary} />}
+          <div className={cn('rounded-xl border border-slate-200 bg-[var(--a3-surface-solid)] p-4 shadow-sm', activePanelTab !== 'evidence' && 'hidden')}>
             <div className="flex items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-[var(--a3-text)]">实时知识库证据</div>
@@ -245,7 +277,7 @@ export function RealtimeCoachingCall() {
             <EvidenceList evidence={evidence} />
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-[var(--a3-surface-solid)] p-4 shadow-sm">
+          <div className={cn('rounded-xl border border-slate-200 bg-[var(--a3-surface-solid)] p-4 shadow-sm', activePanelTab !== 'dialogue' && 'hidden')}>
             <div className="text-sm font-semibold text-[var(--a3-text)]">实时字幕与事件</div>
             <div className="mt-3 max-h-[300px] space-y-2 overflow-auto text-sm">
               {transcript.length ? transcript.slice(-6).map((item) => (
@@ -320,17 +352,9 @@ function Metric({ label, value }: { label: string; value: number }) {
   );
 }
 
-function Pill({ active, children }: { active: boolean; children: ReactNode }) {
-  return (
-    <span className={cn('rounded-full px-3 py-1 text-xs font-medium', active ? 'bg-emerald-400 text-slate-950' : 'bg-white/10 text-slate-300')}>
-      {children}
-    </span>
-  );
-}
-
 function PreviewTile({ active, label, children }: { active: boolean; label: string; children: ReactNode }) {
   return (
-    <div className="relative min-h-[160px] overflow-hidden rounded-2xl border border-white/10 bg-black">
+    <div className="relative min-h-[116px] overflow-hidden rounded-2xl border border-white/35 bg-black shadow-[0_14px_36px_rgba(15,23,42,0.26)] md:min-h-[96px]">
       <div className="absolute left-3 top-3 z-10 rounded-full bg-slate-950/75 px-3 py-1 text-xs font-medium text-white">
         {label}
       </div>

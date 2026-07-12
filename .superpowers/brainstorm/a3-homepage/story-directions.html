@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>智学引擎 A3 - 首页叙事方向</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #eef1f4; color: #111317; font-family: "Microsoft YaHei", Arial, sans-serif; }
+    main { width: min(1500px, calc(100% - 40px)); margin: 0 auto; padding: 48px 0 72px; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+    h1 { margin: 0; font-size: 38px; line-height: 1.15; letter-spacing: 0; }
+    header p { max-width: 720px; margin: 10px 0 0; color: #5d626a; line-height: 1.7; }
+    .note { padding: 9px 13px; border: 1px solid #ccd1d8; background: #fff; font-size: 13px; white-space: nowrap; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .direction { min-width: 0; background: #fff; border: 1px solid #d7dbe0; cursor: pointer; transition: transform .18s, box-shadow .18s, border-color .18s; }
+    .direction:hover { transform: translateY(-3px); box-shadow: 0 16px 36px rgba(18, 24, 38, .10); }
+    .direction.selected { border: 3px solid #176b52; box-shadow: 0 18px 48px rgba(23, 107, 82, .18); }
+    .mock { min-height: 540px; padding: 18px; overflow: hidden; position: relative; }
+    .mock.dark { background: #101315; color: #f6f7f4; }
+    .mock.light { background: #f6f5f0; color: #101216; }
+    .mock.lab { background: #e7edf0; color: #101619; }
+    .nav { display: flex; justify-content: space-between; align-items: center; font-size: 10px; text-transform: uppercase; }
+    .brand { font-weight: 800; font-size: 14px; }
+    .pill { border: 1px solid currentColor; padding: 6px 10px; }
+    .hero { padding: 62px 0 38px; }
+    .eyebrow { color: #48d39b; font-size: 10px; text-transform: uppercase; margin-bottom: 15px; }
+    .light .eyebrow { color: #a13c2c; }
+    .lab .eyebrow { color: #176b52; }
+    .hero h2 { margin: 0; max-width: 390px; font-size: 39px; line-height: 1.05; letter-spacing: 0; }
+    .hero p { max-width: 350px; margin: 17px 0 20px; font-size: 13px; line-height: 1.7; opacity: .72; }
+    .cta { display: inline-flex; padding: 10px 15px; color: #07110d; background: #66e3ae; font-weight: 700; font-size: 12px; }
+    .light .cta { color: white; background: #a13c2c; }
+    .lab .cta { color: white; background: #176b52; }
+    .screen-stack { position: absolute; right: -24px; top: 205px; width: 53%; }
+    .screen { height: 112px; margin-top: -22px; border: 1px solid rgba(255,255,255,.18); background: #20262a; box-shadow: 0 14px 32px rgba(0,0,0,.30); transform: rotate(-3deg); padding: 12px; }
+    .screen:nth-child(2) { transform: rotate(2deg) translateX(-20px); background: #e6ebe9; color: #111; }
+    .screen:nth-child(3) { transform: rotate(-1deg) translateX(8px); background: #253d36; }
+    .screen-lines { display: grid; grid-template-columns: 1fr 1.7fr; gap: 6px; height: 100%; }
+    .block { background: rgba(130, 226, 188, .18); border: 1px solid rgba(130,226,188,.25); }
+    .light-flow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 22px; }
+    .step { min-height: 63px; padding: 10px; border-top: 1px solid #121212; font-size: 11px; }
+    .step b { display: block; font-size: 16px; margin-bottom: 5px; }
+    .large-number { position: absolute; right: 12px; top: 100px; font: 700 170px/1 Arial; color: rgba(161,60,44,.08); }
+    .lab-map { margin-top: 27px; padding: 20px 0; border-top: 1px solid #95a2a6; border-bottom: 1px solid #95a2a6; }
+    .node-row { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+    .node { display: grid; place-items: center; width: 55px; height: 55px; border-radius: 50%; border: 1px solid #176b52; background: #f7faf8; font-size: 9px; text-align: center; }
+    .node.core { width: 78px; height: 78px; background: #176b52; color: white; }
+    .line { flex: 1; height: 1px; background: #7f9690; }
+    .proof { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 18px; }
+    .proof div { min-height: 74px; padding: 9px; background: rgba(255,255,255,.58); border: 1px solid #c8d1d2; font-size: 10px; }
+    .proof b { display: block; font-size: 18px; margin-top: 8px; }
+    .body { padding: 20px 20px 24px; border-top: 1px solid #e0e3e6; }
+    .body h3 { margin: 0 0 7px; font-size: 19px; }
+    .body p { margin: 0; min-height: 66px; color: #60656c; font-size: 13px; line-height: 1.65; }
+    .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+    .tags span { padding: 5px 8px; background: #eff1f3; font-size: 11px; }
+    .recommend { color: #176b52; font-weight: 700; }
+    footer { margin-top: 20px; color: #5d626a; font-size: 13px; }
+    @media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } .mock { min-height: 500px; } header { align-items: start; flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>首页应该如何讲述“智学引擎 A3”？</h1>
+        <p>这一步只比较叙事重心与首屏构图，不是最终视觉稿。点击最接近你期待的一项，也可以回复“以 A 为主，混合 C”。</p>
+      </div>
+      <div class="note">大学生主叙事 / 评委证据层 / 注册后体验</div>
+    </header>
+
+    <section class="grid">
+      <article class="direction" onclick="selectDirection(this, 'A')">
+        <div class="mock dark">
+          <div class="nav"><span class="brand">智学引擎 A3</span><span class="pill">开启旅程</span></div>
+          <div class="hero">
+            <div class="eyebrow">MULTI-AGENT LEARNING SYSTEM</div>
+            <h2>每一次学习，都有一组智能体与你同行。</h2>
+            <p>画像、诊断、知识库、课堂与辅导共同理解你现在在哪里，以及下一步该去哪里。</p>
+            <span class="cta">开启我的智学旅程</span>
+          </div>
+          <div class="screen-stack">
+            <div class="screen"><div class="screen-lines"><div class="block"></div><div class="block"></div></div></div>
+            <div class="screen"><div class="screen-lines"><div class="block"></div><div class="block"></div></div></div>
+            <div class="screen"><div class="screen-lines"><div class="block"></div><div class="block"></div></div></div>
+          </div>
+        </div>
+        <div class="body">
+          <h3>A. 沉浸式产品现场</h3>
+          <p>用真实界面切片和动态学习状态制造第一印象。最像 Awwwards 获奖站，也最能吸引学生继续探索。</p>
+          <div class="tags"><span>强首屏</span><span>真实界面</span><span>滚动叙事</span><span>视频感</span></div>
+        </div>
+      </article>
+
+      <article class="direction" onclick="selectDirection(this, 'B')">
+        <div class="mock light">
+          <div class="large-number">A3</div>
+          <div class="nav"><span class="brand">智学引擎</span><span>登录　开启旅程</span></div>
+          <div class="hero">
+            <div class="eyebrow">A NEW WAY TO LEARN</div>
+            <h2>不是给你更多内容，而是让每一步学习都有依据。</h2>
+            <p>从真实课程资料出发，建立画像、完成诊断，再进入因人而异的课堂与辅导。</p>
+            <span class="cta">开启我的智学旅程</span>
+          </div>
+          <div class="light-flow">
+            <div class="step"><b>01</b>认识你<br>学习画像</div>
+            <div class="step"><b>02</b>找到起点<br>入学诊断</div>
+            <div class="step"><b>03</b>理解资料<br>本地知识库</div>
+            <div class="step"><b>04</b>陪你掌握<br>课堂与辅导</div>
+          </div>
+        </div>
+        <div class="body">
+          <h3>B. 编辑式学习宣言</h3>
+          <p>用鲜明主张和编号流程讲清产品价值。传播性强、文案有记忆点，但技术证据需要后续模块承接。</p>
+          <div class="tags"><span>大字号</span><span>高留白</span><span>流程清晰</span><span>品牌感</span></div>
+        </div>
+      </article>
+
+      <article class="direction" onclick="selectDirection(this, 'C')">
+        <div class="mock lab">
+          <div class="nav"><span class="brand">A3 / 智学引擎</span><span class="pill">系统在线</span></div>
+          <div class="hero">
+            <div class="eyebrow">VERIFIABLE LEARNING LOOP</div>
+            <h2>知识库是底座，智能体让学习持续发生。</h2>
+            <p>所有关键步骤连接真实接口、真实资料和可追踪证据，让个性化学习不是一句口号。</p>
+            <span class="cta">开启我的智学旅程</span>
+          </div>
+          <div class="lab-map">
+            <div class="node-row"><div class="node">画像</div><div class="line"></div><div class="node">诊断</div><div class="line"></div><div class="node core">本地<br>知识库</div><div class="line"></div><div class="node">AI课堂</div><div class="line"></div><div class="node">反馈</div></div>
+          </div>
+          <div class="proof"><div>真实资料<b>可检索</b></div><div>课堂回答<b>有引用</b></div><div>教师干预<b>可追踪</b></div></div>
+        </div>
+        <div class="body">
+          <h3>C. 可验证学习实验室</h3>
+          <p>直接突出知识库底座、智能体协作和验证证据。对比赛评委最有说服力，但对普通学生稍显理性。</p>
+          <div class="tags"><span>系统图</span><span>数据证据</span><span>知识库核心</span><span>评审友好</span></div>
+        </div>
+      </article>
+    </section>
+    <footer><span class="recommend">我的初步建议：</span>A 的沉浸首屏 + B 的易懂文案 + C 的证据结构，最终形成一套混合方案。</footer>
+  </main>
+  <script>
+    function selectDirection(el, value) {
+      document.querySelectorAll('.direction').forEach((item) => item.classList.remove('selected'));
+      el.classList.add('selected');
+      localStorage.setItem('a3-homepage-story-direction', value);
+      document.title = '已选择方向 ' + value + ' - 智学引擎 A3';
+    }
+  </script>
+</body>
+</html>

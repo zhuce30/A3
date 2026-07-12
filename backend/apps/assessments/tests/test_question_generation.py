@@ -387,6 +387,165 @@ class QuestionGenerationApiTests(TestCase):
         self.assertTrue(question.is_active)
         self.assertEqual(question.metadata["reviewReason"], "答案唯一，解析可用")
 
+    def test_teacher_can_list_and_promote_auto_verified_personal_generated_question(self):
+        question = Question.objects.create(
+            knowledge_point=self.point,
+            stem="画像生成的错题变式能否进入教师审核池？",
+            options=[
+                {"key": "A", "text": "可以，教师审核通过后进入正式题库"},
+                {"key": "B", "text": "不可以，永远只能个人使用"},
+                {"key": "C", "text": "无需审核即可进入正式题库"},
+                {"key": "D", "text": "只能被学生自己审核"},
+            ],
+            correct_answer="A",
+            explanation="自动生成题需要教师审核后才进入正式题库。",
+            source_type=QuestionSourceType.VARIANT,
+            review_status=QuestionReviewStatus.AUTO_VERIFIED,
+            scope="personal",
+            owner=self.student,
+            is_active=True,
+            metadata={
+                "questionKind": "wrong_variant",
+                "generationReason": "根据学习画像薄弱点出题",
+                "profileSignals": {"weakPoints": ["闭环控制"], "foundationLevel": "基础薄弱"},
+            },
+        )
+        self.client.force_login(self.teacher)
+
+        list_response = self.client.get("/api/assessments/questions/?status=auto_verified")
+
+        self.assertEqual(list_response.status_code, 200)
+        listed_ids = [item["id"] for item in list_response.json()["questions"]]
+        self.assertIn(str(question.id), listed_ids)
+        listed = next(item for item in list_response.json()["questions"] if item["id"] == str(question.id))
+        self.assertEqual(listed["metadata"]["questionKind"], "wrong_variant")
+
+        review_response = self.client.post(
+            f"/api/assessments/questions/{question.id}/review/",
+            data=json.dumps({"action": "approve", "reason": "个性化变式题可用于正式练习"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(review_response.status_code, 200)
+        question.refresh_from_db()
+        self.assertEqual(question.review_status, QuestionReviewStatus.APPROVED)
+        self.assertEqual(question.scope, "teacher")
+        self.assertTrue(question.is_active)
+        self.assertEqual(question.metadata["originalScope"], "personal")
+        self.assertEqual(question.metadata["originalOwnerId"], str(self.student.id))
+
+    def test_teacher_can_filter_question_bank_by_question_kind(self):
+        scenario = Question.objects.create(
+            knowledge_point=self.point,
+            stem="场景题筛选目标",
+            options=[{"key": "A", "text": "A"}, {"key": "B", "text": "B"}],
+            correct_answer="A",
+            explanation="用于验证题型筛选。",
+            source_type=QuestionSourceType.KB_GENERATED,
+            review_status=QuestionReviewStatus.AUTO_VERIFIED,
+            scope="teacher",
+            metadata={"questionKind": "scenario"},
+        )
+        Question.objects.create(
+            knowledge_point=self.point,
+            stem="概念题不应出现在场景题筛选结果中",
+            options=[{"key": "A", "text": "A"}, {"key": "B", "text": "B"}],
+            correct_answer="A",
+            explanation="用于验证题型筛选隔离。",
+            source_type=QuestionSourceType.KB_GENERATED,
+            review_status=QuestionReviewStatus.AUTO_VERIFIED,
+            scope="teacher",
+            metadata={"questionKind": "concept"},
+        )
+        self.client.force_login(self.teacher)
+
+        response = self.client.get("/api/assessments/questions/?status=auto_verified&questionKind=scenario")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual([item["id"] for item in payload["questions"]], [str(scenario.id)])
+        self.assertEqual(payload["summary"]["count"], 1)
+
+    def test_teacher_can_batch_approve_and_reject_with_editable_reason(self):
+        questions = [
+            Question.objects.create(
+                knowledge_point=self.point,
+                stem=f"批量审核候选题 {index}",
+                options=[{"key": "A", "text": "A"}, {"key": "B", "text": "B"}],
+                correct_answer="A",
+                explanation="用于验证批量审核。",
+                source_type=QuestionSourceType.PERSONAL_GENERATED,
+                review_status=QuestionReviewStatus.AUTO_VERIFIED,
+                scope="personal",
+                owner=self.student,
+                metadata={"questionKind": "application"},
+            )
+            for index in range(3)
+        ]
+        self.client.force_login(self.teacher)
+
+        approve_response = self.client.post(
+            "/api/assessments/questions/batch-review/",
+            data=json.dumps({
+                "questionIds": [str(questions[0].id), str(questions[1].id)],
+                "action": "approve",
+                "reason": "题干清晰，答案与证据一致",
+            }),
+            content_type="application/json",
+        )
+        reject_response = self.client.post(
+            "/api/assessments/questions/batch-review/",
+            data=json.dumps({
+                "questionIds": [str(questions[2].id)],
+                "action": "reject",
+                "reason": "干扰项区分度不足",
+            }),
+            content_type="application/json",
+        )
+
+        self.assertEqual(approve_response.status_code, 200)
+        self.assertEqual(approve_response.json()["processedCount"], 2)
+        self.assertEqual(reject_response.status_code, 200)
+        self.assertEqual(reject_response.json()["processedCount"], 1)
+        for question in questions[:2]:
+            question.refresh_from_db()
+            self.assertEqual(question.review_status, QuestionReviewStatus.APPROVED)
+            self.assertEqual(question.scope, "teacher")
+            self.assertEqual(question.metadata["reviewReason"], "题干清晰，答案与证据一致")
+        questions[2].refresh_from_db()
+        self.assertEqual(questions[2].review_status, QuestionReviewStatus.REJECTED)
+        self.assertFalse(questions[2].is_active)
+        self.assertEqual(questions[2].metadata["reviewReason"], "干扰项区分度不足")
+
+    def test_batch_review_requires_teacher_and_nonempty_reason(self):
+        question = Question.objects.create(
+            knowledge_point=self.point,
+            stem="批量审核权限测试",
+            options=[{"key": "A", "text": "A"}, {"key": "B", "text": "B"}],
+            correct_answer="A",
+            explanation="学生不能审核题目。",
+            source_type=QuestionSourceType.KB_GENERATED,
+            review_status=QuestionReviewStatus.AUTO_VERIFIED,
+            scope="teacher",
+        )
+        payload = {"questionIds": [str(question.id)], "action": "reject", "reason": ""}
+
+        self.client.force_login(self.teacher)
+        missing_reason = self.client.post(
+            "/api/assessments/questions/batch-review/",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+        self.assertEqual(missing_reason.status_code, 400)
+
+        self.client.force_login(self.student)
+        forbidden = self.client.post(
+            "/api/assessments/questions/batch-review/",
+            data=json.dumps({**payload, "reason": "无权限操作"}),
+            content_type="application/json",
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
     def test_student_cannot_review_question(self):
         question = Question.objects.create(
             knowledge_point=self.point,

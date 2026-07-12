@@ -25,6 +25,7 @@ class IndexJobType(models.TextChoices):
     UPLOAD = "upload", "upload"
     REBUILD = "rebuild", "rebuild"
     PARSE = "parse", "parse"
+    WIKI = "wiki", "wiki"
 
 
 class IndexJobStatus(models.TextChoices):
@@ -48,6 +49,7 @@ class KnowledgeIndexJob(models.Model):
     total_files = models.PositiveIntegerField(default=0)
     processed_files = models.PositiveIntegerField(default=0)
     current_file = models.CharField(max_length=255, blank=True)
+    progress_detail = models.JSONField(default=dict, blank=True)
     result = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -356,4 +358,151 @@ class KnowledgeGraphClaim(models.Model):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["owner", "resource"], name="a3_knowled_owner_i_bfc6c5_idx"),
+        ]
+
+
+class KnowledgeConcept(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="knowledge_concepts",
+    )
+    resource = models.ForeignKey(
+        KnowledgeResource,
+        on_delete=models.CASCADE,
+        related_name="concepts",
+    )
+    preferred_label = models.CharField(max_length=160)
+    normalized_label = models.CharField(max_length=180)
+    concept_type = models.CharField(max_length=32, default="concept")
+    summary = models.TextField(blank=True)
+    source_count = models.PositiveIntegerField(default=0)
+    evidence = models.JSONField(default=list, blank=True)
+    confidence = models.FloatField(default=0)
+    schema_version = models.CharField(max_length=64, default="a3.knowledge-wiki.v1")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_knowledge_concepts"
+        ordering = ["preferred_label"]
+        indexes = [
+            models.Index(fields=["owner", "resource"], name="a3_kb_con_owner_res_idx"),
+            models.Index(fields=["owner", "normalized_label"], name="a3_kb_con_owner_label_idx"),
+            models.Index(fields=["concept_type"], name="a3_kb_con_type_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "resource", "normalized_label", "concept_type"],
+                name="a3_unique_kb_concept",
+            ),
+        ]
+
+
+class KnowledgeDefinition(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="knowledge_definitions",
+    )
+    concept = models.ForeignKey(
+        KnowledgeConcept,
+        on_delete=models.CASCADE,
+        related_name="definitions",
+    )
+    resource = models.ForeignKey(
+        KnowledgeResource,
+        on_delete=models.CASCADE,
+        related_name="definitions",
+    )
+    source_block = models.ForeignKey(
+        KnowledgeBlock,
+        on_delete=models.SET_NULL,
+        related_name="definitions",
+        null=True,
+        blank=True,
+    )
+    definition = models.TextField()
+    language = models.CharField(max_length=16, default="zh")
+    evidence = models.JSONField(default=list, blank=True)
+    confidence = models.FloatField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_knowledge_definitions"
+        ordering = ["-confidence", "created_at"]
+        indexes = [
+            models.Index(fields=["owner", "resource"], name="a3_kb_def_owner_res_idx"),
+            models.Index(fields=["concept"], name="a3_kb_def_concept_idx"),
+        ]
+
+
+class KnowledgeAlias(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="knowledge_aliases",
+    )
+    concept = models.ForeignKey(
+        KnowledgeConcept,
+        on_delete=models.CASCADE,
+        related_name="aliases",
+    )
+    alias = models.CharField(max_length=160)
+    normalized_alias = models.CharField(max_length=180)
+    evidence = models.JSONField(default=list, blank=True)
+    confidence = models.FloatField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "a3_knowledge_aliases"
+        ordering = ["alias"]
+        indexes = [
+            models.Index(fields=["owner", "normalized_alias"], name="a3_kb_alias_owner_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "concept", "normalized_alias"],
+                name="a3_unique_kb_alias",
+            ),
+        ]
+
+
+class KnowledgeSummary(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="knowledge_summaries",
+    )
+    concept = models.ForeignKey(
+        KnowledgeConcept,
+        on_delete=models.CASCADE,
+        related_name="summaries",
+        null=True,
+        blank=True,
+    )
+    resource = models.ForeignKey(
+        KnowledgeResource,
+        on_delete=models.CASCADE,
+        related_name="summaries",
+    )
+    title = models.CharField(max_length=200)
+    summary = models.TextField()
+    summary_type = models.CharField(max_length=32, default="document")
+    evidence = models.JSONField(default=list, blank=True)
+    confidence = models.FloatField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_knowledge_summaries"
+        ordering = ["title"]
+        indexes = [
+            models.Index(fields=["owner", "resource"], name="a3_kb_sum_owner_res_idx"),
+            models.Index(fields=["summary_type"], name="a3_kb_sum_type_idx"),
         ]

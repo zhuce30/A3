@@ -12,5 +12,6 @@ urlpatterns = [
     path("report/", views.learning_report, name="learning-report"),
     path("questions/", views.questions, name="question-list"),
     path("questions/generate/", views.generate_questions, name="question-generate"),
+    path("questions/batch-review/", views.batch_review_questions, name="question-batch-review"),
     path("questions/<uuid:question_id>/review/", views.review_question, name="question-review"),
 ]

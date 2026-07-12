@@ -61,4 +61,5 @@ export type A3RealtimeFramePayload = {
   imageDataUrl: string;
   source: 'camera' | 'screen' | 'upload';
   prompt?: string;
+  fast?: boolean;
 };

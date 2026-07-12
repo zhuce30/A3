@@ -46,6 +46,45 @@ type ResourcePackListResponse = {
   resourcePacks?: A3ResourcePackV2[];
 };
 
+type CodeLabTestCase = {
+  name: string;
+  stdin: string;
+  expectedStdout: string;
+};
+
+type CodeLabRunResult = {
+  status: 'passed' | 'failed' | 'timeout' | string;
+  mode: 'run' | 'judge' | string;
+  provider?: string;
+  language?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  durationMs?: number;
+  error?: string;
+  truncated?: boolean;
+  passedCount?: number;
+  totalCount?: number;
+  testResults?: Array<{
+    name: string;
+    passed: boolean;
+    status: string;
+    stdin: string;
+    expectedStdout: string;
+    actualStdout: string;
+    stderr?: string;
+    exitCode?: number | null;
+    durationMs?: number;
+    error?: string;
+  }>;
+};
+
+type CodeLabRunResponse = {
+  success: boolean;
+  error?: string;
+  result?: CodeLabRunResult;
+};
+
 type ResourcePageConfig = {
   slug: string;
   type?: A3ResourcePackV2ResourceType;
@@ -259,7 +298,7 @@ function ResourceBody({
         {resource.type === 'mind_map' && <MindMap resource={resource} />}
         {resource.type === 'practice_set' && <PracticeSet resource={resource} />}
         {resource.type === 'case_study' && <CaseStudy resource={resource} />}
-        {resource.type === 'code_lab' && <CodeLab resource={resource} />}
+        {resource.type === 'code_lab' && <CodeLab key={`${pack.resourcePackId}:${resource.title}`} resource={resource} packId={pack.resourcePackId} />}
       </A3Card>
       <EvidencePanel pack={pack} resource={resource} config={config} feedbackMessage={feedbackMessage} feedbackSaving={feedbackSaving} onFeedback={onFeedback} />
     </div>
@@ -692,29 +731,36 @@ function CaseStudy({ resource }: { resource: A3ResourcePackV2Resource }) {
   );
 }
 
-function CodeLab({ resource }: { resource: A3ResourcePackV2Resource }) {
+function CodeLab({ resource, packId }: { resource: A3ResourcePackV2Resource; packId: string }) {
   const steps = toTextArray(resource.content.steps);
   const checkpoints = toTextArray(resource.content.checkpoints);
   const [checked, setChecked] = useState<Set<number>>(() => new Set());
   const [copyMessage, setCopyMessage] = useState('');
   const language = safeText(resource.content.language, 'Python');
   const starterCode = safeText(resource.content.starterCode, '# 暂无起始代码');
+  const [code, setCode] = useState(starterCode);
+  const [stdin, setStdin] = useState('');
+  const [runningMode, setRunningMode] = useState<'run' | 'judge' | ''>('');
+  const [runResult, setRunResult] = useState<CodeLabRunResult | null>(null);
+  const [runError, setRunError] = useState('');
+  const testCases = buildCodeLabTestCases(resource.content);
   const fileName = codeLabFileName(resource.title, language);
   const runCommand = codeLabRunCommand(fileName, language);
   const completion = checkpoints.length ? Math.round((checked.size / checkpoints.length) * 100) : 0;
+  const inputCount = countPythonInputCalls(code);
 
-  async function copyStarterCode() {
+  async function copyCode() {
     try {
-      await navigator.clipboard.writeText(starterCode);
-      setCopyMessage('已复制起始代码');
+      await navigator.clipboard.writeText(code);
+      setCopyMessage('已复制当前代码');
     } catch {
       setCopyMessage('复制失败，请手动选中代码复制');
     }
     window.setTimeout(() => setCopyMessage(''), 1800);
   }
 
-  function downloadStarterCode() {
-    const blob = new Blob([starterCode], { type: 'text/plain;charset=utf-8' });
+  function downloadCode() {
+    const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
@@ -731,8 +777,28 @@ function CodeLab({ resource }: { resource: A3ResourcePackV2Resource }) {
       return next;
     });
   }
+
+  async function runOnline(mode: 'run' | 'judge') {
+    setRunningMode(mode);
+    setRunError('');
+    setRunResult(null);
+    const result = await a3PostJson<CodeLabRunResponse>(`/api/resources/packs/${packId}/code-lab/run/`, {
+      language,
+      code: stripMarkdownCodeFence(code),
+      stdin,
+      mode,
+      testCases: mode === 'judge' ? testCases : undefined,
+    });
+    setRunningMode('');
+    if (!result.success || !result.result) {
+      setRunError(result.error ?? '代码执行失败');
+      return;
+    }
+    setRunResult(result.result);
+  }
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" data-testid="a3-resource-code-lab-workbench">
       <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
         <div className="text-sm font-semibold text-blue-700">实验目标</div>
         <A3Markdown className="mt-3 text-slate-700">{safeText(resource.content.objective, resource.title)}</A3Markdown>
@@ -752,6 +818,7 @@ function CodeLab({ resource }: { resource: A3ResourcePackV2Resource }) {
               <p className="text-sm leading-6 text-slate-700">{step}</p>
             </div>
           ))}
+          {!steps.length && <div className="text-sm leading-6 text-slate-500">暂无操作步骤。</div>}
         </div>
       </section>
       <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950">
@@ -761,11 +828,14 @@ function CodeLab({ resource }: { resource: A3ResourcePackV2Resource }) {
             <div className="mt-1 font-mono text-xs text-slate-400">{fileName}</div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button type="button" size="sm" variant="outline" className="border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800" onClick={() => void copyStarterCode()}>
+            <Button type="button" size="sm" variant="outline" className="border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800" onClick={() => setCode(starterCode)}>
+              恢复起始代码
+            </Button>
+            <Button type="button" size="sm" variant="outline" className="border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800" onClick={() => void copyCode()}>
               <Copy className="size-4" />
               复制
             </Button>
-            <Button type="button" size="sm" variant="outline" className="border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800" onClick={downloadStarterCode}>
+            <Button type="button" size="sm" variant="outline" className="border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800" onClick={downloadCode}>
               <Download className="size-4" />
               下载
             </Button>
@@ -774,7 +844,47 @@ function CodeLab({ resource }: { resource: A3ResourcePackV2Resource }) {
         <div className="border-b border-slate-800 px-4 py-3 text-sm font-semibold text-slate-200">
           {safeText(resource.content.language, '代码')} 起始代码
         </div>
-        <pre className="max-h-[520px] overflow-auto p-5 text-sm leading-6 text-slate-100">{safeText(resource.content.starterCode, '# 暂无起始代码')}</pre>
+        <textarea
+          value={code}
+          onChange={(event) => setCode(event.target.value)}
+          spellCheck={false}
+          className="min-h-[360px] w-full resize-y bg-slate-950 p-5 font-mono text-sm leading-6 text-slate-100 outline-none"
+          aria-label="代码编辑器"
+        />
+      </section>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-blue-700">在线运行</div>
+            <p className="mt-1 text-xs leading-5 text-slate-500">后端使用受限本地 Python runner，带超时和输出截断；不是前端假运行。</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" className="bg-blue-600 text-white hover:bg-blue-700" disabled={Boolean(runningMode)} onClick={() => void runOnline('run')}>
+              {runningMode === 'run' ? <Loader2 className="size-4 animate-spin" /> : <TerminalSquare className="size-4" />}
+              运行代码
+            </Button>
+            <Button type="button" variant="outline" className="bg-white" disabled={Boolean(runningMode) || !testCases.length} onClick={() => void runOnline('judge')}>
+              {runningMode === 'judge' ? <Loader2 className="size-4 animate-spin" /> : <CheckSquare2 className="size-4" />}
+              提交判题
+            </Button>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+          <label className="block text-xs font-semibold text-slate-600" htmlFor="a3-code-lab-stdin">标准输入 stdin</label>
+          <span className="text-xs text-slate-500">
+            {inputCount > 0 ? `检测到 ${inputCount} 处 input()，请按顺序逐行输入。` : '当前代码没有 input()，这里可以留空。'}
+          </span>
+        </div>
+        <textarea
+          id="a3-code-lab-stdin"
+          value={stdin}
+          onChange={(event) => setStdin(event.target.value)}
+          placeholder={inputCount > 0 ? '每行对应一次 input()，例如第一行给第一个 input。' : '当前代码无需输入，可以留空。'}
+          className="mt-2 min-h-20 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm leading-6 text-slate-800 outline-none focus:border-blue-400 focus:bg-white"
+        />
+        {!testCases.length && <div className="mt-2 text-xs text-slate-500">当前资源没有测试用例，暂不能判题；可以先运行代码查看输出。</div>}
+        {runError && <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{runError}</div>}
+        {runResult && <CodeLabRunResultPanel result={runResult} />}
       </section>
       <section className="rounded-2xl border border-slate-200 bg-white p-5">
         <div className="flex flex-wrap items-center gap-2 text-sm text-slate-700">
@@ -807,8 +917,7 @@ function CodeLab({ resource }: { resource: A3ResourcePackV2Resource }) {
           {!checkpoints.length && <div className="text-sm leading-6 text-slate-500">暂无检查点。</div>}
         </div>
       </section>
-      <section className="grid gap-3 md:grid-cols-2">
-        <TextPanel title="检查点" items={checkpoints} />
+      <section className="rounded-2xl border border-slate-200 bg-white p-5">
         <TextPanel title="扩展任务" items={[safeText(resource.content.extension, '完成基础实验后，尝试修改参数并解释输出差异。')]} />
       </section>
     </div>
@@ -820,6 +929,60 @@ function MiniLabMetric({ label, value, wide = false }: { label: string; value: s
     <div className={wide ? 'col-span-2 md:col-span-1' : ''}>
       <div className="text-[11px] text-slate-500">{label}</div>
       <div className="mt-1 truncate font-semibold text-slate-900" title={value}>{value}</div>
+    </div>
+  );
+}
+
+function CodeLabRunResultPanel({ result }: { result: CodeLabRunResult }) {
+  const isPassed = result.status === 'passed';
+  const isTimeout = result.status === 'timeout';
+  return (
+    <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3">
+        <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+          <A3Pill tone={isPassed ? 'green' : isTimeout ? 'orange' : 'red'}>{result.status}</A3Pill>
+          <span>{result.mode === 'judge' ? '判题结果' : '运行结果'}</span>
+        </div>
+        <div className="text-xs text-slate-500">
+          {result.provider ?? 'local_subprocess'} · {result.durationMs ?? 0}ms
+        </div>
+      </div>
+      {result.mode === 'judge' ? (
+        <div className="divide-y divide-slate-100">
+          <div className="px-4 py-3 text-sm text-slate-700">
+            通过 {result.passedCount ?? 0}/{result.totalCount ?? 0} 个测试用例
+          </div>
+          {(result.testResults ?? []).map((item, index) => (
+            <div key={`${item.name}-${index}`} className="px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm font-semibold text-slate-900">{item.name}</div>
+                <A3Pill tone={item.passed ? 'green' : item.status === 'timeout' ? 'orange' : 'red'}>{item.passed ? '通过' : item.status}</A3Pill>
+              </div>
+              <div className="mt-3 grid gap-3 text-xs md:grid-cols-2">
+                <CodeOutputBlock title="期望输出" value={item.expectedStdout || '(空输出)'} />
+                <CodeOutputBlock title="实际输出" value={item.actualStdout || '(空输出)'} />
+              </div>
+              {item.stderr && <CodeOutputBlock className="mt-3" title="stderr" value={item.stderr} />}
+              {item.error && <div className="mt-2 text-xs text-red-600">{item.error}</div>}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="grid gap-3 p-4 text-xs md:grid-cols-2">
+          <CodeOutputBlock title="stdout" value={result.stdout || '(空输出)'} />
+          <CodeOutputBlock title="stderr" value={result.stderr || '(无错误输出)'} />
+          {result.error && <div className="md:col-span-2 text-red-600">{result.error}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CodeOutputBlock({ title, value, className = '' }: { title: string; value: string; className?: string }) {
+  return (
+    <div className={className}>
+      <div className="mb-1 font-semibold text-slate-500">{title}</div>
+      <pre className="max-h-56 overflow-auto rounded-xl bg-slate-950 p-3 font-mono text-xs leading-5 text-slate-100">{value}</pre>
     </div>
   );
 }
@@ -853,6 +1016,35 @@ function codeLabRunCommand(fileName: string, language: string) {
   if (fileName.endsWith('.c')) return `gcc ${fileName} -o lab && ./lab`;
   if (fileName.endsWith('.js')) return `node ${fileName}`;
   return `打开 ${fileName} 查看`;
+}
+
+function buildCodeLabTestCases(content: Record<string, unknown>): CodeLabTestCase[] {
+  const explicitCases = arrayOfRecords(content.testCases)
+    .map((item, index) => ({
+      name: safeText(item.name, `用例 ${index + 1}`),
+      stdin: safeText(item.stdin ?? item.input, ''),
+      expectedStdout: safeText(item.expectedStdout ?? item.expectedOutput ?? item.output, ''),
+    }))
+    .filter((item) => item.expectedStdout);
+  if (explicitCases.length) return explicitCases.slice(0, 12);
+  return [];
+}
+
+function countPythonInputCalls(code: string) {
+  const matches = stripMarkdownCodeFence(code).match(/\binput\s*\(/g);
+  return matches?.length ?? 0;
+}
+
+function stripMarkdownCodeFence(code: string) {
+  const text = code.trim();
+  const lines = text.split(/\r?\n/);
+  if (lines.length >= 2 && lines[0].trim().startsWith('```') && lines[lines.length - 1].trim() === '```') {
+    return `${lines.slice(1, -1).join('\n').trim()}\n`;
+  }
+  if (lines[0]?.trim().startsWith('```')) {
+    return `${lines.slice(1).join('\n').trim()}\n`;
+  }
+  return code;
 }
 
 function KnowledgeCards({ resource }: { resource: A3ResourcePackV2Resource }) {

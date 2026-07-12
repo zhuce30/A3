@@ -17,6 +17,7 @@ from backend.apps.compat.models import OpenMAICArtifact
 from backend.apps.engagement.models import NotificationType, UserNotification
 from backend.apps.engagement.services import create_notification, ensure_learning_reminders
 from backend.apps.knowledge_base.display import format_source_display_location, format_source_type_label, source_origin_label
+from backend.apps.knowledge_base.services import accessible_resources_for_user
 from backend.apps.knowledge_base.models import IndexJobStatus, KnowledgeAsset, KnowledgeBlock, KnowledgeIndexJob, KnowledgeResource, ResourceScope, ResourceStatus
 from backend.core.settings import FAISS_INDEX_DIR
 from backend.domains.knowledge_base.lexical_retriever import search_lexical_knowledge_base
@@ -2433,7 +2434,7 @@ def classroom_context(user) -> dict:
     point = current.knowledge_point if current else None
     graph = knowledge_graph(user, course=path.course)
     weak_nodes = [node for node in graph["nodes"] if node["status"] in {"weak", "learning"}][:4]
-    sources = _knowledge_sources(point)
+    sources = _knowledge_sources(user, point)
     wrong_count = 0
     if point:
         wrong_count = WrongQuestion.objects.filter(user=user, question__knowledge_point=point, mastered=False).count()
@@ -3085,10 +3086,10 @@ def _serialize_classroom_target(item: LearningPathItem, wrong_count: int) -> dic
     }
 
 
-def _knowledge_sources(point: KnowledgePoint | None) -> list[dict]:
+def _knowledge_sources(user, point: KnowledgePoint | None) -> list[dict]:
     if not point:
         return []
-    resource_names = _indexed_resource_names()
+    resource_names = _indexed_resource_names(user)
     sources: list[dict] = []
     sources.append({
         "id": "course-point",
@@ -3134,10 +3135,10 @@ def _append_recent_upload_sources(sources: list[dict], resource_names: dict[str,
     return sources
 
 
-def _indexed_resource_names() -> dict[str, str]:
+def _indexed_resource_names(user) -> dict[str, str]:
     return {
         stored_path: original_name
-        for stored_path, original_name in KnowledgeResource.objects.filter(
+        for stored_path, original_name in accessible_resources_for_user(user).filter(
             status=ResourceStatus.INDEXED,
         ).values_list("stored_path", "original_name")
         if stored_path

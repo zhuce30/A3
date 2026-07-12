@@ -1711,15 +1711,7 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
         return {
             "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
             "sourceIds": source_ids,
-            "sections": [
-                {"heading": "学习目标", "body": f"围绕“{goal}”建立可复述、可做题、可迁移到课程任务的理解。{profile_line}", "sourceIds": source_ids[:2]},
-                {"heading": "先修知识", "body": f"先确认相关术语、背景场景和公式/协议/流程含义。资料证据：{_join_snippets(evidence[:2])}", "sourceIds": source_ids[:2]},
-                {"heading": "核心概念拆解", "body": f"{primary}。把定义拆成对象、条件、过程、结果四部分，再逐项对应到当前课程材料。", "sourceIds": source_ids[:3]},
-                {"heading": "推导与步骤", "body": _step_explanation(goal, evidence), "sourceIds": source_ids[:4]},
-                {"heading": "例题/场景应用", "body": f"选取资料中的场景，先写出已知条件，再说明为什么要使用“{goal}”，最后给出判断或计算结论。", "sourceIds": source_ids[:4]},
-                {"heading": "常见误区", "body": _misconception_text(goal, weak_points, evidence), "sourceIds": source_ids[:3]},
-                {"heading": "课后复盘", "body": "用 3 句话完成复盘：概念是什么、证据来自哪份资料、下一题如何判断是否该用这个知识点。", "sourceIds": source_ids[:2]},
-            ],
+            "sections": _lecture_doc_sections(goal, evidence, source_ids, profile_line, weak_points),
         }
     if resource_type == "knowledge_card":
         cards = [
@@ -1761,6 +1753,8 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
             "sourceIds": source_ids,
         }
     if resource_type == "code_lab":
+        keywords = _keywords_for_goal(goal, evidence)[:4]
+        expected_score = _code_lab_expected_score(keywords, evidence[:4])
         return {
             "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
             "language": "Python",
@@ -1784,7 +1778,7 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
                 "evidences = [",
                 *[f"    Evidence({json.dumps(item['title'], ensure_ascii=False)}, {round(1 - index * 0.08, 2)})," for index, item in enumerate(evidence[:4])],
                 "]",
-                f"keywords = [{', '.join(json.dumps(token, ensure_ascii=False) for token in _keywords_for_goal(goal, evidence)[:4])}]",
+                f"keywords = [{', '.join(json.dumps(token, ensure_ascii=False) for token in keywords)}]",
                 "print(score_understanding(keywords, evidences))",
             ]),
             "steps": [
@@ -1795,6 +1789,13 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
                 "把实验结论写成 3 行：依据、判断、下一步复习动作。",
             ],
             "expectedOutput": "输出 0.0 到 1.0 之间的小数；分数越高，说明关键词和资料证据匹配越充分。",
+            "testCases": [
+                {
+                    "name": "默认资料匹配分",
+                    "stdin": "",
+                    "expectedStdout": f"{expected_score}\n",
+                }
+            ],
             "checkpoints": [
                 "能说明每条 Evidence 来自哪份资料。",
                 "能解释关键词为什么能代表当前知识点。",
@@ -1821,13 +1822,82 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
     }
 
 
+def _lecture_doc_sections(goal: str, evidence: list[dict], source_ids: list[str], profile_line: str, weak_points: list[str]) -> list[dict]:
+    if _is_deadlock_topic(goal, evidence):
+        return _deadlock_lecture_sections(goal, evidence, source_ids, profile_line)
+    primary = evidence[0]["snippet"] if evidence else goal
+    return [
+        {"heading": "学习目标", "body": f"围绕“{goal}”建立可复述、可做题、可迁移到课程任务的理解。{profile_line}", "sourceIds": source_ids[:2]},
+        {"heading": "先修知识", "body": f"先确认相关术语、背景场景和公式/协议/流程含义。资料证据：{_join_snippets(evidence[:2])}", "sourceIds": source_ids[:2]},
+        {"heading": "核心概念拆解", "body": f"先给出一句话定义：{primary}。再明确概念边界、适用条件、典型表现和判断依据，避免把相近概念混为一谈。", "sourceIds": source_ids[:3]},
+        {"heading": "推导与步骤", "body": _step_explanation(goal, evidence), "sourceIds": source_ids[:4]},
+        {"heading": "例题/场景应用", "body": f"选取资料中的场景，先写出已知条件，再说明为什么要使用“{goal}”，最后给出判断或计算结论。", "sourceIds": source_ids[:4]},
+        {"heading": "常见误区", "body": _misconception_text(goal, weak_points, evidence), "sourceIds": source_ids[:3]},
+        {"heading": "课后复盘", "body": "用 3 句话完成复盘：概念是什么、证据来自哪份资料、下一题如何判断是否该用这个知识点。", "sourceIds": source_ids[:2]},
+    ]
+
+
+def _deadlock_lecture_sections(goal: str, evidence: list[dict], source_ids: list[str], profile_line: str) -> list[dict]:
+    evidence_text = _join_snippets(evidence[:2]) or "死锁是多个进程因竞争资源而互相等待，导致都无法继续推进的状态。"
+    return [
+        {
+            "heading": "学习目标",
+            "body": f"本讲围绕“{goal}”建立三件事：能判断什么是死锁，能说明死锁产生条件，能用银行家算法分析系统是否安全。{profile_line}",
+            "sourceIds": source_ids[:2],
+        },
+        {
+            "heading": "生活化引入",
+            "body": "可以把死锁理解成两个人各拿着对方需要的工具，同时又不愿先放下自己手里的工具。两人都在等待对方释放资源，结果谁也无法继续。操作系统中的进程竞争打印机、磁带机、锁等资源时，也可能出现这种互相等待。",
+            "sourceIds": source_ids[:2],
+        },
+        {
+            "heading": "核心概念拆解",
+            "body": f"死锁是多个进程在并发执行中，因为争夺有限资源而形成的永久等待状态。关键词不是“慢”或“暂时阻塞”，而是形成互相等待链，且没有外部干预就无法继续。资料证据：{evidence_text}",
+            "sourceIds": source_ids[:3],
+        },
+        {
+            "heading": "死锁的四个必要条件",
+            "body": "死锁同时满足四个必要条件：1. 互斥，一个资源同一时刻只能被一个进程占用；2. 占有并等待，进程已经占有部分资源，同时继续请求新资源；3. 不可剥夺，资源不能被系统强行抢走，只能由占有者主动释放；4. 循环等待，存在 P1 等 P2、P2 等 P3、最终又等回 P1 的等待环。破坏任意一个条件，都可以预防死锁。",
+            "sourceIds": source_ids[:3],
+        },
+        {
+            "heading": "资源分配图怎么判断",
+            "body": "资源分配图用圆表示进程，用方框表示资源。进程指向资源表示请求边，资源指向进程表示分配边。若图中不存在环，一定没有死锁；若每类资源只有一个实例，出现环就意味着死锁；若某类资源有多个实例，有环只说明可能死锁，还需要进一步检测。",
+            "sourceIds": source_ids[:4],
+        },
+        {
+            "heading": "处理死锁的四类方法",
+            "body": "死锁处理通常分为四类：预防，通过破坏四个必要条件避免死锁；避免，在分配前判断是否会进入不安全状态，典型方法是银行家算法；检测，允许系统运行后定期检查是否已经死锁；解除，发现死锁后通过撤销进程、回滚或剥夺资源恢复系统。",
+            "sourceIds": source_ids[:4],
+        },
+        {
+            "heading": "银行家算法步骤",
+            "body": "银行家算法用 Available、Max、Allocation、Need 四类数据判断系统是否安全。Need = Max - Allocation。判断时先找一个 Need 小于等于 Available 的进程，假设它能完成并释放 Allocation；更新 Available 后继续寻找下一个进程。如果能让所有进程依次完成，就存在安全序列，系统处于安全状态；否则是不安全状态。",
+            "sourceIds": source_ids[:4],
+        },
+        {
+            "heading": "常见误区",
+            "body": "第一，不安全状态不一定已经死锁，只是未来可能进入死锁。第二，资源分配图有环不一定死锁，要看资源实例数量。第三，阻塞、饥饿和死锁不同：阻塞可能很快解除，饥饿是长期得不到资源，死锁是多个进程构成互相等待。第四，银行家算法判断的是安全性，不是直接检测当前是否已经死锁。",
+            "sourceIds": source_ids[:3],
+        },
+        {
+            "heading": "课后复盘",
+            "body": "复习时按这条线索自测：先说出死锁定义，再背出四个必要条件，然后画资源分配图，最后用银行家算法判断是否存在安全序列。做题时优先写 Need 表和 Available 变化过程，避免只凭直觉判断。",
+            "sourceIds": source_ids[:2],
+        },
+    ]
+
+
 def _normalized_resource_sources(sources: list[dict], *, limit: int, goal: str) -> list[dict]:
     normalized: list[dict] = []
+    require_deadlock_evidence = _is_deadlock_topic(goal, [])
     for index, source in enumerate(sources or [], start=1):
         if not isinstance(source, dict):
             continue
         snippet = str(source.get("snippet") or "").strip()
         if not snippet:
+            continue
+        if require_deadlock_evidence and not _source_mentions_deadlock(source):
             continue
         normalized.append({
             "id": str(source.get("id") or f"source-{index}"),
@@ -1849,6 +1919,11 @@ def _normalized_resource_sources(sources: list[dict], *, limit: int, goal: str) 
         "score": None,
         "snippet": f"当前学习目标是“{goal}”，资源基于画像、学习路径和今日任务生成。",
     }]
+
+
+def _source_mentions_deadlock(source: dict) -> bool:
+    text = f"{source.get('title', '')} {source.get('snippet', '')} {source.get('location', '')}"
+    return any(keyword in text for keyword in ("死锁", "银行家", "资源分配图", "循环等待", "deadlock", "Deadlock"))
 
 
 def _fallback_mind_map_content(goal: str, evidence: list[dict], source_ids: list[str], weak_points: list[str], profile: LearnerProfile | None) -> dict:
@@ -2089,7 +2164,7 @@ def _resource_llm_requirements(resource_type: str) -> dict:
         "mind_map": {"nodes": "至少 7 个一级节点，每个 3-5 个 children，并标 sourceIds；同时输出 markdown 和 mermaid。结构必须像真实思维导图：中心主题、概念边界、核心机制、证据来源、题型路径、易错点、复习动作。操作系统死锁主题必须覆盖四个必要条件、资源分配图、银行家算法、检测与解除"},
         "practice_set": {"questions": "至少 8 题，覆盖概念、选择、填空、应用、分析、纠错、迁移、反思，含 answer/explanation/sourceIds"},
         "case_study": {"case": "包含 scenario/background/task/materials/steps/analysis/reflection/sourceIds"},
-        "code_lab": {"lab": "包含 language/objective/environment/starterCode/steps/expectedOutput/checkpoints/extension/sourceIds"},
+        "code_lab": {"lab": "包含 language/objective/environment/starterCode/steps/expectedOutput/testCases/checkpoints/extension/sourceIds，testCases 必须能用于真实 runner 判题"},
         "micro_video_script": {"shots": "至少 7 个镜头，每个含 scene/durationSeconds/visual/narration/sourceIds；visual 只能描述无文字画面，所有中文概念放到 narration，不要要求视频模型生成板书、字幕、标题或屏幕文字"},
     }[resource_type]
 
@@ -2116,6 +2191,15 @@ def _is_rich_resource_content(resource_type: str, content: dict) -> bool:
 
 def _join_snippets(evidence: list[dict]) -> str:
     return "；".join(str(item.get("snippet") or "")[:140] for item in evidence if item.get("snippet"))
+
+
+def _code_lab_expected_score(keywords: list[str], evidence: list[dict]) -> float:
+    matched = 0
+    titles = [str(item.get("title") or "") for item in evidence]
+    for keyword in keywords:
+        if any(str(keyword) in title for title in titles):
+            matched += 1
+    return round(matched / max(1, len(keywords)), 2)
 
 
 def _short_snippet(evidence: list[dict], index: int) -> str:

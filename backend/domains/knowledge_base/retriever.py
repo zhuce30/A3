@@ -27,10 +27,17 @@ def search_knowledge_base(
     candidate_multiplier: int = 20,
     force_lexical: bool = False,
     visual_use_embedding: bool = True,
+    retrieval_mode: str = "auto",
+    similarity_threshold: float = 0.0,
+    bm25_candidate_count: int | None = None,
+    vector_weight: float = 0.7,
+    bm25_weight: float = 0.3,
 ) -> list[KnowledgeBaseSearchResult]:
     normalized_scope_by_path = _normalize_source_scope_by_path(source_scope_by_path)
-    lexical_top_k = min(max(top_k * max(1, int(candidate_multiplier)), top_k), 200)
-    if force_lexical or not _embedding_model_available_locally(embed_model_name):
+    retrieval_mode = retrieval_mode if retrieval_mode in {"auto", "hybrid", "vector", "bm25"} else "auto"
+    apply_weights = retrieval_mode in {"hybrid", "vector", "bm25"}
+    lexical_top_k = min(max(int(bm25_candidate_count or 0), top_k), 200) if bm25_candidate_count else min(max(top_k * max(1, int(candidate_multiplier)), top_k), 200)
+    if force_lexical or retrieval_mode == "bm25" or not _embedding_model_available_locally(embed_model_name):
         text_results = search_lexical_knowledge_base(
             query=query,
             top_k=lexical_top_k,
@@ -44,6 +51,10 @@ def search_knowledge_base(
             allowed_source_paths,
             source_scope_by_path=normalized_scope_by_path,
             visual_use_embedding=visual_use_embedding,
+            similarity_threshold=similarity_threshold,
+            vector_weight=vector_weight,
+            bm25_weight=bm25_weight,
+            apply_weights=apply_weights,
         )
     try:
         index = _load_knowledge_base_index(persist_dir=persist_dir, embed_model_name=embed_model_name)
@@ -64,6 +75,10 @@ def search_knowledge_base(
             allowed_source_paths,
             source_scope_by_path=normalized_scope_by_path,
             visual_use_embedding=visual_use_embedding,
+            similarity_threshold=similarity_threshold,
+            vector_weight=vector_weight,
+            bm25_weight=bm25_weight,
+            apply_weights=apply_weights,
         )
 
     results: list[KnowledgeBaseSearchResult] = []
@@ -80,11 +95,21 @@ def search_knowledge_base(
             continue
         if normalized_course and str(metadata.get("course", "")).strip().lower() != normalized_course:
             continue
+        metadata.setdefault("retriever", "vector")
         results.append(
             KnowledgeBaseSearchResult(
                 score=float(item.score) if item.score is not None else None,
                 text=node.get_content()[:1200],
                 metadata=metadata,
+            )
+        )
+    if retrieval_mode == "hybrid":
+        results.extend(
+            search_lexical_knowledge_base(
+                query=query,
+                top_k=lexical_top_k,
+                allowed_source_paths=allowed_source_paths,
+                course=course,
             )
         )
     return _merge_visual_results(
@@ -94,6 +119,10 @@ def search_knowledge_base(
         allowed_source_paths,
         source_scope_by_path=normalized_scope_by_path,
         visual_use_embedding=visual_use_embedding,
+        similarity_threshold=similarity_threshold,
+        vector_weight=vector_weight,
+        bm25_weight=bm25_weight,
+        apply_weights=apply_weights,
     )
 
 
@@ -104,6 +133,10 @@ def _merge_visual_results(
     allowed_source_paths: set[str] | None,
     source_scope_by_path: dict[str, str] | None = None,
     visual_use_embedding: bool = True,
+    similarity_threshold: float = 0.0,
+    vector_weight: float = 0.7,
+    bm25_weight: float = 0.3,
+    apply_weights: bool = False,
 ) -> list[KnowledgeBaseSearchResult]:
     normalized_scope_by_path = _normalize_source_scope_by_path(source_scope_by_path)
     try:
@@ -119,7 +152,18 @@ def _merge_visual_results(
     merged: list[KnowledgeBaseSearchResult] = []
     seen: set[tuple[str, str, str]] = set()
     scoped_results = [_apply_scope_metadata(item, normalized_scope_by_path) for item in [*text_results, *visual_results]]
+    if apply_weights:
+        scoped_results = [
+            _apply_retrieval_weight(
+                item,
+                vector_weight=vector_weight,
+                bm25_weight=bm25_weight,
+            )
+            for item in scoped_results
+        ]
     for item in sorted(scoped_results, key=lambda result: result.score or 0, reverse=True):
+        if similarity_threshold and (item.score or 0) < similarity_threshold:
+            continue
         metadata = item.metadata or {}
         key = (
             str(metadata.get("source_path") or ""),
@@ -133,6 +177,31 @@ def _merge_visual_results(
         if len(merged) >= top_k:
             break
     return merged
+
+
+def _apply_retrieval_weight(
+    result: KnowledgeBaseSearchResult,
+    *,
+    vector_weight: float,
+    bm25_weight: float,
+) -> KnowledgeBaseSearchResult:
+    metadata = dict(result.metadata or {})
+    retriever = str(metadata.get("retriever") or "").lower()
+    original_score = float(result.score or 0)
+    if retriever in {"bm25", "keyword"}:
+        weight = bm25_weight
+    elif retriever in {"vector", "visual_vector"}:
+        weight = vector_weight
+    else:
+        weight = 1.0
+    metadata.setdefault("pre_weight_score", round(original_score, 4))
+    metadata["retrieval_weight"] = round(weight, 4)
+    metadata["weighted_score"] = round(original_score * weight, 4)
+    return KnowledgeBaseSearchResult(
+        score=round(original_score * weight, 4) if result.score is not None else None,
+        text=result.text,
+        metadata=metadata,
+    )
 
 
 def _normalize_source_scope_by_path(source_scope_by_path: dict[str, str] | None) -> dict[str, str]:

@@ -185,6 +185,29 @@ class LearningEvent(models.Model):
         ]
 
 
+class LearningSummaryDocument(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="learning_summary_documents")
+    title = models.CharField(max_length=120)
+    file_name = models.CharField(max_length=180)
+    prompt = models.CharField(max_length=240, blank=True)
+    content_md = models.TextField()
+    summary_date = models.DateField(default=timezone.localdate)
+    source_snapshot = models.JSONField(default=dict, blank=True)
+    schema_version = models.CharField(max_length=64, default="a3.learning-summary-document.v1")
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_learning_summary_documents"
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="idx_summary_user_time"),
+            models.Index(fields=["user", "summary_date"], name="idx_summary_user_date"),
+        ]
+        constraints = [models.UniqueConstraint(fields=["user", "file_name"], name="unique_user_summary_file_name")]
+
+
 class CoachingSessionStatus(models.TextChoices):
     ACTIVE = "active", "进行中"
     ENDED = "ended", "已结束"

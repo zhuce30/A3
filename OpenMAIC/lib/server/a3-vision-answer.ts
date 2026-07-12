@@ -52,6 +52,11 @@ type AnswerA3VisionQuestionInput = {
   cookieHeader: string | null;
   image: string;
   message: string;
+  options?: {
+    timeoutMs?: number;
+    includeKnowledgeEvidence?: boolean;
+    verify?: boolean;
+  };
 };
 
 type AnswerA3TextQuestionWithVisualEvidenceInput = {
@@ -184,9 +189,12 @@ export async function answerA3TextQuestionWithVisualEvidence({ cookieHeader, mes
   }
 }
 
-export async function answerA3VisionQuestion({ cookieHeader, image, message }: AnswerA3VisionQuestionInput) {
+export async function answerA3VisionQuestion({ cookieHeader, image, message, options }: AnswerA3VisionQuestionInput) {
   const normalizedImage = image.trim();
   const normalizedMessage = message.trim() || '请观察这张课堂图片，识别与学习相关的题目、公式或板书，并结合当前学习目标给出解答。';
+  const includeKnowledgeEvidence = options?.includeKnowledgeEvidence ?? true;
+  const shouldVerify = options?.verify ?? true;
+  const timeoutMs = options?.timeoutMs ?? 60_000;
 
   if (!normalizedImage) return apiError('MISSING_REQUIRED_FIELD', 400, '请提供图片附件');
   if (normalizedImage.length > MAX_IMAGE_DATA_URL_LENGTH || !IMAGE_DATA_URL_PATTERN.test(normalizedImage)) {
@@ -221,7 +229,7 @@ export async function answerA3VisionQuestion({ cookieHeader, image, message }: A
   const baseUrl = (process.env.A3_VISION_COACHING_BASE_URL || process.env.A3_COACHING_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/$/, '');
   const model = process.env.A3_VISION_COACHING_MODEL || 'qwen-vl-plus';
   const contextPrompt = buildA3CoachingContextPrompt(classroomResult.classroom);
-  const knowledgeEvidence = await fetchA3VisionKnowledgeEvidence(cookieHeader, normalizedMessage);
+  const knowledgeEvidence = includeKnowledgeEvidence ? await fetchA3VisionKnowledgeEvidence(cookieHeader, normalizedMessage) : [];
 
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
@@ -241,7 +249,7 @@ export async function answerA3VisionQuestion({ cookieHeader, image, message }: A
         },
       ],
     }),
-    signal: AbortSignal.timeout(60_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   const result = await response.json() as {
@@ -252,6 +260,24 @@ export async function answerA3VisionQuestion({ cookieHeader, image, message }: A
 
   const reply = result.choices?.[0]?.message?.content?.trim();
   if (!reply) return apiError('UPSTREAM_ERROR', 502, '视觉辅导服务未返回有效内容');
+
+  if (!shouldVerify) {
+    const citations = buildA3VisionEvidenceCitations(knowledgeEvidence);
+    return apiSuccess({
+      reply,
+      verified: false,
+      citations,
+      claims: [],
+      safety: { safe: true, category: 'fast_visual_analysis', reason: '实时截图快速模式跳过二次验证' },
+      refusalReason: '',
+      degraded: false,
+      followUps: buildA3VisionFollowUps({
+        verified: false,
+        citations,
+        message: normalizedMessage,
+      }),
+    });
+  }
 
   const verification = await verifyVisionReply(cookieHeader, normalizedMessage, reply, classroomResult.classroom, knowledgeEvidence);
   const mergedCitations = mergeA3VisionCitations(verification.citations ?? [], knowledgeEvidence);

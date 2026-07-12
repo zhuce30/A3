@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, time, timedelta
 from urllib.parse import quote
 
@@ -10,14 +11,26 @@ from backend.apps.assessments.adaptive import select_adaptive_questions, update_
 from backend.apps.assessments.models import (
     AssessmentAnswer,
     AssessmentSession,
+    PersonalQuestionSequence,
     Question,
     QuestionEvidence,
     QuestionReviewStatus,
+    QuestionSourceType,
+    QuestionType,
     SessionStatus,
     WrongQuestion,
 )
+from backend.apps.assessments.personal_question_llm import generate_grounded_personal_candidates
+from backend.apps.knowledge_base.models import KnowledgeBlock, ResourceScope, ResourceStatus
 from backend.apps.learning.effect_events import record_learning_event
 from backend.apps.learning.models import KnowledgePoint, LearningPath, LearningPathStatus, PathItemStatus, ResourcePackLog
+
+
+logger = logging.getLogger(__name__)
+
+PERSONAL_POOL_LOW_WATERMARK = 6
+PERSONAL_POOL_TARGET_SIZE = 12
+PERSONAL_POOL_MAX_ACTIVE = 40
 
 
 MOJIBAKE_MARKERS = (
@@ -97,12 +110,13 @@ def _ensure_default_assessment_questions() -> None:
 
 
 def _selectable_question_queryset(user, *, mode: str = "assessment"):
-    queryset = Question.objects.filter(is_active=True).select_related("knowledge_point__chapter")
+    queryset = Question.objects.filter(is_active=True, archived_at__isnull=True).select_related("knowledge_point__chapter")
     if mode == "practice":
+        answered_question_ids = AssessmentAnswer.objects.filter(session__user=user).values("question_id")
         return queryset.filter(
             models.Q(review_status=QuestionReviewStatus.APPROVED)
             | models.Q(review_status=QuestionReviewStatus.AUTO_VERIFIED, owner=user)
-        )
+        ).exclude(id__in=answered_question_ids)
     return queryset.filter(review_status=QuestionReviewStatus.APPROVED)
 
 
@@ -119,6 +133,7 @@ def _session_can_continue(session: AssessmentSession, path: LearningPath | None 
 
 def serialize_question(question: Question, include_answer: bool = False) -> dict:
     evidence_items = list(getattr(question, "evidence_items", QuestionEvidence.objects.none()).all()[:3])
+    metadata = question.metadata if isinstance(question.metadata, dict) else {}
     payload = {
         "id": str(question.id),
         "stem": question.stem,
@@ -139,6 +154,9 @@ def serialize_question(question: Question, include_answer: bool = False) -> dict
         },
         "evidence": [serialize_question_evidence(item) for item in evidence_items],
     }
+    personalization = _serialize_question_personalization(metadata)
+    if personalization:
+        payload["personalization"] = personalization
     if include_answer:
         payload.update({
             "correctAnswer": question.correct_answer,
@@ -159,6 +177,29 @@ def serialize_question_evidence(evidence: QuestionEvidence) -> dict:
         "quote": evidence.quote,
         "modality": evidence.modality,
         "score": evidence.score,
+    }
+
+
+def _serialize_question_personalization(metadata: dict) -> dict | None:
+    profile_signals = metadata.get("profileSignals")
+    generation_reason = str(metadata.get("generationReason") or "").strip()
+    source_evidence = metadata.get("sourceEvidence")
+    question_kind = str(metadata.get("questionKind") or "").strip()
+    variant_context = metadata.get("variantContext")
+    llm = metadata.get("llm")
+    if not isinstance(profile_signals, dict) and not generation_reason and not source_evidence and not question_kind:
+        return None
+    return {
+        "questionKind": question_kind,
+        "variantIndex": int(metadata.get("variantIndex") or 0),
+        "variantContext": variant_context if isinstance(variant_context, dict) else {},
+        "generationMode": str(metadata.get("generationMode") or "rules"),
+        "reasoningForm": str(metadata.get("reasoningForm") or ""),
+        "llm": llm if isinstance(llm, dict) else {},
+        "generationReason": generation_reason,
+        "foundationLevel": str((profile_signals or {}).get("foundationLevel") or "") if isinstance(profile_signals, dict) else "",
+        "profileSignals": profile_signals if isinstance(profile_signals, dict) else {},
+        "sourceEvidence": source_evidence if isinstance(source_evidence, list) else [],
     }
 
 
@@ -275,6 +316,683 @@ def resolve_practice_knowledge_point(user, knowledge_point: str) -> KnowledgePoi
     return queryset.filter(title__icontains=title).order_by("chapter__order", "order").first()
 
 
+def _ensure_personalized_practice_questions(
+    user,
+    *,
+    point: KnowledgePoint | None,
+    path: LearningPath | None,
+    requested_title: str,
+    needed: int,
+) -> KnowledgePoint | None:
+    if needed <= 0:
+        return point
+    target = _profile_priority_practice_point(user, point=point, path=path, requested_title=requested_title)
+    if not target:
+        return None
+    distractors = _practice_distractor_points(target, path)
+    profile_signals = _assessment_profile_signals(user, target)
+    source_evidence = _collect_practice_source_evidence(user, target, requested_title=requested_title)
+    variant_indexes = _reserve_personal_variant_indexes(user, target, needed)
+    for variant_index in variant_indexes:
+        distractor_offset = (variant_index - 1) % max(len(distractors), 1)
+        rotated_distractors = distractors[distractor_offset:] + distractors[:distractor_offset]
+        evidence_offset = (variant_index - 1) % max(len(source_evidence), 1)
+        rotated_evidence = source_evidence[evidence_offset:] + source_evidence[:evidence_offset]
+        _upsert_personalized_practice_question(
+            user,
+            target,
+            rotated_distractors,
+            requested_title,
+            variant_index,
+            profile_signals=profile_signals,
+            source_evidence=rotated_evidence,
+        )
+    _archive_excess_personal_questions(user, target)
+    return target
+
+
+def _generate_personal_pool_questions(
+    user,
+    point: KnowledgePoint,
+    *,
+    path: LearningPath | None,
+    needed: int,
+) -> dict:
+    if needed <= 0:
+        return {"llmGenerated": 0, "ruleGenerated": 0, "llmRejected": 0, "llmFallback": False, "llmError": ""}
+    distractors = _practice_distractor_points(point, path)
+    profile_signals = _assessment_profile_signals(user, point)
+    source_evidence = _collect_practice_source_evidence(user, point, requested_title=point.title)
+    variant_indexes = _reserve_personal_variant_indexes(user, point, needed)
+    evidence_rows = _source_evidence_metadata(source_evidence, point) if source_evidence else []
+    llm_batch = generate_grounded_personal_candidates(
+        point_title=point.title,
+        variant_indexes=variant_indexes,
+        profile_signals=profile_signals,
+        evidence_rows=evidence_rows,
+    )
+    candidates_by_index = {int(item["variantIndex"]): item for item in llm_batch.candidates}
+    llm_generated = 0
+    rule_generated = 0
+    llm_quality_rejected = 0
+    for variant_index in variant_indexes:
+        candidate = candidates_by_index.get(variant_index)
+        if candidate:
+            question = _create_grounded_llm_practice_question(
+                user,
+                point,
+                candidate,
+                profile_signals=profile_signals,
+                source_evidence=source_evidence,
+                provider=llm_batch.provider,
+                model=llm_batch.model,
+            )
+            if question.review_status == QuestionReviewStatus.AUTO_VERIFIED and question.is_active:
+                llm_generated += 1
+            else:
+                llm_quality_rejected += 1
+            continue
+        _create_rule_practice_variant(
+            user,
+            point,
+            distractors,
+            variant_index,
+            profile_signals=profile_signals,
+            source_evidence=source_evidence,
+        )
+        rule_generated += 1
+
+    remaining = max(0, needed - llm_generated - rule_generated)
+    if remaining:
+        _ensure_personalized_practice_questions(
+            user,
+            point=point,
+            path=path,
+            requested_title=point.title,
+            needed=remaining,
+        )
+        rule_generated += remaining
+    return {
+        "llmGenerated": llm_generated,
+        "ruleGenerated": rule_generated,
+        "llmRejected": llm_batch.rejected_count + llm_quality_rejected,
+        "llmFallback": llm_batch.fallback,
+        "llmError": llm_batch.error,
+        "llmProvider": llm_batch.provider,
+        "llmModel": llm_batch.model,
+    }
+
+
+def _create_rule_practice_variant(
+    user,
+    point: KnowledgePoint,
+    distractors: list[KnowledgePoint],
+    variant_index: int,
+    *,
+    profile_signals: dict,
+    source_evidence: list[KnowledgeBlock],
+) -> Question:
+    distractor_offset = (variant_index - 1) % max(len(distractors), 1)
+    rotated_distractors = distractors[distractor_offset:] + distractors[:distractor_offset]
+    evidence_offset = (variant_index - 1) % max(len(source_evidence), 1)
+    rotated_evidence = source_evidence[evidence_offset:] + source_evidence[:evidence_offset]
+    return _upsert_personalized_practice_question(
+        user,
+        point,
+        rotated_distractors,
+        point.title,
+        variant_index,
+        profile_signals=profile_signals,
+        source_evidence=rotated_evidence,
+    )
+
+
+def _create_grounded_llm_practice_question(
+    user,
+    point: KnowledgePoint,
+    candidate: dict,
+    *,
+    profile_signals: dict,
+    source_evidence: list[KnowledgeBlock],
+    provider: str,
+    model: str,
+) -> Question:
+    from backend.apps.assessments.verification import verify_question
+
+    block_by_id = {str(block.id): block for block in source_evidence}
+    cited_blocks = [block_by_id[block_id] for block_id in candidate["evidenceBlockIds"] if block_id in block_by_id]
+    if not cited_blocks:
+        raise ValueError("LLM candidate does not cite an allowed evidence block")
+    variant_index = int(candidate["variantIndex"])
+    evidence_rows = _source_evidence_metadata(cited_blocks, point)
+    variant_context = _variant_context(variant_index, cited_blocks)
+    variant_context["scenario"] = candidate["questionKind"]
+    metadata = {
+        "generatedBy": "assessment_practice_supply",
+        "generationMode": "grounded_llm",
+        "requestedKnowledgePoint": point.title,
+        "baseKnowledgePointId": str(point.id),
+        "variantIndex": variant_index,
+        "variantContext": variant_context,
+        "questionKind": candidate["questionKind"],
+        "reasoningForm": candidate["reasoningForm"],
+        "profileSignals": profile_signals,
+        "generationReason": "根据学习画像和已索引资料证据生成，并经过自动质量验证",
+        "sourceEvidence": evidence_rows,
+        "citedEvidenceBlockIds": candidate["evidenceBlockIds"],
+        "llm": {"provider": provider, "model": model, "fallback": False},
+    }
+    primary_block = cited_blocks[0]
+    question = Question.objects.create(
+        owner=user,
+        knowledge_point=point,
+        stem=candidate["stem"],
+        options=candidate["options"],
+        correct_answer=candidate["correctAnswer"],
+        explanation=candidate["explanation"],
+        error_cause=candidate["errorCause"][:255],
+        difficulty=_foundation_adjusted_difficulty(profile_signals, point, variant_index),
+        question_type=QuestionType.SINGLE_CHOICE,
+        source_type=QuestionSourceType.PERSONAL_GENERATED,
+        review_status=QuestionReviewStatus.DRAFT,
+        scope="personal",
+        is_active=False,
+        source_resource=primary_block.resource,
+        source_block_id=str(primary_block.id),
+        evidence_summary=str(primary_block.text or primary_block.markdown or "")[:500],
+        metadata=metadata,
+    )
+    for block in cited_blocks:
+        QuestionEvidence.objects.create(
+            question=question,
+            resource=block.resource,
+            block_id=str(block.id),
+            page_number=block.page.page_number if block.page else None,
+            quote=str(block.text or block.markdown or "")[:500],
+            modality=block.modality,
+            score=float(block.confidence or 0.5),
+        )
+    verify_question(question, checker="practice_supply")
+    return question
+
+
+def _unseen_personal_pool_queryset(user, point: KnowledgePoint):
+    answered_question_ids = AssessmentAnswer.objects.filter(session__user=user).values("question_id")
+    return Question.objects.filter(
+        owner=user,
+        knowledge_point=point,
+        is_active=True,
+        archived_at__isnull=True,
+        review_status=QuestionReviewStatus.AUTO_VERIFIED,
+        metadata__generatedBy="assessment_practice_supply",
+    ).exclude(id__in=answered_question_ids)
+
+
+def _archive_excess_personal_questions(
+    user,
+    point: KnowledgePoint,
+    *,
+    max_active: int = PERSONAL_POOL_MAX_ACTIVE,
+) -> int:
+    pool = Question.objects.filter(
+        owner=user,
+        knowledge_point=point,
+        is_active=True,
+        archived_at__isnull=True,
+        review_status=QuestionReviewStatus.AUTO_VERIFIED,
+        metadata__generatedBy="assessment_practice_supply",
+    )
+    excess = max(0, pool.count() - max(1, int(max_active)))
+    if not excess:
+        return 0
+
+    protected_ids = set()
+    for question_ids in AssessmentSession.objects.filter(
+        user=user,
+        status=SessionStatus.IN_PROGRESS,
+    ).values_list("question_ids", flat=True):
+        if isinstance(question_ids, list):
+            protected_ids.update(str(question_id) for question_id in question_ids)
+    answered = AssessmentAnswer.objects.filter(session__user=user, question_id=models.OuterRef("pk"))
+    candidates = list(
+        pool.exclude(id__in=protected_ids)
+        .annotate(was_answered=models.Exists(answered))
+        .order_by("-was_answered", "created_at")[:excess]
+    )
+    archived_at = timezone.now()
+    for question in candidates:
+        metadata = dict(question.metadata) if isinstance(question.metadata, dict) else {}
+        metadata.update({
+            "archiveReason": "personal_pool_capacity",
+            "archivedAt": archived_at.isoformat(),
+        })
+        question.metadata = metadata
+        question.archived_at = archived_at
+        question.is_active = False
+    if candidates:
+        Question.objects.bulk_update(candidates, ["metadata", "archived_at", "is_active"])
+    return len(candidates)
+
+
+@transaction.atomic
+def refill_personal_question_pool(user, point: KnowledgePoint, *, target_size: int = PERSONAL_POOL_TARGET_SIZE) -> dict:
+    target_size = max(1, min(int(target_size), 20))
+    sequence, _ = PersonalQuestionSequence.objects.get_or_create(user=user, knowledge_point=point)
+    PersonalQuestionSequence.objects.select_for_update().get(pk=sequence.pk)
+    supply = Question.objects.filter(
+        owner=user,
+        knowledge_point=point,
+        metadata__generatedBy="assessment_practice_supply",
+    )
+    existing_ids = set(supply.values_list("id", flat=True))
+    archived = _archive_excess_personal_questions(user, point)
+    before = _unseen_personal_pool_queryset(user, point).count()
+    needed = max(0, target_size - before)
+    generation_stats = {
+        "llmGenerated": 0,
+        "ruleGenerated": 0,
+        "llmRejected": 0,
+        "llmFallback": False,
+        "llmError": "",
+        "llmProvider": "",
+        "llmModel": "",
+    }
+    if needed:
+        path = LearningPath.objects.filter(user=user, status=LearningPathStatus.ACTIVE).first()
+        generation_stats = _generate_personal_pool_questions(
+            user,
+            point,
+            path=path,
+            needed=needed,
+        )
+    archived += _archive_excess_personal_questions(user, point)
+    generated_questions = supply.exclude(id__in=existing_ids)
+    generated_count = generated_questions.count()
+    verified_count = generated_questions.filter(
+        review_status=QuestionReviewStatus.AUTO_VERIFIED,
+        is_active=True,
+        archived_at__isnull=True,
+    ).count()
+    rejected_count = generated_questions.filter(review_status=QuestionReviewStatus.REJECTED).count()
+    after = _unseen_personal_pool_queryset(user, point).count()
+    return {
+        "before": before,
+        "available": after,
+        "generated": generated_count,
+        "verified": verified_count,
+        "rejected": rejected_count,
+        "archived": archived,
+        "targetSize": target_size,
+        **generation_stats,
+    }
+
+
+def _schedule_personal_pool_refill(user, point: KnowledgePoint) -> None:
+    if _unseen_personal_pool_queryset(user, point).count() >= PERSONAL_POOL_LOW_WATERMARK:
+        return
+
+    user_id = str(user.id)
+    point_id = str(point.id)
+
+    def dispatch() -> None:
+        from celery import current_app
+
+        try:
+            current_app.send_task(
+                "assessments.refill_personal_question_pool",
+                args=[user_id, point_id],
+                kwargs={"target_size": PERSONAL_POOL_TARGET_SIZE},
+            )
+        except Exception:
+            logger.warning(
+                "Failed to dispatch personal question pool refill for user=%s point=%s",
+                user_id,
+                point_id,
+                exc_info=True,
+            )
+
+    transaction.on_commit(dispatch)
+
+
+@transaction.atomic
+def _reserve_personal_variant_indexes(user, point: KnowledgePoint, count: int) -> list[int]:
+    if count <= 0:
+        return []
+    sequence, _ = PersonalQuestionSequence.objects.get_or_create(user=user, knowledge_point=point)
+    sequence = PersonalQuestionSequence.objects.select_for_update().get(pk=sequence.pk)
+    existing_indexes = []
+    for metadata in Question.objects.filter(owner=user, knowledge_point=point).values_list("metadata", flat=True):
+        if not isinstance(metadata, dict):
+            continue
+        try:
+            existing_indexes.append(int(metadata.get("variantIndex") or 0))
+        except (TypeError, ValueError):
+            continue
+    start = max(sequence.next_variant_index, max(existing_indexes, default=0) + 1)
+    sequence.next_variant_index = start + count
+    sequence.save(update_fields=["next_variant_index", "updated_at"])
+    return list(range(start, start + count))
+
+
+def _profile_priority_practice_point(
+    user,
+    *,
+    point: KnowledgePoint | None,
+    path: LearningPath | None,
+    requested_title: str,
+) -> KnowledgePoint | None:
+    if point:
+        return point
+    profile = getattr(user, "learner_profile", None)
+    requested = str(requested_title or "").strip()
+    candidates: list[str] = []
+    if requested:
+        candidates.append(requested)
+    if profile and isinstance(profile.weak_points, list):
+        candidates.extend(str(item).strip() for item in profile.weak_points if str(item).strip())
+    for title in candidates:
+        match = _find_knowledge_point_by_title(title, path)
+        if match:
+            return match
+    return _fallback_practice_point(path)
+
+
+def _find_knowledge_point_by_title(title: str, path: LearningPath | None) -> KnowledgePoint | None:
+    if not title:
+        return None
+    queryset = KnowledgePoint.objects.all()
+    if path:
+        path_ids = list(path.items.order_by("order").values_list("knowledge_point_id", flat=True))
+        exact = queryset.filter(id__in=path_ids, title=title).first()
+        if exact:
+            return exact
+        partial = queryset.filter(id__in=path_ids, title__icontains=title).order_by("chapter__order", "order").first()
+        if partial:
+            return partial
+    exact = queryset.filter(title=title).order_by("chapter__order", "order").first()
+    if exact:
+        return exact
+    return queryset.filter(title__icontains=title).order_by("chapter__order", "order").first()
+
+
+def _fallback_practice_point(path: LearningPath | None) -> KnowledgePoint | None:
+    if not path:
+        return KnowledgePoint.objects.order_by("chapter__course__code", "chapter__order", "order").first()
+    current = path.items.filter(status=PathItemStatus.CURRENT).select_related("knowledge_point").first()
+    if current:
+        return current.knowledge_point
+    first = path.items.order_by("order").select_related("knowledge_point").first()
+    return first.knowledge_point if first else None
+
+
+def _practice_distractor_points(point: KnowledgePoint, path: LearningPath | None) -> list[KnowledgePoint]:
+    queryset = KnowledgePoint.objects.exclude(id=point.id)
+    if path:
+        path_ids = list(path.items.order_by("order").values_list("knowledge_point_id", flat=True))
+        path_points = list(queryset.filter(id__in=path_ids).order_by("chapter__order", "order")[:3])
+        if len(path_points) >= 3:
+            return path_points
+    return list(queryset.filter(chapter__course=point.chapter.course).order_by("chapter__order", "order")[:3])
+
+
+def _assessment_profile_signals(user, point: KnowledgePoint) -> dict:
+    profile = getattr(user, "learner_profile", None)
+    recent_wrongs = list(
+        WrongQuestion.objects.filter(user=user, mastered=False, question__knowledge_point=point)
+        .select_related("question")
+        .order_by("-last_wrong_at")[:3]
+    )
+    recent_error_causes: list[str] = []
+    for wrong in recent_wrongs:
+        cause = str(wrong.question.error_cause or "").strip()
+        if cause and cause not in recent_error_causes:
+            recent_error_causes.append(cause)
+    return {
+        "foundationLevel": str(getattr(profile, "foundation_level", "") or ""),
+        "weakPoints": [str(item).strip() for item in (getattr(profile, "weak_points", []) or []) if str(item).strip()] if profile else [],
+        "learningGoals": [str(item).strip() for item in (getattr(profile, "learning_goals", []) or []) if str(item).strip()] if profile else [],
+        "expectedResources": [str(item).strip() for item in (getattr(profile, "expected_resources", []) or []) if str(item).strip()] if profile else [],
+        "recentErrorCauses": recent_error_causes,
+        "targetKnowledgePoint": point.title,
+    }
+
+
+def _collect_practice_source_evidence(user, point: KnowledgePoint, *, requested_title: str) -> list[KnowledgeBlock]:
+    keywords = [point.title, str(requested_title or "").strip(), point.chapter.title]
+    keywords = [item for item in dict.fromkeys(keywords) if item]
+    queryset = (
+        KnowledgeBlock.objects.filter(
+            resource__status__in=[ResourceStatus.INDEXED, ResourceStatus.INDEXED_WITH_WARNINGS],
+        )
+        .filter(
+            models.Q(resource__owner=user)
+            | models.Q(resource__resource_scope__in=[ResourceScope.TEACHER, ResourceScope.CLASS, ResourceScope.GLOBAL])
+        )
+        .select_related("resource", "page", "asset")
+        .exclude(text="")
+    )
+    if point.chapter.course.code:
+        queryset = queryset.filter(models.Q(resource__course_key="") | models.Q(resource__course_key=point.chapter.course.code))
+    keyword_filter = models.Q()
+    for keyword in keywords:
+        keyword_filter |= models.Q(text__icontains=keyword) | models.Q(markdown__icontains=keyword)
+    if keyword_filter:
+        queryset = queryset.filter(keyword_filter)
+    return list(queryset.order_by("-confidence", "-resource__created_at", "created_at")[:3])
+
+
+def _source_evidence_metadata(blocks: list[KnowledgeBlock], point: KnowledgePoint) -> list[dict]:
+    if blocks:
+        rows = []
+        for block in blocks:
+            text = str(block.text or block.markdown or "").strip()
+            rows.append({
+                "resourceId": str(block.resource_id),
+                "resourceTitle": block.resource.original_name,
+                "blockId": str(block.id),
+                "pageNumber": block.page.page_number if block.page else None,
+                "quote": text[:240],
+                "modality": block.modality,
+                "score": float(block.confidence or 0.5),
+            })
+        return rows
+    return [{
+        "resourceId": "",
+        "resourceTitle": "当前学习路径",
+        "blockId": f"learning-path:{point.id}",
+        "pageNumber": None,
+        "quote": str(point.description or point.title)[:240],
+        "modality": "learning_path",
+        "score": 0.75,
+    }]
+
+
+def _foundation_adjusted_difficulty(profile_signals: dict, point: KnowledgePoint, variant_index: int) -> int:
+    level = str(profile_signals.get("foundationLevel") or "")
+    base = int(point.difficulty or 2)
+    if any(keyword in level for keyword in ("薄弱", "较弱", "基础弱", "入门")):
+        return max(1, min(2, base))
+    if any(keyword in level for keyword in ("扎实", "较好", "进阶", "优秀")):
+        return max(3, min(5, base + (variant_index % 2)))
+    return max(2, min(4, base))
+
+
+def _explanation_depth(profile_signals: dict) -> str:
+    level = str(profile_signals.get("foundationLevel") or "")
+    if any(keyword in level for keyword in ("薄弱", "较弱", "基础弱", "入门")):
+        return "解析会先说明概念边界，再说明排除干扰项的理由。"
+    if any(keyword in level for keyword in ("扎实", "较好", "进阶", "优秀")):
+        return "解析会强调适用条件、边界情况和迁移应用。"
+    return "解析会连接定义、场景和常见误区。"
+
+
+def _question_kind(variant_index: int) -> str:
+    kinds = ["concept", "scenario", "judgement_correction", "application", "wrong_variant"]
+    return kinds[(variant_index - 1) % len(kinds)]
+
+
+def _variant_context(variant_index: int, source_evidence: list[KnowledgeBlock]) -> dict:
+    scenarios = ["课堂案例", "实验调试", "项目评审", "错题复盘", "真实决策", "迁移训练"]
+    scenario = scenarios[(variant_index - 1) % len(scenarios)]
+    parameter = 10 + ((variant_index * 17) % 89)
+    primary_block = source_evidence[0] if source_evidence else None
+    return {
+        "scenario": scenario,
+        "parameter": parameter,
+        "distractorOffset": (variant_index - 1) % 3,
+        "evidenceBlockId": str(primary_block.id) if primary_block else "",
+    }
+
+
+def _upsert_personalized_practice_question(
+    user,
+    point: KnowledgePoint,
+    distractors: list[KnowledgePoint],
+    requested_title: str,
+    variant_index: int,
+    *,
+    profile_signals: dict,
+    source_evidence: list[KnowledgeBlock],
+) -> Question:
+    from backend.apps.assessments.verification import verify_question
+
+    focus = str(requested_title or point.title).strip() or point.title
+    description = str(point.description or point.title).strip()
+    while len(distractors) < 3:
+        distractors.append(point)
+    kind = _question_kind(variant_index)
+    variant_context = _variant_context(variant_index, source_evidence)
+    recent_error = (profile_signals.get("recentErrorCauses") or ["概念边界不清"])[0]
+    evidence_rows = _source_evidence_metadata(source_evidence, point)
+    evidence_quote = evidence_rows[0]["quote"] or description
+    stem, options = _personalized_question_content(
+        kind=kind,
+        focus=focus,
+        point=point,
+        distractors=distractors,
+        description=description,
+        recent_error=recent_error,
+        evidence_quote=evidence_quote,
+    )
+    stem = f"{stem}（场景：{variant_context['scenario']}；参数：{variant_context['parameter']}）"
+    difficulty = _foundation_adjusted_difficulty(profile_signals, point, variant_index)
+    reason_parts = ["根据学习画像薄弱点出题", f"当前知识点：{point.title}"]
+    if profile_signals.get("foundationLevel"):
+        reason_parts.append(f"基础水平：{profile_signals['foundationLevel']}")
+    if profile_signals.get("recentErrorCauses"):
+        reason_parts.append("结合最近错因设计易错干扰项")
+    if source_evidence:
+        reason_parts.append("引用已上传资料作为证据")
+    metadata = {
+        "generatedBy": "assessment_practice_supply",
+        "requestedKnowledgePoint": focus,
+        "baseKnowledgePointId": str(point.id),
+        "variantIndex": variant_index,
+        "variantContext": variant_context,
+        "questionKind": kind,
+        "profileSignals": profile_signals,
+        "generationReason": "；".join(reason_parts),
+        "sourceEvidence": evidence_rows,
+    }
+    primary_block = source_evidence[0] if source_evidence else None
+    question = Question.objects.create(
+        owner=user,
+        knowledge_point=point,
+        stem=stem,
+        options=options,
+        correct_answer="A",
+        explanation=f"本题用于巩固“{focus}”。正确选项围绕“{point.title}”的核心目标，并结合证据“{evidence_quote[:80]}”。{_explanation_depth(profile_signals)}",
+        error_cause=f"{recent_error}；需要先抓住“{focus}”的定义、目标和适用范围，再判断相邻知识点是否只是干扰。",
+        difficulty=difficulty,
+        question_type=QuestionType.SINGLE_CHOICE,
+        source_type=QuestionSourceType.VARIANT,
+        review_status=QuestionReviewStatus.DRAFT,
+        scope="personal",
+        is_active=False,
+        source_resource=primary_block.resource if primary_block else None,
+        source_block_id=str(primary_block.id) if primary_block else f"learning-path:{point.id}",
+        evidence_summary=evidence_quote[:500],
+        metadata=metadata,
+    )
+    question.evidence_items.all().delete()
+    if source_evidence:
+        for block in source_evidence[:3]:
+            QuestionEvidence.objects.create(
+                question=question,
+                resource=block.resource,
+                block_id=str(block.id),
+                page_number=block.page.page_number if block.page else None,
+                quote=str(block.text or block.markdown or "")[:500],
+                modality=block.modality,
+                score=float(block.confidence or 0.5),
+            )
+    else:
+        QuestionEvidence.objects.create(
+            question=question,
+            block_id=f"learning-path:{point.id}",
+            quote=description,
+            modality="learning_path",
+            score=0.8,
+        )
+    verify_question(question, checker="practice_supply")
+    return question
+
+
+def _personalized_question_content(
+    *,
+    kind: str,
+    focus: str,
+    point: KnowledgePoint,
+    distractors: list[KnowledgePoint],
+    description: str,
+    recent_error: str,
+    evidence_quote: str,
+) -> tuple[str, list[dict]]:
+    short_desc = description[:56] or point.title
+    evidence_hint = evidence_quote[:64] or short_desc
+    if kind == "scenario":
+        stem = f"场景题：学习“{focus}”时，资料提示“{evidence_hint}”。下列处理方式哪一项最适合？"
+        options = [
+            {"key": "A", "text": f"先解释{point.title}的目标，再结合场景判断适用条件"},
+            {"key": "B", "text": f"直接套用{distractors[0].title}，不检查题目场景"},
+            {"key": "C", "text": f"只记住结论，忽略“{recent_error}”这一类错因"},
+            {"key": "D", "text": f"把{distractors[1].title}作为唯一判断标准"},
+        ]
+    elif kind == "judgement_correction":
+        stem = f"判断纠错题：关于“{focus}”，哪一项判断和修正最合理？"
+        options = [
+            {"key": "A", "text": f"若出现“{recent_error}”，应回到{point.title}的定义和适用范围修正"},
+            {"key": "B", "text": f"只要出现相似术语，就都归为{distractors[0].title}"},
+            {"key": "C", "text": f"遇到不会的题时跳过概念边界，直接背{distractors[1].title}"},
+            {"key": "D", "text": f"不需要引用资料证据，只凭印象判断“{focus}”"},
+        ]
+    elif kind == "application":
+        stem = f"应用题：如果要把“{focus}”用于课堂练习或实验复盘，最关键的第一步是什么？"
+        options = [
+            {"key": "A", "text": f"明确{point.title}要解决的问题，再选择例题或实验验证"},
+            {"key": "B", "text": f"优先扩展到{distractors[0].title}，暂时不处理当前薄弱点"},
+            {"key": "C", "text": f"只整理资料标题，不检查“{focus}”的理解是否正确"},
+            {"key": "D", "text": f"把{distractors[2].title}的结论直接迁移到所有题目"},
+        ]
+    elif kind == "wrong_variant":
+        stem = f"错因变式题：你最近容易出现“{recent_error}”。围绕“{focus}”，哪项能避免这个错误？"
+        options = [
+            {"key": "A", "text": f"先区分{point.title}与相邻知识点，再根据证据完成判断"},
+            {"key": "B", "text": f"继续把{distractors[0].title}和“{focus}”混用"},
+            {"key": "C", "text": f"只看关键词相似度，不回到定义和场景"},
+            {"key": "D", "text": f"把一次错题答案当作所有{point.title}题目的固定答案"},
+        ]
+    else:
+        stem = f"概念辨析题：围绕“{focus}”的个性化专项练习，以下哪项最符合该知识点的学习目标？"
+        options = [
+            {"key": "A", "text": f"理解{point.title}：{short_desc}"},
+            {"key": "B", "text": f"只关注{distractors[0].title}，不处理“{focus}”的核心目标"},
+            {"key": "C", "text": f"跳过概念辨析，直接记忆{distractors[1].title}的结论"},
+            {"key": "D", "text": f"把{distractors[2].title}当作“{focus}”的唯一考点"},
+        ]
+    return stem, options
+
+
 @transaction.atomic
 def create_assessment(
     user,
@@ -306,24 +1024,54 @@ def create_assessment(
         current.completed_at = timezone.now()
         current.save(update_fields=["status", "completed_at"])
 
-    queryset = _selectable_question_queryset(user, mode=mode)
+    practice_point = None
+    base_queryset = _selectable_question_queryset(user, mode=mode)
+    queryset = base_queryset
     if path:
         queryset = queryset.filter(knowledge_point__chapter__course=path.course)
     if mode == "practice" and knowledge_point:
-        point = resolve_practice_knowledge_point(user, knowledge_point)
-        queryset = queryset.filter(knowledge_point=point) if point else queryset.none()
+        practice_point = resolve_practice_knowledge_point(user, knowledge_point)
+        queryset = queryset.filter(knowledge_point=practice_point) if practice_point else queryset.none()
     question_limit = max(1, min(int(limit or 12), 20))
     if path:
         point_ids = list(path.items.order_by("order").values_list("knowledge_point_id", flat=True))
         path_questions = _valid_questions(queryset.filter(knowledge_point_id__in=point_ids))
         if not path_questions and mode == "assessment":
-            _ensure_default_assessment_questions()
-            queryset = _selectable_question_queryset(user, mode=mode).filter(knowledge_point__chapter__course=path.course)
-            path_questions = _valid_questions(queryset.filter(knowledge_point_id__in=point_ids))
+            path_questions = _valid_questions(base_queryset)
+            if not path_questions:
+                _ensure_default_assessment_questions()
+                queryset = _selectable_question_queryset(user, mode=mode).filter(knowledge_point__chapter__course=path.course)
+                path_questions = _valid_questions(queryset.filter(knowledge_point_id__in=point_ids))
         order = {str(point_id): index for index, point_id in enumerate(point_ids)}
         path_questions.sort(key=lambda item: (order.get(str(item.knowledge_point_id), 999), item.difficulty))
         candidate_questions = path_questions
     else:
+        candidate_questions = _valid_questions(queryset)
+    if not candidate_questions and path:
+        fallback_queryset = base_queryset
+        if mode == "practice" and knowledge_point:
+            practice_point = practice_point or resolve_practice_knowledge_point(user, knowledge_point)
+            fallback_queryset = fallback_queryset.filter(knowledge_point=practice_point) if practice_point else fallback_queryset.none()
+        candidate_questions = _valid_questions(fallback_queryset)
+    if mode == "practice" and strategy == "default" and len(candidate_questions) < question_limit:
+        practice_point = _ensure_personalized_practice_questions(
+            user,
+            point=practice_point,
+            path=path,
+            requested_title=knowledge_point,
+            needed=question_limit - len(candidate_questions),
+        ) or practice_point
+        queryset = _selectable_question_queryset(user, mode=mode)
+        practice_point_outside_path = bool(
+            path
+            and practice_point
+            and practice_point.chapter.course_id != path.course_id
+        )
+        if path and not practice_point_outside_path:
+            queryset = queryset.filter(knowledge_point__chapter__course=path.course)
+        if knowledge_point:
+            practice_point = practice_point or resolve_practice_knowledge_point(user, knowledge_point)
+            queryset = queryset.filter(knowledge_point=practice_point) if practice_point else queryset.none()
         candidate_questions = _valid_questions(queryset)
     selection_metadata = None
     if strategy == "adaptive":
@@ -447,6 +1195,9 @@ def answer_assessment_question(user, session: AssessmentSession, selected_answer
         session.status = SessionStatus.COMPLETED
         session.completed_at = timezone.now()
     session.save(update_fields=["current_index", "score", "status", "completed_at"])
+    question_metadata = question.metadata if isinstance(question.metadata, dict) else {}
+    if question.owner_id == user.id and question_metadata.get("generatedBy") == "assessment_practice_supply":
+        _schedule_personal_pool_refill(user, question.knowledge_point)
     if session.status == SessionStatus.COMPLETED:
         _safe_record_learning_event(
             user,
@@ -516,6 +1267,7 @@ def _sync_wrong_question_learning_state(user, wrong: WrongQuestion) -> None:
     )
 
     plan = generate_study_plan(user, force=True)
+    _ensure_wrong_question_in_plan_review_queue(profile, plan, wrong)
     ensure_learning_reminders(user, plan=plan, motivation={})
     reminder_key = f"wrong-question-added:{wrong.id}"
     if not UserNotification.objects.filter(user=user, payload__reminderKey=reminder_key).exists():
@@ -534,6 +1286,79 @@ def _sync_wrong_question_learning_state(user, wrong: WrongQuestion) -> None:
                 "generatedBy": "assessment_wrong_answer",
             },
         )
+
+
+def _ensure_wrong_question_in_plan_review_queue(profile, plan: dict, wrong: WrongQuestion) -> None:
+    if not isinstance(plan, dict):
+        return
+    review_queue = plan.get("reviewQueue")
+    if not isinstance(review_queue, list):
+        review_queue = []
+        plan["reviewQueue"] = review_queue
+    wrong_id = str(wrong.id)
+    if not any(str(item.get("wrongQuestionId") or "") == wrong_id for item in review_queue if isinstance(item, dict)):
+        review_after = wrong.review_after or (timezone.now() + timedelta(days=1))
+        review_queue.insert(0, {
+            "id": wrong_id,
+            "wrongQuestionId": wrong_id,
+            "questionId": str(wrong.question_id),
+            "title": wrong.question.knowledge_point.title,
+            "knowledgePoint": wrong.question.knowledge_point.title,
+            "errorCause": wrong.question.error_cause or "概念理解不稳",
+            "wrongCount": wrong.wrong_count,
+            "reviewAfter": review_after.isoformat(),
+            "status": "due" if review_after <= timezone.now() else "scheduled",
+            "href": "/a3/wrong-notebook",
+            "source": "assessment_wrong_answer",
+        })
+    extra_profile = profile.extra_profile if isinstance(profile.extra_profile, dict) else {}
+    extra_profile["studyPlan"] = plan
+    profile.extra_profile = extra_profile
+    profile.save(update_fields=["extra_profile", "updated_at"])
+
+
+def merge_active_wrong_questions_into_review_queue(user, plan: dict) -> dict:
+    if not isinstance(plan, dict):
+        return plan
+    review_queue = plan.get("reviewQueue")
+    if not isinstance(review_queue, list):
+        review_queue = []
+    merged = [item for item in review_queue if isinstance(item, dict)]
+    existing_ids = {str(item.get("wrongQuestionId") or "") for item in merged}
+    active_wrongs = (
+        WrongQuestion.objects.filter(user=user, mastered=False)
+        .select_related("question__knowledge_point")
+        .order_by("-wrong_count", "-last_wrong_at")[:20]
+    )
+    for wrong in active_wrongs:
+        wrong_id = str(wrong.id)
+        if wrong_id in existing_ids:
+            continue
+        review_after = wrong.review_after or (timezone.now() + timedelta(days=1))
+        merged.append({
+            "id": wrong_id,
+            "wrongQuestionId": wrong_id,
+            "questionId": str(wrong.question_id),
+            "title": wrong.question.knowledge_point.title,
+            "knowledgePoint": wrong.question.knowledge_point.title,
+            "errorCause": wrong.question.error_cause or "概念理解不稳",
+            "wrongCount": wrong.wrong_count,
+            "reviewAfter": review_after.isoformat(),
+            "status": "due" if review_after <= timezone.now() else "scheduled",
+            "href": "/a3/wrong-notebook",
+            "source": "assessment_wrong_answer",
+        })
+        existing_ids.add(wrong_id)
+    plan["reviewQueue"] = merged
+
+    from backend.apps.profiles.models import LearnerProfile
+
+    profile, _ = LearnerProfile.objects.get_or_create(user=user)
+    extra_profile = dict(profile.extra_profile) if isinstance(profile.extra_profile, dict) else {}
+    extra_profile["studyPlan"] = plan
+    profile.extra_profile = extra_profile
+    profile.save(update_fields=["extra_profile", "updated_at"])
+    return plan
 
 
 def serialize_wrong_question(wrong: WrongQuestion) -> dict:

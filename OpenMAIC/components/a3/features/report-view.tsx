@@ -13,8 +13,10 @@ import {
   Download,
   FileDown,
   FileQuestion,
+  FileText,
   Loader2,
   RotateCcw,
+  Sparkles,
   Target,
   TrendingUp,
 } from 'lucide-react';
@@ -25,13 +27,14 @@ import { GridComponent, LegendComponent, RadarComponent, TooltipComponent } from
 import { SVGRenderer } from 'echarts/renderers';
 import { Button } from '@/components/ui/button';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
-import { a3GetJson } from '@/lib/a3/api-client';
+import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import { trackPageView } from '@/lib/a3/learning-event-client';
 import type { LearningReport } from '@/lib/a3/assessment-types';
 import { buildWeaknessTrendItems } from '@/lib/a3/report-weakness-trends';
 import { buildLearningReportCsv } from '@/lib/a3/report-export';
 import type { A3ApiResponse, StudyPlan, StudyPlanAdjustment } from '@/lib/a3/learning-types';
 import { A3Card, A3Pill } from '../ui/a3-card';
+import { A3Markdown } from '../ui/a3-markdown';
 import { DynamicProfileInsightPanel } from '@/components/a3/profile/dynamic-profile-insight-panel';
 import type { DynamicProfileInsight } from '@/components/a3/profile/dynamic-profile-insight-panel';
 import {
@@ -159,6 +162,33 @@ type OptimizationPolicyResponse = {
   decisionHistory?: OptimizationPolicyDecision[];
 };
 
+type LearningSummaryDocument = {
+  id: string;
+  schemaVersion: string;
+  title: string;
+  fileName: string;
+  prompt: string;
+  contentMd: string;
+  summaryDate: string;
+  createdAt: string;
+  sourceSnapshot?: {
+    eventCounts?: Record<string, number>;
+    reportMetrics?: {
+      accuracy?: number;
+      activeWrongQuestions?: number;
+      pathProgress?: number;
+      studyMinutes?: number;
+    };
+  };
+};
+
+type LearningSummaryDocumentsResponse = {
+  success: boolean;
+  error?: string;
+  document?: LearningSummaryDocument;
+  documents?: LearningSummaryDocument[];
+};
+
 type LearningEffectTrend = {
   days?: number;
   behavior?: {
@@ -194,6 +224,11 @@ export function ReportView() {
   const [studyPlan, setStudyPlan] = useState<StudyPlan | null>(null);
   const [dynamicProfile, setDynamicProfile] = useState<DynamicProfileInsight | null>(null);
   const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
+  const [summaryDocuments, setSummaryDocuments] = useState<LearningSummaryDocument[]>([]);
+  const [selectedSummaryId, setSelectedSummaryId] = useState('');
+  const [summaryPrompt, setSummaryPrompt] = useState('总结我今天学了什么');
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryError, setSummaryError] = useState('');
   const [loading, setLoading] = useState(true);
   const [reportLoading, setReportLoading] = useState(false);
   const [error, setError] = useState('');
@@ -236,10 +271,37 @@ export function ReportView() {
         setDynamicProfile(result.dynamicProfile ?? null);
       }
     });
+    void a3GetJson<LearningSummaryDocumentsResponse>('/api/learning/report-summaries/?limit=20').then((result) => {
+      if (!active) return;
+      if (result.success) {
+        const documents = result.documents ?? [];
+        setSummaryDocuments(documents);
+        setSelectedSummaryId((current) => current || documents[0]?.id || '');
+      }
+    });
     return () => {
       active = false;
     };
   }, []);
+
+  async function generateSummaryDocument() {
+    const prompt = summaryPrompt.trim();
+    if (!prompt) {
+      setSummaryError('请输入一句总结要求');
+      return;
+    }
+    setSummaryLoading(true);
+    setSummaryError('');
+    const result = await a3PostJson<LearningSummaryDocumentsResponse>('/api/learning/report-summaries/', { prompt });
+    setSummaryLoading(false);
+    if (!result.success || !result.document) {
+      setSummaryError(result.error || '学习总结生成失败');
+      return;
+    }
+    const documents = result.documents ?? [result.document];
+    setSummaryDocuments(documents);
+    setSelectedSummaryId(result.document.id);
+  }
 
   function exportReport() {
     if (!report) return;
@@ -403,6 +465,17 @@ export function ReportView() {
         </div>
       </section>
 
+      <LearningSummaryPanel
+        documents={summaryDocuments}
+        selectedId={selectedSummaryId}
+        prompt={summaryPrompt}
+        loading={summaryLoading}
+        error={summaryError}
+        onPromptChange={setSummaryPrompt}
+        onSelect={setSelectedSummaryId}
+        onGenerate={generateSummaryDocument}
+      />
+
       <section className="grid gap-5 2xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.65fr)]">
         <A3Card title="趋势判断" subtitle="作答量、正确率和能力轴放在一起看，先判断节奏是否稳定。">
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]">
@@ -483,6 +556,115 @@ export function ReportView() {
 
       <div className="pb-2 text-center text-xs text-slate-400">报告仅统计系统内已记录的学习行为。</div>
     </div>
+  );
+}
+
+function LearningSummaryPanel({
+  documents,
+  selectedId,
+  prompt,
+  loading,
+  error,
+  onPromptChange,
+  onSelect,
+  onGenerate,
+}: {
+  documents: LearningSummaryDocument[];
+  selectedId: string;
+  prompt: string;
+  loading: boolean;
+  error: string;
+  onPromptChange: (value: string) => void;
+  onSelect: (id: string) => void;
+  onGenerate: () => void;
+}) {
+  const selected = documents.find((item) => item.id === selectedId) ?? documents[0] ?? null;
+  const eventTotal = selected?.sourceSnapshot?.eventCounts
+    ? Object.values(selected.sourceSnapshot.eventCounts).reduce((sum, value) => sum + Number(value || 0), 0)
+    : 0;
+  return (
+    <section data-testid="a3-report-summary-tool" className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <A3Card title="AI 学习总结" subtitle="根据今天真实学习记录生成 Markdown 文档，并保留每次历史。">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+          <label className="block">
+            <span className="text-sm font-semibold text-slate-900">一句话要求</span>
+            <textarea
+              data-testid="a3-report-summary-prompt"
+              value={prompt}
+              maxLength={200}
+              rows={3}
+              onChange={(event) => onPromptChange(event.target.value)}
+              className="mt-2 w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-900 outline-none transition-colors placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+              placeholder="例如：总结我今天学了什么，并给出明天第一步"
+            />
+          </label>
+          <Button
+            data-testid="a3-report-summary-generate"
+            type="button"
+            onClick={onGenerate}
+            disabled={loading}
+            className="bg-blue-600 hover:bg-blue-700 lg:mt-7"
+          >
+            {loading ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+            生成总结
+          </Button>
+        </div>
+        {error && (
+          <div className="mt-3 rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+            {error}
+          </div>
+        )}
+        <div data-testid="a3-report-summary-markdown" className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+          {selected ? (
+            <>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-semibold text-slate-950">{selected.fileName}</div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {formatReportDateTime(selected.createdAt)} · 证据事件 {eventTotal} 条
+                  </p>
+                </div>
+                <A3Pill tone="blue">{selected.schemaVersion}</A3Pill>
+              </div>
+              <A3Markdown className="rounded-lg bg-white p-4 text-slate-700">{selected.contentMd}</A3Markdown>
+            </>
+          ) : (
+            <div className="flex min-h-40 flex-col items-center justify-center text-center text-sm text-slate-500">
+              <FileText className="mb-3 size-8 text-slate-400" />
+              还没有学习总结，输入一句话后生成第一篇 Markdown 文档。
+            </div>
+          )}
+        </div>
+      </A3Card>
+
+      <A3Card title="总结历史">
+        <div data-testid="a3-report-summary-history" className="space-y-2">
+          {documents.length > 0 ? (
+            documents.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onSelect(item.id)}
+                className={`w-full rounded-xl border px-3 py-3 text-left transition-colors ${
+                  item.id === selected?.id ? 'border-blue-300 bg-blue-50' : 'border-slate-200 bg-white hover:border-blue-200'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="line-clamp-1 text-sm font-semibold text-slate-950">{item.title}</span>
+                  <A3Pill tone={item.id === selected?.id ? 'blue' : 'slate'}>{item.summaryDate}</A3Pill>
+                </div>
+                <p className="mt-1 line-clamp-1 text-xs text-slate-500">{item.fileName}</p>
+                <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-600">{item.prompt}</p>
+              </button>
+            ))
+          ) : (
+            <div className="rounded-xl bg-slate-50 px-3 py-4 text-sm leading-6 text-slate-500">
+              每次生成都会保留在这里，文件名按日期和序号递增。
+            </div>
+          )}
+        </div>
+      </A3Card>
+    </section>
   );
 }
 

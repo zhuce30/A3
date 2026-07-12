@@ -15,6 +15,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from typing import Callable
 
 from backend.domains.knowledge_base.document_parse_v2 import finalize_parse_result
 from backend.domains.knowledge_base.markdown_normalizer import normalize_material_markdown
@@ -25,6 +26,8 @@ DEFAULT_PPTX_RENDER_MAX_SLIDES = 120
 DEFAULT_PPTX_OCR_MAX_SLIDES = 40
 DEFAULT_PDF_RENDER_MAX_PAGES = 120
 QWEN_OCR_PROVIDERS = {"qwen_ocr", "qwen-vl-ocr", "qwen_vl_ocr", "qwen_ocr_vl", "qwen_vl"}
+
+ProgressCallback = Callable[[dict], None]
 
 
 @dataclass(frozen=True)
@@ -124,7 +127,7 @@ class MultimodalParseResult:
         )
 
 
-def parse_resource(source_path: Path) -> MultimodalParseResult:
+def parse_resource(source_path: Path, progress_callback: ProgressCallback | None = None) -> MultimodalParseResult:
     source_path = source_path.resolve()
     if not source_path.exists():
         return finalize_parse_result(MultimodalParseResult(
@@ -135,13 +138,13 @@ def parse_resource(source_path: Path) -> MultimodalParseResult:
         ))
     suffix = source_path.suffix.lower()
     if suffix == ".pptx":
-        return finalize_parse_result(_parse_pptx(source_path))
+        return finalize_parse_result(_parse_pptx(source_path, progress_callback=progress_callback))
     if suffix in IMAGE_EXTENSIONS:
-        return finalize_parse_result(_parse_image(source_path))
+        return finalize_parse_result(_parse_image(source_path, progress_callback=progress_callback))
     if suffix == ".xlsx":
         return finalize_parse_result(_parse_xlsx(source_path))
     if suffix == ".pdf":
-        return finalize_parse_result(_parse_pdf(source_path))
+        return finalize_parse_result(_parse_pdf(source_path, progress_callback=progress_callback))
     return finalize_parse_result(MultimodalParseResult(
         parser="native",
         status="failed",
@@ -150,7 +153,7 @@ def parse_resource(source_path: Path) -> MultimodalParseResult:
     ))
 
 
-def _parse_image(source_path: Path) -> MultimodalParseResult:
+def _parse_image(source_path: Path, progress_callback: ProgressCallback | None = None) -> MultimodalParseResult:
     width = 0
     height = 0
     image_warnings: list[str] = []
@@ -161,6 +164,13 @@ def _parse_image(source_path: Path) -> MultimodalParseResult:
             width, height = image.size
     except Exception as exc:
         image_warnings.append(f"Image dimensions unavailable: {type(exc).__name__}: {exc}")
+    _emit_progress(progress_callback, {
+        "phase": "ocr",
+        "phaseLabel": "正在识别图片",
+        "page": {"current": 1, "total": 1},
+        "event": "开始图片 OCR/VLM 理解",
+        "phaseProgress": 28,
+    })
     understanding = _understand_image(source_path)
     ocr_text = understanding.text
     image_warnings.extend(understanding.warnings)
@@ -200,7 +210,7 @@ def _parse_image(source_path: Path) -> MultimodalParseResult:
     )
 
 
-def _parse_pptx(source_path: Path) -> MultimodalParseResult:
+def _parse_pptx(source_path: Path, progress_callback: ProgressCallback | None = None) -> MultimodalParseResult:
     try:
         from pptx import Presentation
     except ModuleNotFoundError as exc:
@@ -222,7 +232,15 @@ def _parse_pptx(source_path: Path) -> MultimodalParseResult:
         )
     pages: list[ParsedPage] = []
     warnings: list[str] = []
-    rendered_slides, render_warnings = _render_pptx_slides(source_path)
+    slide_total = len(presentation.slides)
+    _emit_progress(progress_callback, {
+        "phase": "render",
+        "phaseLabel": f"正在渲染 PPTX 幻灯片 0/{slide_total}",
+        "page": {"current": 0, "total": slide_total},
+        "event": f"开始渲染 {slide_total} 页 PPTX",
+        "phaseProgress": 12,
+    })
+    rendered_slides, render_warnings = _render_pptx_slides(source_path, progress_callback=progress_callback, total_hint=slide_total)
     warnings.extend(render_warnings)
     text_slide_count = 0
     ocr_slide_count = 0
@@ -239,6 +257,14 @@ def _parse_pptx(source_path: Path) -> MultimodalParseResult:
         "captionDegradedCount": 0,
     }
     for slide_index, slide in enumerate(presentation.slides, start=1):
+        _emit_progress(progress_callback, {
+            "phase": "parse",
+            "phaseLabel": f"正在解析 PPTX 第 {slide_index}/{slide_total} 页",
+            "page": {"current": slide_index, "total": slide_total},
+            "metrics": {"pagesParsed": slide_index - 1, "blocksCreated": sum(len(page.blocks) for page in pages), "warnings": len(warnings)},
+            "event": f"开始解析第 {slide_index} 页",
+            "phaseProgress": min(55, 30 + round((slide_index - 1) / max(slide_total, 1) * 25)),
+        })
         extracted_blocks = _extract_pptx_slide_blocks(slide, slide_index)
         for block in extracted_blocks:
             block_type = str(block.metadata.get("blockType") or "")
@@ -266,6 +292,14 @@ def _parse_pptx(source_path: Path) -> MultimodalParseResult:
             should_ocr = (not text or ocr_text_slides) and ocr_candidates_used < max_ocr_slides
             if should_ocr:
                 ocr_candidates_used += 1
+                _emit_progress(progress_callback, {
+                    "phase": "ocr",
+                    "phaseLabel": f"正在 OCR PPTX 第 {slide_index}/{slide_total} 页",
+                    "page": {"current": slide_index, "total": slide_total},
+                    "metrics": {"pagesParsed": slide_index - 1, "blocksCreated": sum(len(page.blocks) for page in pages), "warnings": len(warnings)},
+                    "event": f"开始 OCR 第 {slide_index} 页",
+                    "phaseProgress": min(62, 40 + round(slide_index / max(slide_total, 1) * 22)),
+                })
                 understanding = _understand_image(Path(rendered_asset.storage_path))
                 ocr_text = understanding.text
                 page_warnings.extend(understanding.warnings)
@@ -327,6 +361,20 @@ def _parse_pptx(source_path: Path) -> MultimodalParseResult:
             blocks=blocks,
             )
         pages.append(page)
+        _emit_progress(progress_callback, {
+            "phase": "chunk",
+            "phaseLabel": f"正在生成 PPTX 知识块 第 {slide_index}/{slide_total} 页",
+            "page": {"current": slide_index, "total": slide_total},
+            "block": {"current": sum(len(item.blocks) for item in pages), "total": max(sum(len(item.blocks) for item in pages), 1)},
+            "metrics": {
+                "pagesParsed": slide_index,
+                "blocksCreated": sum(len(item.blocks) for item in pages),
+                "visualAssets": len(rendered_slides),
+                "warnings": len(warnings),
+            },
+            "event": f"第 {slide_index} 页已生成 {len(blocks)} 个知识块",
+            "phaseProgress": min(68, 46 + round(slide_index / max(slide_total, 1) * 22)),
+        })
 
     if not pages:
         warnings.append("PPTX has no slides.")
@@ -626,7 +674,7 @@ def _parse_xlsx(source_path: Path) -> MultimodalParseResult:
     )
 
 
-def _parse_pdf(source_path: Path) -> MultimodalParseResult:
+def _parse_pdf(source_path: Path, progress_callback: ProgressCallback | None = None) -> MultimodalParseResult:
     try:
         from pypdf import PdfReader
     except ModuleNotFoundError as exc:
@@ -646,19 +694,43 @@ def _parse_pdf(source_path: Path) -> MultimodalParseResult:
             quality_score=0,
         )
 
-    rendered_pages, render_warnings = _render_pdf_pages(source_path)
+    total_pages = len(reader.pages)
+    _emit_progress(progress_callback, {
+        "phase": "render",
+        "phaseLabel": f"正在渲染 PDF 页面 0/{total_pages}",
+        "page": {"current": 0, "total": total_pages},
+        "event": f"开始渲染 {total_pages} 页 PDF",
+        "phaseProgress": 12,
+    })
+    rendered_pages, render_warnings = _render_pdf_pages(source_path, progress_callback=progress_callback, total_hint=total_pages)
     pages: list[ParsedPage] = []
     warnings: list[str] = []
     warnings.extend(render_warnings)
     text_pages = 0
     ocr_pages = 0
     for page_index, page in enumerate(reader.pages, start=1):
+        _emit_progress(progress_callback, {
+            "phase": "parse",
+            "phaseLabel": f"正在解析 PDF 第 {page_index}/{total_pages} 页",
+            "page": {"current": page_index, "total": total_pages},
+            "metrics": {"pagesParsed": page_index - 1, "blocksCreated": sum(len(item.blocks) for item in pages), "warnings": len(warnings)},
+            "event": f"开始解析第 {page_index} 页",
+            "phaseProgress": min(54, 30 + round((page_index - 1) / max(total_pages, 1) * 24)),
+        })
         text = "\n".join(line.strip() for line in (page.extract_text() or "").splitlines() if line.strip())
         rendered_asset = rendered_pages.get(page_index)
         ocr_text = ""
         understanding = VisionUnderstanding()
         page_warnings: list[str] = []
         if rendered_asset:
+            _emit_progress(progress_callback, {
+                "phase": "ocr",
+                "phaseLabel": f"正在 OCR PDF 第 {page_index}/{total_pages} 页",
+                "page": {"current": page_index, "total": total_pages},
+                "metrics": {"pagesParsed": page_index - 1, "blocksCreated": sum(len(item.blocks) for item in pages), "warnings": len(warnings)},
+                "event": f"开始 OCR 第 {page_index} 页",
+                "phaseProgress": min(62, 40 + round(page_index / max(total_pages, 1) * 22)),
+            })
             understanding = _understand_image(Path(rendered_asset.storage_path))
             ocr_text = understanding.text
             page_warnings.extend(understanding.warnings)
@@ -698,6 +770,20 @@ def _parse_pdf(source_path: Path) -> MultimodalParseResult:
                     blocks=blocks,
                 )
             )
+            _emit_progress(progress_callback, {
+                "phase": "chunk",
+                "phaseLabel": f"正在生成 PDF 知识块 第 {page_index}/{total_pages} 页",
+                "page": {"current": page_index, "total": total_pages},
+                "block": {"current": sum(len(item.blocks) for item in pages), "total": max(sum(len(item.blocks) for item in pages), 1)},
+                "metrics": {
+                    "pagesParsed": page_index,
+                    "blocksCreated": sum(len(item.blocks) for item in pages),
+                    "visualAssets": len(rendered_pages),
+                    "warnings": len(warnings),
+                },
+                "event": f"第 {page_index} 页已生成 {len(blocks)} 个知识块",
+                "phaseProgress": min(68, 46 + round(page_index / max(total_pages, 1) * 22)),
+            })
         else:
             warning = "PDF page has no extractable text; rendering/OCR is required for full recognition."
             if not ocr_text:
@@ -724,6 +810,20 @@ def _parse_pdf(source_path: Path) -> MultimodalParseResult:
                     blocks=blocks,
                 )
             )
+            _emit_progress(progress_callback, {
+                "phase": "chunk",
+                "phaseLabel": f"正在生成 PDF 知识块 第 {page_index}/{total_pages} 页",
+                "page": {"current": page_index, "total": total_pages},
+                "block": {"current": sum(len(item.blocks) for item in pages), "total": max(sum(len(item.blocks) for item in pages), 1)},
+                "metrics": {
+                    "pagesParsed": page_index,
+                    "blocksCreated": sum(len(item.blocks) for item in pages),
+                    "visualAssets": len(rendered_pages),
+                    "warnings": len(warnings),
+                },
+                "event": f"第 {page_index} 页已生成 {len(blocks)} 个知识块",
+                "phaseProgress": min(68, 46 + round(page_index / max(total_pages, 1) * 22)),
+            })
     if not pages:
         warnings.append("PDF has no pages.")
     return MultimodalParseResult(
@@ -1588,7 +1688,12 @@ def _get_ocr_engine():
     return RapidOCR()
 
 
-def _render_pdf_pages(source_path: Path, max_pages: int | None = None) -> tuple[dict[int, ParsedAsset], list[str]]:
+def _render_pdf_pages(
+    source_path: Path,
+    max_pages: int | None = None,
+    progress_callback: ProgressCallback | None = None,
+    total_hint: int | None = None,
+) -> tuple[dict[int, ParsedAsset], list[str]]:
     max_pages = max_pages if max_pages is not None else _env_int("A3_PDF_RENDER_MAX_PAGES", DEFAULT_PDF_RENDER_MAX_PAGES)
     output_dir = source_path.parent / ".a3_rendered" / source_path.stem
     return _render_pdf_to_assets(
@@ -1597,10 +1702,17 @@ def _render_pdf_pages(source_path: Path, max_pages: int | None = None) -> tuple[
         kind="rendered_page",
         metadata_name="page",
         max_pages=max_pages,
+        progress_callback=progress_callback,
+        total_hint=total_hint,
     )
 
 
-def _render_pptx_slides(source_path: Path, max_slides: int | None = None) -> tuple[dict[int, ParsedAsset], list[str]]:
+def _render_pptx_slides(
+    source_path: Path,
+    max_slides: int | None = None,
+    progress_callback: ProgressCallback | None = None,
+    total_hint: int | None = None,
+) -> tuple[dict[int, ParsedAsset], list[str]]:
     max_slides = max_slides if max_slides is not None else _env_int("A3_PPTX_RENDER_MAX_SLIDES", DEFAULT_PPTX_RENDER_MAX_SLIDES)
     soffice = _find_soffice()
     if not soffice:
@@ -1638,6 +1750,8 @@ def _render_pptx_slides(source_path: Path, max_slides: int | None = None) -> tup
         kind="rendered_slide",
         metadata_name="slide",
         max_pages=max_slides,
+        progress_callback=progress_callback,
+        total_hint=total_hint,
     )
 
 
@@ -1666,6 +1780,8 @@ def _render_pdf_to_assets(
     kind: str,
     metadata_name: str,
     max_pages: int,
+    progress_callback: ProgressCallback | None = None,
+    total_hint: int | None = None,
 ) -> tuple[dict[int, ParsedAsset], list[str]]:
     try:
         import pypdfium2 as pdfium
@@ -1684,6 +1800,13 @@ def _render_pdf_to_assets(
         for zero_index in range(page_count):
             page_number = zero_index + 1
             try:
+                _emit_progress(progress_callback, {
+                    "phase": "render",
+                    "phaseLabel": f"正在渲染第 {page_number}/{total_hint or total_pages} 页",
+                    "page": {"current": page_number, "total": total_hint or total_pages},
+                    "event": f"开始渲染第 {page_number} 页",
+                    "phaseProgress": min(30, 12 + round(page_number / max(page_count, 1) * 18)),
+                })
                 page = pdf[zero_index]
                 bitmap = page.render(scale=1.5)
                 image = bitmap.to_pil()
@@ -1707,6 +1830,12 @@ def _render_pdf_to_assets(
     if total_pages > max_pages:
         warnings.append(f"PDF rendering limited to first {max_pages} pages.")
     return rendered, warnings
+
+
+def _emit_progress(progress_callback: ProgressCallback | None, detail: dict) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(detail)
 
 
 def _sha256(path: Path) -> str:

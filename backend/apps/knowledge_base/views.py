@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from django.http import FileResponse, JsonResponse
@@ -22,9 +23,14 @@ from backend.apps.knowledge_base.services import (
     create_parse_job,
     create_rebuild_job,
     create_upload_index_job,
+    create_wiki_rebuild_job,
+    cancel_resource_indexing_for_delete,
+    clear_knowledge_resources,
     delete_resource,
+    fail_stale_index_jobs,
     indexed_resource_scope_by_path,
     knowledge_base_stats,
+    reset_derived_resources,
     retry_index_job,
     resource_scope_label,
     save_upload,
@@ -33,6 +39,7 @@ from backend.apps.knowledge_base.services import (
     serialize_resource,
 )
 from backend.apps.knowledge_base.graph_builder import serialize_material_graph
+from backend.apps.knowledge_base.deep_retrieval import run_deep_retrieval_router, serialize_retrieval_plan
 from backend.domains.knowledge_base.retriever import search_knowledge_base
 
 
@@ -41,6 +48,7 @@ def resources(request):
     rejected = require_authenticated(request)
     if rejected:
         return rejected
+    fail_stale_index_jobs(request.user)
     queryset = accessible_resources_for_user(request.user)
     scope = str(request.GET.get("scope", "")).strip()
     if scope:
@@ -111,12 +119,13 @@ def resource_detail(request, resource_id):
     rejected = require_authenticated(request)
     if rejected:
         return rejected
+    fail_stale_index_jobs(request.user)
     resource = get_object_or_404(KnowledgeResource, id=resource_id, owner=request.user)
     if resource.status == ResourceStatus.INDEXING or (
         resource.index_job
         and resource.index_job.status in [IndexJobStatus.QUEUED, IndexJobStatus.RUNNING]
     ):
-        return JsonResponse({"success": False, "error": "资源正在索引，暂时不能删除"}, status=409)
+        cancel_resource_indexing_for_delete(resource)
     delete_resource(resource)
     return JsonResponse({"success": True, "deleted": str(resource_id)})
 
@@ -162,6 +171,33 @@ def resource_reparse(request, resource_id):
 
 
 @require_http_methods(["POST"])
+def resource_wiki_rebuild(request, resource_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    resource = get_object_or_404(accessible_resources_for_user(request.user), id=resource_id)
+    if resource.status not in {ResourceStatus.INDEXED, ResourceStatus.INDEXED_WITH_WARNINGS}:
+        return JsonResponse({"success": False, "error": "资料尚未完成索引，不能重建 Wiki 词条"}, status=409)
+    from backend.apps.knowledge_base.wiki_builder import safe_rebuild_resource_wiki
+
+    result = safe_rebuild_resource_wiki(resource)
+    resource.refresh_from_db()
+    return JsonResponse({
+        "success": result.status != "failed",
+        "wiki": {
+            "status": result.status,
+            "conceptCount": result.concept_count,
+            "definitionCount": result.definition_count,
+            "aliasCount": result.alias_count,
+            "summaryCount": result.summary_count,
+            "reason": result.reason,
+        },
+        "resource": serialize_resource(resource),
+        "error": result.reason if result.status == "failed" else "",
+    }, status=500 if result.status == "failed" else 200)
+
+
+@require_http_methods(["POST"])
 def force_reparse_resources(request):
     rejected = require_authenticated(request)
     if rejected:
@@ -177,6 +213,65 @@ def force_reparse_resources(request):
         "resources": [serialize_resource(resource) for resource in resources],
         "stats": knowledge_base_stats(request.user),
     }, status=202)
+
+
+@require_http_methods(["POST"])
+def wiki_rebuild_resources(request):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    resources = list(_searchable_resources_for_user(request.user).order_by("created_at"))
+    try:
+        job = create_wiki_rebuild_job(request.user, resources)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+    return JsonResponse({
+        "success": True,
+        "job": serialize_index_job(job),
+        "resources": [serialize_resource(resource) for resource in resources],
+        "stats": knowledge_base_stats(request.user),
+    }, status=202)
+
+
+@require_http_methods(["POST"])
+def reset(request):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"success": False, "error": "请求格式不正确"}, status=400)
+
+    action = str(payload.get("action") or "").strip()
+    resources = list(_resettable_resources_for_user(request.user).order_by("created_at"))
+    try:
+        if action == "reset_derived":
+            deleted = reset_derived_resources(resources)
+            return JsonResponse({
+                "success": True,
+                "action": action,
+                "deleted": deleted,
+                "resources": [serialize_resource(resource) for resource in resources],
+                "stats": knowledge_base_stats(request.user),
+            })
+        if action == "clear_all":
+            deleted = clear_knowledge_resources(
+                request.user,
+                resources,
+                confirm_text=str(payload.get("confirmText") or ""),
+            )
+            return JsonResponse({
+                "success": True,
+                "action": action,
+                "deleted": deleted,
+                "resources": [],
+                "stats": knowledge_base_stats(request.user),
+            })
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+    return JsonResponse({"success": False, "error": "未知的知识库清理操作"}, status=400)
 
 
 @require_http_methods(["GET"])
@@ -202,35 +297,72 @@ def search(request):
     if not query:
         return JsonResponse({"success": False, "error": "查询内容不能为空"}, status=400)
     try:
-        top_k = max(1, min(int(request.GET.get("top_k", "5")), 20))
+        top_k = _int_query_param(request, "top_k", default=5, minimum=1, maximum=20)
         source_scope_by_path = indexed_resource_scope_by_path(request.user)
         allowed_paths = set(source_scope_by_path)
         course = str(request.GET.get("course", "")).strip() or None
-        fast = str(request.GET.get("fast", "")).lower() in {"1", "true", "yes", "on"}
+        include_assets = _bool_query_param(request, "include_assets")
+        fast = _bool_query_param(request, "fast")
+        mode = _search_mode_param(request)
+        similarity_threshold = _float_query_param(request, "similarity_threshold", default=0.0, minimum=0.0, maximum=1.0)
+        bm25_candidates = _int_query_param(request, "bm25_candidates", default=50, minimum=1, maximum=200)
+        vector_weight = _float_query_param(request, "vector_weight", default=0.7, minimum=0.0, maximum=1.0)
+        bm25_weight = _float_query_param(request, "bm25_weight", default=0.3, minimum=0.0, maximum=1.0)
+        search_config = {
+            "mode": mode,
+            "fast": fast,
+            "topK": top_k,
+            "includeAssets": include_assets,
+            "similarityThreshold": similarity_threshold,
+            "bm25Candidates": bm25_candidates,
+            "vectorWeight": vector_weight,
+            "bm25Weight": bm25_weight,
+        }
+        resource_rows = list(_searchable_resources_for_user(request.user))
         if not allowed_paths:
             return JsonResponse({
                 "success": True,
                 "query": query,
                 "topK": top_k,
                 "course": course,
+                "searchConfig": search_config,
+                "retrieval": {
+                    "schemaVersion": "a3.deep-retrieval-router.v1",
+                    "intent": "fact",
+                    "requestedRoute": "vector",
+                    "route": "vector",
+                    "reason": "当前用户没有已索引资料，无法执行知识库检索。",
+                    "subQuestions": [],
+                    "fallback": True,
+                    "fallbackReason": "没有可检索的已索引资料",
+                },
+                "wikiEvidence": [],
+                "graphEvidence": [],
                 "results": [],
             })
+        deep_retrieval = run_deep_retrieval_router(
+            query,
+            resource_rows,
+            top_k=top_k,
+            requested_route=mode if mode in {"wiki", "graph"} else None,
+        )
         results = search_knowledge_base(
             query=query,
             top_k=top_k,
             allowed_source_paths=allowed_paths,
             source_scope_by_path=source_scope_by_path,
             course=course,
-            force_lexical=fast,
+            force_lexical=fast or mode == "bm25",
             visual_use_embedding=not fast,
-        )
-        include_assets = str(request.GET.get("include_assets", "")).lower() in {"1", "true", "yes", "on"}
-        resource_rows = list(
-            _searchable_resources_for_user(request.user)
+            retrieval_mode=mode if mode in {"hybrid", "vector", "bm25"} else "hybrid",
+            similarity_threshold=similarity_threshold,
+            bm25_candidate_count=bm25_candidates,
+            vector_weight=vector_weight,
+            bm25_weight=bm25_weight,
         )
         resources_by_path = {str(Path(resource.stored_path).resolve()): resource for resource in resource_rows if resource.stored_path}
         response_results = []
-        for item in results:
+        for item in [*deep_retrieval.result_items, *results]:
             payload = item.model_dump()
             metadata = dict(payload.get("metadata") or {})
             source_path = str(metadata.get("source_path", ""))
@@ -251,6 +383,10 @@ def search(request):
             "query": query,
             "topK": top_k,
             "course": course,
+            "searchConfig": search_config,
+            "retrieval": serialize_retrieval_plan(deep_retrieval.plan),
+            "wikiEvidence": deep_retrieval.wiki_evidence,
+            "graphEvidence": deep_retrieval.graph_evidence,
             "results": response_results,
         })
     except Exception as exc:
@@ -269,6 +405,41 @@ def _reparseable_resources_for_user(user):
 
 def _searchable_resources_for_user(user):
     return accessible_resources_for_user(user).filter(status__in=[ResourceStatus.INDEXED, ResourceStatus.INDEXED_WITH_WARNINGS])
+
+
+def _bool_query_param(request, name: str) -> bool:
+    return str(request.GET.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_query_param(request, name: str, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(request.GET.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _float_query_param(request, name: str, *, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(request.GET.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return round(max(minimum, min(value, maximum)), 4)
+
+
+def _search_mode_param(request) -> str:
+    mode = str(request.GET.get("mode", "hybrid")).strip().lower()
+    if mode in {"hybrid", "vector", "bm25", "wiki", "graph"}:
+        return mode
+    return "hybrid"
+
+
+def _resettable_resources_for_user(user):
+    if getattr(user, "role", "") == "admin":
+        return KnowledgeResource.objects.all()
+    if _is_teacher_or_admin(user):
+        return accessible_resources_for_user(user).exclude(resource_scope=ResourceScope.PERSONAL)
+    return KnowledgeResource.objects.filter(owner=user, resource_scope=ResourceScope.PERSONAL)
 
 
 def _all_indexed_resource_paths() -> set[str]:
@@ -314,7 +485,14 @@ def _attach_multimodal_evidence(payload: dict, resource: KnowledgeResource, *, i
     payload["confidence"] = block.confidence
     payload["warnings"] = block.warnings
     block_metadata = block.metadata if isinstance(block.metadata, dict) else {}
-    payload["markdownSnippet"] = str(block_metadata.get("markdownText") or payload.get("text") or block.text or "")
+    block_snippet = str(block_metadata.get("markdownText") or block.markdown or block.text or payload.get("text") or "")
+    context_blocks = _build_context_blocks(block)
+    context_snippet = "\n\n".join(item["text"] for item in context_blocks if item.get("text")).strip()
+    payload["text"] = block.text or payload.get("text") or ""
+    payload["content"] = block.text or payload.get("content") or payload.get("text") or ""
+    payload["markdownSnippet"] = block_snippet
+    payload["contextSnippet"] = context_snippet or block_snippet
+    payload["contextBlocks"] = context_blocks
     payload["contentFormat"] = str(block_metadata.get("contentFormat") or "plain")
     payload["formatFeatures"] = list(block_metadata.get("formatFeatures") or [])
     payload["asset"] = _serialize_search_asset(asset) if include_assets and asset else None
@@ -341,6 +519,35 @@ def _find_result_block(resource: KnowledgeResource, text: str, metadata: dict) -
     return ordered_blocks[0] if ordered_blocks else None
 
 
+def _build_context_blocks(block: KnowledgeBlock) -> list[dict]:
+    context_queryset = KnowledgeBlock.objects.filter(resource=block.resource).select_related("page")
+    if block.page_id:
+        context_queryset = context_queryset.filter(page_id=block.page_id)
+    else:
+        context_queryset = context_queryset.filter(page__isnull=True)
+    context_queryset = context_queryset.filter(modality__in=["text", "table", "formula"]).exclude(text="")
+    context_blocks = list(context_queryset.order_by("created_at")[:8])
+    if not context_blocks and block.text:
+        context_blocks = [block]
+    context_blocks.sort(key=lambda context_block: 0 if context_block.id == block.id else 1)
+    rows = []
+    for context_block in context_blocks:
+        metadata = context_block.metadata if isinstance(context_block.metadata, dict) else {}
+        text = str(metadata.get("markdownText") or context_block.markdown or context_block.text or "").strip()
+        if not text:
+            continue
+        page = context_block.page
+        rows.append({
+            "blockId": str(context_block.id),
+            "modality": context_block.modality,
+            "text": text[:2000],
+            "isHit": context_block.id == block.id,
+            "page": page.page_number if page else None,
+            "slide": page.slide_number if page else None,
+        })
+    return rows
+
+
 def _serialize_search_asset(asset: KnowledgeAsset | None) -> dict | None:
     if not asset:
         return None
@@ -359,6 +566,7 @@ def jobs(request):
     rejected = require_authenticated(request)
     if rejected:
         return rejected
+    fail_stale_index_jobs(request.user)
     queryset = KnowledgeIndexJob.objects.filter(owner=request.user)[:20]
     return JsonResponse({"success": True, "jobs": [serialize_index_job(job) for job in queryset]})
 
@@ -368,6 +576,7 @@ def job_detail(request, job_id):
     rejected = require_authenticated(request)
     if rejected:
         return rejected
+    fail_stale_index_jobs(request.user)
     job = get_object_or_404(KnowledgeIndexJob, id=job_id, owner=request.user)
     return JsonResponse({"success": True, "job": serialize_index_job(job)})
 
@@ -377,6 +586,7 @@ def retry_job(request, job_id):
     rejected = require_authenticated(request)
     if rejected:
         return rejected
+    fail_stale_index_jobs(request.user)
     job = get_object_or_404(KnowledgeIndexJob, id=job_id, owner=request.user)
     try:
         return JsonResponse({"success": True, "job": serialize_index_job(retry_index_job(job))}, status=202)

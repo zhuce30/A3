@@ -147,6 +147,28 @@ export async function GET(request: NextRequest) {
     }
     cleanupExpiredVideoJobs();
     const jobId = request.nextUrl.searchParams.get('jobId') || '';
+    if (!jobId) {
+      const userId = getA3UserId(auth.user);
+      return apiSuccess({
+        jobs: Array.from(videoJobs.values())
+          .filter((job) => !job.userId || job.userId === userId)
+          .map((job) => ({
+            jobId: job.jobId,
+            type: 'openmaic_video',
+            workflow: 'openmaic_video',
+            status: job.status,
+            progress: job.progress,
+            stage: job.stage,
+            message: job.message,
+            done: ['succeeded', 'partial', 'failed'].includes(job.status),
+            resourcePackId: job.resourcePackId,
+            traceId: job.traceId,
+            error: job.error,
+            updatedAt: job.updatedAt,
+            actionUrl: job.resourcePackId ? `/a3/resources/${job.resourcePackId}/video` : '/a3/recommendations',
+          })),
+      });
+    }
     const job = videoJobs.get(jobId);
     if (!job) return apiError('INVALID_REQUEST', 404, '视频任务不存在或已过期');
     if (job.userId && job.userId !== getA3UserId(auth.user)) {

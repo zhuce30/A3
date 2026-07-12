@@ -22,7 +22,7 @@ import {
   teacherArtifactCountsToSummary,
 } from '@/lib/a3/openmaic-artifact-history';
 import { buildTeacherResourcePackFilter, type TeacherResourcePackFilter } from '@/lib/a3/teacher-resource-pack-filter';
-import type { TeacherDistributionItem, TeacherTask, TeacherWorkbench, TeacherWorkbenchStudent } from '@/lib/a3/teacher-types';
+import type { TeacherDistributionItem, TeacherResourcePackArtifact, TeacherTask, TeacherWorkbench, TeacherWorkbenchStudent } from '@/lib/a3/teacher-types';
 import { cn } from '@/lib/utils';
 import { A3Card, A3Pill } from '../ui/a3-card';
 import { MetricGrid } from '../ui/metric-card';
@@ -555,7 +555,7 @@ function OpenMAICArtifactEffectCardV2({
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {latestArtifacts.slice(0, 9).map((artifact, index) => (
             <Link
-              key={`${artifact.type}-${artifact.jobId || artifact.resourcePackId || index}`}
+              key={buildTeacherArtifactCardKey(artifact, index)}
               href={artifact.resourcePackId ? `/a3/resources/${artifact.resourcePackId}` : (artifact.classroomUrl || artifact.videoUrl || '/a3/recommendations')}
               className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] p-4 transition hover:border-blue-300 hover:bg-blue-50"
               data-testid="a3-teacher-openmaic-artifact"
@@ -602,6 +602,23 @@ function artifactLabelV2(type: string): string {
   if (type === 'openmaic_video') return '视频';
   if (type === 'openmaic_pptx_export') return 'PPTX 导出';
   return '课堂';
+}
+
+function buildTeacherArtifactCardKey(artifact: TeacherResourcePackArtifact, index: number) {
+  return [
+    artifact.type,
+    artifact.status,
+    artifact.jobId,
+    artifact.resourcePackId,
+    artifact.classroomUrl,
+    artifact.videoUrl,
+    artifact.fileName,
+    artifact.completedAt,
+    artifact.createdAt,
+    index,
+  ]
+    .filter((part) => part !== undefined && part !== null && part !== '')
+    .join('|');
 }
 
 function summarizeArtifactProvidersV2(artifacts: NonNullable<TeacherWorkbench['resourcePackSummary']>['latestArtifacts'] = []) {

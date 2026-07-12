@@ -81,7 +81,7 @@ type ResourceEntry = {
 
 type ProgressStepStatus = 'pending' | 'running' | 'succeeded' | 'failed';
 type LongRunningProgress = {
-  kind: 'video' | 'classroom';
+  kind: 'video' | 'classroom' | 'resource';
   title: string;
   message: string;
   steps: Array<{ label: string; status: ProgressStepStatus; detail?: string }>;
@@ -104,6 +104,15 @@ const classroomProgressLabels = [
   '同步课堂状态',
   '写回 A3 资源包',
   '进入课堂导出 PPTX',
+];
+
+const resourceProgressLabels = [
+  '检索知识库',
+  '分析学习画像',
+  '生成资源内容',
+  '校验引用来源',
+  '保存资源包',
+  '准备打开页面',
 ];
 
 const resourceEntries: ResourceEntry[] = [
@@ -257,18 +266,21 @@ export function RecommendationsView() {
     setGeneratingPack(true);
     setError('');
     setMessage('');
-    const result = await a3PostJson<A3ResourceGenerateResponse>('/api/resources/generate/', {
+    setLongRunningProgress(buildProgress('resource', 0, '正在检索与你目标相关的课程资料'));
+    const result = await postNextJson<A3ResourceGenerateResponse>('/api/a3/resources/jobs', {
       goal: nextGoal,
       topK: 5,
     });
+    const synced = result.success ? await pollResourceGenerationJob(result) : result;
     setGeneratingPack(false);
-    if (!result.success || !result.resourcePack) {
+    if (!synced.success || !synced.resourcePack) {
       setError(result.error ?? '资源包生成失败。');
       return;
     }
-    const normalizedPack = sanitizeResourcePackV2(result.resourcePack);
+    const normalizedPack = sanitizeResourcePackV2(synced.resourcePack);
     setPack(normalizedPack);
-    setMessage(`已生成个性化资源包，traceId: ${(result.traceId ?? normalizedPack.traceId).slice(0, 12)}。请从下面选择一个成品单独查看。`);
+    setLongRunningProgress(buildProgress('resource', 5, '资源包已生成，可以选择一个成品单独查看', 'succeeded'));
+    setMessage(`已生成个性化资源包，traceId: ${(synced.traceId ?? normalizedPack.traceId).slice(0, 12)}。请从下面选择一个成品单独查看。`);
   }
 
   async function generateSingleResourceV2(resourceType: A3ResourcePackV2ResourceType) {
@@ -276,19 +288,23 @@ export function RecommendationsView() {
     setSingleGeneratingType(resourceType);
     setError('');
     setMessage('');
-    const result = await a3PostJson<A3ResourceGenerateResponse>('/api/resources/generate/', {
+    setLongRunningProgress(buildProgress('resource', 0, `正在准备${resourceLabels[resourceType]}`));
+    const result = await postNextJson<A3ResourceGenerateResponse>('/api/a3/resources/jobs', {
       goal: nextGoal,
       topK: 5,
       resourceType,
     });
+    const synced = result.success ? await pollResourceGenerationJob(result) : result;
     setSingleGeneratingType('');
-    if (!result.success || !result.resourcePack) {
-      setError(result.error ?? `${resourceLabels[resourceType]}生成失败。`);
+    if (!synced.success || !synced.resourcePack) {
+      setLongRunningProgress(buildProgress('resource', 2, synced.error ?? `${resourceLabels[resourceType]}生成失败`, 'failed'));
+      setError(synced.error ?? `${resourceLabels[resourceType]}生成失败。`);
       return null;
     }
-    const normalizedPack = sanitizeResourcePackV2(result.resourcePack);
+    const normalizedPack = sanitizeResourcePackV2(synced.resourcePack);
     setPack(normalizedPack);
-    setMessage(`已单独生成${resourceLabels[resourceType]}，traceId: ${(result.traceId ?? normalizedPack.traceId).slice(0, 12)}。`);
+    setLongRunningProgress(buildProgress('resource', 5, `${resourceLabels[resourceType]}已生成，可以打开查看`, 'succeeded'));
+    setMessage(`已单独生成${resourceLabels[resourceType]}，traceId: ${(synced.traceId ?? normalizedPack.traceId).slice(0, 12)}。`);
     return normalizedPack;
   }
 
@@ -416,6 +432,59 @@ export function RecommendationsView() {
     return latestJob;
   }
 
+  async function pollResourceGenerationJob(start: A3ResourceGenerateResponse) {
+    const jobStart = start as A3ResourceGenerateResponse & {
+      pollUrl?: string;
+      pollIntervalMs?: number;
+      status?: string;
+      progress?: number;
+      stage?: string;
+      message?: string;
+      done?: boolean;
+    };
+    const pollUrl = normalizeResourceGenerationPollUrl(jobStart.pollUrl);
+    if (!pollUrl) return { success: false, error: '资源生成任务缺少进度地址，请重新生成。' } as A3ResourceGenerateResponse;
+    const intervalMs = Math.max(800, Math.min(jobStart.pollIntervalMs ?? 1500, 4000));
+    const maxAttempts = Math.ceil((30 * 60 * 1000) / intervalMs);
+    let latestJob: (A3ResourceGenerateResponse & {
+      status?: string;
+      progress?: number;
+      stage?: string;
+      message?: string;
+      done?: boolean;
+    }) | null = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      await sleep(attempt === 0 ? 300 : intervalMs);
+      let response: Response;
+      try {
+        response = await fetch(pollUrl, { cache: 'no-store' });
+      } catch (error) {
+        return {
+          success: false,
+          error: `资源生成进度查询失败：${error instanceof Error ? error.message : '无法连接本地服务'}`,
+        } as A3ResourceGenerateResponse;
+      }
+      const job = (await response.json().catch(() => ({}))) as A3ResourceGenerateResponse & {
+        status?: string;
+        progress?: number;
+        stage?: string;
+        message?: string;
+        done?: boolean;
+      };
+      if (!response.ok || !job.success) return { success: false, error: job.error || `资源生成进度查询失败：${response.status}` } as A3ResourceGenerateResponse;
+      latestJob = job;
+      const progress = typeof job.progress === 'number' ? Math.max(0, Math.min(100, Math.round(job.progress))) : 0;
+      const activeStep = progress >= 95 ? 5 : Math.max(0, Math.min(4, Math.floor(progress / 20)));
+      setLongRunningProgress(buildProgress('resource', activeStep, job.message || `资源生成进度 ${progress}%`));
+      if (job.done || ['succeeded', 'failed'].includes(String(job.status))) break;
+    }
+    if (!latestJob) return { success: false, error: '资源生成任务未返回状态。' } as A3ResourceGenerateResponse;
+    if (!latestJob.done && !['succeeded', 'failed'].includes(String(latestJob.status))) {
+      return { success: false, error: '资源生成仍在运行，请稍后刷新资源包查看结果。' } as A3ResourceGenerateResponse;
+    }
+    return latestJob;
+  }
+
   async function pollAndSyncOpenMAICClassroom(start: A3OpenMAICBridgeResponse, resourcePackId: string) {
     const pollUrl = normalizeOpenMAICPollUrl(start.pollUrl);
     if (!pollUrl) {
@@ -533,7 +602,7 @@ export function RecommendationsView() {
                     const isPpt = entry.key === 'ppt';
                     const isVideo = entry.key === 'video';
                     const loading =
-                      (entry.resourceType && singleGeneratingType === entry.resourceType) ||
+                      (!isPpt && !isVideo && entry.resourceType && singleGeneratingType === entry.resourceType) ||
                       (isPpt && generatingClassroom) ||
                       (isVideo && generatingVideo);
                     return (
@@ -672,7 +741,7 @@ export function RecommendationsView() {
                   generated={entry.resourceType ? generatedTypes.has(entry.resourceType) : false}
                   classroomArtifact={classroomArtifact}
                   videoArtifact={videoArtifact}
-                  generating={singleGeneratingType === entry.resourceType || (entry.key === 'ppt' && generatingClassroom) || (entry.key === 'video' && generatingVideo)}
+                  generating={(entry.key !== 'ppt' && entry.key !== 'video' && singleGeneratingType === entry.resourceType) || (entry.key === 'ppt' && generatingClassroom) || (entry.key === 'video' && generatingVideo)}
                   onGenerateSingle={generateSingleResourceV2}
                   onGenerateClassroom={generateClassroomForPpt}
                   onGenerateVideo={generateVideoFromScript}
@@ -730,6 +799,9 @@ function RecommendationEvidenceItem({ item, profileFeed }: { item: A3Recommendat
   const confidence = effect?.effectConfidence ?? 'low';
   const source = item.evidence.sourceEvidence ?? item.citation;
   const hasSource = Boolean(source?.title);
+  const sourceValue = hasSource
+    ? `${formatSourceOrigin(source)} · ${source?.title}${source?.location ? ` · ${source.location}` : ''}`
+    : '暂无可引用资料，生成时会标明来源不足';
   const usageText = formatResourceUsage(effect);
   const confidenceLabel = confidence === 'high' ? '资料依据充分' : confidence === 'medium' ? '依据基本可用' : '需要边学边验证';
   const confidenceTone = confidence === 'high' ? 'green' : confidence === 'medium' ? 'blue' : 'orange';
@@ -762,7 +834,7 @@ function RecommendationEvidenceItem({ item, profileFeed }: { item: A3Recommendat
 
       <div className="mt-4 grid gap-3 text-xs leading-5 text-slate-600 sm:grid-cols-3">
         <RecommendationSignal label="适合现在学" value={item.evidence.profileMatch.reason || '匹配当前画像和学习路径'} />
-        <RecommendationSignal label="参考资料" value={hasSource ? `${source?.title}${source?.location ? ` · ${source.location}` : ''}` : '暂无可引用资料，生成时会标明来源不足'} />
+        <RecommendationSignal label="参考资料" value={sourceValue} />
         <RecommendationSignal label="使用反馈" value={usageText} />
       </div>
 
@@ -796,6 +868,14 @@ function RecommendationSignal({ label, value }: { label: string; value: string }
       <div className="mt-1 line-clamp-2 font-semibold text-slate-900">{value}</div>
     </div>
   );
+}
+
+function formatSourceOrigin(source: { sourceScope?: string; sourceOrigin?: string } | null | undefined) {
+  if (source && source.sourceScope === 'personal') return '我的资料';
+  if (source && source.sourceScope === 'teacher') return '教师资料';
+  if (source && source.sourceScope === 'class') return '班级资料';
+  if (source && source.sourceScope === 'global') return '全局资料';
+  return source?.sourceOrigin || '知识库';
 }
 
 function ProfileSignalStrip({ signals }: { signals: NonNullable<RecommendationResponse['profileSignals']> }) {
@@ -1029,10 +1109,10 @@ function ContextBox({ title, value }: { title: string; value: string }) {
 }
 
 function buildProgress(kind: LongRunningProgress['kind'], activeIndex: number, message: string, finalStatus?: ProgressStepStatus): LongRunningProgress {
-  const labels = kind === 'video' ? videoProgressLabels : classroomProgressLabels;
+  const labels = kind === 'video' ? videoProgressLabels : kind === 'resource' ? resourceProgressLabels : classroomProgressLabels;
   return {
     kind,
-    title: kind === 'video' ? '视频生成进度' : 'PPT 课堂生成进度',
+    title: kind === 'video' ? '视频生成进度' : kind === 'resource' ? '资源生成进度' : 'PPT 课堂生成进度',
     message,
     steps: labels.map((label, index) => {
       let status: ProgressStepStatus = index < activeIndex ? 'succeeded' : index === activeIndex ? 'running' : 'pending';
@@ -1124,6 +1204,20 @@ function normalizeOpenMAICVideoPollUrl(value: string | undefined): string {
   try {
     const parsed = new URL(text, window.location.origin);
     if (parsed.pathname === '/api/a3/resources/openmaic-video' && parsed.searchParams.get('jobId')) {
+      return `${parsed.pathname}${parsed.search}`;
+    }
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function normalizeResourceGenerationPollUrl(value: string | undefined): string {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  try {
+    const parsed = new URL(text, window.location.origin);
+    if (parsed.pathname === '/api/a3/resources/jobs' && parsed.searchParams.get('jobId')) {
       return `${parsed.pathname}${parsed.search}`;
     }
   } catch {

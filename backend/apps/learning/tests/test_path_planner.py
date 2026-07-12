@@ -341,6 +341,27 @@ class LearningPathTests(TestCase):
         self.assertEqual(upload_source["type"], "教师上传资料")
         self.assertIn("已索引", upload_source["snippet"])
 
+    def test_classroom_context_excludes_other_student_personal_sources(self):
+        generate_learning_path(self.user, self.course)
+        other_student = User.objects.create_user(phone="13800007777", password="TestPassword123")
+        KnowledgeResource.objects.create(
+            owner=other_student,
+            original_name="other-student-private-notes.pdf",
+            stored_path="uploads/other-student-private-notes.pdf",
+            file_type=".pdf",
+            status=ResourceStatus.INDEXED,
+            resource_scope="personal",
+            document_count=1,
+            chunk_count=1,
+        )
+
+        response = self.client.get("/api/learning/classroom/")
+
+        self.assertEqual(response.status_code, 200)
+        classroom = response.json()["classroom"]
+        source_titles = [source["title"] for source in classroom["sources"]]
+        self.assertNotIn("other-student-private-notes.pdf", source_titles)
+
     @patch.dict("os.environ", {"A3_KB_SYNC_INDEX_ON_UPLOAD": "1"})
     @patch("backend.apps.knowledge_base.tasks.close_old_connections")
     @patch("backend.domains.knowledge_base.index_manager.append_source_file", return_value=(2, 5, []))

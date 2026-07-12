@@ -89,6 +89,7 @@ class Question(models.Model):
         on_delete=models.SET_NULL,
         related_name="questions",
     )
+    archived_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -194,6 +195,30 @@ class StudentQuestionMastery(models.Model):
         ordering = ["-updated_at"]
         constraints = [
             models.UniqueConstraint(fields=["user", "knowledge_point"], name="unique_user_question_mastery_point")
+        ]
+
+
+class PersonalQuestionSequence(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="personal_question_sequences",
+    )
+    knowledge_point = models.ForeignKey(
+        "learning.KnowledgePoint",
+        on_delete=models.CASCADE,
+        related_name="personal_question_sequences",
+    )
+    next_variant_index = models.PositiveIntegerField(default=1)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_personal_question_sequences"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "knowledge_point"],
+                name="unique_user_personal_question_sequence_point",
+            )
         ]
 
 

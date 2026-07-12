@@ -157,12 +157,11 @@ export function CoachingView() {
   }
 
   return (
-    <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px] 2xl:grid-cols-[minmax(0,1fr)_390px]" data-testid="a3-coaching-view">
+    <div className="grid gap-5" data-testid="a3-coaching-view">
       <div className="min-w-0">
-        <RealtimeCoachingCall />
-      </div>
-
-      <div className="space-y-5 xl:sticky xl:top-20 xl:self-start">
+        <RealtimeCoachingCall
+          rightRail={(
+            <div className="space-y-4">
         <CoachingHistoryCard sessions={coachingSessions} activeId={viewingSessionId} onOpen={viewCoachingSession} />
         <A3Card>
           <div className="mb-5 grid grid-cols-4 gap-1 rounded-[10px] bg-[var(--a3-surface-muted)] p-1 text-center text-xs font-medium text-[var(--a3-text-muted)]">
@@ -175,6 +174,9 @@ export function CoachingView() {
           {activeTab === '随堂测验' && <Quiz target={target?.title} session={quizSession} feedback={quizFeedback} feedbackQuestionId={quizFeedbackQuestionId} error={quizError} lastAnswer={lastQuizAnswer} loading={quizLoading} submitting={quizSubmitting} onAnswer={submitQuizAnswer} />}
           {activeTab === '课堂总结' && <SessionSummary target={target?.title} messages={messages} sessionUpdatedAt={sessionUpdatedAt} />}
         </A3Card>
+            </div>
+          )}
+        />
       </div>
     </div>
   );

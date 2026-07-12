@@ -17,18 +17,18 @@ describe('A3 login password visibility', () => {
     expect(loginSection).toContain('setShowPassword((current) => !current)');
   });
 
-  it('offers demo account fill actions and a concrete learning preview', () => {
+  it('keeps the login page product-grade without fixed demo accounts', () => {
     const source = fs.readFileSync(authPagesPath, 'utf8');
     const loginSection = source.slice(source.indexOf('export function LoginPage'), source.indexOf('export function RegisterPage'));
 
-    expect(loginSection).toContain('fillDemoAccount');
-    expect(loginSection).toContain("setIdentifier('13800000001')");
-    expect(loginSection).toContain("setIdentifier('13800000002')");
-    expect(loginSection).toContain("setPassword('Demo@123456')");
-    expect(loginSection).toContain('data-testid="a3-login-demo-student"');
-    expect(loginSection).toContain('data-testid="a3-login-demo-teacher"');
-    expect(source).toContain('data-testid="a3-login-learning-preview"');
-    expect(source).toContain('今日学习预览');
-    expect(source).toContain('AI 课堂');
+    expect(loginSection).not.toContain('fillDemoAccount');
+    expect(loginSection).not.toContain("setIdentifier('13800000001')");
+    expect(loginSection).not.toContain("setIdentifier('13800000002')");
+    expect(loginSection).not.toContain("setPassword('Demo@123456')");
+    expect(loginSection).not.toContain('data-testid="a3-login-demo-student"');
+    expect(loginSection).not.toContain('data-testid="a3-login-demo-teacher"');
+    expect(source).toContain('data-testid="a3-login-product-flow"');
+    expect(source).not.toContain('今日学习预览');
+    expect(source).not.toContain('演示数据');
   });
 });

@@ -69,7 +69,7 @@ type CoachingAttachment = {
 type ClassroomRetrievalMode = 'fast' | 'deep';
 type ClassroomRetrievalScope = 'all' | 'personal' | 'teacher' | 'class' | 'global';
 
-const DEFAULT_BACKEND_QA_TIMEOUT_MS = 20_000;
+const DEFAULT_BACKEND_QA_TIMEOUT_MS = 60_000;
 
 export async function POST(request: NextRequest) {
   try {
@@ -118,14 +118,22 @@ export async function POST(request: NextRequest) {
     const resourceId = typeof body.resourceId === 'string' ? body.resourceId.trim() : '';
     if (resourceId) query.set('resourceId', resourceId);
 
-    const result = await fetchA3DjangoJson<BackendQaResponse>(`/api/v1/qa/interact/?${query.toString()}`, cookieHeader, {
-      signal: AbortSignal.timeout(resolveBackendQaTimeoutMs()),
-    }).catch((error) => {
+    let result: BackendQaResponse & { success?: boolean };
+    try {
+      result = await fetchA3DjangoJson<BackendQaResponse>(`/api/v1/qa/interact/?${query.toString()}`, cookieHeader, {
+        signal: AbortSignal.timeout(resolveBackendQaTimeoutMs()),
+      });
+    } catch (error) {
       if (error instanceof Error && error.name === 'TimeoutError') {
-        return buildBackendQaTimeoutFallback(message);
+        return apiError(
+          'UPSTREAM_TIMEOUT',
+          504,
+          '课堂知识库检索仍在处理，请稍后重试，或先缩小资料范围后再问。',
+        );
+      } else {
+        throw error;
       }
-      throw error;
-    });
+    }
     if (!result.success || !result.answer) {
       return apiError('UPSTREAM_ERROR', 502, result.error || 'AI 辅导服务请求失败');
     }
@@ -154,36 +162,6 @@ function normalizeRetrievalScope(scope?: string) {
 function resolveBackendQaTimeoutMs() {
   const value = Number.parseInt(process.env.A3_BACKEND_QA_TIMEOUT_MS || '', 10);
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_BACKEND_QA_TIMEOUT_MS;
-}
-
-function buildBackendQaTimeoutFallback(message: string): BackendQaResponse & { success: true } {
-  return {
-    success: true,
-    answer: [
-      '当前课堂问答服务响应较慢，先给出可继续学习的降级反馈。',
-      '',
-      `你的问题是：${message}`,
-      '',
-      '建议先按三步处理：第一，回到当前学习路径节点确认核心定义；第二，查看右侧知识库来源里的相关片段；第三，完成一题随堂练习验证是否理解。',
-      '',
-      '这次回答会标记为未充分验证。系统仍会把本次提问写入课堂记录和画像候选，用于后续调整讲解方式。',
-    ].join('\n'),
-    verified: false,
-    citations: [],
-    sources: [],
-    claims: [],
-    safety: {
-      safe: true,
-      category: 'qa_timeout_fallback',
-      reason: '课堂问答服务超时，已降级为学习流程指导',
-    },
-    refusalReason: 'qa_timeout_fallback',
-    retrievalMode: 'timeout_fallback',
-    followUps: [
-      { label: '看来源', question: '请根据右侧知识库来源重新解释这个问题。', type: 'evidence', reason: '补充可验证证据' },
-      { label: '做练习', question: '请围绕这个知识点生成一道随堂练习。', type: 'practice', reason: '用练习验证理解' },
-    ],
-  };
 }
 
 async function tryAnswerWithVisualEvidence(cookieHeader: string | null, message: string) {

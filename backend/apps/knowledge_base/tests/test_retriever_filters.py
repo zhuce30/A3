@@ -127,6 +127,44 @@ class RetrieverFilterTests(SimpleTestCase):
 
         self.assertEqual(captured["similarity_top_k"], 10)
 
+    def test_hybrid_mode_applies_bm25_candidates_weights_and_threshold(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vector_path = Path(temp_dir) / "vector.pdf"
+            bm25_path = Path(temp_dir) / "bm25.pdf"
+            vector_path.write_text("vector", encoding="utf-8")
+            bm25_path.write_text("bm25", encoding="utf-8")
+            vector_node = _node("vector evidence", vector_path, "", 0.9)
+            index = SimpleNamespace(as_retriever=lambda similarity_top_k: SimpleNamespace(retrieve=lambda query: [vector_node]))
+            bm25_result = KnowledgeBaseSearchResult(
+                score=0.8,
+                text="bm25 evidence",
+                metadata={"retriever": "bm25", "source_path": str(bm25_path)},
+            )
+
+            self.addCleanup(lambda: __import__("os").environ.pop("A3_ALLOW_ONLINE_EMBEDDING", None))
+            __import__("os").environ["A3_ALLOW_ONLINE_EMBEDDING"] = "1"
+            with patch("backend.domains.knowledge_base.retriever._load_knowledge_base_index", return_value=index):
+                with patch("backend.domains.knowledge_base.retriever.search_lexical_knowledge_base", return_value=[bm25_result]) as lexical:
+                    with patch("backend.domains.knowledge_base.retriever.search_visual_knowledge_base", return_value=[]):
+                        results = search_knowledge_base(
+                            query="root locus",
+                            top_k=3,
+                            allowed_source_paths={str(vector_path), str(bm25_path)},
+                            retrieval_mode="hybrid",
+                            bm25_candidate_count=7,
+                            similarity_threshold=0.2,
+                            vector_weight=0.1,
+                            bm25_weight=1.0,
+                        )
+
+        lexical.assert_called_once()
+        self.assertEqual(lexical.call_args.kwargs["top_k"], 7)
+        self.assertEqual([item.text for item in results], ["bm25 evidence"])
+        self.assertEqual(results[0].score, 0.8)
+        self.assertEqual(results[0].metadata["pre_weight_score"], 0.8)
+        self.assertEqual(results[0].metadata["retrieval_weight"], 1.0)
+        self.assertEqual(results[0].metadata["weighted_score"], 0.8)
+
     def test_lexical_fallback_scans_all_files_when_allowed_paths_are_provided(self):
         allowed_path = str((Path.cwd() / "uploaded.xlsx").resolve())
         doc = {

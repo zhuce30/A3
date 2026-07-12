@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>A3 首页证据段文案</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#e8ebed;color:#101315;font-family:"Microsoft YaHei",Arial,sans-serif}main{width:min(1380px,calc(100% - 40px));margin:auto;padding:48px 0 70px}h1{margin:0;font-size:34px;letter-spacing:0}.intro{margin:10px 0 28px;color:#61686c}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.card{cursor:pointer;background:#0b0e10;color:#f5f6f3;border:1px solid #252a2d;min-height:540px;padding:42px 34px;display:flex;flex-direction:column;transition:.18s}.card:hover{transform:translateY(-3px)}.card.selected{outline:3px solid #bff04f}.number{font-size:11px;color:#7f898d}.copy{margin:auto 0}.copy h2{margin:0;font-size:50px;line-height:1.05;letter-spacing:0}.copy p{margin:20px 0 0;color:#a8b0b3;font-size:15px;line-height:1.7}.proofs{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#303538;border:1px solid #303538}.proofs div{background:#14181a;padding:12px 9px;font-size:10px;color:#90999c;min-height:72px}.proofs b{display:block;color:#f5f6f3;font-size:12px;margin-top:8px}.label{margin-top:18px;color:#5f676b;font-size:12px}.recommended{color:#6b8900;font-weight:700}@media(max-width:900px){.grid{grid-template-columns:1fr}.card{min-height:430px}.copy h2{font-size:43px}}
+  </style>
+</head>
+<body><main>
+  <h1>证据段不再讲“验收”，而是讲学习体验</h1>
+  <p class="intro">三种都比原文自然。点击你最喜欢的一种，也可以说“标题选 A，副句选 C”。</p>
+  <section class="grid">
+    <article class="card" onclick="pick(this,'A')"><span class="number">02 / 学习依据</span><div class="copy"><h2>每一步，<br>都有据可循。</h2><p>从资料来源到学习进展，过程清清楚楚。</p></div><div class="proofs"><div>知识库<b>资料可检索</b></div><div>AI 回答<b>来源可验证</b></div><div>学习进展<b>结果会写回</b></div></article>
+    <article class="card" onclick="pick(this,'B')"><span class="number">02 / 学习依据</span><div class="copy"><h2>学过什么，<br>下一步就更清楚。</h2><p>每次提问、练习和反馈，都会回到你的学习计划里。</p></div><div class="proofs"><div>知识库<b>资料可检索</b></div><div>AI 回答<b>来源可验证</b></div><div>学习进展<b>结果会写回</b></div></article>
+    <article class="card" onclick="pick(this,'C')"><span class="number">02 / 学习依据</span><div class="copy"><h2>答案有来处，<br>进步有痕迹。</h2><p>你看到的不只是一句回答，还有它从哪里来。</p></div><div class="proofs"><div>知识库<b>资料可检索</b></div><div>AI 回答<b>来源可验证</b></div><div>学习进展<b>结果会写回</b></div></article>
+  </section>
+  <p class="label"><span class="recommended">我的建议：</span>A 最适合首页整体气质；B 更像学生产品；C 最有记忆点，但覆盖面略窄。</p>
+</main><script>function pick(el,v){document.querySelectorAll('.card').forEach(x=>x.classList.remove('selected'));el.classList.add('selected');localStorage.setItem('a3-evidence-copy',v);document.title='已选择 '+v+' - A3 首页证据段文案'}</script></body></html>

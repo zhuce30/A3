@@ -6,6 +6,42 @@ export type AssessmentQuestion = {
   options: QuestionOption[];
   difficulty: number;
   knowledgePoint: { id: string; title: string; chapter: string };
+  personalization?: {
+    questionKind: string;
+    variantIndex: number;
+    variantContext: {
+      scenario?: string;
+      parameter?: number;
+      distractorOffset?: number;
+      evidenceBlockId?: string;
+    };
+    generationMode: string;
+    reasoningForm: string;
+    llm: {
+      provider?: string;
+      model?: string;
+      fallback?: boolean;
+    };
+    generationReason: string;
+    foundationLevel: string;
+    profileSignals: {
+      foundationLevel?: string;
+      weakPoints?: string[];
+      learningGoals?: string[];
+      expectedResources?: string[];
+      recentErrorCauses?: string[];
+      targetKnowledgePoint?: string;
+    };
+    sourceEvidence: Array<{
+      resourceId: string;
+      resourceTitle: string;
+      blockId: string;
+      pageNumber: number | null;
+      quote: string;
+      modality: string;
+      score: number;
+    }>;
+  };
   source?: {
     type: string;
     reviewStatus: string;

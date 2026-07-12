@@ -6,7 +6,6 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
-  Bell,
   BookOpen,
   Bot,
   Building2,
@@ -16,6 +15,7 @@ import {
   Eye,
   EyeOff,
   GraduationCap,
+  KeyRound,
   Loader2,
   Lock,
   Mail,
@@ -243,9 +243,9 @@ function syncA3User(user?: ApiResult['user']) {
 
 function AuthFrame({ children, variant = 'learning' }: { children: React.ReactNode; variant?: 'learning' | 'secure' }) {
   const secureFeatures: Array<[string, string, LucideIcon]> = [
-    ['数据加密', '账号、验证码和学习画像按最小必要原则处理', ShieldCheck],
-    ['身份验证', '通过手机号或邮箱验证码完成关键操作', Check],
-    ['隐私保护', '学习数据只用于计划、推荐、报告和提醒', Lock],
+    ['账号验证', '登录、注册和找回密码都通过真实后端接口校验。', ShieldCheck],
+    ['状态续接', '系统按账号的首启进度进入欢迎、隐私授权或画像采集。', Check],
+    ['数据边界', '学习画像、计划和报告只在授权后进入个性化流程。', Lock],
   ];
 
   return (
@@ -263,22 +263,22 @@ function AuthFrame({ children, variant = 'learning' }: { children: React.ReactNo
         <div className="hidden md:block"><A3TopActions /></div>
       </header>
 
-      <main className="mx-auto grid min-h-[calc(100vh-88px)] max-w-[1580px] items-center gap-8 px-5 py-8 lg:grid-cols-[1fr_560px] lg:px-10">
+      <main className="mx-auto grid min-h-[calc(100vh-88px)] max-w-[1480px] items-center gap-8 px-5 py-8 lg:grid-cols-[minmax(0,1fr)_500px] lg:px-10 xl:gap-12">
         <section className="hidden lg:block">
           {variant === 'learning' ? (
             <LearningPreviewPanel />
           ) : (
             <>
               <div className="max-w-[720px]">
-                <p className="mb-4 text-sm font-semibold uppercase tracking-[0.24em] text-blue-600">Account security</p>
-                <h1 className="text-5xl font-semibold leading-tight tracking-[-0.03em]">验证身份后继续学习。</h1>
+                <p className="mb-4 text-sm font-semibold uppercase tracking-[0.22em] text-blue-600">ACCOUNT SECURITY</p>
+                <h1 className="text-5xl font-semibold leading-tight tracking-[-0.02em]">验证身份后继续学习。</h1>
                 <p className="mt-6 text-xl leading-9 text-slate-600">
-                  账号、验证码和学习画像按最小必要原则处理，关键操作会保留可追踪记录。
+                  账号、验证码和学习画像按最小必要原则处理，关键操作会写回后端并保留可追踪状态。
                 </p>
               </div>
               <div className="mt-10 grid max-w-[860px] grid-cols-3 gap-4">
                 {secureFeatures.map(([title, desc, Icon]) => (
-                  <div key={title} className="rounded-2xl border border-slate-200 bg-white/82 p-5 shadow-[0_16px_42px_rgba(15,23,42,0.06)]">
+                  <div key={title} className="rounded-2xl border border-slate-200 bg-white/90 p-5 shadow-[0_16px_42px_rgba(15,23,42,0.06)]">
                     <Icon className="size-7 text-blue-600" />
                     <div className="mt-3 text-base font-semibold">{title}</div>
                     <div className="mt-1 text-sm leading-6 text-slate-500">{desc}</div>
@@ -295,72 +295,54 @@ function AuthFrame({ children, variant = 'learning' }: { children: React.ReactNo
 }
 
 function LearningPreviewPanel() {
-  const tasks = [
-    ['调度算法复盘', '20 分钟', '继续学习'],
-    ['AI 课堂追问', '引用知识库资料', '可提问'],
-    ['错题重练', '3 道待复习', '优先'],
-  ];
-  const signals = [
-    ['今日任务', '3/5', '还差 42 分钟'],
-    ['薄弱点', '进程调度', '已纳入计划'],
-    ['AI 课堂', '已接入', '支持引用验证'],
-  ];
+  const workflow = [
+    ['登录续接', '按账号状态进入今日任务、首启流程或教师工作台。', KeyRound],
+    ['本地知识库', '上传资料完成索引后，课堂和辅导会带来源引用。', BookOpen],
+    ['个性化计划', '画像、诊断和测评结果共同决定学习路径。', Target],
+    ['AI 辅导闭环', '提问、练习、错题和报告写回同一学习记录。', Bot],
+  ] as const;
+  const principles = ['真实接口', '可追踪状态', '授权后个性化'] as const;
 
   return (
-    <div data-testid="a3-login-learning-preview" className="max-w-[860px]">
+    <div data-testid="a3-login-product-flow" className="max-w-[860px]">
       <div className="mb-7">
-        <p className="mb-4 text-sm font-semibold uppercase tracking-[0.24em] text-blue-600">Today in A3</p>
-        <h1 className="max-w-[720px] text-5xl font-semibold leading-tight tracking-[-0.03em]">登录后直接回到今天的学习现场。</h1>
+        <p className="mb-4 text-sm font-semibold uppercase tracking-[0.22em] text-blue-600">A3 LEARNING ENGINE</p>
+        <h1 className="max-w-[760px] text-5xl font-semibold leading-tight tracking-[-0.02em]">登录后回到真实的学习闭环。</h1>
         <p className="mt-5 max-w-[680px] text-lg leading-8 text-slate-600">
-          任务、AI 课堂、知识库引用和错题复习会接在同一条学习闭环里，不需要重新找入口。
+          A3 不把登录页做成静态展示。账号通过后端校验后，会根据你的画像、授权和学习记录进入对应工作区。
         </p>
       </div>
 
-      <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-[0_24px_70px_rgba(15,23,42,0.08)]">
-        <div className="flex items-center justify-between gap-4 border-b border-slate-100 pb-4">
+      <div className="grid gap-4 md:grid-cols-2">
+        {workflow.map(([title, desc, Icon]) => (
+          <div key={title} className="rounded-2xl border border-slate-200 bg-white/90 p-5 shadow-[0_16px_44px_rgba(15,23,42,0.06)]">
+            <div className="flex size-11 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+              <Icon className="size-6" />
+            </div>
+            <h2 className="mt-4 text-lg font-semibold text-slate-950">{title}</h2>
+            <p className="mt-2 text-sm leading-6 text-slate-500">{desc}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-5 rounded-[24px] border border-slate-200 bg-white/90 p-5 shadow-[0_18px_50px_rgba(15,23,42,0.07)]">
+        <div className="flex items-start gap-4">
+          <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-slate-950 text-white">
+            <ShieldCheck className="size-6" />
+          </div>
           <div>
-            <div className="text-sm font-semibold text-slate-500">今日学习预览</div>
-            <div className="mt-1 text-2xl font-semibold text-slate-950">操作系统</div>
+            <h2 className="text-lg font-semibold text-slate-950">页面展示不替代真实数据。</h2>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              登录后显示的任务、资料、测评和报告都来自后端接口；这里仅说明产品流向，不写死个人学习结果。
+            </p>
           </div>
-          <span className="rounded-full bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700">演示数据</span>
         </div>
-
-        <div className="mt-5 grid grid-cols-3 gap-3">
-          {signals.map(([label, value, detail]) => (
-            <div key={label} className="rounded-2xl bg-slate-50 px-4 py-3">
-              <div className="text-xs font-medium text-slate-500">{label}</div>
-              <div className="mt-1 text-xl font-semibold text-slate-950">{value}</div>
-              <div className="mt-1 text-xs text-slate-500">{detail}</div>
-            </div>
+        <div className="mt-5 flex flex-wrap gap-2">
+          {principles.map((item) => (
+            <span key={item} className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-600">
+              {item}
+            </span>
           ))}
-        </div>
-
-        <div className="mt-5 space-y-3">
-          {tasks.map(([title, meta, status], index) => (
-            <div key={title} className="flex items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3">
-              <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-blue-50 text-sm font-semibold text-blue-700">{index + 1}</div>
-              <div className="min-w-0 flex-1">
-                <div className="font-semibold text-slate-950">{title}</div>
-                <div className="mt-0.5 text-sm text-slate-500">{meta}</div>
-              </div>
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">{status}</span>
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-5 grid grid-cols-3 gap-3 text-sm">
-          <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-emerald-800">
-            <Check className="mb-2 size-4" />
-            画像已完成
-          </div>
-          <div className="rounded-2xl bg-blue-50 px-4 py-3 text-blue-800">
-            <BookOpen className="mb-2 size-4" />
-            知识库可检索
-          </div>
-          <div className="rounded-2xl bg-violet-50 px-4 py-3 text-violet-800">
-            <Bot className="mb-2 size-4" />
-            AI 课堂可追问
-          </div>
         </div>
       </div>
     </div>
@@ -396,19 +378,12 @@ export function LoginPage() {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  function fillDemoAccount(role: 'student' | 'teacher') {
-    setError('');
-    if (role === 'student') {
-      setIdentifier('13800000001');
-      setPassword('Demo@123456');
-      return;
-    }
-    setIdentifier('13800000002');
-    setPassword('Demo@123456');
-  }
-
   async function submit() {
     setError('');
+    if (!identifier.trim() || !password.trim()) {
+      setError('请输入账号和密码后再登录');
+      return;
+    }
     setSubmitting(true);
     const result = await postJson('/api/auth/login/', { identifier, password });
     setSubmitting(false);
@@ -419,41 +394,45 @@ export function LoginPage() {
 
   return (
     <AuthFrame>
-      <FormCard title="欢迎回来" subtitle="登录后继续今日学习、AI 辅导和错题复盘。">
+      <FormCard title="欢迎回来" subtitle="使用已开通的学生、教师或管理员账号进入对应学习工作区。">
         <div className="space-y-5">
-          <div className="relative">
-            <FieldIcon icon={User} />
-            <Input className="h-14 pl-12 text-base" value={identifier} onChange={(event) => setIdentifier(event.target.value)} placeholder="手机号 / 邮箱 / 学号" />
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold text-slate-900">演示账号</div>
-                <div className="mt-0.5 text-xs text-slate-500">一键填入，便于本地测试和答辩演示。</div>
-              </div>
-              <div className="flex shrink-0 gap-2">
-                <Button data-testid="a3-login-demo-student" type="button" variant="outline" className="h-9 rounded-lg bg-white px-3 text-sm" onClick={() => fillDemoAccount('student')}>
-                  学生
-                </Button>
-                <Button data-testid="a3-login-demo-teacher" type="button" variant="outline" className="h-9 rounded-lg bg-white px-3 text-sm" onClick={() => fillDemoAccount('teacher')}>
-                  教师
-                </Button>
-              </div>
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-700">账号</span>
+            <div className="relative">
+              <FieldIcon icon={User} />
+              <Input
+                className="h-14 pl-12 text-base"
+                value={identifier}
+                onChange={(event) => setIdentifier(event.target.value)}
+                placeholder="手机号 / 邮箱 / 学号"
+                autoComplete="username"
+                inputMode="email"
+              />
             </div>
-          </div>
-          <div className="relative">
-            <FieldIcon icon={Lock} />
-            <Input className="h-14 pl-12 pr-14 text-base" type={showPassword ? 'text' : 'password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="密码" />
-            <button
-              type="button"
-              aria-label={showPassword ? '隐藏密码' : '显示密码'}
-              aria-pressed={showPassword}
-              onClick={() => setShowPassword((current) => !current)}
-              className="absolute right-3 top-1/2 flex size-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-            >
-              {showPassword ? <EyeOff className="size-5" /> : <Eye className="size-5" />}
-            </button>
-          </div>
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-700">密码</span>
+            <div className="relative">
+              <FieldIcon icon={Lock} />
+              <Input
+                className="h-14 pl-12 pr-14 text-base"
+                type={showPassword ? 'text' : 'password'}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="请输入密码"
+                autoComplete="current-password"
+              />
+              <button
+                type="button"
+                aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                aria-pressed={showPassword}
+                onClick={() => setShowPassword((current) => !current)}
+                className="absolute right-3 top-1/2 flex size-10 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                {showPassword ? <EyeOff className="size-5" /> : <Eye className="size-5" />}
+              </button>
+            </div>
+          </label>
           <div className="flex items-center justify-between text-sm">
             <label className="flex items-center gap-2 text-slate-600">
               <input type="checkbox" defaultChecked className="size-4 accent-blue-600" />
@@ -465,6 +444,9 @@ export function LoginPage() {
           <Button disabled={submitting} onClick={submit} className="h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg hover:from-blue-700 hover:to-violet-700">
             {submitting ? '登录中...' : '登录'}
           </Button>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-500">
+            账号由注册流程或管理员开通产生；本页面不会填入固定测试账号。
+          </div>
           <div className="text-center text-sm text-slate-500">
             还没有账号？ <Link href="/a3/register" className="font-semibold text-blue-600">立即注册</Link>
           </div>
@@ -499,21 +481,39 @@ export function RegisterPage() {
 
   return (
     <AuthFrame>
-      <FormCard title="创建学习账号" subtitle="注册后将进入身份确认、手机绑定、隐私授权和学习画像采集。">
+      <FormCard title="创建学习账号" subtitle="注册成功后会进入身份确认、手机绑定、隐私授权和学习画像采集。">
         <div className="space-y-4">
           <div className="rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-700">
-            当前开放学生账号自助注册；教师和管理员账号建议由后台开通。
+            当前支持学生账号自助注册；教师和管理员账号由后台开通后登录。
           </div>
-          <div className="relative"><FieldIcon icon={User} /><Input className="h-13 pl-12" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="姓名 / 昵称" /></div>
-          <div className="relative"><FieldIcon icon={Mail} /><Input className="h-13 pl-12" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="邮箱" /></div>
-          <div className="grid grid-cols-[1fr_132px] gap-3">
-            <div className="relative"><FieldIcon icon={ShieldCheck} /><Input className="h-13 pl-12" value={code} onChange={(event) => setCode(event.target.value)} placeholder="验证码" /></div>
-            <Button variant="outline" disabled={verification.sending || verification.cooldown > 0} onClick={() => verification.sendCode(email)} className="h-13">{verification.buttonLabel}</Button>
-          </div>
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-700">姓名或昵称</span>
+            <div className="relative"><FieldIcon icon={User} /><Input className="h-13 pl-12" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="请输入姓名或昵称" autoComplete="name" /></div>
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-700">邮箱</span>
+            <div className="relative"><FieldIcon icon={Mail} /><Input className="h-13 pl-12" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="用于接收验证码" autoComplete="email" /></div>
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-700">邮箱验证码</span>
+            <div className="grid grid-cols-[1fr_132px] gap-3">
+              <div className="relative"><FieldIcon icon={ShieldCheck} /><Input className="h-13 pl-12" value={code} onChange={(event) => setCode(event.target.value)} placeholder="6 位验证码" inputMode="numeric" autoComplete="one-time-code" /></div>
+              <Button variant="outline" disabled={verification.sending || verification.cooldown > 0} onClick={() => verification.sendCode(email)} className="h-13">{verification.buttonLabel}</Button>
+            </div>
+          </label>
           {verification.message && <div className="text-xs text-blue-600">{verification.message}</div>}
-          <div className="relative"><FieldIcon icon={Lock} /><Input className="h-13 pl-12" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="设置密码" /></div>
-          <div className="relative"><FieldIcon icon={Lock} /><Input className="h-13 pl-12" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="确认密码" /></div>
-          <div className="relative"><FieldIcon icon={Building2} /><Input className="h-13 pl-12" value={school} onChange={(event) => setSchool(event.target.value)} placeholder="学校 / 学院" /></div>
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-700">密码</span>
+            <div className="relative"><FieldIcon icon={Lock} /><Input className="h-13 pl-12" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="设置登录密码" autoComplete="new-password" /></div>
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-700">确认密码</span>
+            <div className="relative"><FieldIcon icon={Lock} /><Input className="h-13 pl-12" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="再次输入密码" autoComplete="new-password" /></div>
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-700">学校 / 学院</span>
+            <div className="relative"><FieldIcon icon={Building2} /><Input className="h-13 pl-12" value={school} onChange={(event) => setSchool(event.target.value)} placeholder="用于后续学习画像，可稍后完善" autoComplete="organization" /></div>
+          </label>
           <ErrorBox message={error} />
           <Button disabled={submitting} onClick={submit} className="h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg">
             {submitting ? '创建中...' : '注册并继续'}
@@ -572,7 +572,9 @@ function SimpleFlowFrame({ children }: { children: React.ReactNode }) {
             <div className="text-xs font-medium uppercase tracking-wide text-slate-500">AI Learning</div>
           </div>
         </Link>
-        <A3TopActions />
+        <div className="hidden md:block">
+          <A3TopActions />
+        </div>
       </header>
       <main className="mx-auto mt-8 max-w-[1500px]">{children}</main>
     </div>
@@ -680,40 +682,59 @@ export function PhoneBindingPage() {
 export function WelcomePage() {
   const router = useRouter();
   const user = useA3CurrentUser();
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const cards = [
-    ['先诊断', '通过入学诊断定位薄弱知识点。', ShieldCheck],
-    ['生成计划', '按目标、时间和基础生成每日任务。', Clock3],
-    ['边学边练', 'AI 课堂、题库和错题本形成闭环。', Bot],
-    ['持续调整', '报告和提醒推动下一轮学习。', Bell],
+    ['确认授权', '只在必要范围内使用账号、通知和学习数据。', ShieldCheck],
+    ['建立画像', '用目标、基础、时间和薄弱点生成初始画像。', User],
+    ['生成路径', '后端会根据画像创建学习路径和周期计划。', Target],
+    ['回到任务', '首启完成后进入今日任务、课堂和复习闭环。', Clock3],
   ] as const;
 
   async function start() {
+    if (submitting) return;
+    setError('');
+    setSubmitting(true);
     const result = await patchJson('/api/profiles/me/', { onboardingStep: 'privacy' });
+    setSubmitting(false);
+    if (!result.success) {
+      setError(result.error ?? '首启状态保存失败，请稍后重试');
+      return;
+    }
     syncA3User(result.user);
     router.push('/a3/privacy');
   }
 
   return (
     <SimpleFlowFrame>
-      <div className="grid gap-8 rounded-[28px] border border-slate-200 bg-white p-8 shadow-[0_24px_70px_rgba(15,23,42,0.10)] lg:grid-cols-[1fr_420px]">
+      <div className="grid gap-8 rounded-[28px] border border-slate-200 bg-white p-8 shadow-[0_24px_70px_rgba(15,23,42,0.10)] lg:grid-cols-[minmax(0,1fr)_390px]">
         <section>
-          <p className="text-sm font-semibold uppercase tracking-[0.22em] text-blue-600">First run</p>
-          <h1 className="mt-4 text-4xl font-semibold tracking-[-0.03em] md:text-6xl">你好，{user?.displayName || '同学'}。先把学习闭环跑起来。</h1>
-          <p className="mt-6 max-w-3xl text-lg leading-8 text-slate-600">接下来只需要完成隐私授权和学习画像，系统就能生成你的第一版学习路径和今日任务。</p>
+          <p className="text-sm font-semibold uppercase tracking-[0.22em] text-blue-600">FIRST RUN</p>
+          <h1 className="mt-4 max-w-4xl text-4xl font-semibold tracking-[-0.02em] md:text-6xl">你好，{user?.displayName || '同学'}。先完成学习引擎初始化。</h1>
+          <p className="mt-6 max-w-3xl text-lg leading-8 text-slate-600">这一步不会生成静态演示内容。系统会按真实账号状态继续隐私授权、画像采集，并在完成后生成你的学习路径和今日任务。</p>
           <div className="mt-8 grid gap-4 md:grid-cols-2">
-            {cards.map(([title, desc, Icon]) => (
+            {cards.map(([title, desc, Icon], index) => (
               <div key={title} className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
-                <Icon className="size-7 text-blue-600" />
-                <h2 className="mt-3 font-semibold">{title}</h2>
+                <div className="flex items-center gap-3">
+                  <span className="flex size-9 items-center justify-center rounded-full bg-white text-sm font-semibold text-blue-700 shadow-sm">{index + 1}</span>
+                  <Icon className="size-6 text-blue-600" />
+                </div>
+                <h2 className="mt-4 font-semibold">{title}</h2>
                 <p className="mt-1 text-sm leading-6 text-slate-500">{desc}</p>
               </div>
             ))}
           </div>
+          <ErrorBox message={error} />
         </section>
-        <aside className="rounded-[24px] bg-gradient-to-br from-blue-600 to-violet-600 p-7 text-white">
-          <Bot className="size-16" />
-          <h2 className="mt-6 text-3xl font-semibold">目标不是做页面，是让学生每天知道下一步学什么。</h2>
-          <Button onClick={start} className="mt-10 h-14 w-full bg-white text-lg text-blue-700 hover:bg-blue-50">开始设置<ArrowRight className="ml-2 size-5" /></Button>
+        <aside className="rounded-[24px] border border-blue-100 bg-blue-50 p-6 text-slate-950">
+          <div className="rounded-2xl bg-white p-4 shadow-[0_16px_40px_rgba(37,99,235,0.10)]">
+            <img src="/a3/assets/onboarding/welcome-robot.webp" alt="A3 学习引擎助手" className="mx-auto h-40 w-full object-contain" />
+          </div>
+          <h2 className="mt-6 text-2xl font-semibold leading-tight">下一步会写回你的首启进度。</h2>
+          <p className="mt-3 text-sm leading-6 text-slate-600">点击后会调用资料接口更新 onboardingStep，然后进入隐私授权页。</p>
+          <Button disabled={submitting} onClick={start} className="mt-8 h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg text-white hover:from-blue-700 hover:to-violet-700">
+            {submitting ? '正在进入...' : '继续初始化'}<ArrowRight className="ml-2 size-5" />
+          </Button>
         </aside>
       </div>
     </SimpleFlowFrame>
@@ -1049,15 +1070,33 @@ export function ProfileSetupPage() {
     },
   ];
 
+  function goBack() {
+    if (typeof window !== 'undefined' && window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    router.push('/a3/dashboard');
+  }
+
   return (
     <SimpleFlowFrame>
       <div data-testid="a3-profile-setup-view">
         <div className="mb-7 grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-end">
           <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={goBack}
+              className="mb-5 h-9 rounded-full border-slate-200 bg-white/80 px-3 text-slate-700 shadow-sm hover:bg-white"
+            >
+              <ArrowLeft className="size-4" />
+              返回上一页
+            </Button>
             <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-600">Learner profile</p>
             <h1 className="mt-3 text-4xl font-semibold tracking-normal text-slate-950 md:text-5xl">画像与规划输入</h1>
             <p className="mt-4 max-w-3xl text-base leading-7 text-slate-600">
-              告诉系统你的目标、基础和薄弱点。画像确认后，入学诊断、学习路径、今日任务和资源生成会沿着同一条主线更新。
+              完善目标、基础与偏好，系统将据此生成诊断、学习路径和今日任务。
             </p>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1066,7 +1105,6 @@ export function ProfileSetupPage() {
               <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">{loadingOptions ? '同步中' : '已同步'}</span>
             </div>
             <div className="mt-2 text-xl font-semibold text-slate-950">{optionsCourse}</div>
-            <div className="mt-1 text-xs leading-5 text-slate-500">知识点来自后端课程包，不是前端写死。</div>
           </div>
         </div>
         <section className="mb-7 overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.07)]">
@@ -1086,7 +1124,7 @@ export function ProfileSetupPage() {
                 <div>
                   <h2 className="text-2xl font-semibold tracking-normal text-slate-950">先用一句话完成画像</h2>
                   <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">
-                    说清楚目标、每天时间、薄弱点和喜欢的资源形式。ProfileAgent 会抽取字段，缺什么再追问。
+                    写下目标、时间、薄弱点和资源偏好即可。
                   </p>
                 </div>
               </div>
@@ -1113,9 +1151,9 @@ export function ProfileSetupPage() {
                         <Bot className="size-5" />
                       </div>
                       <div className="min-w-0">
-                        <div className="text-sm font-semibold text-slate-950">一次说清楚，后面自动接上规划</div>
+                        <div className="text-sm font-semibold text-slate-950">描述你的学习情况</div>
                         <p className="mt-1 text-sm leading-6 text-slate-600">
-                          例子不用照抄。重点写清楚当前课程、薄弱点、每天时间和想要的资源形式。
+                          建议包含目标、基础、薄弱点、时间和资源偏好。
                         </p>
                         <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold text-slate-600">
                           <span className="rounded-full bg-slate-100 px-3 py-1">目标</span>
@@ -1179,7 +1217,7 @@ export function ProfileSetupPage() {
                 profileSnapshot={profileSnapshot}
                 compact
                 title="动态画像摘要"
-                subtitle="系统会用诊断、测评、课堂问答继续修正画像。"
+                subtitle="随学习表现持续更新。"
               />
               <ProfileUpdateTimelinePanel
                 feed={profileFeed}
@@ -1197,7 +1235,7 @@ export function ProfileSetupPage() {
                   <span>
                     <span className="block text-sm font-semibold text-slate-950">Agent 决策证据</span>
                     <span className="mt-1 block text-xs leading-5 text-slate-500">
-                      答辩或排查时展开，学生日常使用不需要先读这些细节。
+                      查看画像生成依据。
                     </span>
                   </span>
                   <ChevronDown className={evidenceOpen ? 'size-5 shrink-0 rotate-180 text-slate-500 transition-transform' : 'size-5 shrink-0 text-slate-500 transition-transform'} />
@@ -1246,7 +1284,7 @@ export function ProfileSetupPage() {
                   </span>
                   <span className="min-w-0">
                     <span className="block text-lg font-semibold text-slate-950">手动校准画像字段</span>
-                    <span className="mt-1 block text-sm leading-5 text-slate-500">对话是主流程；这里用于精确修正目标、基础、薄弱点和资源偏好。</span>
+                    <span className="mt-1 block text-sm leading-5 text-slate-500">补充或修正关键字段。</span>
                   </span>
                 </span>
                 <ChevronDown className={advancedOpen ? 'size-5 shrink-0 rotate-180 text-slate-500 transition-transform' : 'size-5 shrink-0 text-slate-500 transition-transform'} />
@@ -1260,12 +1298,12 @@ export function ProfileSetupPage() {
                 下一步
               </div>
               <p className="mt-2 text-sm leading-6 text-blue-900/75">
-                保存后会刷新入学诊断任务、学习路径和周期计划。
+                保存后生成诊断、路径和计划。
               </p>
               <Button data-testid="a3-profile-setup-submit" disabled={submitting} onClick={submit} className="mt-4 h-12 w-full rounded-xl bg-blue-600 text-base hover:bg-blue-700">
                 {submitting ? '正在保存...' : '保存画像并生成规划'}
               </Button>
-              <p className="mt-3 text-xs leading-5 text-blue-900/60">信息仅用于个性化学习路径，后续可在个人资料中修改。</p>
+              <p className="mt-3 text-xs leading-5 text-blue-900/60">仅用于个性化学习，可随时修改。</p>
             </div>
           </div>
           {advancedOpen && (
@@ -1441,7 +1479,7 @@ function AgentExtractionPanel({ interviewResult }: { interviewResult: ProfileInt
         </div>
       ) : (
         <p className="mt-4 text-sm leading-6 text-slate-500">
-          生成后会展示年级、专业、基础水平、每日时间、目标、薄弱点、资源偏好、认知风格和动机风险，并自动回填到高级编辑。
+          生成后会自动回填画像字段。
         </p>
       )}
     </div>
@@ -1466,7 +1504,7 @@ function ProfileUpdateTimelinePanel({
       <div className="flex items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold text-slate-950">画像变化确认</h3>
-          <p className="mt-1 text-xs leading-5 text-slate-500">诊断、测评、课堂和资源反馈会先形成候选变化，确认后才写入长期画像。</p>
+          <p className="mt-1 text-xs leading-5 text-slate-500">确认后写入长期画像。</p>
         </div>
         <span className={queue.length ? 'rounded-full bg-orange-50 px-2.5 py-1 text-xs font-semibold text-orange-700' : 'rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600'}>
           {queue.length ? `${queue.length} 条待确认` : '无待确认'}
@@ -1497,7 +1535,7 @@ function ProfileUpdateTimelinePanel({
         </div>
       ) : (
         <div className="mt-4 rounded-xl bg-slate-50 px-3 py-3 text-sm leading-6 text-slate-600">
-          完成入学诊断、错题复盘或课堂问答后，这里会显示哪次行为让画像发生变化。
+          暂无待确认变化。
         </div>
       )}
 

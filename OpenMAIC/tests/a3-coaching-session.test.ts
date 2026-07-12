@@ -175,10 +175,9 @@ describe('/api/a3/coaching/respond', () => {
     expect(response.status).toBe(200);
     expect(payload.success).toBe(true);
     expect(payload.reply).toContain('杆件的几何要素');
-    expect(fetchA3DjangoJson).toHaveBeenCalledWith(
-      expect.stringContaining('/api/v1/qa/interact/'),
-      'sessionid=test',
-    );
+    const qaCall = fetchA3DjangoJson.mock.calls.find((call) => String(call[0]).startsWith('/api/v1/qa/interact/'));
+    expect(qaCall?.[0]).toEqual(expect.stringContaining('/api/v1/qa/interact/'));
+    expect(qaCall?.[1]).toBe('sessionid=test');
   });
 
   it('forwards deep retrieval mode and material scope to backend QA', async () => {
@@ -218,5 +217,67 @@ describe('/api/a3/coaching/respond', () => {
     expect(upstreamUrl.searchParams.get('mode')).toBe('deep');
     expect(upstreamUrl.searchParams.get('scope')).toBe('personal');
     expect(upstreamUrl.searchParams.get('q')).toBe('从我上传的 PPTX 里解释根轨迹法');
+  });
+
+  it('returns a retryable timeout error instead of fake fallback for deep personal retrieval', async () => {
+    fetchA3DjangoJson
+      .mockResolvedValueOnce({ success: true, user: { id: 'u1' } })
+      .mockRejectedValueOnce(Object.assign(new Error('timeout'), { name: 'TimeoutError' }));
+    const { POST } = await import('@/app/api/a3/coaching/respond/route');
+
+    const response = await POST(new Request('http://localhost/api/a3/coaching/respond', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: 'sessionid=test' },
+      body: JSON.stringify({
+        message: '请从我上传的资料里检索这个概念',
+        mode: 'deep',
+        scope: 'personal',
+        history: [],
+      }),
+    }) as never);
+    const payload = await response.json();
+
+    expect(response.status).toBe(504);
+    expect(payload.success).toBe(false);
+    expect(payload.errorCode).toBe('UPSTREAM_TIMEOUT');
+    expect(payload.retrievalMode).not.toBe('timeout_fallback');
+
+    const upstreamPath = fetchA3DjangoJson.mock.calls[1][0] as string;
+    const upstreamUrl = new URL(upstreamPath, 'http://localhost');
+    expect(upstreamUrl.pathname).toBe('/api/v1/qa/interact/');
+    expect(upstreamUrl.searchParams.get('mode')).toBe('deep');
+    expect(upstreamUrl.searchParams.get('scope')).toBe('personal');
+  });
+
+  it('returns a retryable timeout error instead of fake fallback for default classroom retrieval', async () => {
+    fetchA3DjangoJson.mockImplementation((path: string) => {
+      if (path === '/api/auth/me/') return Promise.resolve({ success: true, user: { id: 'u1' } });
+      if (path === '/api/learning/classroom/') return Promise.reject(new Error('visual evidence unavailable'));
+      if (path.startsWith('/api/v1/qa/interact/')) {
+        return Promise.reject(Object.assign(new Error('timeout'), { name: 'TimeoutError' }));
+      }
+      return Promise.resolve({ success: true, results: [] });
+    });
+    const { POST } = await import('@/app/api/a3/coaching/respond/route');
+
+    const response = await POST(new Request('http://localhost/api/a3/coaching/respond', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: 'sessionid=test' },
+      body: JSON.stringify({
+        message: '请从我上传的资料里检索这个概念',
+        history: [],
+      }),
+    }) as never);
+    const payload = await response.json();
+
+    expect(response.status).toBe(504);
+    expect(payload.success).toBe(false);
+    expect(payload.errorCode).toBe('UPSTREAM_TIMEOUT');
+    expect(payload.retrievalMode).not.toBe('timeout_fallback');
+
+    const qaCall = fetchA3DjangoJson.mock.calls.find((call) => String(call[0]).startsWith('/api/v1/qa/interact/'));
+    const upstreamUrl = new URL(qaCall?.[0] as string, 'http://localhost');
+    expect(upstreamUrl.searchParams.get('mode')).toBe('fast');
+    expect(upstreamUrl.searchParams.get('scope')).toBe('all');
   });
 });

@@ -9,6 +9,8 @@ from django.core.management.base import BaseCommand
 from backend.apps.compat.safety import check_learning_safety
 from backend.apps.compat.verification import verify_answer
 from backend.apps.knowledge_base.display import format_source_display_location, safe_source_filename
+from backend.apps.knowledge_base.deep_retrieval import plan_retrieval_route, run_deep_retrieval_router
+from backend.apps.knowledge_base.models import KnowledgeResource, ResourceStatus
 from backend.domains.knowledge_base.retriever import search_knowledge_base
 
 
@@ -121,6 +123,10 @@ class Command(BaseCommand):
         self.stdout.write(f"retrievalTop1HitRate: {metrics['retrievalTop1HitRate']}%")
         self.stdout.write(f"retrievalTop3HitRate: {metrics['retrievalTop3HitRate']}%")
         self.stdout.write(f"retrievalTop5HitRate: {metrics['retrievalTop5HitRate']}%")
+        self.stdout.write(f"retrievalHitRateByRoute: {metrics['retrievalHitRateByRoute']}")
+        self.stdout.write(f"graphPathHitRate: {metrics['graphPathHitRate']}%")
+        self.stdout.write(f"graphEvidenceCoverage: {metrics['graphEvidenceCoverage']}%")
+        self.stdout.write(f"graphAverageHops: {metrics['graphAverageHops']}")
         self.stdout.write(f"verifiedCoverage: {metrics['verifiedCoverage']}%")
         self.stdout.write(f"safetyRefusalRate: {metrics['safetyRefusalRate']}%")
         self.stdout.write(f"missingEvidenceRefusalRate: {metrics['missingEvidenceRefusalRate']}%")
@@ -140,11 +146,14 @@ class Command(BaseCommand):
 
 def _evaluate_case(case: EvalCase, *, top_k: int, requested_top_k: int, course: str | None) -> dict:
     safety = check_learning_safety(case.question)
+    retrieval_plan = plan_retrieval_route(case.question)
     if case.kind in {"unsafe", "missing_evidence"}:
         verification = verify_answer(case.question, "演示回答", [])
         return {
             "question": case.question,
             "kind": case.kind,
+            "retrievalRoute": retrieval_plan.requested_route,
+            "retrievalIntent": retrieval_plan.intent,
             "expectedKeywords": list(case.expected_keywords),
             "retrievalHit": False,
             "retrievalHits": {f"top{k}": False for k in TOP_K_BUCKETS},
@@ -154,9 +163,14 @@ def _evaluate_case(case: EvalCase, *, top_k: int, requested_top_k: int, course: 
             "refusalReason": verification.refusalReason,
             "topSource": "",
             "topSnippet": "",
+            "graphPathHit": False,
+            "graphEvidenceCoverage": 0.0,
+            "graphAverageHops": 0.0,
         }
 
     results = search_knowledge_base(case.question, top_k=top_k, course=course)
+    deep_retrieval = _deep_retrieval_for_eval(case.question, top_k=top_k)
+    graph_stats = _graph_path_stats(deep_retrieval.graph_evidence)
     sources = [
         {
             "title": str(result.metadata.get("title") or result.metadata.get("source_name") or safe_source_filename(result.metadata.get("source_path")) or "知识库片段"),
@@ -177,6 +191,9 @@ def _evaluate_case(case: EvalCase, *, top_k: int, requested_top_k: int, course: 
     return {
         "question": case.question,
         "kind": case.kind,
+        "retrievalRoute": retrieval_plan.requested_route,
+        "actualRetrievalRoute": getattr(getattr(deep_retrieval, "plan", None), "route", retrieval_plan.requested_route),
+        "retrievalIntent": retrieval_plan.intent,
         "expectedKeywords": list(case.expected_keywords),
         "retrievalHit": retrieval_hit,
         "retrievalHits": retrieval_hits,
@@ -186,6 +203,9 @@ def _evaluate_case(case: EvalCase, *, top_k: int, requested_top_k: int, course: 
         "refusalReason": verification.refusalReason,
         "topSource": sources[0]["title"] if sources else "",
         "topSnippet": sources[0]["snippet"] if sources else "",
+        "graphPathHit": graph_stats["pathHit"],
+        "graphEvidenceCoverage": graph_stats["evidenceCoverage"],
+        "graphAverageHops": graph_stats["averageHops"],
     }
 
 
@@ -193,6 +213,7 @@ def _metrics(cases: list[dict]) -> dict:
     grounded = [case for case in cases if case["kind"] == "grounded"]
     unsafe = [case for case in cases if case["kind"] == "unsafe"]
     missing_evidence = [case for case in cases if case["kind"] == "missing_evidence"]
+    route_hit_rates = _route_hit_rates(grounded)
     return {
         "totalCases": len(cases),
         "groundedCases": len(grounded),
@@ -202,6 +223,10 @@ def _metrics(cases: list[dict]) -> dict:
         "retrievalTop1HitRate": _percent(sum(1 for case in grounded if case["retrievalHits"].get("top1")), len(grounded)),
         "retrievalTop3HitRate": _percent(sum(1 for case in grounded if case["retrievalHits"].get("top3")), len(grounded)),
         "retrievalTop5HitRate": _percent(sum(1 for case in grounded if case["retrievalHits"].get("top5")), len(grounded)),
+        "retrievalHitRateByRoute": route_hit_rates,
+        "graphPathHitRate": _percent(sum(1 for case in grounded if case.get("graphPathHit")), len(grounded)),
+        "graphEvidenceCoverage": _average_percent([case.get("graphEvidenceCoverage", 0.0) for case in grounded if case.get("graphPathHit")]),
+        "graphAverageHops": _average([case.get("graphAverageHops", 0.0) for case in grounded if case.get("graphPathHit")]),
         "verifiedCoverage": _percent(sum(1 for case in grounded if case["verified"]), len(grounded)),
         "safetyRefusalRate": _percent(sum(1 for case in unsafe if not case["safety"]["safe"]), len(unsafe)),
         "missingEvidenceRefusalRate": _percent(
@@ -211,8 +236,43 @@ def _metrics(cases: list[dict]) -> dict:
     }
 
 
+def _route_hit_rates(cases: list[dict]) -> dict:
+    metrics: dict[str, dict] = {}
+    for route in ("wiki", "graph", "vector"):
+        route_cases = [case for case in cases if case.get("retrievalRoute") == route]
+        metrics[route] = {
+            "cases": len(route_cases),
+            "hitRate": _percent(sum(1 for case in route_cases if case.get("retrievalHit")), len(route_cases)),
+        }
+    return metrics
+
+
 def _percent(value: int, total: int) -> float:
     return round(value * 100 / total, 1) if total else 0.0
+
+
+def _average(values: list[float]) -> float:
+    return round(sum(float(value or 0) for value in values) / len(values), 2) if values else 0.0
+
+
+def _average_percent(values: list[float]) -> float:
+    return round(_average(values) * 100, 1) if values else 0.0
+
+
+def _deep_retrieval_for_eval(question: str, *, top_k: int):
+    resources = KnowledgeResource.objects.filter(status__in=[ResourceStatus.INDEXED, ResourceStatus.INDEXED_WITH_WARNINGS])
+    return run_deep_retrieval_router(question, resources, top_k=top_k)
+
+
+def _graph_path_stats(graph_evidence: list[dict]) -> dict:
+    path_items = [item for item in graph_evidence if item.get("pathLabels") or item.get("relations")]
+    if not path_items:
+        return {"pathHit": False, "evidenceCoverage": 0.0, "averageHops": 0.0}
+    return {
+        "pathHit": True,
+        "evidenceCoverage": _average([float(item.get("evidenceCoverage") or 0.0) for item in path_items]),
+        "averageHops": _average([float(item.get("hops") or len(item.get("relations") or []) or 1) for item in path_items]),
+    }
 
 
 def _has_keyword_hit(sources: list[dict], expected_keywords: tuple[str, ...]) -> bool:

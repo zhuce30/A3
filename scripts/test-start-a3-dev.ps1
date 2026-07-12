@@ -24,11 +24,17 @@ $requiredSnippets = @(
   "a3-backend.log",
   "a3-frontend.log",
   "a3-realtime-proxy.log",
+  "a3-celery-worker.log",
+  "a3-celery-worker-error.log",
   "A3_REALTIME_WS_PROXY_PORT",
+  "assessments.refill_personal_question_pool",
+  "inspect registered",
+  "--pool=solo",
+  "Get-CeleryWorkerProcesses",
+  "Wait-CeleryWorker",
   "http://127.0.0.1:3002",
   "http://127.0.0.1:8000",
-  "http://127.0.0.1:3003/health",
-  "Skipping reused"
+  "http://127.0.0.1:3003/health"
 )
 
 foreach ($snippet in $requiredSnippets) {

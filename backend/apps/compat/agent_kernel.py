@@ -18,7 +18,7 @@ from backend.apps.compat.safety import check_learning_safety
 from backend.apps.compat.verification import verify_answer
 from backend.apps.assessments.generation import run_question_generation_job, serialize_question_generation_job
 from backend.apps.assessments.models import Question, QuestionGenerationJob, QuestionQualityCheck, StudentQuestionMastery, WrongQuestion
-from backend.apps.assessments.services import answer_assessment_question, build_learning_report
+from backend.apps.assessments.services import answer_assessment_question, build_learning_report, merge_active_wrong_questions_into_review_queue
 from backend.apps.engagement.models import UserNotification
 from backend.apps.knowledge_base.models import KnowledgeAsset, KnowledgeBlock, KnowledgeGraphClaim, KnowledgeGraphEntity, KnowledgeGraphRelation, KnowledgeIndexEntry, KnowledgeResource, ResourceStatus
 from backend.apps.knowledge_base.display import format_source_display_location, format_source_type_label, safe_source_filename, source_origin_label
@@ -2022,6 +2022,7 @@ class StudyPlanAgent(BaseAgent):
                 detail="Skip plan refresh because the answer did not change remediation state.",
             )
         study_plan = generate_study_plan(context.user, force=True)
+        study_plan = merge_active_wrong_questions_into_review_queue(context.user, study_plan)
         report = build_learning_report(context.user) if result.get("session", {}).get("status") == "completed" else None
         days = study_plan.get("days") if isinstance(study_plan.get("days"), list) else []
         today_tasks = len((days or [{}])[0].get("tasks", []))

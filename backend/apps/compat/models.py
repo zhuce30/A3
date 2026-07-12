@@ -98,3 +98,36 @@ class OpenMAICArtifact(models.Model):
 
     def __str__(self) -> str:
         return f"{self.resource_pack_id}:{self.artifact_type}:{self.status}"
+
+
+class ResourceGenerationJob(models.Model):
+    job_id = models.CharField(max_length=120, unique=True, db_index=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="a3_resource_generation_jobs")
+    workflow = models.CharField(max_length=80, default="resource_generate")
+    status = models.CharField(max_length=32, default="queued")
+    progress = models.PositiveSmallIntegerField(default=0)
+    stage = models.CharField(max_length=40, default="queued")
+    message = models.CharField(max_length=255, blank=True)
+    goal = models.TextField(blank=True)
+    top_k = models.PositiveSmallIntegerField(default=5)
+    resource_type = models.CharField(max_length=40, blank=True)
+    resource_pack_id = models.CharField(max_length=64, blank=True, db_index=True)
+    trace_id = models.CharField(max_length=64, blank=True, db_index=True)
+    result = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_resource_generation_jobs"
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="a3_resgen_user_created_idx"),
+            models.Index(fields=["workflow", "status"], name="a3_resgen_flow_status_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.job_id}:{self.status}:{self.progress}"

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from uuid import UUID
 
+from django.db import models, transaction
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_http_methods
@@ -30,6 +32,39 @@ def _body(request):
 
 def _is_teacher_or_admin(user) -> bool:
     return getattr(user, "role", "") in {"teacher", "admin"}
+
+
+def _teacher_question_queryset():
+    return Question.objects.filter(
+        ~models.Q(scope="personal")
+        | models.Q(
+            scope="personal",
+            archived_at__isnull=True,
+            review_status=QuestionReviewStatus.AUTO_VERIFIED,
+            source_type__in=["personal_generated", "variant", "kb_generated"],
+        )
+    )
+
+
+def _apply_question_review(question, *, action: str, reason: str, reviewer):
+    metadata = dict(question.metadata) if isinstance(question.metadata, dict) else {}
+    metadata.update({"reviewAction": action, "reviewReason": reason, "reviewerId": str(reviewer.id)})
+    if action == "approve":
+        if question.scope == "personal":
+            metadata.setdefault("originalScope", "personal")
+            metadata.setdefault("originalOwnerId", str(question.owner_id) if question.owner_id else "")
+            question.scope = "teacher"
+        question.review_status = QuestionReviewStatus.APPROVED
+        question.is_active = True
+    elif action == "reject":
+        question.review_status = QuestionReviewStatus.REJECTED
+        question.is_active = False
+    else:
+        question.review_status = QuestionReviewStatus.DISABLED
+        question.is_active = False
+    question.metadata = metadata
+    question.save(update_fields=["review_status", "scope", "is_active", "metadata"])
+    return question
 
 
 @require_http_methods(["GET"])
@@ -164,7 +199,7 @@ def questions(request):
         .order_by("-created_at")
     )
     if _is_teacher_or_admin(request.user):
-        queryset = queryset.exclude(scope="personal")
+        queryset = queryset.filter(id__in=_teacher_question_queryset().values("id"))
     else:
         queryset = queryset.filter(owner=request.user, scope="personal", is_active=True)
     base_queryset = queryset
@@ -177,6 +212,9 @@ def questions(request):
     source_type = str(request.GET.get("sourceType") or "").strip()
     if source_type:
         queryset = queryset.filter(source_type=source_type)
+    question_kind = str(request.GET.get("questionKind") or "").strip()
+    if question_kind:
+        queryset = queryset.filter(metadata__questionKind=question_kind)
     try:
         limit = max(1, min(int(request.GET.get("limit") or 50), 100))
     except ValueError:
@@ -187,6 +225,8 @@ def questions(request):
         summary_queryset = summary_queryset.filter(scope=scope)
     if source_type:
         summary_queryset = summary_queryset.filter(source_type=source_type)
+    if question_kind:
+        summary_queryset = summary_queryset.filter(metadata__questionKind=question_kind)
     return JsonResponse({
         "success": True,
         "questions": [serialize_question_bank_item(question) for question in rows],
@@ -207,7 +247,7 @@ def review_question(request, question_id):
     if not _is_teacher_or_admin(request.user):
         return JsonResponse({"success": False, "error": "只有教师或管理员可以审核题库"}, status=403)
     question = get_object_or_404(
-        Question.objects.select_related("knowledge_point__chapter", "source_resource").prefetch_related("evidence_items__resource"),
+        _teacher_question_queryset().select_related("knowledge_point__chapter", "source_resource").prefetch_related("evidence_items__resource"),
         id=question_id,
     )
     try:
@@ -218,17 +258,84 @@ def review_question(request, question_id):
     reason = str(payload.get("reason") or "").strip()
     if action not in {"approve", "reject", "disable"}:
         return JsonResponse({"success": False, "error": "审核动作必须是 approve、reject 或 disable"}, status=400)
-    metadata = question.metadata if isinstance(question.metadata, dict) else {}
-    metadata.update({"reviewAction": action, "reviewReason": reason, "reviewerId": str(request.user.id)})
-    if action == "approve":
-        question.review_status = QuestionReviewStatus.APPROVED
-        question.is_active = True
-    elif action == "reject":
-        question.review_status = QuestionReviewStatus.REJECTED
-        question.is_active = False
-    else:
-        question.review_status = QuestionReviewStatus.DISABLED
-        question.is_active = False
-    question.metadata = metadata
-    question.save(update_fields=["review_status", "is_active", "metadata"])
+    if len(reason) > 500:
+        return JsonResponse({"success": False, "error": "审核理由不能超过 500 个字符"}, status=400)
+    _apply_question_review(question, action=action, reason=reason, reviewer=request.user)
     return JsonResponse({"success": True, "question": serialize_question_bank_item(question)})
+
+
+@require_http_methods(["POST"])
+def batch_review_questions(request):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    if not _is_teacher_or_admin(request.user):
+        return JsonResponse({"success": False, "error": "只有教师或管理员可以审核题库"}, status=403)
+    try:
+        payload = _body(request)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+    raw_ids = payload.get("questionIds")
+    action = str(payload.get("action") or "").strip()
+    reason = str(payload.get("reason") or "").strip()
+    if action not in {"approve", "reject"}:
+        return JsonResponse({"success": False, "error": "批量审核动作必须是 approve 或 reject"}, status=400)
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return JsonResponse({"success": False, "error": "请至少选择一道待审核题目"}, status=400)
+    if len(raw_ids) > 100:
+        return JsonResponse({"success": False, "error": "单次最多审核 100 道题"}, status=400)
+    if not reason:
+        return JsonResponse({"success": False, "error": "请填写审核理由"}, status=400)
+    if len(reason) > 500:
+        return JsonResponse({"success": False, "error": "审核理由不能超过 500 个字符"}, status=400)
+
+    valid_ids = []
+    failures = []
+    seen_ids = set()
+    for raw_id in raw_ids:
+        try:
+            normalized_id = str(UUID(str(raw_id)))
+        except (TypeError, ValueError, AttributeError):
+            failures.append({"id": str(raw_id), "error": "题目 ID 无效"})
+            continue
+        if normalized_id in seen_ids:
+            continue
+        seen_ids.add(normalized_id)
+        valid_ids.append(normalized_id)
+
+    reviewed = []
+    if valid_ids:
+        with transaction.atomic():
+            candidates = {
+                str(question.id): question
+                for question in _teacher_question_queryset()
+                .select_for_update()
+                .select_related("knowledge_point__chapter", "source_resource")
+                .prefetch_related("evidence_items__resource")
+                .filter(id__in=valid_ids)
+            }
+            for question_id in valid_ids:
+                question = candidates.get(question_id)
+                if question is None:
+                    failures.append({"id": question_id, "error": "题目不存在或不在教师审核范围内"})
+                    continue
+                if question.review_status != QuestionReviewStatus.AUTO_VERIFIED:
+                    failures.append({"id": question_id, "error": "题目已不处于待审核状态"})
+                    continue
+                reviewed.append(_apply_question_review(
+                    question,
+                    action=action,
+                    reason=reason,
+                    reviewer=request.user,
+                ))
+
+    return JsonResponse({
+        "success": bool(reviewed),
+        "action": action,
+        "processedCount": len(reviewed),
+        "failedCount": len(failures),
+        "questions": [serialize_question_bank_item(question) for question in reviewed],
+        "failures": failures,
+        **({"error": "没有可审核的题目"} if not reviewed else {}),
+    }, status=200 if reviewed else 409)

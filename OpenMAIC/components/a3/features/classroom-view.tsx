@@ -1847,30 +1847,64 @@ function VerificationBadge({ verified, citations, claims, safety, refusalReason 
 }
 
 function CitationPreview({ citation, size = 'compact' }: { citation: Citation; size?: 'compact' | 'thumb' | 'large' | 'hero' }) {
+  const [previewAvailable, setPreviewAvailable] = useState(true);
   if (!citation.previewUrl) return null;
+  const image = (
+    <CitationImage
+      citation={citation}
+      size={size}
+      previewAvailable={previewAvailable}
+      onUnavailable={() => setPreviewAvailable(false)}
+    />
+  );
+  if (!previewAvailable) {
+    return (
+      <div className={cn('block shrink-0', size === 'compact' ? '' : 'w-full')} data-testid="a3-classroom-citation-preview">
+        {image}
+      </div>
+    );
+  }
   return (
     <a
       href={resolveCitationPreviewUrl(citation.previewUrl)}
       target="_blank"
       rel="noreferrer"
       className={cn('block shrink-0', size === 'compact' ? '' : 'w-full')}
-      data-testid="a3-classroom-citation-preview"
+      data-testid="a3-classroom-citation-preview-link"
     >
-      <CitationImage citation={citation} size={size} />
+      {image}
     </a>
   );
 }
 
-function CitationImage({ citation, size = 'compact' }: { citation: Citation; size?: 'compact' | 'thumb' | 'large' | 'hero' }) {
+function CitationImage({
+  citation,
+  size = 'compact',
+  previewAvailable = true,
+  onUnavailable,
+}: {
+  citation: Citation;
+  size?: 'compact' | 'thumb' | 'large' | 'hero';
+  previewAvailable?: boolean;
+  onUnavailable?: () => void;
+}) {
   if (!citation.previewUrl) return null;
   const previewUrl = resolveCitationPreviewUrl(citation.previewUrl);
+  const frameClassName = cn(
+    'group relative overflow-hidden rounded-lg border border-slate-200 bg-slate-50',
+    size === 'hero' ? 'h-[220px] w-full' : size === 'large' ? 'h-[168px] w-full md:w-[260px]' : size === 'thumb' ? 'h-[72px] w-full' : 'h-14 w-20',
+  );
+  if (!previewAvailable) {
+    return (
+      <div className={frameClassName} data-testid="a3-classroom-citation-preview">
+        <span className="flex h-full w-full items-center justify-center px-2 text-center text-[10px] leading-3 text-slate-500">
+          预览不可用
+        </span>
+      </div>
+    );
+  }
   return (
-    <div
-      className={cn(
-        'group relative overflow-hidden rounded-lg border border-slate-200 bg-slate-50',
-        size === 'hero' ? 'h-[220px] w-full' : size === 'large' ? 'h-[168px] w-full md:w-[260px]' : size === 'thumb' ? 'h-[72px] w-full' : 'h-14 w-20',
-      )}
-    >
+    <div className={frameClassName} data-testid="a3-classroom-citation-preview">
       <img
         src={previewUrl}
         alt={citation.title || 'knowledge-base citation preview'}
@@ -1878,6 +1912,7 @@ function CitationImage({ citation, size = 'compact' }: { citation: Citation; siz
         loading="lazy"
         onError={(event) => {
           event.currentTarget.classList.add('hidden');
+          onUnavailable?.();
           const fallback = event.currentTarget.nextElementSibling;
           if (fallback instanceof HTMLElement) fallback.style.display = 'flex';
         }}

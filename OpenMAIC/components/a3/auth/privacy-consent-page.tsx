@@ -141,7 +141,7 @@ export function PrivacyConsentPage() {
 
   return (
     <div className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_10%_100%,rgba(37,99,235,0.10),transparent_32%),radial-gradient(circle_at_86%_92%,rgba(124,58,237,0.08),transparent_30%),linear-gradient(135deg,var(--a3-bg-soft)_0%,var(--a3-bg)_48%,var(--a3-bg-soft)_100%)] text-[var(--a3-text)]">
-      <header className="flex h-[88px] items-center justify-between border-b border-[var(--a3-border)] bg-[var(--a3-surface)] px-8 backdrop-blur-xl xl:px-11">
+      <header className="flex h-[88px] items-center justify-between border-b border-[var(--a3-border)] bg-[var(--a3-surface)] px-4 backdrop-blur-xl md:px-8 xl:px-11">
         <Link href="/a3/login" className="flex items-center gap-3">
           <div className="flex size-12 items-center justify-center rounded-[14px] bg-gradient-to-br from-blue-500 to-violet-600 text-xl font-bold text-white shadow-[0_14px_30px_rgba(37,99,235,0.24)]">A</div>
           <div>
@@ -152,17 +152,17 @@ export function PrivacyConsentPage() {
         <div className="hidden md:block"><A3TopActions /></div>
       </header>
 
-      <main className="mx-auto max-w-[1500px] px-6 py-8 xl:px-8">
-        <section className="rounded-[28px] border border-[var(--a3-border)] bg-[var(--a3-surface)] p-6 shadow-[var(--a3-shadow)] xl:p-8">
+      <main className="mx-auto max-w-[1500px] px-3 py-6 sm:px-6 xl:px-8">
+        <section className="rounded-[24px] border border-[var(--a3-border)] bg-[var(--a3-surface)] p-4 shadow-[var(--a3-shadow)] sm:p-6 xl:rounded-[28px] xl:p-8">
           <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_430px]">
             <div className="min-w-0">
-              <div className="mb-6 flex items-center gap-5">
-                <div className="flex size-[96px] shrink-0 items-center justify-center rounded-[28px] bg-gradient-to-br from-blue-500 to-violet-600 text-white shadow-[0_20px_44px_rgba(37,99,235,0.24)]">
-                  <Check className="size-14" />
+              <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-5">
+                <div className="flex size-16 shrink-0 items-center justify-center rounded-[22px] bg-gradient-to-br from-blue-500 to-violet-600 text-white shadow-[0_20px_44px_rgba(37,99,235,0.24)] sm:size-[96px] sm:rounded-[28px]">
+                  <Check className="size-10 sm:size-14" />
                 </div>
                 <div>
-                  <h1 className="text-[40px] font-semibold leading-tight">隐私授权说明</h1>
-                  <p className="mt-3 text-lg text-[var(--a3-text-muted)]">为了提供更安全、更个性化的学习服务，请确认以下数据使用范围。</p>
+                  <h1 className="text-3xl font-semibold leading-tight sm:text-[40px]">隐私授权说明</h1>
+                  <p className="mt-3 text-base leading-7 text-[var(--a3-text-muted)] sm:text-lg">授权结果会写回个人资料接口，用于决定后续画像、提醒和推荐能力是否启用。</p>
                 </div>
               </div>
 
@@ -172,25 +172,25 @@ export function PrivacyConsentPage() {
                   const enabled = item.locked || optionalConsents[item.key as ConsentKey];
                   const isExpanded = expanded === item.key;
                   return (
-                    <div key={item.key} className="rounded-2xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-5 py-4 shadow-[0_8px_26px_rgba(30,64,175,0.04)]">
-                      <div className="flex items-center justify-between gap-5">
-                        <div className="flex min-w-0 items-center gap-4">
-                          <span className={`flex size-14 shrink-0 items-center justify-center rounded-full ${toneClass[item.tone]}`}>
-                            <Icon className="size-7" />
+                    <div key={item.key} className="rounded-2xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-4 py-4 shadow-[0_8px_26px_rgba(30,64,175,0.04)] sm:px-5">
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between sm:gap-5">
+                        <div className="flex min-w-0 items-start gap-3 sm:items-center sm:gap-4">
+                          <span className={`flex size-12 shrink-0 items-center justify-center rounded-full sm:size-14 ${toneClass[item.tone]}`}>
+                            <Icon className="size-6 sm:size-7" />
                           </span>
                           <div className="min-w-0">
-                            <h2 className="flex flex-wrap items-center gap-2 text-xl font-semibold">
+                            <h2 className="flex flex-wrap items-center gap-2 text-lg font-semibold sm:text-xl">
                               {item.title}
                               <span className="rounded-lg bg-blue-50 px-2.5 py-1 text-sm font-semibold text-blue-600 dark:bg-blue-950/50 dark:text-blue-200">{item.tag}</span>
                             </h2>
                             <p className="mt-2 text-sm leading-6 text-[var(--a3-text-muted)]">{item.desc}</p>
                           </div>
                         </div>
-                        <div className="flex shrink-0 items-center gap-4">
+                        <div className="flex w-full shrink-0 items-center justify-between gap-3 border-t border-[var(--a3-border)] pt-3 sm:w-auto sm:justify-end sm:border-t-0 sm:pt-0">
                           <button
                             type="button"
                             onClick={() => setExpanded(isExpanded ? null : item.key)}
-                            className="text-sm font-medium text-blue-600 hover:text-blue-700"
+                            className="whitespace-nowrap text-sm font-medium text-blue-600 hover:text-blue-700"
                           >
                             {isExpanded ? '收起详情' : '查看详情'}
                           </button>
@@ -206,6 +206,7 @@ export function PrivacyConsentPage() {
                                 setOptionalConsents((current) => ({ ...current, [key]: !current[key] }));
                               }}
                               className={cn('relative h-8 w-14 rounded-full transition-colors', enabled ? 'bg-blue-600' : 'bg-slate-300 dark:bg-slate-700')}
+                              aria-label={`${item.title}授权开关`}
                               aria-pressed={enabled}
                             >
                               <span className={cn('absolute top-1 size-6 rounded-full bg-white shadow transition-transform', enabled ? 'translate-x-7' : 'translate-x-1')} />
@@ -230,7 +231,7 @@ export function PrivacyConsentPage() {
                   </div>
                   {documentPanel === 'user'
                     ? '你需要遵守账号安全、学习资源使用、课堂互动规范等约定。平台会保护你的账号权益，也会对异常使用行为进行必要限制。'
-                    : '平台只会在学习服务所需范围内处理数据，并提供授权管理、撤回和账号资料修改能力。详细政策后续可接入正式文档页面。'}
+                    : '平台只会在学习服务所需范围内处理数据，并提供授权管理、撤回和账号资料修改能力。可选授权会写入个人资料设置，后续可在设置页重新调整。'}
                 </div>
               )}
             </div>

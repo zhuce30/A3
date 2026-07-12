@@ -2,6 +2,38 @@ from .common import *
 
 
 class A3RequirementsDeepFillTests(CompatApiTestCase):
+    def test_resource_generation_job_create_api_persists_job(self):
+        long_goal = (
+            "给我生成一套操作系统死锁学习资源，要求讲解清楚易懂；"
+            "表格使用标准 Markdown 表格，公式和矩阵排版完整；"
+            "每一节都要有小结，最后附知识点速记表和考试高频考点；"
+        ) * 8
+        response = self.client.post(
+            "/api/resources/jobs/",
+            data=json.dumps(
+                {
+                    "jobId": "job-resource-generation-api-001",
+                    "workflow": "resource_generate",
+                    "status": "queued",
+                    "progress": 0,
+                    "stage": "queued",
+                    "message": "已创建资源包生成任务",
+                    "goal": long_goal,
+                    "topK": 3,
+                    "resourceType": "lecture_doc",
+                    "metadata": {"createdBy": "test"},
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["job"]["jobId"], "job-resource-generation-api-001")
+        self.assertEqual(payload["job"]["resourceType"], "lecture_doc")
+        self.assertEqual(payload["job"]["goal"], long_goal)
+
     def test_resource_generation_has_single_kernel_entrypoint(self):
         source = Path("backend/apps/compat/resource_generation.py").read_text(encoding="utf-8")
 
@@ -451,6 +483,7 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         code_lab = next(item for item in pack["resources"] if item["type"] == "code_lab")
         self.assertEqual(code_lab["content"]["language"], "Python")
         self.assertIn("starterCode", code_lab["content"])
+        self.assertGreaterEqual(len(code_lab["content"].get("testCases", [])), 1)
         self.assertGreaterEqual(len(code_lab["content"]["checkpoints"]), 1)
         self.assertTrue(all(item["citations"] for item in pack["resources"]))
         self.assertTrue(all(item["verified"] for item in pack["resources"]))
@@ -515,6 +548,40 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertTrue(all(item["content"]["schemaVersion"] == "a3.resource-content.rich.v1" for item in pack["resources"]))
         self.assertTrue(all(len(item["citations"]) >= 3 for item in pack["resources"]))
         self.assertTrue(all(item["synthesis"]["mode"] in {"rules", "llm"} for item in pack["resources"]))
+
+    def test_deadlock_lecture_doc_uses_topic_specific_explanation(self):
+        from backend.apps.compat.resource_generation import _fallback_resource_content
+
+        content = _fallback_resource_content(
+            "lecture_doc",
+            "操作系统中的死锁",
+            [
+                {
+                    "id": "S1",
+                    "title": "操作系统课件",
+                    "snippet": "死锁是多个进程因竞争资源而造成的一种互相等待现象。",
+                    "sourceId": "S1",
+                },
+                {
+                    "id": "S2",
+                    "title": "工程制图题库",
+                    "snippet": "根据三视图判断点线面的投影关系。",
+                    "sourceId": "S2",
+                }
+            ],
+            None,
+        )
+
+        text = json.dumps(content, ensure_ascii=False)
+        self.assertIn("互斥", text)
+        self.assertIn("占有并等待", text)
+        self.assertIn("不可剥夺", text)
+        self.assertIn("循环等待", text)
+        self.assertIn("资源分配图", text)
+        self.assertIn("银行家算法", text)
+        self.assertIn("不安全状态不一定已经死锁", text)
+        self.assertNotIn("三视图", text)
+        self.assertNotIn("对象、条件、过程、结果四部分", text)
 
     def test_deadlock_mind_map_uses_os_specific_exam_structure(self):
         response = self.client.post(

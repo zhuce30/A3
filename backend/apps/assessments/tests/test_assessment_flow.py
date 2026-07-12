@@ -1,12 +1,14 @@
 import json
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.test import Client, TestCase
 from django.utils import timezone
 
 from backend.apps.accounts.models import User
-from backend.apps.assessments.models import AssessmentAnswer, AssessmentSession, Question, WrongQuestion
+from backend.apps.assessments.models import AssessmentAnswer, AssessmentSession, Question, QuestionReviewStatus, QuestionSourceType, WrongQuestion
 from backend.apps.engagement.models import UserNotification
+from backend.apps.knowledge_base.models import KnowledgeBlock, KnowledgeResource, ResourceScope, ResourceStatus
 from backend.apps.learning.models import Course, ResourcePackLog
 from backend.apps.learning.services import default_course, generate_learning_path
 from backend.apps.profiles.models import LearnerProfile
@@ -549,3 +551,410 @@ class AssessmentFlowTests(TestCase):
         self.assertEqual(payload["session"]["status"], "completed")
         self.assertIn("nextAction", payload)
         self.assertTrue(payload["nextAction"]["href"].startswith("/a3/"))
+
+    def test_start_practice_backfills_personalized_questions_when_point_bank_is_empty(self):
+        Question.objects.all().update(is_active=False)
+        point = default_course().chapters.first().knowledge_points.first()
+
+        response = self.client.post(
+            "/api/assessments/start/",
+            data=json.dumps({"mode": "practice", "knowledgePoint": point.title, "limit": 3}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        session = response.json()["session"]
+        self.assertEqual(session["totalQuestions"], 3)
+        self.assertIsNotNone(session["currentQuestion"])
+        self.assertGreaterEqual(
+            Question.objects.filter(source_type=QuestionSourceType.VARIANT, is_active=True).count(),
+            3,
+        )
+
+    def test_start_practice_backfills_from_current_path_when_requested_point_is_new(self):
+        Question.objects.all().update(is_active=False)
+
+        response = self.client.post(
+            "/api/assessments/start/",
+            data=json.dumps({"mode": "practice", "knowledgePoint": "上传资料里的新专题", "limit": 2}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        session = response.json()["session"]
+        self.assertEqual(session["mode"], "practice")
+        self.assertEqual(session["totalQuestions"], 2)
+        self.assertGreaterEqual(
+            Question.objects.filter(source_type=QuestionSourceType.VARIANT, owner=self.user, is_active=True).count(),
+            2,
+        )
+
+    def test_practice_backfill_uses_profile_weak_points_error_cause_and_material_evidence(self):
+        Question.objects.all().update(is_active=False)
+        course = default_course()
+        weak_point = course.chapters.first().knowledge_points.first()
+        profile = LearnerProfile.objects.get(user=self.user)
+        profile.foundation_level = "基础薄弱"
+        profile.weak_points = [weak_point.title]
+        profile.learning_goals = ["补齐操作系统薄弱点"]
+        profile.expected_resources = ["练习题库", "知识卡片"]
+        profile.save(update_fields=["foundation_level", "weak_points", "learning_goals", "expected_resources", "updated_at"])
+        source = KnowledgeResource.objects.create(
+            owner=self.user,
+            original_name="学生上传的进程调度讲义.pdf",
+            stored_path="kb/student/process-scheduling.pdf",
+            file_type="pdf",
+            resource_scope=ResourceScope.PERSONAL,
+            course_key=course.code,
+            status=ResourceStatus.INDEXED,
+            chunk_count=1,
+        )
+        KnowledgeBlock.objects.create(
+            resource=source,
+            modality="text",
+            text=f"{weak_point.title} 常见误区：只背结论，不会解释调度目标和适用场景。",
+            confidence=0.91,
+        )
+        wrong_question = Question.objects.create(
+            knowledge_point=weak_point,
+            stem="历史错题",
+            options=[
+                {"key": "A", "text": "正确"},
+                {"key": "B", "text": "错误"},
+                {"key": "C", "text": "错误"},
+                {"key": "D", "text": "错误"},
+            ],
+            correct_answer="A",
+            explanation="历史解析",
+            error_cause="把适用场景和定义混在一起",
+            is_active=False,
+        )
+        WrongQuestion.objects.create(user=self.user, question=wrong_question, last_wrong_answer="B")
+
+        response = self.client.post(
+            "/api/assessments/start/",
+            data=json.dumps({"mode": "practice", "knowledgePoint": weak_point.title, "limit": 4}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()["session"]
+        self.assertEqual(payload["totalQuestions"], 4)
+        generated = list(Question.objects.filter(owner=self.user, is_active=True).order_by("created_at"))
+        self.assertEqual(len(generated), 4)
+        kinds = {question.metadata.get("questionKind") for question in generated}
+        self.assertGreaterEqual(len(kinds), 3)
+        for question in generated:
+            metadata = question.metadata
+            self.assertEqual(question.knowledge_point_id, weak_point.id)
+            self.assertLessEqual(question.difficulty, 2)
+            self.assertIn(weak_point.title, metadata["profileSignals"]["weakPoints"])
+            self.assertEqual(metadata["profileSignals"]["foundationLevel"], "基础薄弱")
+            self.assertIn("把适用场景和定义混在一起", metadata["profileSignals"]["recentErrorCauses"])
+            self.assertIn("薄弱点", metadata["generationReason"])
+            self.assertEqual(metadata["sourceEvidence"][0]["resourceTitle"], "学生上传的进程调度讲义.pdf")
+            self.assertTrue(question.evidence_items.filter(resource=source).exists())
+        current_question = payload["currentQuestion"]
+        self.assertIn("personalization", current_question)
+        self.assertEqual(current_question["personalization"]["foundationLevel"], "基础薄弱")
+        self.assertIn(weak_point.title, current_question["personalization"]["profileSignals"]["weakPoints"])
+
+    def test_repeated_practice_excludes_answered_questions_and_advances_dynamic_variants(self):
+        Question.objects.all().update(is_active=False)
+        course = default_course()
+        point = course.chapters.first().knowledge_points.first()
+        profile = LearnerProfile.objects.get(user=self.user)
+        profile.weak_points = [point.title]
+        profile.save(update_fields=["weak_points", "updated_at"])
+        source = KnowledgeResource.objects.create(
+            owner=self.user,
+            original_name="持续变式资料.pdf",
+            stored_path="kb/student/sustainable-variants.pdf",
+            file_type="pdf",
+            resource_scope=ResourceScope.PERSONAL,
+            course_key=course.code,
+            status=ResourceStatus.INDEXED,
+            chunk_count=2,
+        )
+        blocks = [
+            KnowledgeBlock.objects.create(
+                resource=source,
+                modality="text",
+                text=f"{point.title} 证据片段 {index}：用于不同应用场景和参数条件。",
+                confidence=0.9 - index * 0.05,
+            )
+            for index in range(2)
+        ]
+
+        first_response = self.client.post(
+            "/api/assessments/start/",
+            data=json.dumps({"mode": "practice", "knowledgePoint": point.title, "limit": 4}),
+            content_type="application/json",
+        )
+        self.assertEqual(first_response.status_code, 201)
+        first_session = AssessmentSession.objects.get(id=first_response.json()["session"]["id"])
+        first_ids = list(first_session.question_ids)
+        first_questions = list(Question.objects.filter(id__in=first_ids))
+        first_variants = [int(question.metadata["variantIndex"]) for question in first_questions]
+        for question_id in first_ids:
+            question = Question.objects.get(id=question_id)
+            answer_response = self.client.post(
+                f"/api/assessments/sessions/{first_session.id}/answer/",
+                data=json.dumps({"selectedAnswer": question.correct_answer}),
+                content_type="application/json",
+            )
+            self.assertEqual(answer_response.status_code, 200)
+
+        second_response = self.client.post(
+            "/api/assessments/start/",
+            data=json.dumps({"mode": "practice", "knowledgePoint": point.title, "limit": 4}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(second_response.status_code, 201)
+        second_session = AssessmentSession.objects.get(id=second_response.json()["session"]["id"])
+        second_ids = list(second_session.question_ids)
+        self.assertTrue(set(first_ids).isdisjoint(second_ids))
+        second_questions = list(Question.objects.filter(id__in=second_ids).order_by("created_at"))
+        second_variants = [int(question.metadata["variantIndex"]) for question in second_questions]
+        self.assertGreater(min(second_variants), max(first_variants))
+        contexts = [question.metadata.get("variantContext") for question in second_questions]
+        self.assertTrue(all(isinstance(context, dict) for context in contexts))
+        self.assertGreaterEqual(len({context["scenario"] for context in contexts}), 2)
+        self.assertGreaterEqual(len({context["parameter"] for context in contexts}), 2)
+        self.assertGreaterEqual(len({context["evidenceBlockId"] for context in contexts}), 2)
+        for question in second_questions:
+            self.assertEqual(question.review_status, QuestionReviewStatus.AUTO_VERIFIED)
+            self.assertTrue(question.is_active)
+            self.assertTrue(question.evidence_items.filter(resource=source).exists())
+            self.assertTrue(question.quality_checks.filter(checker="practice_supply", passed=True).exists())
+        self.assertEqual(
+            {context["evidenceBlockId"] for context in contexts},
+            {str(block.id) for block in blocks},
+        )
+        personalization = second_response.json()["session"]["currentQuestion"]["personalization"]
+        self.assertIn(personalization.get("variantIndex"), second_variants)
+        variant_context = personalization.get("variantContext") or {}
+        self.assertTrue(variant_context.get("scenario"))
+        self.assertGreater(variant_context.get("parameter", 0), 0)
+
+    @patch("celery.current_app.send_task")
+    def test_answering_personal_variant_dispatches_low_watermark_refill_after_commit(self, send_task):
+        Question.objects.all().update(is_active=False)
+        course = default_course()
+        point = course.chapters.first().knowledge_points.first()
+        profile = LearnerProfile.objects.get(user=self.user)
+        profile.weak_points = [point.title]
+        profile.save(update_fields=["weak_points", "updated_at"])
+        start_response = self.client.post(
+            "/api/assessments/start/",
+            data=json.dumps({"mode": "practice", "knowledgePoint": point.title, "limit": 1}),
+            content_type="application/json",
+        )
+        self.assertEqual(start_response.status_code, 201)
+        session = AssessmentSession.objects.get(id=start_response.json()["session"]["id"])
+        question = Question.objects.get(id=session.question_ids[0])
+
+        with self.captureOnCommitCallbacks(execute=True):
+            answer_response = self.client.post(
+                f"/api/assessments/sessions/{session.id}/answer/",
+                data=json.dumps({"selectedAnswer": question.correct_answer}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(answer_response.status_code, 200)
+        send_task.assert_called_once_with(
+            "assessments.refill_personal_question_pool",
+            args=[str(self.user.id), str(point.id)],
+            kwargs={"target_size": 12},
+        )
+
+    @patch("celery.current_app.send_task", side_effect=RuntimeError("broker unavailable"))
+    def test_refill_dispatch_failure_does_not_break_answer_writeback(self, _send_task):
+        point = default_course().chapters.first().knowledge_points.first()
+        question = Question.objects.create(
+            owner=self.user,
+            knowledge_point=point,
+            stem="异步补池失败不影响答题",
+            options=[{"key": "A", "text": "正确"}, {"key": "B", "text": "错误"}],
+            correct_answer="A",
+            explanation="答题事务与补池消息发送解耦。",
+            source_type=QuestionSourceType.VARIANT,
+            review_status=QuestionReviewStatus.AUTO_VERIFIED,
+            scope="personal",
+            is_active=True,
+            metadata={"generatedBy": "assessment_practice_supply", "variantIndex": 1},
+        )
+        session = AssessmentSession.objects.create(user=self.user, question_ids=[str(question.id)])
+        self.client.raise_request_exception = False
+
+        try:
+            with patch("backend.apps.assessments.services.logger.warning") as warning, self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    f"/api/assessments/sessions/{session.id}/answer/",
+                    data=json.dumps({"selectedAnswer": "A"}),
+                    content_type="application/json",
+                )
+        except RuntimeError as exc:
+            self.fail(f"异步补池发送失败不应冒泡到答题请求：{exc}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(AssessmentAnswer.objects.filter(session=session, question=question).exists())
+        warning.assert_called_once()
+
+    def test_personal_pool_archives_old_answered_variants_above_capacity(self):
+        from backend.apps.assessments.services import refill_personal_question_pool
+
+        point = default_course().chapters.first().knowledge_points.first()
+        questions = [
+            Question.objects.create(
+                owner=self.user,
+                knowledge_point=point,
+                stem=f"容量归档变式 {index}",
+                options=[{"key": "A", "text": "正确"}, {"key": "B", "text": "错误"}],
+                correct_answer="A",
+                explanation="容量归档测试解析",
+                source_type=QuestionSourceType.VARIANT,
+                review_status=QuestionReviewStatus.AUTO_VERIFIED,
+                scope="personal",
+                is_active=True,
+                metadata={
+                    "generatedBy": "assessment_practice_supply",
+                    "variantIndex": index + 1,
+                    "questionKind": "application",
+                },
+            )
+            for index in range(45)
+        ]
+        answered_session = AssessmentSession.objects.create(
+            user=self.user,
+            question_ids=[str(question.id) for question in questions[:10]],
+            status="completed",
+            current_index=10,
+            completed_at=timezone.now(),
+        )
+        for question in questions[:10]:
+            AssessmentAnswer.objects.create(
+                session=answered_session,
+                question=question,
+                selected_answer="A",
+                is_correct=True,
+            )
+
+        result = refill_personal_question_pool(self.user, point, target_size=12)
+
+        active = Question.objects.filter(
+            owner=self.user,
+            knowledge_point=point,
+            metadata__generatedBy="assessment_practice_supply",
+            is_active=True,
+            archived_at__isnull=True,
+        )
+        archived = Question.objects.filter(owner=self.user, knowledge_point=point, archived_at__isnull=False)
+        self.assertEqual(result.get("archived"), 5)
+        self.assertEqual(active.count(), 40)
+        self.assertEqual(archived.count(), 5)
+        self.assertTrue(set(archived.values_list("id", flat=True)).issubset({question.id for question in questions[:10]}))
+        self.assertFalse(archived.filter(id__in=[question.id for question in questions[10:]]).exists())
+        for metadata in archived.values_list("metadata", flat=True):
+            self.assertEqual(metadata["archiveReason"], "personal_pool_capacity")
+
+    def test_refill_task_reports_verified_grounded_supply(self):
+        from backend.apps.assessments.tasks import refill_personal_question_pool_task
+
+        Question.objects.all().update(is_active=False)
+        course = default_course()
+        point = course.chapters.first().knowledge_points.first()
+        profile = LearnerProfile.objects.get(user=self.user)
+        profile.weak_points = [point.title]
+        profile.save(update_fields=["weak_points", "updated_at"])
+
+        with patch("backend.apps.assessments.tasks.close_old_connections"):
+            result = refill_personal_question_pool_task.run(
+                str(self.user.id),
+                str(point.id),
+                target_size=4,
+            )
+
+        self.assertEqual(result.get("generated"), 4)
+        self.assertEqual(result.get("verified"), 4)
+        self.assertEqual(result.get("rejected"), 0)
+        self.assertEqual(result.get("available"), 4)
+        generated = Question.objects.filter(
+            owner=self.user,
+            knowledge_point=point,
+            metadata__generatedBy="assessment_practice_supply",
+        )
+        self.assertEqual(generated.count(), 4)
+        for question in generated:
+            self.assertEqual(question.review_status, QuestionReviewStatus.AUTO_VERIFIED)
+            self.assertTrue(question.evidence_items.exists())
+            self.assertTrue(question.quality_checks.filter(checker="practice_supply", passed=True).exists())
+
+    @patch("backend.apps.assessments.services.generate_grounded_personal_candidates")
+    def test_refill_uses_grounded_llm_candidates_and_rules_fill_the_gap(self, generate_candidates):
+        from backend.apps.assessments.personal_question_llm import GroundedCandidateBatch
+        from backend.apps.assessments.services import refill_personal_question_pool
+
+        Question.objects.all().update(is_active=False)
+        course = default_course()
+        point = course.chapters.first().knowledge_points.first()
+        source = KnowledgeResource.objects.create(
+            owner=self.user,
+            original_name="LLM 证据讲义.pdf",
+            stored_path="kb/student/llm-grounding.pdf",
+            file_type="pdf",
+            resource_scope=ResourceScope.PERSONAL,
+            course_key=course.code,
+            status=ResourceStatus.INDEXED,
+            chunk_count=1,
+        )
+        block = KnowledgeBlock.objects.create(
+            resource=source,
+            modality="text",
+            text=f"{point.title} 的场景证据：参数变化会影响系统表现。",
+            confidence=0.93,
+        )
+        generate_candidates.return_value = GroundedCandidateBatch(
+            candidates=[{
+                "variantIndex": 1,
+                "questionKind": "scenario",
+                "stem": f"证据约束场景题：如何根据参数变化分析{point.title}？",
+                "options": [
+                    {"key": "A", "text": "先读取证据中的条件再判断"},
+                    {"key": "B", "text": "忽略参数"},
+                    {"key": "C", "text": "直接套用其他知识点"},
+                    {"key": "D", "text": "只看题目长度"},
+                ],
+                "correctAnswer": "A",
+                "explanation": "资料证据明确指出参数变化会影响系统表现，因此应先读取条件。",
+                "errorCause": "忽略证据条件",
+                "evidenceBlockIds": [str(block.id)],
+                "reasoningForm": "parameter_change",
+            }],
+            provider="dashscope",
+            model="qwen-plus",
+            fallback=False,
+            error="",
+            rejected_count=0,
+        )
+
+        result = refill_personal_question_pool(self.user, point, target_size=3)
+
+        self.assertEqual(result["available"], 3)
+        self.assertEqual(result["llmGenerated"], 1)
+        self.assertEqual(result["ruleGenerated"], 2)
+        llm_question = Question.objects.get(owner=self.user, metadata__generationMode="grounded_llm")
+        self.assertEqual(llm_question.metadata["llm"]["provider"], "dashscope")
+        self.assertEqual(llm_question.metadata["reasoningForm"], "parameter_change")
+        self.assertEqual(llm_question.source_block_id, str(block.id))
+        self.assertTrue(llm_question.evidence_items.filter(block_id=str(block.id)).exists())
+        self.assertTrue(llm_question.quality_checks.filter(checker="practice_supply", passed=True).exists())
+        personalization = llm_question.metadata
+        self.assertEqual(personalization["generationMode"], "grounded_llm")
+        serialized = __import__(
+            "backend.apps.assessments.services", fromlist=["serialize_question"]
+        ).serialize_question(llm_question)["personalization"]
+        self.assertEqual(serialized["generationMode"], "grounded_llm")
+        self.assertEqual(serialized["reasoningForm"], "parameter_change")
+        self.assertEqual(serialized["llm"]["model"], "qwen-plus")

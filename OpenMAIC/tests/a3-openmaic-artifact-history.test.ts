@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   filterOpenMAICArtifactHistory,
@@ -106,5 +108,18 @@ describe('A3 OpenMAIC artifact history', () => {
     expect(summary.degraded).toBe(2);
     expect(summary.pptxExportSucceeded).toBe(1);
     expect(summary.latestAt).toBe('2026-06-27T11:00:00Z');
+  });
+
+  it('guards teacher artifact cards against duplicate React keys for repeated videos in one pack', () => {
+    const source = fs.readFileSync(
+      path.resolve(process.cwd(), 'components/a3/features/teacher-workbench-view.tsx'),
+      'utf8',
+    );
+
+    expect(source).toContain('buildTeacherArtifactCardKey');
+    expect(source).not.toContain('key={`${artifact.type}-${artifact.jobId || artifact.resourcePackId || index}`}');
+    expect(source).toContain('artifact.videoUrl');
+    expect(source).toContain('artifact.completedAt');
+    expect(source).toContain('artifact.createdAt');
   });
 });

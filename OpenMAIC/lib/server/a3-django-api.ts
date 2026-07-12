@@ -36,28 +36,105 @@ export async function postA3DjangoJson<T>(
   cookieHeader: string | null,
   body: unknown,
 ): Promise<DjangoJsonResponse<T>> {
-  const csrfToken = extractCookie(cookieHeader, 'csrftoken');
-  const response = await fetch(resolveA3DjangoEndpoint(path), {
+  let csrf = await resolveCsrfForServerPost(cookieHeader);
+  let response = await postA3Django(path, cookieHeader, body, csrf);
+  if (response.status === 403) {
+    csrf = await resolveCsrfForServerPost(cookieHeader, true);
+    response = await postA3Django(path, csrf.cookieHeader, body, csrf);
+  }
+
+  const responseText = await response.text();
+  const data = parseJsonResponse<T>(responseText);
+  if (!response.ok) {
+    const upstreamError = data.error || djangoErrorMessage(response.status, responseText);
+    console.error('[A3_DJANGO_POST_FAILED]', {
+      path,
+      status: response.status,
+      error: upstreamError,
+      bodyPreview: responseText.slice(0, 800),
+    });
+    return {
+      ...data,
+      success: false,
+      error: upstreamError,
+    };
+  }
+  return data;
+}
+
+function parseJsonResponse<T>(text: string): DjangoJsonResponse<T> {
+  try {
+    return JSON.parse(text || '{}') as DjangoJsonResponse<T>;
+  } catch {
+    return {} as DjangoJsonResponse<T>;
+  }
+}
+
+function djangoErrorMessage(status: number, responseText: string) {
+  const title = responseText.match(/<title>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim();
+  const exception = responseText.match(/<pre class="exception_value">([\s\S]*?)<\/pre>/i)?.[1]?.replace(/\s+/g, ' ').trim();
+  const detail = exception || title || responseText.replace(/\s+/g, ' ').trim().slice(0, 160);
+  return detail ? `Django API 请求失败：${status}，${detail}` : `Django API 请求失败：${status}`;
+}
+
+async function postA3Django(
+  path: string,
+  cookieHeader: string | null,
+  body: unknown,
+  csrf: { token: string; cookieHeader: string | null },
+) {
+  return fetch(resolveA3DjangoEndpoint(path), {
     method: 'POST',
     headers: {
-      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
-      ...(csrfToken ? { 'X-CSRFToken': csrfToken } : {}),
+      ...(csrf.cookieHeader ? { Cookie: csrf.cookieHeader } : {}),
+      ...(csrf.token ? { 'X-CSRFToken': csrf.token } : {}),
       Accept: 'application/json',
       'Content-Type': 'application/json',
     },
     cache: 'no-store',
     body: JSON.stringify(body),
   });
+}
 
-  const data = await response.json().catch(() => ({})) as DjangoJsonResponse<T>;
-  if (!response.ok) {
-    return {
-      ...data,
-      success: false,
-      error: data.error || `Django API 请求失败：${response.status}`,
-    };
+async function resolveCsrfForServerPost(cookieHeader: string | null, forceRefresh = false) {
+  const existing = forceRefresh ? '' : extractCookie(cookieHeader, 'csrftoken');
+  if (existing) return { token: existing, cookieHeader };
+  const response = await fetch(resolveA3DjangoEndpoint('/api/auth/csrf/'), {
+    method: 'GET',
+    headers: {
+      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+      Accept: 'application/json',
+    },
+    cache: 'no-store',
+  });
+  const data = await response.json().catch(() => ({})) as { csrfToken?: string };
+  const token = data.csrfToken || extractCookie(response.headers.get('set-cookie'), 'csrftoken');
+  return {
+    token,
+    cookieHeader: token ? upsertCookie(cookieHeader, 'csrftoken', token) : cookieHeader,
+  };
+}
+
+function upsertCookie(cookieHeader: string | null, name: string, value: string) {
+  const encoded = encodeURIComponent(value);
+  const parts = (cookieHeader || '')
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => !part.startsWith(`${name}=`));
+  parts.push(`${name}=${encoded}`);
+  return parts.join('; ');
+}
+
+function extractCookie(cookieHeader: string | null, name: string) {
+  if (!cookieHeader) return '';
+  const prefix = `${name}=`;
+  const item = cookieHeader.split(';').map((part) => part.trim()).find((part) => part.startsWith(prefix));
+  if (item) {
+    return decodeURIComponent(item.slice(prefix.length));
   }
-  return data;
+  const setCookieMatch = cookieHeader.match(new RegExp(`(?:^|,\\s*)${name}=([^;,]+)`));
+  return setCookieMatch ? decodeURIComponent(setCookieMatch[1]) : '';
 }
 
 export async function fetchA3DjangoBinaryAsDataUrl(
@@ -92,11 +169,4 @@ export async function fetchA3DjangoBinaryAsDataUrl(
 export function resolveA3DjangoEndpoint(path: string) {
   const baseUrl = process.env.A3_API_BASE_URL || process.env.NEXT_PUBLIC_A3_API_BASE_URL || DEFAULT_A3_API_BASE_URL;
   return new URL(path, baseUrl).toString();
-}
-
-function extractCookie(cookieHeader: string | null, name: string) {
-  if (!cookieHeader) return '';
-  const prefix = `${name}=`;
-  const item = cookieHeader.split(';').map((part) => part.trim()).find((part) => part.startsWith(prefix));
-  return item ? decodeURIComponent(item.slice(prefix.length)) : '';
 }

@@ -29,7 +29,7 @@ async function loginAsStudent(page: Page) {
 }
 
 test.describe('A3 realtime coaching', () => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
 
   test.beforeAll(() => {
     seedDemoData();
@@ -97,11 +97,16 @@ test.describe('A3 realtime coaching', () => {
         }),
       });
     });
+    let frameRequestCount = 0;
     await page.route('**/api/a3/coaching/realtime/frame', async (route) => {
+      frameRequestCount += 1;
       const payload = route.request().postDataJSON();
       expect(payload.imageDataUrl).toContain('data:image/jpeg;base64,');
-      expect(payload.source).toBe('camera');
+      expect(['camera', 'screen']).toContain(payload.source);
+      expect(payload.fast).toBe(true);
       expect(payload.prompt).toContain('请看这里');
+      expect(payload.prompt).not.toContain('auto_shared_screen');
+      expect(payload.prompt).not.toContain('screen_share_auto_frame');
       await route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -119,7 +124,7 @@ test.describe('A3 realtime coaching', () => {
         }),
       });
     });
-    await page.route('**/api/demo/status/', async (route) => {
+    await page.route('**/api/demo/status**', async (route) => {
       await route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -141,8 +146,13 @@ test.describe('A3 realtime coaching', () => {
     const call = page.getByTestId('a3-realtime-coaching-call');
     await expect(call).toBeVisible({ timeout: 60_000 });
     await call.getByTestId('a3-realtime-start').click();
+    await call.getByTestId('a3-realtime-panel-tab-evidence').click();
     await expect(call.getByTestId('a3-realtime-status')).toContainText('已降级');
     await expect(call).toContainText('测试环境未配置实时 provider');
+
+    await call.getByTestId('a3-realtime-share-screen').click();
+    await expect(call).toContainText('屏幕共享已开启。需要 AI 分析当前画面时，请点击“看这里/截屏分析”。');
+    await expect.poll(() => frameRequestCount).toBe(0);
 
     await call.getByLabel('实时检索问题').fill('根轨迹渐近线');
     await call.getByRole('button', { name: '检索' }).click();
@@ -152,13 +162,15 @@ test.describe('A3 realtime coaching', () => {
     await call.getByRole('button', { name: '开启摄像头' }).click();
     await expect(call.getByTestId('a3-realtime-camera-preview')).toBeVisible();
     await call.getByTestId('a3-realtime-capture-frame').click();
+    await expect.poll(() => frameRequestCount).toBe(1);
     await expect(call).toContainText('视觉帧已识别');
 
-    await page.goto('/a3/capabilities');
+    await page.goto('/a3/capabilities', { waitUntil: 'domcontentloaded' });
     const capability = page.getByTestId('a3-realtime-coaching-capability');
     await expect(capability).toBeVisible({ timeout: 60_000 });
-    await expect(capability).toContainText('dashscope_qwen_omni_realtime');
+    await expect(capability).toContainText('Realtime Coaching');
     await expect(capability).toContainText('visual frames');
+    await expect(capability).toContainText('a3.realtime-coaching-metrics.v1');
   });
 });
 

@@ -28,8 +28,9 @@ from backend.apps.compat.agent_kernel import (
 )
 from backend.apps.compat.agent_runtime import AgentRun, recent_agent_runs
 from backend.apps.compat.agent_workflows import summarize_workflow_readiness
+from backend.apps.compat.code_lab_runner import run_code_lab
 from backend.apps.compat.management.commands.evaluate_demo_retrieval import DEFAULT_CASES, EVALUATION_TARGET_CASES
-from backend.apps.compat.models import AgentRun as AgentRunModel, OpenMAICArtifact
+from backend.apps.compat.models import AgentRun as AgentRunModel, OpenMAICArtifact, ResourceGenerationJob
 from backend.apps.compat.profile_interview import confirm_profile_interview, get_profile_interview_session, run_profile_interview
 from backend.apps.compat.recommendations import build_recommendation_payload
 from backend.apps.compat.resource_generation import (
@@ -121,6 +122,104 @@ def resource_generate(request):
         return JsonResponse({"success": False, "error": f"资源包生成失败：{exc}"}, status=500)
 
 
+def serialize_resource_generation_job(job: ResourceGenerationJob) -> dict:
+    result = job.result if isinstance(job.result, dict) else {}
+    resource_pack = result.get("resourcePack") if isinstance(result.get("resourcePack"), dict) else None
+    return {
+        "id": job.job_id,
+        "jobId": job.job_id,
+        "type": "resource_generation",
+        "workflow": job.workflow,
+        "status": job.status,
+        "progress": job.progress,
+        "stage": job.stage,
+        "message": job.message,
+        "goal": job.goal,
+        "topK": job.top_k,
+        "resourceType": job.resource_type,
+        "resourcePackId": job.resource_pack_id,
+        "traceId": job.trace_id,
+        "resourcePack": resource_pack,
+        "error": job.error_message,
+        "done": job.status in {"succeeded", "failed"},
+        "actionUrl": f"/a3/resources/{job.resource_pack_id}" if job.resource_pack_id else "/a3/recommendations",
+        "createdAt": job.created_at.isoformat(),
+        "startedAt": job.started_at.isoformat() if job.started_at else None,
+        "finishedAt": job.finished_at.isoformat() if job.finished_at else None,
+        "updatedAt": job.updated_at.isoformat(),
+    }
+
+
+@require_http_methods(["GET", "POST"])
+def resource_generation_jobs(request):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    if request.method == "GET":
+        queryset = ResourceGenerationJob.objects.filter(user=request.user)[:20]
+        return JsonResponse({"success": True, "jobs": [serialize_resource_generation_job(job) for job in queryset]})
+    try:
+        payload = _body(request)
+        job_id = str(payload.get("jobId") or "").strip()
+        if not job_id:
+            return JsonResponse({"success": False, "error": "缺少 jobId"}, status=400)
+        job, _ = ResourceGenerationJob.objects.update_or_create(
+            job_id=job_id,
+            user=request.user,
+            defaults={
+                "workflow": str(payload.get("workflow") or "resource_generate"),
+                "status": str(payload.get("status") or "queued"),
+                "progress": int(payload.get("progress") or 0),
+                "stage": str(payload.get("stage") or "queued"),
+                "message": str(payload.get("message") or ""),
+                "goal": str(payload.get("goal") or ""),
+                "top_k": int(payload.get("topK") or payload.get("top_k") or 5),
+                "resource_type": str(payload.get("resourceType") or payload.get("resource_type") or ""),
+                "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            },
+        )
+        return JsonResponse({"success": True, "job": serialize_resource_generation_job(job)}, status=201)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["GET", "PATCH", "POST"])
+def resource_generation_job_detail(request, job_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(ResourceGenerationJob, job_id=str(job_id), user=request.user)
+    if request.method == "GET":
+        return JsonResponse({"success": True, "job": serialize_resource_generation_job(job)})
+    try:
+        payload = _body(request)
+        for payload_key, model_key in {
+            "status": "status",
+            "progress": "progress",
+            "stage": "stage",
+            "message": "message",
+            "resourcePackId": "resource_pack_id",
+            "traceId": "trace_id",
+            "error": "error_message",
+        }.items():
+            if payload_key in payload:
+                setattr(job, model_key, payload[payload_key])
+        if "resourcePack" in payload and isinstance(payload["resourcePack"], dict):
+            result = job.result if isinstance(job.result, dict) else {}
+            result["resourcePack"] = payload["resourcePack"]
+            job.result = result
+            job.resource_pack_id = str(payload["resourcePack"].get("resourcePackId") or job.resource_pack_id or "")
+            job.trace_id = str(payload.get("traceId") or payload["resourcePack"].get("traceId") or job.trace_id or "")
+        if str(job.status) == "running" and not job.started_at:
+            job.started_at = timezone.now()
+        if str(job.status) in {"succeeded", "failed"} and not job.finished_at:
+            job.finished_at = timezone.now()
+        job.save()
+        return JsonResponse({"success": True, "job": serialize_resource_generation_job(job)})
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
 @require_http_methods(["GET"])
 def resource_packs(request):
     rejected = require_authenticated(request)
@@ -148,6 +247,20 @@ def resource_pack_feedback(request, pack_id):
     try:
         result = record_resource_feedback(request.user, str(pack_id), _body(request))
         return JsonResponse({"success": True, **result})
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["POST"])
+def resource_pack_code_lab_run(request, pack_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    if not get_resource_pack(request.user, str(pack_id)):
+        return JsonResponse({"success": False, "error": "资源包不存在"}, status=404)
+    try:
+        result = run_code_lab(_body(request))
+        return JsonResponse({"success": True, "result": result})
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
 

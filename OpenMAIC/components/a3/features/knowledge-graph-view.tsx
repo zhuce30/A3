@@ -4,91 +4,23 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import Link from 'next/link';
 import { Background, Controls, MiniMap, ReactFlow, type Edge, type Node } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { AlertTriangle, BookOpen, Database, Loader2, Maximize2, Network, RotateCcw, Sparkles } from 'lucide-react';
+import { BookOpen, Database, Loader2, Maximize2, Network, RotateCcw, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import type { A3ApiResponse, KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphNodeStatus, LearningPath } from '@/lib/a3/learning-types';
 import { cn } from '@/lib/utils';
 import { A3Card, A3Pill } from '../ui/a3-card';
-import { A3Markdown } from '../ui/a3-markdown';
+import { MaterialDetailPanel } from './knowledge-graph/material-detail-panel';
+import { buildFocusedMaterialFlow, chooseDefaultMaterialCenter, type MaterialGraphDepth } from './knowledge-graph/material-focused-flow';
+import { MaterialGraphMiniPanel, MaterialGraphSearchPanel, MaterialGraphStatsPanel } from './knowledge-graph/material-graph-panels';
+import { MaterialRelationEdge } from './knowledge-graph/material-relation-edge';
+import type { GraphNodeData, MaterialGraph } from './knowledge-graph/material-types';
 
 type GraphTab = 'material' | 'course';
 
-type MaterialEvidence = {
-  resourceId: string;
-  resourceTitle: string;
-  resourceType: string;
-  blockId: string;
-  blockType: string;
-  pageNumber: number | null;
-  slideIndex: number | null;
-  location: string;
-  snippet: string;
-  markdownSnippet?: string;
-  contentFormat?: 'markdown' | 'plain' | string;
-  formatFeatures?: string[];
-  confidence: number;
-  degraded: boolean;
-  warnings?: string[];
-};
-
-type MaterialNode = {
-  id: string;
-  label: string;
-  type: string;
-  summary: string;
-  confidence: number;
-  evidence: MaterialEvidence[];
-  degraded: boolean;
-  schemaVersion: string;
-};
-
-type MaterialEdge = {
-  id: string;
-  source: string;
-  target: string;
-  type: string;
-  label: string;
-  weight: number;
-  evidence: MaterialEvidence[];
-  degraded: boolean;
-};
-
-type MaterialClaim = {
-  id: string;
-  text: string;
-  entityIds: string[];
-  verified: boolean;
-  evidence: MaterialEvidence[];
-  degraded: boolean;
-};
-
-type MaterialGraph = {
-  schemaVersion: string;
-  source: 'knowledge_base_materials' | string;
-  mode: 'material_graph' | string;
-  nodes: MaterialNode[];
-  edges: MaterialEdge[];
-  claims: MaterialClaim[];
-  summary: {
-    resourceCount: number;
-    entityCount: number;
-    relationCount: number;
-    claimCount: number;
-    degradedCount: number;
-  };
-  build: {
-    status: string;
-    lastBuiltAt: string | null;
-    degraded: boolean;
-    reason: string;
-  };
-  nextAction?: { label: string; href: string } | null;
-};
-
-type GraphNodeData = {
-  label: ReactNode;
-};
+const materialEdgeTypes = { materialRelation: MaterialRelationEdge };
+const MATERIAL_GRAPH_INITIAL_LIMIT = 120;
+const MATERIAL_GRAPH_EXPAND_LIMIT = 220;
 
 const statusMeta: Record<KnowledgeGraphNodeStatus, { label: string; dot: string; surface: string; text: string }> = {
   mastered: { label: '已掌握', dot: 'bg-emerald-500', surface: '#ecfdf5', text: '#047857' },
@@ -98,13 +30,6 @@ const statusMeta: Record<KnowledgeGraphNodeStatus, { label: string; dot: string;
   unstarted: { label: '未学习', dot: 'bg-violet-500', surface: '#f5f3ff', text: '#6d28d9' },
 };
 
-const materialTypeLabel: Record<string, string> = {
-  concept: '概念',
-  method: '方法',
-  formula: '公式',
-  visual: '图表',
-};
-
 export function KnowledgeGraphView() {
   const graphRef = useRef<HTMLDivElement | null>(null);
   const [activeTab, setActiveTab] = useState<GraphTab>('material');
@@ -112,6 +37,8 @@ export function KnowledgeGraphView() {
   const [courseGraph, setCourseGraph] = useState<KnowledgeGraph | null>(null);
   const [selectedMaterialNodeId, setSelectedMaterialNodeId] = useState<string | null>(null);
   const [selectedMaterialEdgeId, setSelectedMaterialEdgeId] = useState<string | null>(null);
+  const [materialDepth, setMaterialDepth] = useState<MaterialGraphDepth>('one');
+  const [materialSearchQuery, setMaterialSearchQuery] = useState('');
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [planning, setPlanning] = useState(false);
@@ -119,17 +46,37 @@ export function KnowledgeGraphView() {
 
   const loadMaterialGraph = useCallback(async () => {
     setLoading(true);
-    const result = await a3GetJson<A3ApiResponse<{ graph: MaterialGraph }>>('/api/kb/graph/');
+    const params = new URLSearchParams();
+    params.set('depth', '1');
+    params.set('limit', String(MATERIAL_GRAPH_INITIAL_LIMIT));
+    const result = await a3GetJson<A3ApiResponse<{ graph: MaterialGraph }>>(`/api/kb/graph/?${params.toString()}`);
     setLoading(false);
     if (!result.success) {
       setMessage(result.error ?? '资料知识图谱加载失败');
       return;
     }
     setMaterialGraph(result.graph);
-    setSelectedMaterialNodeId((current) => current ?? result.graph.nodes[0]?.id ?? null);
+    setSelectedMaterialNodeId((current) => (current && result.graph.nodes.some((node) => node.id === current) ? current : chooseDefaultMaterialCenter(result.graph)));
     setSelectedMaterialEdgeId(null);
+    setMaterialDepth('one');
     setMessage('');
   }, []);
+
+  const loadMaterialGraphNeighborhood = useCallback(async (centerId: string, depth: MaterialGraphDepth = materialDepth) => {
+    const params = new URLSearchParams();
+    params.set('depth', depth === 'all' ? 'all' : depth === 'two' ? '2' : '1');
+    params.set('limit', String(MATERIAL_GRAPH_EXPAND_LIMIT));
+    params.set('centerId', centerId);
+    const result = await a3GetJson<A3ApiResponse<{ graph: MaterialGraph }>>(`/api/kb/graph/?${params.toString()}`);
+    if (!result.success) {
+      setMessage(result.error ?? '资料知识图谱邻域加载失败');
+      return;
+    }
+    setMaterialGraph((current) => (current ? mergeMaterialGraphs(current, result.graph) : result.graph));
+    setSelectedMaterialNodeId(centerId);
+    setSelectedMaterialEdgeId(null);
+    setMessage('');
+  }, [materialDepth]);
 
   const loadCourseGraph = useCallback(async () => {
     setLoading(true);
@@ -151,18 +98,34 @@ export function KnowledgeGraphView() {
     return () => window.clearTimeout(timer);
   }, [activeTab, loadCourseGraph, loadMaterialGraph]);
 
-  const materialFlow = useMemo(() => buildMaterialFlow(materialGraph, selectedMaterialNodeId, selectedMaterialEdgeId), [materialGraph, selectedMaterialNodeId, selectedMaterialEdgeId]);
-  const courseFlow = useMemo(() => buildCourseFlow(courseGraph, selectedCourseId), [courseGraph, selectedCourseId]);
   const materialNodesById = useMemo(() => new Map((materialGraph?.nodes ?? []).map((node) => [node.id, node])), [materialGraph]);
   const materialEdgesById = useMemo(() => new Map((materialGraph?.edges ?? []).map((edge) => [edge.id, edge])), [materialGraph]);
+  const effectiveSelectedMaterialNodeId = selectedMaterialNodeId && materialNodesById.has(selectedMaterialNodeId) ? selectedMaterialNodeId : chooseDefaultMaterialCenter(materialGraph);
+  const materialFlow = useMemo(
+    () =>
+      buildFocusedMaterialFlow({
+        graph: materialGraph,
+        centerNodeId: effectiveSelectedMaterialNodeId,
+        selectedEdgeId: selectedMaterialEdgeId,
+        depth: materialDepth,
+        searchQuery: materialSearchQuery,
+      }),
+    [effectiveSelectedMaterialNodeId, materialDepth, materialGraph, materialSearchQuery, selectedMaterialEdgeId],
+  );
+  const courseFlow = useMemo(() => buildCourseFlow(courseGraph, selectedCourseId), [courseGraph, selectedCourseId]);
   const courseNodesById = useMemo(() => new Map((courseGraph?.nodes ?? []).map((node) => [node.id, node])), [courseGraph]);
-  const selectedMaterialNode = selectedMaterialNodeId ? materialNodesById.get(selectedMaterialNodeId) ?? null : null;
+  const selectedMaterialNode = effectiveSelectedMaterialNodeId ? materialNodesById.get(effectiveSelectedMaterialNodeId) ?? null : null;
   const selectedMaterialEdge = selectedMaterialEdgeId ? materialEdgesById.get(selectedMaterialEdgeId) ?? null : null;
   const selectedCourseNode = selectedCourseId ? courseNodesById.get(selectedCourseId) ?? null : null;
-  const selectedClaims = useMemo(
-    () => (materialGraph?.claims ?? []).filter((claim) => selectedMaterialNodeId && claim.entityIds.includes(selectedMaterialNodeId)).slice(0, 5),
-    [materialGraph, selectedMaterialNodeId],
-  );
+  const selectedClaims = useMemo(() => {
+    const selectedIds = new Set<string>();
+    if (effectiveSelectedMaterialNodeId) selectedIds.add(effectiveSelectedMaterialNodeId);
+    if (selectedMaterialEdge) {
+      selectedIds.add(selectedMaterialEdge.source);
+      selectedIds.add(selectedMaterialEdge.target);
+    }
+    return (materialGraph?.claims ?? []).filter((claim) => claim.entityIds.some((id) => selectedIds.has(id))).slice(0, 8);
+  }, [effectiveSelectedMaterialNodeId, materialGraph, selectedMaterialEdge]);
 
   async function reloadCurrent() {
     if (activeTab === 'material') await loadMaterialGraph();
@@ -189,15 +152,33 @@ export function KnowledgeGraphView() {
     await graphRef.current.requestFullscreen();
   }
 
+  function resetMaterialCenter() {
+    setSelectedMaterialNodeId(chooseDefaultMaterialCenter(materialGraph));
+    setSelectedMaterialEdgeId(null);
+    setMaterialSearchQuery('');
+  }
+
+  function onMaterialNodeClick(nodeId: string) {
+    setSelectedMaterialNodeId(nodeId);
+    setSelectedMaterialEdgeId(null);
+    void loadMaterialGraphNeighborhood(nodeId, materialDepth);
+  }
+
+  function onMaterialDepthChange(depth: MaterialGraphDepth) {
+    setMaterialDepth(depth);
+    const centerId = effectiveSelectedMaterialNodeId ?? chooseDefaultMaterialCenter(materialGraph);
+    if (centerId) void loadMaterialGraphNeighborhood(centerId, depth);
+  }
+
   const activeFlow = activeTab === 'material' ? materialFlow : courseFlow;
   const isMaterialEmpty = activeTab === 'material' && !loading && !(materialGraph?.nodes.length);
 
   return (
-    <div className="grid gap-5 xl:grid-cols-[1fr_360px]">
+    <div className="grid gap-5 2xl:grid-cols-[minmax(0,1fr)_380px]">
       <div className="space-y-5">
         <A3Card
           title="资料知识图谱"
-          subtitle={activeTab === 'material' ? '从已上传资料的多模态解析块抽取实体、关系和证据；课程路径图保留在次级页签。' : '课程路径图展示课程知识点、先修关系和学习进度，不代表上传资料图谱。'}
+          subtitle={activeTab === 'material' ? '从已上传资料的多模态解析块抽取实体、关系和证据；默认聚焦最高连接度实体。' : '课程路径图展示课程知识点、先修关系和学习进度，不代表上传资料图谱。'}
           action={
             <div className="flex flex-wrap gap-2">
               <Button size="sm" variant="outline" onClick={() => void reloadCurrent()} disabled={loading}>
@@ -224,25 +205,17 @@ export function KnowledgeGraphView() {
 
           {message && <div className="mb-4 rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">{message}</div>}
 
-          {activeTab === 'material' ? (
-            <div className="mb-5 grid gap-3 md:grid-cols-4">
-              <GraphMetric label="资料数" value={materialGraph?.summary.resourceCount ?? 0} />
-              <GraphMetric label="实体" value={materialGraph?.summary.entityCount ?? 0} />
-              <GraphMetric label="关系" value={materialGraph?.summary.relationCount ?? 0} tone="blue" />
-              <GraphMetric label="降级证据" value={materialGraph?.summary.degradedCount ?? 0} tone="orange" />
-            </div>
-          ) : (
-            <div className="mb-5 grid gap-3 md:grid-cols-4">
-              <GraphMetric label="知识点" value={courseGraph?.summary.total ?? 0} />
-              <GraphMetric label="掌握率" value={`${courseGraph?.summary.masteryRate ?? 0}%`} />
-              <GraphMetric label="薄弱点" value={courseGraph?.summary.weak ?? 0} tone="red" />
-              <GraphMetric label="下一步" value={courseGraph?.summary.nextCount ?? 0} tone="blue" />
-            </div>
-          )}
-
-          <div ref={graphRef} className="relative h-[640px] overflow-hidden rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)]" data-testid="a3-real-knowledge-graph">
+          <div
+            ref={graphRef}
+            className="a3-material-graph-canvas relative h-[680px] overflow-hidden rounded-xl border border-[var(--a3-border)]"
+            data-testid="a3-real-knowledge-graph"
+            style={{
+              background:
+                'radial-gradient(circle at 50% 44%, rgba(255, 255, 255, 0.96) 0%, rgba(239, 246, 255, 0.78) 42%, rgba(248, 250, 252, 0.92) 74%), linear-gradient(135deg, rgba(241, 245, 249, 0.96), rgba(236, 253, 245, 0.28))',
+            }}
+          >
             {loading && (
-              <div className="absolute inset-0 z-10 grid place-items-center bg-[var(--a3-surface-solid)]/80">
+              <div className="absolute inset-0 z-30 grid place-items-center bg-[var(--a3-surface-solid)]/80">
                 <div className="flex items-center gap-2 text-sm text-[var(--a3-text-muted)]">
                   <Loader2 className="size-4 animate-spin" />
                   正在读取{activeTab === 'material' ? '资料知识图谱' : '课程路径图'}
@@ -250,29 +223,64 @@ export function KnowledgeGraphView() {
               </div>
             )}
 
-            {!loading && activeFlow.nodes.length > 0 && (
+            {!loading && activeTab === 'material' && materialFlow.nodes.length > 0 && (
+              <div className="h-full" data-testid="a3-material-focused-graph">
+                <ReactFlow
+                  nodes={materialFlow.nodes}
+                  edges={materialFlow.edges}
+                  edgeTypes={materialEdgeTypes}
+                  onlyRenderVisibleElements
+                  fitView
+                  fitViewOptions={{ padding: 0.16 }}
+                  nodesDraggable
+                  nodesConnectable={false}
+                  elementsSelectable
+                  onNodeClick={(_, node) => {
+                    onMaterialNodeClick(node.id);
+                  }}
+                  onEdgeClick={(_, edge) => {
+                    setSelectedMaterialEdgeId(edge.id);
+                    const materialEdge = materialEdgesById.get(edge.id);
+                    setSelectedMaterialNodeId(materialEdge?.source ?? null);
+                  }}
+                >
+                  <Background gap={24} color="#dbe3ee" />
+                  <Controls showInteractive={false} />
+                </ReactFlow>
+                <div className="pointer-events-none absolute inset-0 z-20">
+                  <div className="pointer-events-auto absolute left-4 top-4 w-[min(340px,calc(100%-2rem))]" data-testid="a3-material-graph-search">
+                    <MaterialGraphSearchPanel
+                      query={materialSearchQuery}
+                      onQueryChange={setMaterialSearchQuery}
+                      onReset={resetMaterialCenter}
+                      loading={loading}
+                      selectedNode={selectedMaterialNode}
+                      graph={materialGraph}
+                      onSelectNode={(id) => {
+                        onMaterialNodeClick(id);
+                      }}
+                    />
+                    <div className="mt-3">
+                      <MaterialGraphMiniPanel node={selectedMaterialNode} edge={selectedMaterialEdge} />
+                    </div>
+                  </div>
+                  <div className="pointer-events-auto absolute right-4 top-4 hidden w-[280px] lg:block" data-testid="a3-material-graph-quality-panel">
+                    <MaterialGraphStatsPanel graph={materialGraph} depth={materialDepth} onDepthChange={onMaterialDepthChange} quality={materialGraph?.quality} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {!loading && activeTab === 'course' && activeFlow.nodes.length > 0 && (
               <ReactFlow
-                nodes={activeFlow.nodes}
-                edges={activeFlow.edges}
+                nodes={courseFlow.nodes}
+                edges={courseFlow.edges}
                 fitView
                 fitViewOptions={{ padding: 0.18 }}
                 nodesDraggable
                 nodesConnectable={false}
                 elementsSelectable
-                onNodeClick={(_, node) => {
-                  if (activeTab === 'material') {
-                    setSelectedMaterialNodeId(node.id);
-                    setSelectedMaterialEdgeId(null);
-                  } else {
-                    setSelectedCourseId(node.id);
-                  }
-                }}
-                onEdgeClick={(_, edge) => {
-                  if (activeTab === 'material') {
-                    setSelectedMaterialEdgeId(edge.id);
-                    setSelectedMaterialNodeId(null);
-                  }
-                }}
+                onNodeClick={(_, node) => setSelectedCourseId(node.id)}
               >
                 <Background gap={24} color="#e2e8f0" />
                 <MiniMap pannable zoomable />
@@ -285,7 +293,9 @@ export function KnowledgeGraphView() {
                 <div className="max-w-md">
                   <Database className="mx-auto size-10 text-blue-600" />
                   <h3 className="mt-3 text-lg font-semibold text-[var(--a3-text)]">还没有生成资料知识图谱</h3>
-                  <p className="mt-2 text-sm leading-7 text-[var(--a3-text-muted)]">{materialGraph?.build.reason || '请先在知识库上传资料并完成多模态解析，系统会从真实解析块生成实体、关系和来源证据。'}</p>
+                  <p className="mt-2 text-sm leading-7 text-[var(--a3-text-muted)]">
+                    {materialGraph?.build.reason || '请先在知识库上传资料并完成多模态解析，系统会从真实解析块生成实体、关系和来源证据。'}
+                  </p>
                   <Button asChild className="mt-4 bg-blue-600 hover:bg-blue-700">
                     <Link href={materialGraph?.nextAction?.href ?? '/a3/knowledge-base'}>{materialGraph?.nextAction?.label ?? '上传资料'}</Link>
                   </Button>
@@ -315,9 +325,9 @@ export function KnowledgeGraphView() {
         )}
       </div>
 
-      <div className="space-y-5">
+      <div className="space-y-5" data-testid="a3-material-detail-panel">
         {activeTab === 'material' ? (
-          <MaterialDetail node={selectedMaterialNode} edge={selectedMaterialEdge} claims={selectedClaims} />
+          <MaterialDetailPanel node={selectedMaterialNode} edge={selectedMaterialEdge} claims={selectedClaims} edges={materialGraph?.edges ?? []} nodesById={materialNodesById} />
         ) : (
           <CourseDetail node={selectedCourseNode} planning={planning} onRegenerate={() => void regeneratePath()} />
         )}
@@ -326,50 +336,20 @@ export function KnowledgeGraphView() {
   );
 }
 
-function buildMaterialFlow(graph: MaterialGraph | null, selectedNodeId: string | null, selectedEdgeId: string | null): { nodes: Node<GraphNodeData>[]; edges: Edge[] } {
-  if (!graph) return { nodes: [], edges: [] };
-  const radius = Math.max(260, Math.min(620, graph.nodes.length * 28));
-  const nodes = graph.nodes.map((node, index) => {
-    const angle = (Math.PI * 2 * index) / Math.max(graph.nodes.length, 1);
-    const tone = materialTone(node.type, node.degraded);
-    return {
-      id: node.id,
-      position: { x: Math.cos(angle) * radius + radius, y: Math.sin(angle) * radius + radius },
-      data: {
-        label: (
-          <div className="space-y-2 text-left">
-            <div className="line-clamp-2 font-semibold leading-5">{node.label}</div>
-            <div className="flex items-center justify-between text-xs">
-              <span>{materialTypeLabel[node.type] ?? node.type}</span>
-              <span>{Math.round(node.confidence * 100)}%</span>
-            </div>
-            {node.degraded && <div className="rounded bg-white/75 px-2 py-1 text-xs text-amber-700">降级抽取</div>}
-          </div>
-        ),
-      },
-      selected: selectedNodeId === node.id,
-      style: {
-        width: 210,
-        borderRadius: 10,
-        border: selectedNodeId === node.id ? '2px solid #2563eb' : `1px solid ${tone.border}`,
-        background: tone.surface,
-        color: tone.text,
-        padding: 12,
-        fontSize: 13,
-        boxShadow: selectedNodeId === node.id ? '0 12px 30px rgba(37, 99, 235, 0.18)' : '0 8px 20px rgba(15, 23, 42, 0.08)',
-      },
-    } satisfies Node<GraphNodeData>;
-  });
-  const edges = graph.edges.map((edge) => ({
-    id: edge.id,
-    source: edge.source,
-    target: edge.target,
-    label: edge.label,
-    animated: selectedEdgeId === edge.id,
-    style: { stroke: selectedEdgeId === edge.id ? '#2563eb' : '#64748b', strokeWidth: selectedEdgeId === edge.id ? 2.4 : 1.7 },
-    labelStyle: { fill: '#475569', fontSize: 11 },
-  }));
-  return { nodes, edges };
+function mergeMaterialGraphs(current: MaterialGraph, incoming: MaterialGraph): MaterialGraph {
+  return {
+    ...incoming,
+    nodes: mergeById(current.nodes, incoming.nodes),
+    edges: mergeById(current.edges, incoming.edges),
+    claims: mergeById(current.claims, incoming.claims),
+  };
+}
+
+function mergeById<T extends { id: string }>(current: T[], incoming: T[]): T[] {
+  const byId = new Map<string, T>();
+  current.forEach((item) => byId.set(item.id, item));
+  incoming.forEach((item) => byId.set(item.id, item));
+  return [...byId.values()];
 }
 
 function buildCourseFlow(graph: KnowledgeGraph | null, selectedId: string | null): { nodes: Node<GraphNodeData>[]; edges: Edge[] } {
@@ -424,48 +404,6 @@ function buildCourseFlow(graph: KnowledgeGraph | null, selectedId: string | null
   return { nodes, edges };
 }
 
-function MaterialDetail({ node, edge, claims }: { node: MaterialNode | null; edge: MaterialEdge | null; claims: MaterialClaim[] }) {
-  if (edge) {
-    return (
-      <A3Card title="关系证据" action={<A3Pill tone={edge.degraded ? 'orange' : 'green'}>{edge.degraded ? '降级' : '已验证'}</A3Pill>}>
-        <div className="space-y-4">
-          <div>
-            <h2 className="text-lg font-semibold text-[var(--a3-text)]">{edge.label}</h2>
-            <p className="mt-1 text-sm text-[var(--a3-text-muted)]">{edge.type} · 权重 {Math.round(edge.weight * 100)}%</p>
-          </div>
-          <EvidenceList evidence={edge.evidence} />
-        </div>
-      </A3Card>
-    );
-  }
-  return (
-    <A3Card title="实体详情" action={node ? <A3Pill tone={node.degraded ? 'orange' : 'green'}>{node.degraded ? '降级抽取' : '已验证'}</A3Pill> : undefined}>
-      {node ? (
-        <div className="space-y-4">
-          <div>
-            <h2 className="text-lg font-semibold text-[var(--a3-text)]">{node.label}</h2>
-            <p className="mt-1 text-sm text-[var(--a3-text-muted)]">{materialTypeLabel[node.type] ?? node.type} · 置信度 {Math.round(node.confidence * 100)}%</p>
-          </div>
-          <A3Markdown className="text-sm leading-7 text-[var(--a3-text-muted)]">{formatMaterialMarkdown(node.summary || '该实体来自上传资料解析块，暂无更长摘要。')}</A3Markdown>
-          <EvidenceList evidence={node.evidence} />
-          {claims.length > 0 && (
-            <div className="rounded-xl bg-[var(--a3-surface-muted)] p-3">
-              <div className="mb-2 text-sm font-semibold text-[var(--a3-text)]">关联断言</div>
-              <div className="space-y-2">
-                {claims.map((claim) => (
-                  <A3Markdown key={claim.id} className="text-sm leading-6 text-[var(--a3-text-muted)]">{formatMaterialMarkdown(claim.text)}</A3Markdown>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="py-10 text-center text-sm text-[var(--a3-text-muted)]">请选择一个实体或关系查看来源证据。</div>
-      )}
-    </A3Card>
-  );
-}
-
 function CourseDetail({ node, planning, onRegenerate }: { node: KnowledgeGraphNode | null; planning: boolean; onRegenerate: () => void }) {
   return (
     <A3Card title="课程节点详情" action={node ? <A3Pill tone={node.status === 'weak' ? 'red' : node.status === 'mastered' ? 'green' : 'blue'}>{statusMeta[node.status].label}</A3Pill> : undefined}>
@@ -510,36 +448,6 @@ function CourseDetail({ node, planning, onRegenerate }: { node: KnowledgeGraphNo
   );
 }
 
-function EvidenceList({ evidence }: { evidence: MaterialEvidence[] }) {
-  return (
-    <div className="space-y-3">
-      <div className="text-sm font-semibold text-[var(--a3-text)]">来源证据</div>
-      {evidence.map((item, index) => (
-        <div key={materialEvidenceKey(item, index)} className="rounded-xl bg-[var(--a3-surface-muted)] p-3 text-sm leading-6">
-          <div className="font-medium text-[var(--a3-text)]">{item.resourceTitle}</div>
-          <div className="text-[var(--a3-text-muted)]">{item.location}</div>
-          <A3Markdown className="mt-2 text-[var(--a3-text-muted)] [&_table]:min-w-[460px]">{formatMaterialMarkdown(item.markdownSnippet || item.snippet)}</A3Markdown>
-          {item.degraded && (
-            <div className="mt-2 inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-xs text-amber-700">
-              <AlertTriangle className="size-3" />
-              降级证据
-            </div>
-          )}
-        </div>
-      ))}
-      {!evidence.length && <p className="text-sm text-[var(--a3-text-muted)]">暂无证据片段。</p>}
-    </div>
-  );
-}
-
-function materialEvidenceKey(item: MaterialEvidence, index: number) {
-  return [item.resourceId, item.blockId, item.location, item.blockType, item.snippet.slice(0, 80), index].join('::');
-}
-
-function formatMaterialMarkdown(value: string) {
-  return value.trim();
-}
-
 function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return (
     <button
@@ -555,16 +463,6 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
   );
 }
 
-function GraphMetric({ label, value, tone = 'slate' }: { label: string; value: string | number; tone?: 'slate' | 'blue' | 'red' | 'orange' }) {
-  const toneClass = tone === 'blue' ? 'text-blue-700' : tone === 'red' ? 'text-rose-700' : tone === 'orange' ? 'text-amber-700' : 'text-[var(--a3-text)]';
-  return (
-    <div className="rounded-xl bg-[var(--a3-surface-muted)] p-4">
-      <div className="text-xs text-[var(--a3-text-muted)]">{label}</div>
-      <div className={cn('mt-1 text-2xl font-semibold', toneClass)}>{value}</div>
-    </div>
-  );
-}
-
 function InfoBox({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4">
@@ -572,12 +470,4 @@ function InfoBox({ label, value }: { label: string; value: string }) {
       <div className="mt-1 truncate text-sm font-semibold text-[var(--a3-text)]">{value}</div>
     </div>
   );
-}
-
-function materialTone(type: string, degraded: boolean) {
-  if (degraded) return { surface: '#fffbeb', border: '#f59e0b', text: '#92400e' };
-  if (type === 'method') return { surface: '#eff6ff', border: '#60a5fa', text: '#1d4ed8' };
-  if (type === 'formula') return { surface: '#f0fdf4', border: '#4ade80', text: '#15803d' };
-  if (type === 'visual') return { surface: '#f5f3ff', border: '#a78bfa', text: '#6d28d9' };
-  return { surface: '#f8fafc', border: '#cbd5e1', text: '#334155' };
 }

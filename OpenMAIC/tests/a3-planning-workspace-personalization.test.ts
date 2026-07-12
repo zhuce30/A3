@@ -11,6 +11,7 @@ const courses = readFileSync(join(root, 'components/a3/features/courses-view.tsx
 describe('A3 planning workspace personalization', () => {
   it('turns profile setup into a course-aware planning input page without hard-coded automation examples', () => {
     expect(profileSetup).toContain('画像与规划输入');
+    expect(profileSetup).toContain('返回上一页');
     expect(profileSetup).toContain('buildProfileInterviewPlaceholder(optionsCourse)');
     expect(profileSetup).toContain('buildProfileInterviewExample(optionsCourse)');
     expect(profileSetup).toContain('data-testid="a3-profile-planning-impact"');
@@ -18,6 +19,10 @@ describe('A3 planning workspace personalization', () => {
     expect(profileSetup).toContain('dynamicProfile');
     expect(profileSetup).not.toContain('我是自动化大二');
     expect(profileSetup).not.toContain('根轨迹和频率响应比较薄弱');
+    expect(profileSetup).not.toContain('不是前端写死');
+    expect(profileSetup).not.toContain('ProfileAgent 会抽取字段');
+    expect(profileSetup).not.toContain('答辩或排查时展开');
+    expect(profileSetup).not.toContain('诊断、测评、课堂和资源反馈会先形成候选变化');
   });
 
   it('keeps profile interview message bubbles aligned with the form width', () => {

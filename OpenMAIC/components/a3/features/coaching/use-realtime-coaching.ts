@@ -2,6 +2,10 @@
 
 import { useCallback, useRef, useState } from 'react';
 import type {
+  A3DigitalHumanSpeechCue,
+  A3DigitalHumanSpeechViseme,
+} from '@/lib/a3/digital-human-types';
+import type {
   A3RealtimeCoachingSession,
   A3RealtimeEvidence,
   A3RealtimeFramePayload,
@@ -21,6 +25,7 @@ type FrameResponse = {
   reply?: string;
   verified?: boolean;
   citations?: A3RealtimeEvidence[];
+  visualContextPersisted?: boolean;
 };
 
 type SdpResponse = {
@@ -55,6 +60,18 @@ type RetrievalProgress = {
   sourceCount?: number;
 };
 
+type ProviderSpeechCueItem = {
+  viseme?: string;
+  phoneme?: string;
+  start_ms?: number;
+  duration_ms?: number;
+  startMs?: number;
+  durationMs?: number;
+  weights?: Partial<Record<A3DigitalHumanSpeechViseme, number>>;
+};
+
+const REALTIME_FRAME_SLOW_FEEDBACK_MS = 8000;
+
 export function useRealtimeCoaching() {
   const [status, setStatus] = useState<A3RealtimeStatus>('idle');
   const [session, setSession] = useState<A3RealtimeCoachingSession | null>(null);
@@ -67,6 +84,7 @@ export function useRealtimeCoaching() {
   const [screenEnabled, setScreenEnabled] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [assistantSpeaking, setAssistantSpeaking] = useState(false);
+  const [speechCues, setSpeechCues] = useState<A3DigitalHumanSpeechCue[]>([]);
   const [summary, setSummary] = useState<RealtimeSummary | null>(null);
   const [retrievalProgress, setRetrievalProgress] = useState<RetrievalProgress>({
     status: 'idle',
@@ -90,6 +108,7 @@ export function useRealtimeCoaching() {
   const playbackCursorRef = useRef(0);
   const activePlaybackSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const audioSequenceRef = useRef(0);
+  const speechCueSequenceRef = useRef(0);
   const audioStreamingRef = useRef(false);
   const audioSpeechActiveRef = useRef(false);
   const audioSilenceChunksRef = useRef(0);
@@ -102,7 +121,12 @@ export function useRealtimeCoaching() {
   }, []);
 
   const attachScreenStream = useCallback(() => {
-    if (screenVideoRef.current) screenVideoRef.current.srcObject = screenStreamRef.current;
+    if (screenVideoRef.current) {
+      screenVideoRef.current.srcObject = screenStreamRef.current;
+      void screenVideoRef.current.play().catch(() => {
+        // The explicit play call is best-effort; autoplay handles the common path.
+      });
+    }
   }, []);
 
   const appendTranscriptEvent = useCallback((role: A3RealtimeTranscriptEvent['role'], content: string, final: boolean) => {
@@ -134,6 +158,23 @@ export function useRealtimeCoaching() {
     });
   }, []);
 
+  const appendAudioEnergySpeechCue = useCallback((startAtSeconds: number, durationSeconds: number, audioContextCurrentTime: number, energy: number) => {
+    const startsAtMs = performance.now() + Math.max(0, startAtSeconds - audioContextCurrentTime) * 1000;
+    const endsAtMs = startsAtMs + Math.max(60, durationSeconds * 1000);
+    const cueIndex = speechCueSequenceRef.current++;
+    const visemeCycle: A3DigitalHumanSpeechViseme[] = ['aa', 'ih', 'ou', 'ee', 'oh'];
+    const viseme = visemeCycle[cueIndex % visemeCycle.length];
+    const nextCue: A3DigitalHumanSpeechCue = {
+      id: `audio-energy-${cueIndex}`,
+      source: 'audio_energy',
+      startsAtMs,
+      endsAtMs,
+      viseme,
+      energy: Math.max(0.08, Math.min(1, energy * 10)),
+    };
+    setSpeechCues((items) => [...items.filter((item) => item.endsAtMs > startsAtMs - 4000), nextCue].slice(-48));
+  }, []);
+
   const playRealtimeAudioDelta = useCallback((audioBase64: string) => {
     const pcm = decodePcm16Base64(audioBase64);
     if (!pcm.length) return;
@@ -156,9 +197,10 @@ export function useRealtimeCoaching() {
       if (!activePlaybackSourcesRef.current.size) setAssistantSpeaking(false);
     };
     const startAt = Math.max(audioContext.currentTime + 0.02, playbackCursorRef.current);
+    appendAudioEnergySpeechCue(startAt, audioBuffer.duration, audioContext.currentTime, calculatePcm16Rms(pcm));
     source.start(startAt);
     playbackCursorRef.current = startAt + audioBuffer.duration;
-  }, []);
+  }, [appendAudioEnergySpeechCue]);
 
   const stopRealtimePlayback = useCallback(() => {
     activePlaybackSourcesRef.current.forEach((source) => {
@@ -171,6 +213,7 @@ export function useRealtimeCoaching() {
     activePlaybackSourcesRef.current.clear();
     playbackCursorRef.current = 0;
     setAssistantSpeaking(false);
+    setSpeechCues([]);
   }, []);
 
   const sendRealtimeCancel = useCallback(() => {
@@ -183,6 +226,48 @@ export function useRealtimeCoaching() {
     }
     if (dataChannelRef.current?.readyState === 'open') {
       dataChannelRef.current.send(event);
+    }
+  }, []);
+
+  const sendRealtimeVisualContext = useCallback((context: {
+    source: 'camera' | 'screen' | 'upload';
+    prompt?: string;
+    reply: string;
+    citations?: A3RealtimeEvidence[];
+  }) => {
+    const citationText = (context.citations || [])
+      .slice(0, 3)
+      .map((citation, index) => `${index + 1}. ${citation.title || '视觉证据'} ${citation.location || ''} ${citation.snippet || ''}`.trim())
+      .join('\n');
+    const text = [
+      context.source === 'screen' ? '[A3_SCREEN_CONTEXT]' : '[A3_CAMERA_CONTEXT]',
+      context.source === 'screen'
+        ? '用户刚共享了一帧屏幕画面，下面是视觉模型对该屏幕的识别结果。后续回答必须把它当作你已经看到的屏幕上下文，不要再说你看不到共享屏幕。'
+        : '用户刚发送了一帧摄像头/画面截图，下面是视觉模型识别结果。',
+      context.prompt ? `用户视觉请求：${context.prompt}` : '',
+      `视觉识别结果：${context.reply}`,
+      citationText ? `可用证据：\n${citationText}` : '',
+    ].filter(Boolean).join('\n');
+    const contextEvent = JSON.stringify({
+      event_id: `a3_visual_context_${Date.now()}`,
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text }],
+      },
+    });
+    const responseEvent = JSON.stringify({
+      event_id: `a3_visual_response_${Date.now()}`,
+      type: 'response.create',
+    });
+    if (websocketRef.current?.readyState === WebSocket.OPEN) {
+      websocketRef.current.send(contextEvent);
+      websocketRef.current.send(responseEvent);
+    }
+    if (dataChannelRef.current?.readyState === 'open') {
+      dataChannelRef.current.send(contextEvent);
+      dataChannelRef.current.send(responseEvent);
     }
   }, []);
 
@@ -229,6 +314,12 @@ export function useRealtimeCoaching() {
         text?: string;
         response?: { output_text?: string };
         item?: { content?: Array<{ transcript?: string; text?: string }> };
+        viseme?: string;
+        phoneme?: string;
+        start_ms?: number;
+        duration_ms?: number;
+        visemes?: Array<{ viseme?: string; phoneme?: string; start_ms?: number; duration_ms?: number; startMs?: number; durationMs?: number; weights?: Partial<Record<A3DigitalHumanSpeechViseme, number>> }>;
+        phonemes?: Array<{ phoneme?: string; start_ms?: number; duration_ms?: number; startMs?: number; durationMs?: number }>;
       };
       const eventType = event.type || '';
       if (eventType === 'input_audio_buffer.committed' || eventType === 'response.created') {
@@ -236,6 +327,10 @@ export function useRealtimeCoaching() {
       }
       const audioDelta = eventType.includes('audio.delta') ? event.delta || event.audio || '' : '';
       if (audioDelta) playRealtimeAudioDelta(audioDelta);
+      const providerSpeechCues = extractProviderSpeechCues(event);
+      if (providerSpeechCues.length) {
+        setSpeechCues((items) => [...items.filter((item) => item.endsAtMs > performance.now() - 4000), ...providerSpeechCues].slice(-64));
+      }
       const itemTranscript = event.item?.content?.map((item) => item.transcript || item.text || '').join('');
       const content = event.transcript || event.text || event.response?.output_text || event.delta || itemTranscript || '';
       if (!content || eventType.includes('audio.delta')) return;
@@ -359,6 +454,7 @@ export function useRealtimeCoaching() {
     playbackCursorRef.current = 0;
     activePlaybackSourcesRef.current.clear();
     setAssistantSpeaking(false);
+    setSpeechCues([]);
     setAudioLevel(0);
   }, [clearManualAudioCommitTimer]);
 
@@ -753,6 +849,114 @@ export function useRealtimeCoaching() {
     }
   }, [attachCameraStream, cameraEnabled, syncOutgoingVideoTrack]);
 
+  const sendFrame = useCallback(async (payload: Omit<A3RealtimeFramePayload, 'coachingSessionId'>) => {
+    if (!session?.coachingSessionId) {
+      setError('请先开始实时辅导会话');
+      return;
+    }
+    const sourceLabel = payload.source === 'screen' ? '屏幕画面' : '摄像头画面';
+    let slowFeedbackShown = false;
+    setStatus('visual_focus');
+    setError('');
+    setTranscript((items) => [
+      ...items,
+      {
+        id: crypto.randomUUID(),
+        role: 'system',
+        content: `已截取${sourceLabel}，正在发送给视觉模型识别；识别完成后会同步给实时模型上下文。`,
+        final: true,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    const slowFeedbackTimer = window.setTimeout(() => {
+      slowFeedbackShown = true;
+      setTranscript((items) => [
+        ...items,
+        {
+          id: crypto.randomUUID(),
+          role: 'system',
+          content: '视觉模型响应较慢，画面已发送成功，请稍等；如果一直没有结果，可以再次点击“看这里/截屏分析”重试。',
+          final: true,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+    }, REALTIME_FRAME_SLOW_FEEDBACK_MS);
+    try {
+      const response = await fetch('/api/a3/coaching/realtime/frame', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, coachingSessionId: session.coachingSessionId }),
+      });
+      window.clearTimeout(slowFeedbackTimer);
+      const result = await response.json().catch(() => ({})) as FrameResponse;
+      if (!response.ok || !result.success) {
+        const message = result.error || '实时视觉帧理解失败';
+        setError(message);
+        setTranscript((items) => [
+          ...items,
+          {
+            id: crypto.randomUUID(),
+            role: 'system',
+            content: `视觉分析失败：${message}`,
+            final: true,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+        setStatus('degraded');
+        return;
+      }
+      setEvidence(result.citations || []);
+      if (result.reply) {
+        sendRealtimeVisualContext({
+          source: payload.source,
+          prompt: payload.prompt,
+          reply: result.reply,
+          citations: result.citations,
+        });
+        setTranscript((items) => [
+          ...items,
+          {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: result.reply || '',
+            final: true,
+            verified: Boolean(result.verified),
+            citations: result.citations,
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: crypto.randomUUID(),
+            role: 'system',
+            content: result.visualContextPersisted
+              ? '视觉分析结果已写入辅导会话，并同步给实时模型上下文。'
+              : slowFeedbackShown
+                ? '视觉分析已完成，结果已同步给实时模型上下文。'
+                : '视觉分析结果已同步给实时模型上下文。',
+            final: true,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      setStatus(session.connection.readyForBrowserMedia ? 'live' : 'degraded');
+    } catch (frameError) {
+      window.clearTimeout(slowFeedbackTimer);
+      const message = frameError instanceof Error ? frameError.message : '实时视觉帧理解失败';
+      setError(message);
+      setTranscript((items) => [
+        ...items,
+        {
+          id: crypto.randomUUID(),
+          role: 'system',
+          content: `视觉分析请求失败：${message}`,
+          final: true,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+      setStatus('degraded');
+    }
+  }, [sendRealtimeVisualContext, session]);
+
   const shareScreen = useCallback(async () => {
     try {
       if (!navigator.mediaDevices?.getDisplayMedia) {
@@ -767,49 +971,26 @@ export function useRealtimeCoaching() {
         return;
       }
       screenStreamRef.current = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      screenStreamRef.current.getVideoTracks().forEach((track) => {
+        track.addEventListener('ended', () => setScreenEnabled(false), { once: true });
+      });
       attachScreenStream();
       setScreenEnabled(true);
       await syncOutgoingVideoTrack();
-    } catch {
-      setError('屏幕共享被取消或浏览器权限不可用。');
-    }
-  }, [attachScreenStream, syncOutgoingVideoTrack]);
-
-  const sendFrame = useCallback(async (payload: Omit<A3RealtimeFramePayload, 'coachingSessionId'>) => {
-    if (!session?.coachingSessionId) {
-      setError('请先开始实时辅导会话');
-      return;
-    }
-    setStatus('visual_focus');
-    const response = await fetch('/api/a3/coaching/realtime/frame', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...payload, coachingSessionId: session.coachingSessionId }),
-    });
-    const result = await response.json().catch(() => ({})) as FrameResponse;
-    if (!response.ok || !result.success) {
-      setError(result.error || '实时视觉帧理解失败');
-      setStatus('degraded');
-      return;
-    }
-    setEvidence(result.citations || []);
-    if (result.reply) {
       setTranscript((items) => [
         ...items,
         {
           id: crypto.randomUUID(),
-          role: 'assistant',
-          content: result.reply || '',
+          role: 'system',
+          content: '屏幕共享已开启。需要 AI 分析当前画面时，请点击“看这里/截屏分析”。',
           final: true,
-          verified: Boolean(result.verified),
-          citations: result.citations,
           createdAt: new Date().toISOString(),
         },
       ]);
+    } catch {
+      setError('屏幕共享被取消或浏览器权限不可用。');
     }
-    setStatus(session.connection.readyForBrowserMedia ? 'live' : 'degraded');
-  }, [session]);
+  }, [attachScreenStream, syncOutgoingVideoTrack]);
 
   const captureFrame = useCallback(async () => {
     const screenVideo = screenEnabled ? screenVideoRef.current : null;
@@ -821,7 +1002,7 @@ export function useRealtimeCoaching() {
       return;
     }
     const canvas = document.createElement('canvas');
-    const maxWidth = 1280;
+    const maxWidth = 960;
     const scale = Math.min(1, maxWidth / video.videoWidth);
     canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
     canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
@@ -832,9 +1013,10 @@ export function useRealtimeCoaching() {
     }
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     await sendFrame({
-      imageDataUrl: canvas.toDataURL('image/jpeg', 0.82),
+      imageDataUrl: canvas.toDataURL('image/jpeg', 0.72),
       source,
       prompt: '请看这里，识别当前画面中的题目、公式、图表或板书，并结合本地知识库证据讲解。',
+      fast: true,
     });
   }, [cameraEnabled, screenEnabled, sendFrame]);
 
@@ -852,6 +1034,7 @@ export function useRealtimeCoaching() {
     screenEnabled,
     audioLevel,
     assistantSpeaking,
+    speechCues,
     summary,
     retrievalProgress,
     setError,
@@ -909,6 +1092,57 @@ function decodePcm16Base64(audioBase64: string) {
     bytes[index] = binary.charCodeAt(index);
   }
   return new Int16Array(bytes.buffer);
+}
+
+function extractProviderSpeechCues(event: {
+  viseme?: string;
+  phoneme?: string;
+  start_ms?: number;
+  duration_ms?: number;
+  visemes?: ProviderSpeechCueItem[];
+  phonemes?: ProviderSpeechCueItem[];
+}) {
+  const nowMs = performance.now();
+  const rawItems: ProviderSpeechCueItem[] = [
+    ...(event.visemes || []),
+    ...(event.phonemes || []),
+    ...(event.viseme || event.phoneme ? [event] : []),
+  ];
+
+  return rawItems.flatMap((item, index): A3DigitalHumanSpeechCue[] => {
+    const startOffsetMs = item.start_ms ?? item.startMs ?? index * 90;
+    const durationMs = item.duration_ms ?? item.durationMs ?? 110;
+    const viseme = normalizeProviderViseme(item.viseme);
+    const cue: A3DigitalHumanSpeechCue = {
+      id: `tts-cue-${Math.round(nowMs)}-${index}`,
+      source: item.phoneme && !viseme ? 'tts_phoneme' : 'tts_viseme',
+      startsAtMs: nowMs + Math.max(0, startOffsetMs),
+      endsAtMs: nowMs + Math.max(0, startOffsetMs) + Math.max(40, durationMs),
+      viseme,
+      phoneme: item.phoneme,
+      weights: item.weights,
+      energy: 0.82,
+    };
+    return cue.viseme || cue.phoneme || cue.weights ? [cue] : [];
+  });
+}
+
+function normalizeProviderViseme(value?: string): A3DigitalHumanSpeechViseme | undefined {
+  const normalized = value?.toLowerCase();
+  if (normalized === 'aa' || normalized === 'ih' || normalized === 'ou' || normalized === 'ee' || normalized === 'oh') {
+    return normalized;
+  }
+  return undefined;
+}
+
+function calculatePcm16Rms(input: Int16Array) {
+  if (!input.length) return 0;
+  let sum = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    const sample = input[index] / 0x8000;
+    sum += sample * sample;
+  }
+  return Math.sqrt(sum / input.length);
 }
 
 function calculateRms(input: Float32Array) {

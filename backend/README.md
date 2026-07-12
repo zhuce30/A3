@@ -97,6 +97,14 @@ python .\backend\manage.py build_knowledge_base --data-root .\data --limit-files
 python .\backend\manage.py query_knowledge_base "什么是根轨迹" --top-k 5
 ```
 
+Backfill structured Wiki entries for historical indexed resources:
+
+```powershell
+python .\backend\manage.py backfill_knowledge_wiki --limit 100
+python .\backend\manage.py backfill_knowledge_wiki --scope personal --json
+python .\backend\manage.py backfill_knowledge_wiki --resource-id <uuid> --force
+```
+
 ## 竞赛演示数据
 
 建议使用后端虚拟环境运行演示命令，确保知识库解析和 BM25 检索依赖一致：
