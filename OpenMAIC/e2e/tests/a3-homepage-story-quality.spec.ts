@@ -6,14 +6,27 @@ const TERMINAL_RENDERERS = ['vrm', 'vrm_idle_animation', 'primitive', 'static_fa
 type HandoffSample = {
   empty: boolean;
   fallbackInDom: boolean;
+  fallbackStyle: string;
   loadingExposed: boolean;
   renderer: string;
   stageRenderer: string;
 };
 
-async function readCompositedPixelStats(locator: Locator) {
+async function readCompositedPixelStats(locator: Locator, centerRatio = 1) {
   const screenshot = await locator.screenshot();
-  const { data } = await sharp(screenshot)
+  const source = sharp(screenshot);
+  const metadata = await source.metadata();
+  const width = metadata.width ?? 1;
+  const height = metadata.height ?? 1;
+  const cropWidth = Math.max(1, Math.floor(width * centerRatio));
+  const cropHeight = Math.max(1, Math.floor(height * centerRatio));
+  const { data } = await source
+    .extract({
+      left: Math.floor((width - cropWidth) / 2),
+      top: Math.floor((height - cropHeight) / 2),
+      width: cropWidth,
+      height: cropHeight,
+    })
     .resize(32, 32, { fit: 'fill' })
     .ensureAlpha()
     .raw()
@@ -21,15 +34,22 @@ async function readCompositedPixelStats(locator: Locator) {
   let opaque = 0;
   let minimum = 255;
   let maximum = 0;
+  let edges = 0;
+  const colors = new Set<string>();
 
   for (let index = 0; index < data.length; index += 4) {
     const lightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
     if (data[index + 3] > 0) opaque += 1;
     minimum = Math.min(minimum, lightness);
     maximum = Math.max(maximum, lightness);
+    colors.add(`${data[index] >> 3}:${data[index + 1] >> 3}:${data[index + 2] >> 3}`);
+    if (index >= 4) {
+      const previous = (data[index - 4] + data[index - 3] + data[index - 2]) / 3;
+      if (Math.abs(lightness - previous) > 10) edges += 1;
+    }
   }
 
-  return { opaque, variance: maximum - minimum };
+  return { edges, opaque, uniqueColors: colors.size, variance: maximum - minimum };
 }
 
 async function delayTeacherRendererChunk(page: Page) {
@@ -137,17 +157,29 @@ test('desktop and mobile keep the full real teacher portrait visible before acti
   await assertContainedTeacherPortrait(page, 'teacher-fallback-mobile.png');
 });
 
-test('teacher fallback covers loading and hands off without an empty frame', async ({ page }) => {
+test('teacher fallback keeps the user-visible handoff complete and nonblank', async ({ page }) => {
   const delayedRendererRequests = await delayTeacherRendererChunk(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/a3', { waitUntil: 'domcontentloaded' });
   const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
   await stage.scrollIntoViewIfNeeded();
+  const initialFallback = stage.getByTestId('a3-homepage-teacher-fallback');
+  await expect(initialFallback).toBeVisible();
+  await expect
+    .poll(() =>
+      initialFallback
+        .locator('img')
+        .evaluate((node) => node.complete && node.naturalWidth > 0 && node.naturalHeight > 0),
+    )
+    .toBe(true);
 
   const samples: HandoffSample[] = [];
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const sample = await stage.evaluate((root, terminalRenderers) => {
+      const currentRoot =
+        document.querySelector<HTMLElement>('main [data-testid="a3-homepage-teacher-stage"]') ??
+        root;
       const visible = (element: Element | null) => {
         if (!(element instanceof HTMLElement)) return false;
         const style = getComputedStyle(element);
@@ -160,8 +192,8 @@ test('teacher fallback covers loading and hands off without an empty frame', asy
         );
       };
 
-      const fallback = root.querySelector('[data-testid="a3-homepage-teacher-fallback"]');
-      const renderer = root.querySelector('[data-avatar-renderer]');
+      const fallback = currentRoot.querySelector('[data-testid="a3-homepage-teacher-fallback"]');
+      const renderer = currentRoot.querySelector('[data-avatar-renderer]');
       const rendererName = renderer?.getAttribute('data-avatar-renderer') ?? '';
       const terminalVisible = terminalRenderers.includes(rendererName) && visible(renderer);
       let loadingExposed = false;
@@ -178,9 +210,17 @@ test('teacher fallback covers loading and hands off without an empty frame', asy
       return {
         empty: !visible(fallback) && !terminalVisible,
         fallbackInDom: fallback !== null,
+        fallbackStyle:
+          fallback instanceof HTMLElement
+            ? (() => {
+                const style = getComputedStyle(fallback);
+                const rect = fallback.getBoundingClientRect();
+                return `${style.display}/${style.opacity}/${rect.width}x${rect.height}`;
+              })()
+            : 'missing',
         loadingExposed,
         renderer: rendererName,
-        stageRenderer: root.getAttribute('data-renderer') ?? '',
+        stageRenderer: currentRoot.getAttribute('data-renderer') ?? '',
       };
     }, TERMINAL_RENDERERS);
     samples.push(sample);
@@ -220,12 +260,14 @@ test('teacher fallback covers loading and hands off without an empty frame', asy
     const stats = await readCompositedPixelStats(homepageFallback);
     expect(stats.opaque).toBeGreaterThan(700);
     expect(stats.variance).toBeGreaterThan(8);
+    expect(stats.uniqueColors).toBeGreaterThan(8);
   } else if (terminalRenderer === 'static_fallback') {
     const staticFallback = stage.getByTestId('a3-digital-human-static-fallback');
     await expect(staticFallback).toBeVisible();
     const stats = await readCompositedPixelStats(staticFallback);
     expect(stats.opaque).toBeGreaterThan(700);
     expect(stats.variance).toBeGreaterThan(8);
+    expect(stats.uniqueColors).toBeGreaterThan(8);
   } else {
     const canvas = stage.getByTestId('a3-digital-human-three-canvas');
     await expect(canvas).toBeVisible();
@@ -239,6 +281,48 @@ test('teacher fallback covers loading and hands off without an empty frame', asy
       )
       .toBe(true);
   }
+});
+
+test('teacher canvas stays independently nonblank beneath the homepage overlay', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/a3', { waitUntil: 'domcontentloaded' });
+  const stage = page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
+  await stage.scrollIntoViewIfNeeded();
+  await expect(stage).toHaveAttribute('data-renderer', 'terminal', { timeout: 30_000 });
+
+  const renderer = stage.locator('[data-avatar-renderer]');
+  const rendererName = await renderer.getAttribute('data-avatar-renderer');
+  const canvas = stage.getByTestId('a3-digital-human-three-canvas');
+  if (rendererName === 'static_fallback') {
+    await expect(canvas).toHaveCount(0);
+    const builtInFallback = stage.getByTestId('a3-digital-human-static-fallback');
+    await expect(builtInFallback).toBeVisible();
+    const stats = await readCompositedPixelStats(builtInFallback, 0.5);
+    expect(stats.opaque).toBeGreaterThan(700);
+    expect(stats.uniqueColors).toBeGreaterThan(8);
+    return;
+  }
+
+  await expect(renderer).toHaveAttribute(
+    'data-avatar-renderer',
+    /vrm|vrm_idle_animation|primitive/,
+  );
+  await expect(canvas).toBeVisible();
+  await page.addStyleTag({
+    content: `
+      [data-testid='a3-homepage-teacher-fallback'],
+      [data-testid='a3-homepage-teacher-stage'] > :not([data-testid='a3-homepage-teacher-visual']) {
+        visibility: hidden !important;
+      }
+    `,
+  });
+  const stats = await readCompositedPixelStats(canvas, 0.5);
+  expect(stats.opaque).toBeGreaterThan(700);
+  expect(stats.variance).toBeGreaterThan(12);
+  expect(stats.uniqueColors).toBeGreaterThan(6);
+  expect(stats.edges).toBeGreaterThan(6);
 });
 
 test('homepage anchor navigation clears the sticky header', async ({ page }) => {

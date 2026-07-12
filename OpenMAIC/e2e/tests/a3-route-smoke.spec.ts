@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import path from 'node:path';
 import { test, expect } from '../fixtures/base';
+import { resolveA3PlaywrightRuntime } from '../playwright-runtime';
 
 const STUDENT_PHONE = '13800000001';
 const TEACHER_PHONE = '13800000002';
@@ -26,14 +26,9 @@ const STUDENT_ROUTES = [
 ] as const;
 
 function seedDemoData() {
-  const projectRoot = path.resolve(process.cwd(), '..');
-  const backendProjectRoot = process.env.A3_BACKEND_PROJECT_ROOT ?? projectRoot;
-  const python =
-    process.env.A3_BACKEND_PYTHON ??
-    path.join(backendProjectRoot, 'backend', '.venv', 'Scripts', 'python.exe');
-  const manage = path.join(backendProjectRoot, 'backend', 'manage.py');
-  execFileSync(python, [manage, 'seed_demo_data'], {
-    cwd: backendProjectRoot,
+  const runtime = resolveA3PlaywrightRuntime(process.env, process.cwd());
+  execFileSync(runtime.backendPython, [runtime.backendManagePy, 'seed_demo_data'], {
+    cwd: runtime.backendProjectRoot,
     stdio: 'pipe',
   });
 }
@@ -57,9 +52,10 @@ async function expectUsableA3Page(page: import('@playwright/test').Page, route: 
 }
 
 test.describe.serial('A3 authenticated route smoke', () => {
-  test.setTimeout(600_000);
+  test.setTimeout(60_000);
 
-  test.beforeAll(() => {
+  test.beforeAll(({}, testInfo) => {
+    testInfo.setTimeout(120_000);
     seedDemoData();
   });
 
@@ -79,7 +75,8 @@ test.describe.serial('A3 authenticated route smoke', () => {
     await expect(page.getByTestId('a3-dashboard')).toHaveCount(0);
   });
 
-  test('student can open all core learning routes', async ({ page }) => {
+  test('student can open all core learning routes', async ({ page }, testInfo) => {
+    testInfo.setTimeout(600_000);
     await loginAs(page, STUDENT_PHONE);
 
     for (const route of STUDENT_ROUTES) {
@@ -122,7 +119,9 @@ test.describe.serial('A3 authenticated route smoke', () => {
     await expect(page.getByRole('button', { name: '看这里/截屏分析' })).toBeVisible();
   });
 
-  test('student sees recommendation fast and deep metrics on capabilities page', async ({ page }) => {
+  test('student sees recommendation fast and deep metrics on capabilities page', async ({
+    page,
+  }) => {
     await loginAs(page, STUDENT_PHONE);
     await expectUsableA3Page(page, '/a3/capabilities');
 

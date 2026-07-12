@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
+import { resolveA3PlaywrightRuntime } from './e2e/playwright-runtime';
 
-const useExistingServers = process.env.A3_PLAYWRIGHT_USE_EXISTING === '1';
-const baseURL = process.env.A3_PLAYWRIGHT_BASE_URL ?? 'http://localhost:3002';
+const runtime = resolveA3PlaywrightRuntime();
 
 export default defineConfig({
   testDir: './e2e/tests',
@@ -11,7 +11,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: process.env.CI ? 'html' : 'list',
   use: {
-    baseURL,
+    baseURL: runtime.baseURL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
@@ -21,18 +21,20 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-  webServer: useExistingServers ? undefined : [
-    {
-      command: process.env.CI ? 'pnpm build && pnpm start -- -p 3002' : 'cmd /c node_modules\\.bin\\next.CMD dev -p 3002',
-      url: 'http://localhost:3002',
-      reuseExistingServer: !process.env.CI,
-      timeout: 120_000,
-    },
-    {
-      command: 'cmd /c set A3_KB_SYNC_INDEX_ON_UPLOAD=1&& ..\\backend\\.venv\\Scripts\\python.exe ..\\backend\\manage.py runserver 127.0.0.1:8000 --noreload',
-      url: 'http://localhost:8000/api/auth/csrf/',
-      reuseExistingServer: !process.env.CI,
-      timeout: 120_000,
-    },
-  ],
+  webServer: runtime.useExistingServers
+    ? undefined
+    : [
+        {
+          command: runtime.frontendCommand,
+          url: runtime.baseURL,
+          reuseExistingServer: false,
+          timeout: 120_000,
+        },
+        {
+          command: runtime.backendCommand,
+          url: 'http://localhost:8000/api/auth/csrf/',
+          reuseExistingServer: false,
+          timeout: 120_000,
+        },
+      ],
 });

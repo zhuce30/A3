@@ -211,6 +211,7 @@ export function A3HomepageTeacherStage() {
             <A3HomepageProductMedia
               src="/a3/assets/homepage/teacher-fallback.webp"
               alt="数字教师实时辅导界面"
+              priority
               sizes="(max-width: 768px) 100vw, 92vw"
               fallbackKind="teacher"
             />

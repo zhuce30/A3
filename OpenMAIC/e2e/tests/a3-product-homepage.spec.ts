@@ -18,9 +18,21 @@ async function stubAnonymousUser(page: Page, delayMs = 0) {
   });
 }
 
-async function compositedPixelStats(locator: Locator) {
+async function compositedPixelStats(locator: Locator, centerRatio = 1) {
   const screenshot = await locator.screenshot();
-  const { data } = await sharp(screenshot)
+  const source = sharp(screenshot);
+  const metadata = await source.metadata();
+  const width = metadata.width ?? 1;
+  const height = metadata.height ?? 1;
+  const cropWidth = Math.max(1, Math.floor(width * centerRatio));
+  const cropHeight = Math.max(1, Math.floor(height * centerRatio));
+  const { data } = await source
+    .extract({
+      left: Math.floor((width - cropWidth) / 2),
+      top: Math.floor((height - cropHeight) / 2),
+      width: cropWidth,
+      height: cropHeight,
+    })
     .resize(32, 32, { fit: 'fill' })
     .ensureAlpha()
     .raw()
@@ -28,15 +40,34 @@ async function compositedPixelStats(locator: Locator) {
   let opaque = 0;
   let minimum = 255;
   let maximum = 0;
+  let edges = 0;
+  const colors = new Set<string>();
 
   for (let index = 0; index < data.length; index += 4) {
     const lightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
     if (data[index + 3] > 0) opaque += 1;
     minimum = Math.min(minimum, lightness);
     maximum = Math.max(maximum, lightness);
+    colors.add(`${data[index] >> 3}:${data[index + 1] >> 3}:${data[index + 2] >> 3}`);
+    if (index >= 4) {
+      const previous = (data[index - 4] + data[index - 3] + data[index - 2]) / 3;
+      if (Math.abs(lightness - previous) > 10) edges += 1;
+    }
   }
 
-  return { opaque, variance: maximum - minimum };
+  return { edges, opaque, uniqueColors: colors.size, variance: maximum - minimum };
+}
+
+function boxesOverlap(
+  first: { x: number; y: number; width: number; height: number },
+  second: { x: number; y: number; width: number; height: number },
+) {
+  return !(
+    first.x + first.width <= second.x ||
+    second.x + second.width <= first.x ||
+    first.y + first.height <= second.y ||
+    second.y + second.height <= first.y
+  );
 }
 
 async function expectNoHorizontalOverflow(page: Page) {
@@ -83,6 +114,7 @@ async function expectHeaderAndHero(page: Page, viewportHeight: number) {
   const brand = page.getByRole('link', { name: '智学引擎首页' });
   const headerCta = header.getByRole('link', { name: '开启旅程' });
   const heading = page.getByRole('heading', { name: '每一步学习， 都更懂你。' });
+  const support = page.getByText('一群懂学习的智能体，陪你找到自己的节奏。');
   const heroCta = page.getByRole('link', { name: '开启我的智学旅程' }).first();
   const firstImage = page
     .getByTestId('a3-homepage-hero-stage')
@@ -91,22 +123,31 @@ async function expectHeaderAndHero(page: Page, viewportHeight: number) {
   await expect(brand).toBeVisible();
   await expect(headerCta).toBeVisible();
   await expect(heading).toBeVisible();
+  await expect(support).toBeVisible();
   await expect(heroCta).toBeVisible();
   await expect(firstImage).toBeVisible();
   await expect
     .poll(() => firstImage.evaluate((node) => node.complete && node.naturalWidth > 0))
     .toBe(true);
 
-  const [brandBox, headerCtaBox, headingBox, heroCtaBox] = await Promise.all([
+  const [brandBox, headerCtaBox, headingBox, supportBox, heroCtaBox, imageBox] = await Promise.all([
     brand.boundingBox(),
     headerCta.boundingBox(),
     heading.boundingBox(),
+    support.boundingBox(),
     heroCta.boundingBox(),
+    firstImage.boundingBox(),
   ]);
   expect(brandBox).not.toBeNull();
   expect(headerCtaBox).not.toBeNull();
+  expect(headingBox).not.toBeNull();
+  expect(supportBox).not.toBeNull();
+  expect(heroCtaBox).not.toBeNull();
+  expect(imageBox).not.toBeNull();
   expect((brandBox?.x ?? 0) + (brandBox?.width ?? 0)).toBeLessThan(headerCtaBox?.x ?? 0);
-  expect((headingBox?.y ?? 0) + (headingBox?.height ?? 0)).toBeLessThan(heroCtaBox?.y ?? 0);
+  expect((headingBox?.y ?? 0) + (headingBox?.height ?? 0)).toBeLessThan(supportBox?.y ?? 0);
+  expect((supportBox?.y ?? 0) + (supportBox?.height ?? 0)).toBeLessThan(heroCtaBox?.y ?? 0);
+  expect(boxesOverlap(heroCtaBox!, imageBox!)).toBe(false);
 
   const nextSectionTop = await page
     .getByTestId('a3-homepage-profile')
@@ -134,8 +175,16 @@ test('renders the public product homepage before a slow auth check resolves', as
     });
     observer.observe(document, { childList: true, subtree: true });
   });
+  let authStarted = false;
+  let authResolved = false;
+  let releaseAuth: (() => void) | undefined;
+  const deferredAuth = new Promise<void>((resolve) => {
+    releaseAuth = resolve;
+  });
   await page.route('**/api/auth/me/', async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    authStarted = true;
+    await deferredAuth;
+    authResolved = true;
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({ success: true, user: null }),
@@ -145,12 +194,15 @@ test('renders the public product homepage before a slow auth check resolves', as
   await expect(page.getByTestId('a3-product-homepage')).toBeVisible();
   await expect(page.getByRole('heading', { name: '每一步学习， 都更懂你。' })).toBeVisible();
   await expect(page.getByRole('link', { name: '开启我的智学旅程' }).first()).toBeVisible();
+  await expect.poll(() => authStarted).toBe(true);
+  expect(authResolved).toBe(false);
   const homepagePaintMs = await page.evaluate(
-    () =>
-      (window as typeof window & { __a3HomepagePaintMs: number | null }).__a3HomepagePaintMs,
+    () => (window as typeof window & { __a3HomepagePaintMs: number | null }).__a3HomepagePaintMs,
   );
   expect(homepagePaintMs).not.toBeNull();
   expect(homepagePaintMs).toBeLessThan(1_000);
+  releaseAuth?.();
+  await expect.poll(() => authResolved).toBe(true);
 });
 
 test('review entry exposes the approved account without bypassing login', async ({ page }) => {
@@ -162,9 +214,7 @@ test('review entry exposes the approved account without bypassing login', async 
   await expect(page.getByTestId('a3-review-login-panel')).toBeVisible();
   await page.getByTestId('a3-review-fill-account').click();
   await expect(page.getByLabel('账号')).toHaveValue('13800000001');
-  await expect(page.locator('input[autocomplete="current-password"]')).toHaveValue(
-    'Demo@123456',
-  );
+  await expect(page.locator('input[autocomplete="current-password"]')).toHaveValue('Demo@123456');
   await expect(page).toHaveURL(/\/a3\/login/);
 });
 
@@ -200,6 +250,8 @@ test('anchors reveal real evidence and classroom citations without mutating data
   await classroomModes.getByRole('button', { name: '引用' }).click();
   await expect(page.getByText('操作系统 / 第 3 章 / 课程 PPT')).toBeVisible();
   await expect(page.getByText('进程调度 / 知识总结')).toBeVisible();
+  await page.waitForLoadState('networkidle');
+  await page.waitForTimeout(500);
   expect(mutations).toEqual([]);
 });
 
@@ -254,9 +306,9 @@ for (const viewport of [
       (emailBox?.y ?? 0) + (emailBox?.height ?? 0) <= (competitionBox?.y ?? 0)
     );
     expect(boxesOverlap).toBe(false);
-    expect(
-      await competition.evaluate((node) => node.scrollWidth <= node.clientWidth + 1),
-    ).toBe(true);
+    expect(await competition.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(
+      true,
+    );
     await expectNoHorizontalOverflow(page);
     await footer.screenshot({
       path: path.join(SCREENSHOT_DIR, `a3-homepage-${viewport.name}-footer.png`),
@@ -266,6 +318,28 @@ for (const viewport of [
     await page.screenshot({
       path: path.join(SCREENSHOT_DIR, `a3-homepage-${viewport.name}.png`),
       fullPage: true,
+      animations: 'disabled',
+    });
+  });
+}
+
+for (const viewport of [
+  { name: 'short-mobile', width: 390, height: 667 },
+  { name: 'compact-mobile', width: 375, height: 568 },
+] as const) {
+  test(`${viewport.name} keeps the entire hero and next chapter cue in one viewport`, async ({
+    page,
+  }) => {
+    await stubAnonymousUser(page);
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto('/a3');
+    await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
+
+    await expectNoHorizontalOverflow(page);
+    await expectHeaderAndHero(page, viewport.height);
+    fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+    await page.screenshot({
+      path: path.join(SCREENSHOT_DIR, `a3-homepage-${viewport.name}-hero.png`),
       animations: 'disabled',
     });
   });
@@ -306,7 +380,7 @@ test('reduced motion keeps every key chapter and the static hero readable', asyn
   await expectNoHorizontalOverflow(page);
 });
 
-test('normal motion hands the teacher stage to a nonblank terminal renderer', async ({ page }) => {
+async function loadTerminalTeacher(page: Page) {
   await stubAnonymousUser(page);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -317,9 +391,17 @@ test('normal motion hands the teacher stage to a nonblank terminal renderer', as
   await stage.scrollIntoViewIfNeeded();
   await expect(stage).toHaveAttribute('data-renderer', 'terminal', { timeout: 30_000 });
   const renderer = stage.locator('[data-avatar-renderer]');
-  await expect(renderer).toHaveAttribute('data-avatar-renderer', new RegExp(TERMINAL_RENDERERS.join('|')));
+  await expect(renderer).toHaveAttribute(
+    'data-avatar-renderer',
+    new RegExp(TERMINAL_RENDERERS.join('|')),
+  );
   await expect(renderer).not.toHaveAttribute('data-avatar-renderer', 'loading');
   const rendererName = await renderer.getAttribute('data-avatar-renderer');
+  return { renderer, rendererName, stage };
+}
+
+test('normal motion presents a complete nonblank teacher to the user', async ({ page }) => {
+  const { renderer, rendererName, stage } = await loadTerminalTeacher(page);
   const fallback = stage.getByTestId('a3-homepage-teacher-fallback');
   if (rendererName === 'primitive') {
     await expect(fallback).toBeVisible();
@@ -335,7 +417,10 @@ test('normal motion hands the teacher stage to a nonblank terminal renderer', as
   }
 
   const visual = stage.getByTestId('a3-homepage-teacher-visual');
-  const [visualBox, rendererBox] = await Promise.all([visual.boundingBox(), renderer.boundingBox()]);
+  const [visualBox, rendererBox] = await Promise.all([
+    visual.boundingBox(),
+    renderer.boundingBox(),
+  ]);
   expect(rendererBox).not.toBeNull();
   expect(rendererBox?.x).toBeGreaterThanOrEqual((visualBox?.x ?? 0) - 1);
   expect(rendererBox?.y).toBeGreaterThanOrEqual((visualBox?.y ?? 0) - 1);
@@ -346,15 +431,49 @@ test('normal motion hands the teacher stage to a nonblank terminal renderer', as
     (visualBox?.y ?? 0) + (visualBox?.height ?? 0) + 1,
   );
 
-  const compositorTarget =
-    rendererName === 'primitive'
-      ? fallback
-      : (await stage.getByTestId('a3-digital-human-three-canvas').count())
-        ? stage.getByTestId('a3-digital-human-three-canvas')
-        : renderer;
-  const stats = await compositedPixelStats(compositorTarget);
+  const stats = await compositedPixelStats(visual, 0.5);
   expect(stats.opaque).toBeGreaterThan(700);
   expect(stats.variance).toBeGreaterThan(12);
+  expect(stats.uniqueColors).toBeGreaterThan(8);
+  expect(stats.edges).toBeGreaterThan(8);
   fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
   await visual.screenshot({ path: path.join(SCREENSHOT_DIR, 'a3-homepage-teacher.png') });
+});
+
+test('normal motion independently renders a nonblank underlying teacher canvas', async ({
+  page,
+}) => {
+  const { renderer, rendererName, stage } = await loadTerminalTeacher(page);
+  const canvas = stage.getByTestId('a3-digital-human-three-canvas');
+
+  if (rendererName === 'static_fallback') {
+    await expect(canvas).toHaveCount(0);
+    const builtInFallback = stage.getByTestId('a3-digital-human-static-fallback');
+    await expect(builtInFallback).toBeVisible();
+    const stats = await compositedPixelStats(builtInFallback, 0.5);
+    expect(stats.opaque).toBeGreaterThan(700);
+    expect(stats.uniqueColors).toBeGreaterThan(8);
+    return;
+  }
+
+  await expect(renderer).toHaveAttribute(
+    'data-avatar-renderer',
+    /vrm|vrm_idle_animation|primitive/,
+  );
+  await expect(canvas).toBeVisible();
+  await page.addStyleTag({
+    content: `
+      [data-testid='a3-homepage-teacher-fallback'],
+      [data-testid='a3-homepage-teacher-stage'] > :not([data-testid='a3-homepage-teacher-visual']) {
+        visibility: hidden !important;
+      }
+    `,
+  });
+  const stats = await compositedPixelStats(canvas, 0.5);
+  expect(stats.opaque).toBeGreaterThan(700);
+  expect(stats.variance).toBeGreaterThan(12);
+  expect(stats.uniqueColors).toBeGreaterThan(6);
+  expect(stats.edges).toBeGreaterThan(6);
+  fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+  await canvas.screenshot({ path: path.join(SCREENSHOT_DIR, 'a3-homepage-teacher-canvas.png') });
 });

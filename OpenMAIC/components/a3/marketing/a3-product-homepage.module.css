@@ -846,8 +846,8 @@
   }
 
   .hero {
-    height: 700px;
-    min-height: 660px;
+    height: clamp(440px, calc(100dvh - 128px), 700px);
+    min-height: 440px;
     max-height: 700px;
   }
 
@@ -1096,6 +1096,31 @@
 @media (max-width: 390px) {
   .heroCopy h1 {
     font-size: 43px;
+  }
+}
+
+@media (max-width: 767px) and (max-height: 700px) {
+  .heroCopy {
+    padding-top: 24px;
+  }
+
+  .heroCopy h1 {
+    font-size: 40px;
+  }
+
+  .heroSupport {
+    margin-top: 12px;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .primaryCta {
+    min-height: 44px;
+    margin-top: 14px;
+  }
+
+  .heroStage {
+    inset: 240px 16px 10px;
   }
 }
 
