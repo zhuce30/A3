@@ -236,6 +236,17 @@ const classroomCopy = {
     safetyAlternative: '合规替代：可以讲解相关考点、生成练习题、分析错因或制定复习步骤。',
     reason: '原因',
     citationPreview: '引用预览',
+    evidenceGalleryTitle: '证据画廊',
+    evidenceGalleryGuide: '先看课件页，再看它支撑了哪些结论。',
+    evidenceSourceCount: (count: number) => `${count} 个来源`,
+    evidenceThumbnailLabel: '课件证据缩略图',
+    evidenceNumber: (index: number) => `证据 ${index}`,
+    supportedClaims: (count: number) => `${count} 句`,
+    supportingPoints: '支撑要点',
+    moreClaims: (count: number) => `展开其余 ${count} 条句级证据`,
+    missingPreview: '该证据没有可预览图片，已显示文字来源。',
+    previewUnavailable: '预览不可用',
+    openPreview: '打开预览',
     openFavorites: '去我的收藏',
     sourcePersonal: '我的资料',
     sourceTeacher: '教师资料',
@@ -379,6 +390,17 @@ const classroomCopy = {
     safetyAlternative: 'Safe alternative: explain the concept, generate practice, analyze mistakes, or build a review plan.',
     reason: 'Reason',
     citationPreview: 'Citation preview',
+    evidenceGalleryTitle: 'Evidence gallery',
+    evidenceGalleryGuide: 'Review the slide first, then inspect the claims it supports.',
+    evidenceSourceCount: (count: number) => `${count} source(s)`,
+    evidenceThumbnailLabel: 'Slide evidence thumbnails',
+    evidenceNumber: (index: number) => `Evidence ${index}`,
+    supportedClaims: (count: number) => `${count} claim(s)`,
+    supportingPoints: 'Supported points',
+    moreClaims: (count: number) => `Show ${count} more sentence-level claim(s)`,
+    missingPreview: 'This evidence has no preview image. Its text source is shown instead.',
+    previewUnavailable: 'Preview unavailable',
+    openPreview: 'Open preview',
     openFavorites: 'Open favorites',
     sourcePersonal: 'My materials',
     sourceTeacher: 'Teacher materials',
@@ -2225,6 +2247,8 @@ function VerificationBadge({
   const { copy } = useClassroomCopy();
   const blocked = safety?.safe === false;
   const verifiedClaims = claims.filter((claim) => claim.verified).length;
+  const claimsWithMapping = claims.filter((claim): claim is MappedClaim => Boolean(claim.citation));
+  const groupedClaimCitations = groupClaimsByCitation(claimsWithMapping);
   const statusLabel = verified ? copy.verified : citations.length ? copy.partiallyVerified : copy.missingEvidence;
   return (
     <div className="mt-3 rounded-lg border border-white/70 bg-white/80 p-3 text-xs leading-5 text-slate-600" data-testid="a3-classroom-verification">
@@ -2239,7 +2263,10 @@ function VerificationBadge({
           <div className="mt-1 font-semibold">{copy.safetyAlternative}</div>
         </div>
       )}
-      {citations.length > 0 && (
+      {claimsWithMapping.length > 0 && (
+        <EvidenceGallery groups={groupedClaimCitations} />
+      )}
+      {citations.length > 0 && claimsWithMapping.length === 0 && (
         <div className="mt-3 grid gap-2">
           {citations.slice(0, 2).map((citation, index) => (
             <div key={`${citation.title}-${index}`} className="rounded-xl border border-slate-200 bg-white p-3">
@@ -2256,27 +2283,209 @@ function VerificationBadge({
   );
 }
 
-function CitationPreview({ citation }: { citation: Citation }) {
+type CitationPreviewSize = 'compact' | 'thumb' | 'large' | 'hero';
+type MappedClaim = Claim & { citation: Citation };
+type EvidenceGroup = { key: string; citation: Citation; claims: MappedClaim[] };
+
+function CitationPreview({ citation, size = 'compact' }: { citation: Citation; size?: CitationPreviewSize }) {
   const { copy } = useClassroomCopy();
   const [previewAvailable, setPreviewAvailable] = useState(true);
-  if (!citation.previewUrl || !previewAvailable) return null;
+  if (!citation.previewUrl) return null;
+  const image = (
+    <CitationImage
+      citation={citation}
+      size={size}
+      previewAvailable={previewAvailable}
+      unavailableLabel={copy.previewUnavailable}
+      openLabel={copy.openPreview}
+      onUnavailable={() => setPreviewAvailable(false)}
+    />
+  );
+  if (!previewAvailable) {
+    return <div className={cn('block shrink-0', size === 'compact' ? '' : 'w-full')}>{image}</div>;
+  }
   return (
     <a
       href={resolveCitationPreviewUrl(citation.previewUrl)}
       target="_blank"
       rel="noreferrer"
-      className="block overflow-hidden rounded-lg border border-slate-200 bg-slate-50"
+      className={cn('block shrink-0', size === 'compact' ? '' : 'w-full')}
       data-testid="a3-classroom-citation-preview-link"
     >
-      <img
-        src={resolveCitationPreviewUrl(citation.previewUrl)}
-        alt={citation.title || copy.citationPreview}
-        className="h-24 w-full object-cover"
-        data-testid="a3-classroom-citation-preview"
-        onError={() => setPreviewAvailable(false)}
-      />
+      {image}
     </a>
   );
+}
+
+function CitationImage({
+  citation,
+  size,
+  previewAvailable,
+  unavailableLabel,
+  openLabel,
+  onUnavailable,
+}: {
+  citation: Citation;
+  size: CitationPreviewSize;
+  previewAvailable: boolean;
+  unavailableLabel: string;
+  openLabel: string;
+  onUnavailable: () => void;
+}) {
+  if (!citation.previewUrl) return null;
+  const frameClassName = cn(
+    'group relative overflow-hidden rounded-lg border border-slate-200 bg-slate-50',
+    size === 'hero'
+      ? 'aspect-[16/9] max-h-[360px] min-h-[180px] w-full'
+      : size === 'large'
+        ? 'h-[168px] w-full md:w-[260px]'
+        : size === 'thumb'
+          ? 'h-[72px] w-full'
+          : 'h-24 w-full',
+  );
+  if (!previewAvailable) {
+    return (
+      <div className={frameClassName} data-testid="a3-classroom-citation-preview">
+        <span className="flex h-full w-full items-center justify-center px-3 text-center text-xs text-slate-500">
+          {unavailableLabel}
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className={frameClassName} data-testid="a3-classroom-citation-preview">
+      <img
+        src={resolveCitationPreviewUrl(citation.previewUrl)}
+        alt={citation.title || openLabel}
+        className="h-full w-full object-contain"
+        loading="lazy"
+        onError={onUnavailable}
+      />
+    </div>
+  );
+}
+
+function EvidenceGallery({ groups }: { groups: EvidenceGroup[] }) {
+  const { copy } = useClassroomCopy();
+  const [activeIndex, setActiveIndex] = useState(0);
+  const activeGroup = groups[Math.min(activeIndex, Math.max(groups.length - 1, 0))];
+  if (!activeGroup) return null;
+  const visibleClaims = activeGroup.claims.slice(0, 3);
+  const hiddenClaims = activeGroup.claims.slice(3);
+
+  return (
+    <div className="mt-3 min-w-0 border-t border-slate-200 pt-3" data-testid="a3-classroom-claim-citation-map">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="font-semibold text-slate-950">{copy.evidenceGalleryTitle}</div>
+          <p className="mt-0.5 text-[11px] leading-5 text-slate-500">{copy.evidenceGalleryGuide}</p>
+        </div>
+        <A3Pill tone="green">{copy.evidenceSourceCount(groups.length)}</A3Pill>
+      </div>
+
+      <div className="mt-3 min-w-0">
+        {activeGroup.citation.previewUrl ? (
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-slate-950 p-2">
+            <CitationPreview citation={activeGroup.citation} size="hero" />
+          </div>
+        ) : (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm leading-6 text-slate-700">
+            {activeGroup.citation.snippet || activeGroup.citation.location || copy.missingPreview}
+          </div>
+        )}
+        <div className="mt-3 min-w-0">
+          <div className="truncate text-sm font-semibold leading-5 text-slate-950">
+            {activeGroup.citation.title || copy.sourceFallback}
+          </div>
+          <div className="mt-1 text-[11px] leading-5 text-slate-500">
+            {[formatCitationOrigin(activeGroup.citation, copy), activeGroup.citation.sourceTypeLabel || activeGroup.citation.type, activeGroup.citation.location].filter(Boolean).join(' · ')}
+            {activeGroup.citation.score !== null && activeGroup.citation.score !== undefined ? ` · ${activeGroup.citation.score}` : ''}
+          </div>
+        </div>
+      </div>
+
+      {groups.length > 1 && (
+        <div className="mt-3 min-w-0 border-y border-slate-100 bg-slate-50 py-3">
+          <div className="flex max-w-full gap-2 overflow-x-auto px-1 pb-1" role="list" aria-label={copy.evidenceThumbnailLabel}>
+            {groups.map((group, index) => {
+              const selected = index === activeIndex;
+              return (
+                <button
+                  key={group.key}
+                  type="button"
+                  data-testid="a3-classroom-evidence-thumbnail"
+                  onClick={() => setActiveIndex(index)}
+                  className={cn(
+                    'w-[116px] shrink-0 rounded-lg border bg-white p-1.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
+                    selected ? 'border-blue-500 shadow-sm ring-2 ring-blue-100' : 'border-slate-200 hover:border-blue-300',
+                  )}
+                  aria-pressed={selected}
+                >
+                  <CitationPreview citation={group.citation} size="thumb" />
+                  <div className="mt-1.5 flex items-center justify-between gap-2">
+                    <span className={cn('text-[11px] font-semibold', selected ? 'text-blue-700' : 'text-slate-700')}>
+                      {copy.evidenceNumber(index + 1)}
+                    </span>
+                    <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+                      {copy.supportedClaims(group.claims.length)}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="pt-3">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="text-xs font-semibold text-slate-900">{copy.supportingPoints}</div>
+          <span className="text-[11px] text-slate-500">{copy.supportedClaims(activeGroup.claims.length)}</span>
+        </div>
+        <div className="space-y-2">
+          {visibleClaims.map((claim, claimIndex) => (
+            <div key={claim.id} className="flex gap-3 rounded-lg bg-emerald-50 px-3 py-2">
+              <div className="flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-[11px] font-semibold text-emerald-700">
+                {claimIndex + 1}
+              </div>
+              <A3Markdown className="min-w-0 text-sm leading-6 text-slate-950">{claim.text}</A3Markdown>
+            </div>
+          ))}
+          {hiddenClaims.length > 0 && (
+            <details className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+              <summary className="cursor-pointer text-xs font-medium text-blue-700">{copy.moreClaims(hiddenClaims.length)}</summary>
+              <div className="mt-2 space-y-2">
+                {hiddenClaims.map((claim, claimIndex) => (
+                  <div key={claim.id} className="rounded-md bg-white px-3 py-2">
+                    <div className="text-[11px] font-semibold text-slate-500">
+                      {copy.evidenceNumber(claimIndex + visibleClaims.length + 1)}
+                    </div>
+                    <A3Markdown className="mt-1 text-xs leading-6 text-slate-700">{claim.text}</A3Markdown>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function groupClaimsByCitation(claims: MappedClaim[]) {
+  const groups = new Map<string, EvidenceGroup>();
+  for (const claim of claims) {
+    const key = [
+      claim.citation.previewUrl,
+      claim.citation.title,
+      claim.citation.location,
+      claim.citation.sourceTypeLabel || claim.citation.type,
+    ].filter(Boolean).join('::') || claim.id;
+    const existing = groups.get(key);
+    if (existing) existing.claims.push(claim);
+    else groups.set(key, { key, citation: claim.citation, claims: [claim] });
+  }
+  return Array.from(groups.values());
 }
 
 function ClassroomMessage({ message }: { message: string }) {
