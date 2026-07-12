@@ -37,7 +37,7 @@ import { Button } from '@/components/ui/button';
 import { ProfileUpdateCandidatePanel } from '@/components/a3/profile/profile-update-candidate-panel';
 import { a3GetJson, a3PostJson, resolveA3Endpoint } from '@/lib/a3/api-client';
 import type { AnswerFeedback, AssessmentSession } from '@/lib/a3/assessment-types';
-import { buildPracticeWritebackPayload, findPracticePlanTaskForRecommendation } from '@/lib/a3/classroom-practice';
+import { buildPracticeSyncEvidence, buildPracticeWritebackPayload, findPracticePlanTaskForRecommendation } from '@/lib/a3/classroom-practice';
 import type { ClassroomContext } from '@/lib/a3/classroom-types';
 import type { A3ApiResponse, StudyPlan, StudyPlanTaskFeedback } from '@/lib/a3/learning-types';
 import { useA3Locale, type A3Locale } from '@/lib/a3/i18n';
@@ -230,9 +230,10 @@ const classroomCopy = {
     saveNote: '存为笔记',
     verified: 'VerifierAgent 已验证',
     partiallyVerified: '部分待核验',
-    missingEvidence: '缺少证据',
+    missingEvidence: '未验证 · 缺少证据',
     citationCount: (citations: number, verifiedClaims: number, claims: number) => `引用 ${citations} 条 / 句级验证 ${verifiedClaims}/${claims || verifiedClaims}`,
-    safetyRefused: 'SafetyAgent 已拒答',
+    safetyRefused: 'SafetyAgent 已拦截',
+    safetyAlternative: '合规替代：可以讲解相关考点、生成练习题、分析错因或制定复习步骤。',
     reason: '原因',
     citationPreview: '引用预览',
     openFavorites: '去我的收藏',
@@ -372,9 +373,10 @@ const classroomCopy = {
     saveNote: 'Save as note',
     verified: 'VerifierAgent verified',
     partiallyVerified: 'Partially pending',
-    missingEvidence: 'Missing evidence',
+    missingEvidence: 'Unverified · Missing evidence',
     citationCount: (citations: number, verifiedClaims: number, claims: number) => `${citations} citation(s) / sentence checks ${verifiedClaims}/${claims || verifiedClaims}`,
     safetyRefused: 'SafetyAgent refused',
+    safetyAlternative: 'Safe alternative: explain the concept, generate practice, analyze mistakes, or build a review plan.',
     reason: 'Reason',
     citationPreview: 'Citation preview',
     openFavorites: 'Open favorites',
@@ -981,7 +983,7 @@ export function ClassroomViewRedesign() {
         />
       )}
 
-      <main className="min-w-0 rounded-[18px] border border-slate-200 bg-white shadow-sm">
+      <section className="min-w-0 rounded-[18px] border border-slate-200 bg-white shadow-sm">
         <WorkspaceHeader
           copy={copy}
           classroom={classroom}
@@ -1068,7 +1070,7 @@ export function ClassroomViewRedesign() {
             }}
           />
         </div>
-      </main>
+      </section>
 
       {drawerOpen && (
         <LearningDrawer
@@ -1623,6 +1625,7 @@ function LearningDrawer({
                 <button
                   key={item.value}
                   type="button"
+                  data-testid={`a3-classroom-drawer-tab-${item.value}`}
                   onClick={() => onTabChange(item.value)}
                   className={cn(
                     'inline-flex items-center justify-center gap-1 rounded-lg px-2 py-2 text-xs font-semibold transition',
@@ -1798,6 +1801,7 @@ function PracticeItem({
               <p className="mt-1">{activePractice.feedback.explanation}</p>
               {activePractice.feedback.errorCause && <p className="mt-1">{copy.errorCause}: {activePractice.feedback.errorCause}</p>}
               {activePractice.planFeedback && <p className="mt-2 font-semibold">已回写学习计划：{activePractice.planFeedback.headline}</p>}
+              <PracticeSyncEvidencePanel feedback={activePractice.feedback} planFeedback={activePractice.planFeedback} />
             </div>
           ) : question ? (
             <>
@@ -1850,6 +1854,52 @@ function PracticeItem({
         {savingPracticeId === resource.href ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
         {completed ? copy.completed : copy.completeAndSync}
       </Button>
+    </div>
+  );
+}
+
+function PracticeSyncEvidencePanel({ feedback, planFeedback }: { feedback: AnswerFeedback; planFeedback: StudyPlanTaskFeedback | null }) {
+  const evidence = buildPracticeSyncEvidence({ feedback, planFeedback });
+  return (
+    <div className="mt-3 space-y-2" data-testid="a3-classroom-practice-sync-evidence">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold text-emerald-950">本次判分同步证据</div>
+        <div className="text-[11px] text-emerald-700">错题本 / 画像 / 报告已按接口返回更新</div>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-3">
+        <div className="rounded-lg bg-white/80 p-2" data-testid="a3-classroom-profile-sync">
+          <div className="text-[11px] font-semibold text-emerald-950">画像：weakPoints</div>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {evidence.weakPoints.length ? evidence.weakPoints.slice(0, 4).map((item) => (
+              <span key={item} className="rounded bg-orange-50 px-1.5 py-0.5 text-[10px] font-medium text-orange-700">{item}</span>
+            )) : <span className="text-[11px] text-emerald-700">无新增薄弱点</span>}
+          </div>
+        </div>
+        <div className="rounded-lg bg-white/80 p-2" data-testid="a3-classroom-wrong-sync">
+          <div className="text-[11px] font-semibold text-emerald-950">错题本：复习队列</div>
+          <div className="mt-1 text-[11px] leading-4 text-emerald-700">{evidence.wrongNotebookText}</div>
+          <Link href="/a3/wrong-notebook" className="mt-1 inline-flex text-[11px] font-semibold text-emerald-800 hover:text-emerald-950">查看错题本</Link>
+        </div>
+        <div className="rounded-lg bg-white/80 p-2" data-testid="a3-classroom-plan-sync">
+          <div className="text-[11px] font-semibold text-emerald-950">计划回写</div>
+          <div className="mt-1 text-[11px] leading-4 text-emerald-700">{evidence.planText}</div>
+          <Link href="/a3/study-plan" className="mt-1 inline-flex text-[11px] font-semibold text-emerald-800 hover:text-emerald-950">查看计划</Link>
+        </div>
+      </div>
+      <div className="rounded-lg bg-white/80 p-2" data-testid="a3-classroom-report-sync">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[11px] font-semibold text-emerald-950">报告：report.metrics</div>
+          <Link href="/a3/report" className="text-[11px] font-semibold text-emerald-800 hover:text-emerald-950">打开报告</Link>
+        </div>
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          {evidence.reportMetrics.map((item) => (
+            <div key={item.label} className={cn('rounded px-2 py-1', item.available ? 'bg-emerald-50' : 'bg-slate-50')}>
+              <div className={cn('text-[10px]', item.available ? 'text-emerald-700' : 'text-slate-500')}>{item.label}</div>
+              <div className={cn('mt-0.5 text-xs font-semibold', item.available ? 'text-emerald-950' : 'text-slate-600')}>{item.value}</div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2186,6 +2236,7 @@ function VerificationBadge({
         <div data-testid="a3-classroom-safety-status" className="mt-3 rounded-lg bg-orange-50 p-3 text-orange-800">
           <div className="font-semibold">{copy.safetyRefused} · {safety.category}</div>
           <div className="mt-1">{safety.reason}</div>
+          <div className="mt-1 font-semibold">{copy.safetyAlternative}</div>
         </div>
       )}
       {citations.length > 0 && (

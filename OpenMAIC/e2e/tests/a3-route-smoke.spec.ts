@@ -99,8 +99,9 @@ test.describe.serial('A3 authenticated route smoke', () => {
 
     await expect(page.getByTestId('a3-classroom-view')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText('AI 多智能体课堂').first()).toBeVisible();
-    await expect(page.getByRole('heading', { name: '当前学习目标' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '知识库溯源' })).toBeVisible();
+    await expect(page.getByText('从这里开始本节课堂')).toBeVisible();
+    await page.getByTestId('a3-classroom-drawer-tab-actions').click();
+    await expect(page.getByRole('heading', { name: '知识库来源' })).toBeVisible();
     await expect(page.getByTestId('a3-classroom-input')).toHaveAttribute(
       'placeholder',
       /输入你的问题，或使用上方快捷指令|请先生成学习路径后再开始课堂提问/,

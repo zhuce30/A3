@@ -6,11 +6,21 @@ const HEARTBEAT_EVENT = 'event: heartbeat';
 export async function GET(request: NextRequest) {
   const encoder = new TextEncoder();
   let closed = false;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let snapshot: ReturnType<typeof setInterval> | null = null;
+
+  const clearTaskStreamTimers = () => {
+    if (heartbeat) clearInterval(heartbeat);
+    if (snapshot) clearInterval(snapshot);
+    heartbeat = null;
+    snapshot = null;
+  };
 
   const stream = new ReadableStream({
     async start(controller) {
       request.signal.addEventListener('abort', () => {
         closed = true;
+        clearTaskStreamTimers();
         try {
           controller.close();
         } catch {
@@ -41,12 +51,13 @@ export async function GET(request: NextRequest) {
       };
 
       await pushTasks();
-      const heartbeat = windowlessSetInterval(() => send('heartbeat', { now: new Date().toISOString() }), 15000);
-      const snapshot = windowlessSetInterval(() => void pushTasks(), 2500);
-      request.signal.addEventListener('abort', () => {
-        clearInterval(heartbeat);
-        clearInterval(snapshot);
-      });
+      if (closed) return;
+      heartbeat = windowlessSetInterval(() => send('heartbeat', { now: new Date().toISOString() }), 15000);
+      snapshot = windowlessSetInterval(() => void pushTasks(), 2500);
+    },
+    cancel() {
+      closed = true;
+      clearTaskStreamTimers();
     },
   });
 

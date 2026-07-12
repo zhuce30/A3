@@ -154,7 +154,7 @@ export function RealtimeCoachingCall({ rightRail }: RealtimeCoachingCallProps = 
         </div>
       </div>
 
-      <div className="grid gap-6 bg-[#f7f9fd] p-5 2xl:grid-cols-[minmax(0,1fr)_420px]">
+      <div className="grid gap-6 bg-[#f7f9fd] p-1.5 sm:p-5 2xl:grid-cols-[minmax(0,1fr)_420px]">
         <div className="text-white">
           <div data-testid="a3-realtime-video-surface" className="relative flex min-h-[760px] flex-col overflow-hidden rounded-[30px] bg-slate-900 shadow-[0_28px_80px_rgba(15,23,42,0.18)]">
             <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(15,23,42,0.18)_62%,rgba(15,23,42,0.52))]" />

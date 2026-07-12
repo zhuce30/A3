@@ -18,7 +18,7 @@ describe('A3 coaching respond image attachments', () => {
   it('tries hybrid visual evidence for ordinary text questions before falling back to backend QA', () => {
     const source = fs.readFileSync(routePath, 'utf8');
     const visualCallIndex = source.indexOf('const visualEvidenceResponse = await tryAnswerWithVisualEvidence(cookieHeader, message);');
-    const backendQaIndex = source.indexOf('const result = await fetchA3DjangoJson<BackendQaResponse>');
+    const backendQaIndex = source.indexOf('result = await fetchA3DjangoJson<BackendQaResponse>');
 
     expect(visualCallIndex).toBeGreaterThan(0);
     expect(backendQaIndex).toBeGreaterThan(visualCallIndex);

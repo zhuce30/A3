@@ -98,7 +98,7 @@ async function loginAs(page: Page, phone: string) {
   const inputs = page.locator('main input');
   await inputs.nth(0).fill(phone);
   await inputs.nth(1).fill(DEMO_PASSWORD);
-  await page.locator('main button').first().click();
+  await page.getByRole('button', { name: '登录', exact: true }).click();
   await expect(page).not.toHaveURL(/\/a3\/login/, { timeout: 15_000 });
 }
 

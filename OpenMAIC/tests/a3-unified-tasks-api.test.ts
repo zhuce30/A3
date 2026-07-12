@@ -34,6 +34,8 @@ describe('A3 unified task APIs', () => {
     expect(source).toContain('event: tasks');
     expect(source).toContain('event: heartbeat');
     expect(source).toContain("'/api/a3/tasks'");
+    expect(source).toContain('cancel()');
+    expect(source).toContain('clearTaskStreamTimers');
   });
 
   it('persists resource generation jobs through Django instead of only storing them in memory', () => {
