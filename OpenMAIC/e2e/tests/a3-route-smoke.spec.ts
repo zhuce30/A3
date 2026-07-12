@@ -25,8 +25,9 @@ const STUDENT_ROUTES = [
   '/a3/demo-flow',
 ] as const;
 
-function seedDemoData() {
+function prepareDemoData() {
   const runtime = resolveA3PlaywrightRuntime(process.env, process.cwd());
+  if (runtime.useExistingServers) return;
   execFileSync(runtime.backendPython, [runtime.backendManagePy, 'seed_demo_data'], {
     cwd: runtime.backendProjectRoot,
     stdio: 'pipe',
@@ -56,7 +57,7 @@ test.describe.serial('A3 authenticated route smoke', () => {
 
   test.beforeAll(({}, testInfo) => {
     testInfo.setTimeout(120_000);
-    seedDemoData();
+    prepareDemoData();
   });
 
   test('public /a3 stays on the product homepage', async ({ page }) => {
