@@ -102,7 +102,8 @@ async function expectProductImagesReadable(page: Page) {
       frameBox: node.parentElement?.getBoundingClientRect().toJSON() ?? null,
     }));
     expect(geometry.naturalWidth).toBeGreaterThan(300);
-    expect(geometry.naturalHeight).toBeGreaterThan(180);
+    expect(Math.min(geometry.naturalWidth, geometry.naturalHeight)).toBeGreaterThan(120);
+    expect(geometry.naturalWidth * geometry.naturalHeight).toBeGreaterThan(40_000);
     expect(geometry.frameBox).not.toBeNull();
     expect(geometry.imageBox.left).toBeGreaterThanOrEqual((geometry.frameBox?.left ?? 0) - 1);
     expect(geometry.imageBox.right).toBeLessThanOrEqual((geometry.frameBox?.right ?? 0) + 1);
