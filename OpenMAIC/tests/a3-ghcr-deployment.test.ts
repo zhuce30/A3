@@ -1,30 +1,102 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import yaml from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 
-const root = path.resolve(process.cwd(), '..');
+type WorkflowStep = {
+  uses?: string;
+  with?: Record<string, unknown>;
+};
+
+type WorkflowDocument = {
+  permissions?: Record<string, unknown>;
+  jobs?: Record<string, { steps?: WorkflowStep[] }>;
+};
+
+type ComposeDocument = {
+  services?: Record<string, { image?: unknown }>;
+};
+
+const resetSequenceType = new yaml.Type('!reset', {
+  kind: 'sequence',
+  construct: (data: unknown[]) => data ?? [],
+});
+const composeSchema = yaml.DEFAULT_SCHEMA.extend([resetSequenceType]);
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const workflowPath = path.join(root, '.github/workflows/build-frontend-image.yml');
 const composePath = path.join(root, 'docker-compose.prod.yml');
 const envTemplatePath = path.join(root, '.env.production.template');
 
+function parseLines(value: unknown, field: string): string[] {
+  if (typeof value !== 'string') {
+    throw new TypeError(`${field} must be a multiline string`);
+  }
+
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function parseKeyValueLines(value: unknown, field: string): Array<readonly [string, string]> {
+  return parseLines(value, field).map((line) => {
+    const separator = line.indexOf('=');
+    if (separator <= 0) {
+      throw new TypeError(`${field} entry must use KEY=VALUE: ${line}`);
+    }
+
+    return [line.slice(0, separator), line.slice(separator + 1)] as const;
+  });
+}
+
 describe('A3 private GHCR frontend deployment', () => {
   it('builds and publishes amd64 latest and immutable frontend tags', () => {
     expect(fs.existsSync(workflowPath)).toBe(true);
-    const workflow = fs.readFileSync(workflowPath, 'utf8');
-    expect(workflow).toContain('packages: write');
-    expect(workflow).toContain('docker/login-action@v3');
-    expect(workflow).toContain('docker/build-push-action@v6');
-    expect(workflow).toContain('platforms: linux/amd64');
-    expect(workflow).toContain('ghcr.io/zhuce30/a3-frontend:latest');
-    expect(workflow).toContain('ghcr.io/zhuce30/a3-frontend:${{ github.sha }}');
-    expect(workflow).toContain('NEXT_PUBLIC_A3_API_BASE_URL=https://api.zhuce.work');
-    expect(workflow).not.toMatch(/EMAIL_HOST_PASSWORD|A3_LLM_API_KEY|DJANGO_SECRET_KEY|MYSQL_PASSWORD/);
+    const workflowSource = fs.readFileSync(workflowPath, 'utf8');
+    const workflow = yaml.load(workflowSource) as WorkflowDocument;
+    const steps = workflow.jobs?.['build-and-push']?.steps ?? [];
+    const loginStep = steps.find((step) => step.uses === 'docker/login-action@v3');
+    const buildStep = steps.find((step) => step.uses === 'docker/build-push-action@v6');
+
+    expect(workflow.permissions?.packages).toBe('write');
+    expect(loginStep?.with).toMatchObject({
+      registry: 'ghcr.io',
+      username: '${{ github.actor }}',
+      password: '${{ secrets.GITHUB_TOKEN }}',
+    });
+    expect(buildStep?.with).toMatchObject({
+      context: 'OpenMAIC',
+      file: 'OpenMAIC/Dockerfile',
+      platforms: 'linux/amd64',
+      push: true,
+    });
+    expect(parseLines(buildStep?.with?.tags, 'tags')).toEqual([
+      'ghcr.io/zhuce30/a3-frontend:latest',
+      'ghcr.io/zhuce30/a3-frontend:${{ github.sha }}',
+    ]);
+
+    const buildArgsSource = buildStep?.with?.['build-args'];
+    const buildArgs = parseKeyValueLines(buildArgsSource, 'build-args');
+    expect(buildArgs.map(([key]) => key)).toEqual(['NEXT_PUBLIC_A3_API_BASE_URL']);
+    expect(Object.fromEntries(buildArgs)).toEqual({
+      NEXT_PUBLIC_A3_API_BASE_URL: 'https://api.zhuce.work',
+    });
+    expect(buildArgsSource).not.toMatch(/\$\{\{\s*secrets\./);
+    expect(workflowSource).not.toMatch(
+      /EMAIL_HOST_PASSWORD|A3_LLM_API_KEY|DJANGO_SECRET_KEY|MYSQL_PASSWORD/,
+    );
   });
 
   it('uses the published image through the production environment', () => {
-    const compose = fs.readFileSync(composePath, 'utf8');
+    const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
+      schema: composeSchema,
+    }) as ComposeDocument;
     const envTemplate = fs.readFileSync(envTemplatePath, 'utf8');
-    expect(compose).toContain('image: ${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}');
+    expect(compose.services?.frontend?.image).toBe(
+      '${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}',
+    );
     expect(envTemplate).toContain('A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend:latest');
   });
 });
