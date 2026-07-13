@@ -10,6 +10,13 @@ type WorkflowStep = {
 };
 
 type WorkflowDocument = {
+  on?: {
+    workflow_dispatch?: unknown;
+    push?: {
+      branches?: string[];
+      paths?: string[];
+    };
+  };
   concurrency?: Record<string, unknown>;
   permissions?: Record<string, unknown>;
   jobs?: Record<
@@ -32,6 +39,15 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const workflowPath = path.join(root, '.github/workflows/build-frontend-image.yml');
 const composePath = path.join(root, 'docker-compose.prod.yml');
 const envTemplatePath = path.join(root, '.env.production.template');
+const runbookPath = path.join(root, 'docs/A3_GHCR前端镜像部署.md');
+const designPath = path.join(
+  root,
+  'docs/superpowers/specs/2026-07-13-ghcr-frontend-deployment-design.md',
+);
+const planPath = path.join(
+  root,
+  'docs/superpowers/plans/2026-07-13-ghcr-frontend-deployment.md',
+);
 
 function parseLines(value: unknown, field: string): string[] {
   if (typeof value !== 'string') {
@@ -81,12 +97,18 @@ describe('A3 private GHCR frontend deployment', () => {
         'docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8',
     );
 
+    expect(workflow.on).toHaveProperty('workflow_dispatch');
+    expect(workflow.on?.push).toEqual({
+      branches: ['codex/a3-latest-integration'],
+      paths: ['OpenMAIC/**', '.github/workflows/build-frontend-image.yml'],
+    });
     expect(buildJob?.if).toBe("${{ github.ref == 'refs/heads/codex/a3-latest-integration' }}");
     expect(buildJob?.concurrency).toEqual({
       group: 'a3-frontend-image',
       'cancel-in-progress': true,
     });
     expect(workflow.concurrency).toBeUndefined();
+    expect(workflow.permissions?.contents).toBe('read');
     expect(workflow.permissions?.packages).toBe('write');
     expect(checkoutStep?.with).toMatchObject({
       'persist-credentials': false,
@@ -115,12 +137,16 @@ describe('A3 private GHCR frontend deployment', () => {
       NEXT_PUBLIC_A3_API_BASE_URL: 'https://api.zhuce.work',
     });
     expect(buildArgsSource).not.toMatch(/\$\{\{\s*secrets\./);
+    expect(Object.fromEntries(parseKeyValueLines(buildStep?.with?.labels, 'labels'))).toEqual({
+      'org.opencontainers.image.source': '${{ github.server_url }}/${{ github.repository }}',
+      'org.opencontainers.image.revision': '${{ github.sha }}',
+    });
     expect(workflowSource).not.toMatch(
       /EMAIL_HOST_PASSWORD|A3_LLM_API_KEY|DJANGO_SECRET_KEY|MYSQL_PASSWORD/,
     );
   });
 
-  it('uses the published image through the production environment', () => {
+  it('uses a verified digest through the production environment', () => {
     const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
       schema: composeSchema,
     }) as ComposeDocument;
@@ -128,6 +154,95 @@ describe('A3 private GHCR frontend deployment', () => {
     expect(compose.services?.frontend?.image).toBe(
       '${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}',
     );
-    expect(envTemplate).toContain('A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend:latest');
+    expect(envTemplate).toMatch(
+      /^A3_FRONTEND_IMAGE=ghcr\.io\/zhuce30\/a3-frontend@sha256:REPLACE_WITH_VERIFIED_64_HEX_DIGEST$/m,
+    );
+    expect(envTemplate).toContain('full DEPLOY_SHA tag');
+    expect(envTemplate).toContain('verified RepoDigest');
+    expect(envTemplate).not.toMatch(/^A3_FRONTEND_IMAGE=.*:latest$/m);
+  });
+
+  it('ties deployment source and image identity to the full deployment SHA', () => {
+    const runbook = fs.readFileSync(runbookPath, 'utf8');
+
+    expect(runbook).toContain("INTEGRATION_BRANCH='codex/a3-latest-integration'");
+    expect(runbook).toMatch(/git -C \/opt\/A3 symbolic-ref --short HEAD/);
+    expect(runbook).toMatch(/git -C \/opt\/A3 fetch --prune origin "\$INTEGRATION_BRANCH"/);
+    expect(runbook).toMatch(/git -C \/opt\/A3 pull --ff-only origin "\$INTEGRATION_BRANCH"/);
+    expect(runbook).toMatch(/git -C \/opt\/A3 rev-parse HEAD[^\n]*DEPLOY_SHA/);
+    expect(runbook).toMatch(
+      /git -C \/opt\/A3 status --porcelain --untracked-files=all -- OpenMAIC docker-compose\.yml docker-compose\.prod\.yml Caddyfile \.github/,
+    );
+
+    expect(runbook).toContain('ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}');
+    expect(runbook).toContain('.RepoDigests');
+    expect(runbook).toContain('org.opencontainers.image.revision');
+    expect(runbook).toMatch(/test "\$image_revision" = "\$expected_revision"/);
+    expect(runbook).toMatch(/A3_FRONTEND_IMAGE=.*\$digest_ref/);
+    expect(runbook).toMatch(/ghcr\\\.io\/zhuce30\/a3-frontend@sha256:/);
+    expect(runbook).not.toMatch(/(?:IMAGE_REF|image_ref)=['"]?ghcr\.io\/zhuce30\/a3-frontend:latest/);
+  });
+
+  it('uses bounded public readiness checks with strict HTTP and service assertions', () => {
+    const runbook = fs.readFileSync(runbookPath, 'utf8');
+    const curlLines = runbook
+      .split(/\r?\n/)
+      .filter((line) => /\bcurl\b/.test(line) && !line.trimStart().startsWith('#'));
+
+    expect(runbook).toContain('for attempt in {1..12}');
+    expect(runbook).toContain('sleep 5');
+    expect(curlLines.length).toBeGreaterThanOrEqual(3);
+    for (const line of curlLines) {
+      expect(line).toContain('--connect-timeout 3');
+      expect(line).toContain('--max-time 10');
+    }
+    expect(runbook).toContain("test \"$root_status\" = '308'");
+    expect(runbook).toMatch(/location:\[\[:space:\]\]\*\/a3\$/);
+    expect(runbook).toContain('.get("success") is True');
+    expect(runbook).toContain("test \"$task_status\" = '401'");
+    expect(runbook).toContain(
+      "printf '%s\\n' backend caddy celery celery-beat frontend mysql redis | sort",
+    );
+  });
+
+  it('retains the snapshot and reports a distinct rollback failure until recovery succeeds', () => {
+    const runbook = fs.readFileSync(runbookPath, 'utf8');
+    const recoveryStart = runbook.indexOf('recover_transaction()');
+    const recoveryEnd = runbook.indexOf('switch_frontend_image()', recoveryStart);
+    const recovery = runbook.slice(recoveryStart, recoveryEnd);
+
+    expect(recoveryStart).toBeGreaterThanOrEqual(0);
+    expect(recoveryEnd).toBeGreaterThan(recoveryStart);
+    expect(recovery.indexOf('trap - EXIT HUP INT TERM')).toBeLessThan(
+      recovery.indexOf('set +e'),
+    );
+    expect(recovery).toContain('restore_status=');
+    expect(recovery).toContain('frontend_status=');
+    expect(recovery).toContain('caddy_status=');
+    expect(recovery).toContain('running_status=');
+    expect(recovery).toContain('install -o root -g root -m 0600 "$SNAPSHOT" "$ENV_FILE"');
+    expect(recovery).not.toContain('mv -f "$SNAPSHOT" "$ENV_FILE"');
+    expect(recovery).toContain('ROLLBACK FAILED');
+    expect(recovery).toContain('snapshot retained at');
+    expect(recovery).toContain('exit "$rc"');
+    expect(recovery.indexOf('sudo rm -f "$SNAPSHOT"')).toBeGreaterThan(
+      recovery.indexOf('running_status='),
+    );
+  });
+
+  it('documents SHA tag lookup and digest identity without a latest production switch', () => {
+    const sources = [
+      fs.readFileSync(designPath, 'utf8'),
+      fs.readFileSync(planPath, 'utf8'),
+    ];
+
+    for (const source of sources) {
+      expect(source).toContain('DEPLOY_SHA');
+      expect(source).toContain('RepoDigest');
+      expect(source).toContain('org.opencontainers.image.revision');
+      expect(source).toContain('A3_FRONTEND_IMAGE');
+      expect(source).toMatch(/digest/i);
+      expect(source).not.toMatch(/set `?A3_FRONTEND_IMAGE`? to a known-good SHA tag/i);
+    }
   });
 });
