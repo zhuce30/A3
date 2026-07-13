@@ -15,8 +15,10 @@ pnpm build
 部署前确认：
 
 1. `Build frontend image` Actions 在 `codex/a3-latest-integration` 的目标提交上成功。
-2. 私有 GHCR 包及 `latest`、完整提交 SHA 标签已经存在。
+2. 私有 GHCR 包存在与目标完整提交 SHA 一致的不可变标签。
 3. GitHub 账号 `zhuce30` 可读取私有仓库和对应 GHCR 包。
+
+正常生产部署必须使用成功 Actions 运行对应的完整 40 位 `DEPLOY_SHA`，镜像固定为 `ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}`。禁止把可变 `latest` 作为日常部署目标；`latest` 仅保留为显式、非推荐的便利选项，并且也必须经过同一恢复事务。
 
 ## 目录与密钥所有权
 
@@ -57,48 +59,23 @@ pnpm build
 
 检查仅验证文件元数据，不打印 `/root/.docker/config.json` 内容。令牌撤销或失效后，重复以上安全登录流程。
 
-## 标准 latest 部署
-
-该流程适用于 `.env.production` 已指向 `ghcr.io/zhuce30/a3-frontend:latest` 的日常发布。若当前固定在回滚 SHA，先执行后文“安全切换镜像”并选择 `latest`。
-
-```bash
-(
-  set -euo pipefail
-  cd /opt/A3
-  test "$(sudo stat -c '%U:%G %a' .env.production)" = 'root:root 600'
-  sudo grep -qx 'A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend:latest' .env.production
-
-  sudo -H -u admin git -C /opt/A3 pull --ff-only origin codex/a3-latest-integration
-  sudo -H env -u DOCKER_CONFIG docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml pull frontend
-  sudo -H env -u DOCKER_CONFIG docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build --no-deps frontend
-  sudo -H env -u DOCKER_CONFIG docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml restart caddy
-)
-```
-
-`pull frontend` 在容器重建之前完成；拉取失败时子 shell 立即停止，当前 frontend 服务和本地镜像保持不变。该流程只替换 `frontend` 并重启 Caddy，MySQL、Redis、backend、Celery worker 和 Celery beat 保持运行。
-
-`/opt/A3/.env.production` 是服务器持久化运行时配置，不由镜像携带，也不应被 `git pull` 覆盖。修改前端运行时密钥后，使用目标重建让新值生效，仍然禁止构建镜像：
-
-```bash
-(
-  set -euo pipefail
-  cd /opt/A3
-  test "$(sudo stat -c '%U:%G %a' .env.production)" = 'root:root 600'
-  sudo -H env -u DOCKER_CONFIG docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build --no-deps --force-recreate frontend
-)
-```
-
-不要为前端密钥变更重建数据库或队列服务。
-
 ## 自动化验证
 
-以下检查会真实断言：根路径状态为 `308`、`Location` 为 `/a3`、CSRF JSON 的 `success` 为 `true`，且未登录任务接口为 `401` 而不是 `500`。失败会停止子 shell，不会退出当前交互 shell。
+以下检查真实断言：
+
+- 根路径状态为 `308` 且 `Location` 为 `/a3`。
+- CSRF JSON 的 `success` 为 `true`。
+- 未登录任务接口为 `401`，不能是 `500`。
+- 运行中的 Compose 服务恰好为 `backend`、`caddy`、`celery`、`celery-beat`、`frontend`、`mysql`、`redis`。
+
+失败会停止子 shell，不会退出当前交互 shell。临时文件只保存公开响应头，并由 trap 清理。
 
 ```bash
 (
   set -euo pipefail
   ROOT_HEADERS="$(mktemp)"
   trap 'rm -f "$ROOT_HEADERS"' EXIT
+  COMPOSE_ARGS=(--env-file /opt/A3/.env.production -f /opt/A3/docker-compose.yml -f /opt/A3/docker-compose.prod.yml)
 
   ROOT_STATUS="$(curl -sS -o /dev/null -D "$ROOT_HEADERS" -w '%{http_code}' https://a3.zhuce.work/)"
   test "$ROOT_STATUS" = '308'
@@ -110,7 +87,14 @@ pnpm build
   TASK_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' https://a3.zhuce.work/api/a3/tasks)"
   test "$TASK_STATUS" = '401'
 
-  printf 'public verification passed: root=308, location=/a3, csrf=true, unauthenticated_tasks=401\n'
+  EXPECTED_SERVICES="$(printf '%s\n' backend caddy celery celery-beat frontend mysql redis | sort)"
+  RUNNING_SERVICES="$(
+    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" ps --status running --services |
+      sort
+  )"
+  test "$RUNNING_SERVICES" = "$EXPECTED_SERVICES"
+
+  printf 'verification passed: HTTP assertions and exact seven running services\n'
 )
 ```
 
@@ -121,17 +105,17 @@ pnpm build
 3. 筛选 `/api/a3/tasks`，确认该请求状态码为 `200`。
 4. 不要复制、导出或粘贴密码、CSRF token、session cookie；不要用 shell 重放已登录请求。
 
-最后确认 7 个服务 `mysql`、`redis`、`backend`、`celery`、`celery-beat`、`frontend`、`caddy` 均为 `Up`：
+## 统一镜像切换事务
 
-```bash
-sudo -H env -u DOCKER_CONFIG docker compose --env-file /opt/A3/.env.production -f /opt/A3/docker-compose.yml -f /opt/A3/docker-compose.prod.yml ps
-```
+下面唯一的事务同时处理：
 
-## 安全切换镜像
+- `deploy`：正常部署，必须输入成功 Actions 对应的 `DEPLOY_SHA`，并先以 `admin` 身份 fast-forward 拉取集成分支。
+- `rollback`：回滚，必须输入此前成功 Actions 对应的 `ROLLBACK_SHA`。
+- `latest`：显式、非推荐的便利操作；不能替代正常的不可变 SHA 部署。
 
-同一流程同时用于回滚和恢复 `latest`。选择 `rollback` 时，`ROLLBACK_SHA` 必须来自此前成功的 `Build frontend image` Actions 运行，并使用完整 40 位提交 SHA；选择 `latest` 前也必须确认最新 Actions 成功。
+`switch_frontend_image` 的固定顺序是：验证镜像引用和环境文件、预拉取目标镜像、创建 `root:root 0600` 快照、同目录原子更新、只重建 frontend、重启 Caddy、断言 HTTP 和七个服务，验证通过后才删除快照并标记成功。
 
-流程顺序固定为：验证环境文件、先拉取目标镜像、创建 root-only 快照、同目录原子更新、目标重建、验证公共 HTTP、删除快照。更新或验证失败时，ERR trap 会恢复旧环境文件并只重建 `frontend`、重启 Caddy。
+`EXIT/HUP/INT/TERM` 共用恢复处理器。事务未标记成功且快照仍存在时，处理器先禁用全部 trap，恢复旧配置，只强制重建旧 frontend 并重启 Caddy，最后保留原失败或信号状态退出。数据库和队列服务不会被停止或重建。
 
 ```bash
 (
@@ -141,77 +125,86 @@ sudo -H env -u DOCKER_CONFIG docker compose --env-file /opt/A3/.env.production -
   ENV_FILE='/opt/A3/.env.production'
   COMPOSE_ARGS=(--env-file "$ENV_FILE" -f /opt/A3/docker-compose.yml -f /opt/A3/docker-compose.prod.yml)
   SNAPSHOT=''
+  TRANSACTION_SUCCESS=0
 
-  verify_public_http() (
+  verify_runtime() (
     set -uo pipefail
-    local root_headers root_status task_status
+    local root_headers root_status task_status expected_services running_services
     root_headers="$(mktemp)" || exit 1
     trap 'rm -f "$root_headers"' EXIT
 
     root_status="$(curl -sS -o /dev/null -D "$root_headers" -w '%{http_code}' https://a3.zhuce.work/)" || exit 1
     test "$root_status" = '308' || exit 1
     tr -d '\r' <"$root_headers" | grep -Eiq '^location:[[:space:]]*/a3$' || exit 1
+
     curl -fsS https://api.zhuce.work/api/auth/csrf/ |
       python3 -c 'import json, sys; assert json.load(sys.stdin).get("success") is True' || exit 1
+
     task_status="$(curl -sS -o /dev/null -w '%{http_code}' https://a3.zhuce.work/api/a3/tasks)" || exit 1
     test "$task_status" = '401' || exit 1
+
+    expected_services="$(printf '%s\n' backend caddy celery celery-beat frontend mysql redis | sort)"
+    running_services="$(
+      sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" ps --status running --services |
+        sort
+    )" || exit 1
+    test "$running_services" = "$expected_services" || exit 1
   )
 
-  cleanup_snapshot() {
-    if [ -n "$SNAPSHOT" ]; then
-      sudo rm -f "$SNAPSHOT"
-    fi
-  }
-
-  restore_on_error() {
+  recover_transaction() {
     local rc=$?
-    trap - ERR
+    local trigger=$1
+    trap - EXIT HUP INT TERM
     set +e
-    if [ -n "$SNAPSHOT" ] && sudo test -f "$SNAPSHOT"; then
+
+    case "$trigger" in
+      HUP) rc=129 ;;
+      INT) rc=130 ;;
+      TERM) rc=143 ;;
+    esac
+
+    if [ "$TRANSACTION_SUCCESS" -ne 1 ] &&
+       [ -n "$SNAPSHOT" ] &&
+       sudo test -f "$SNAPSHOT"; then
       sudo mv -f "$SNAPSHOT" "$ENV_FILE"
       sudo chown root:root "$ENV_FILE"
       sudo chmod 0600 "$ENV_FILE"
       SNAPSHOT=''
-      sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps frontend
+      sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps --force-recreate frontend
       sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" restart caddy
     fi
+
     exit "$rc"
   }
 
-  trap cleanup_snapshot EXIT
+  switch_frontend_image() {
+    local image_ref=$1
 
-  sudo test -f "$ENV_FILE"
-  test "$(sudo stat -c '%U:%G %a' "$ENV_FILE")" = 'root:root 600'
+    [[ "$image_ref" =~ ^ghcr\.io/zhuce30/a3-frontend:([0-9a-f]{40}|latest)$ ]]
+    sudo test -f "$ENV_FILE"
+    test "$(sudo stat -c '%U:%G %a' "$ENV_FILE")" = 'root:root 600'
 
-  read -rp "切换模式（rollback/latest）: " SWITCH_MODE
-  case "$SWITCH_MODE" in
-    rollback)
-      read -rp "ROLLBACK_SHA（此前成功 Actions 的完整提交 SHA）: " ROLLBACK_SHA
-      if [[ ! "$ROLLBACK_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-        printf 'ROLLBACK_SHA 必须是 40 位小写十六进制提交 SHA\n' >&2
-        exit 1
-      fi
-      IMAGE_REF="ghcr.io/zhuce30/a3-frontend:$ROLLBACK_SHA"
-      unset ROLLBACK_SHA
-      ;;
-    latest)
-      IMAGE_REF='ghcr.io/zhuce30/a3-frontend:latest'
-      ;;
-    *)
-      printf '切换模式只能是 rollback 或 latest\n' >&2
-      exit 1
-      ;;
-  esac
-  unset SWITCH_MODE
+    sudo -H env -u DOCKER_CONFIG docker pull "$image_ref"
 
-  sudo -H env -u DOCKER_CONFIG docker pull "$IMAGE_REF"
+    trap 'recover_transaction EXIT' EXIT
+    trap 'recover_transaction HUP' HUP
+    trap 'recover_transaction INT' INT
+    trap 'recover_transaction TERM' TERM
 
-  SNAPSHOT="$(sudo mktemp --tmpdir=/opt/A3 .env.production.snapshot.XXXXXX)"
-  sudo install -o root -g root -m 0600 "$ENV_FILE" "$SNAPSHOT"
-  test "$(sudo stat -c '%U:%G %a' "$SNAPSHOT")" = 'root:root 600'
-  trap restore_on_error ERR
+    SNAPSHOT="$(
+      sudo bash -s -- "$ENV_FILE" <<'ROOT_SNAPSHOT'
+set -euo pipefail
+env_file=$1
+snapshot="$(mktemp "${env_file}.snapshot.XXXXXX")"
+trap 'rm -f "$snapshot"' EXIT
+install -o root -g root -m 0600 "$env_file" "$snapshot"
+test "$(stat -c '%U:%G %a' "$snapshot")" = 'root:root 600'
+printf '%s\n' "$snapshot"
+trap - EXIT
+ROOT_SNAPSHOT
+    )"
 
-  sudo bash -s -- "$ENV_FILE" "$IMAGE_REF" <<'ROOT_UPSERT'
+    sudo bash -s -- "$ENV_FILE" "$image_ref" <<'ROOT_UPSERT'
 set -euo pipefail
 env_file=$1
 image_ref=$2
@@ -238,29 +231,78 @@ mv -f "$tmp" "$env_file"
 trap - EXIT
 ROOT_UPSERT
 
-  test "$(sudo stat -c '%U:%G %a' "$ENV_FILE")" = 'root:root 600'
-  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps frontend
-  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" restart caddy
-  if ! verify_public_http; then
-    false
-  fi
+    test "$(sudo stat -c '%U:%G %a' "$ENV_FILE")" = 'root:root 600'
+    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps frontend
+    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" restart caddy
+    verify_runtime
 
-  sudo rm -f "$SNAPSHOT"
-  SNAPSHOT=''
-  trap - ERR
-  trap - EXIT
+    sudo rm -f "$SNAPSHOT"
+    SNAPSHOT=''
+    TRANSACTION_SUCCESS=1
+    trap - EXIT HUP INT TERM
+  }
+
+  read -rp "操作模式（deploy/rollback/latest）: " OPERATION
+  case "$OPERATION" in
+    deploy)
+      read -rp "DEPLOY_SHA（本次成功 Actions 的完整提交 SHA）: " DEPLOY_SHA
+      if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'DEPLOY_SHA 必须是 40 位小写十六进制提交 SHA\n' >&2
+        exit 1
+      fi
+      sudo -H -u admin git -C /opt/A3 pull --ff-only origin codex/a3-latest-integration
+      IMAGE_REF="ghcr.io/zhuce30/a3-frontend:$DEPLOY_SHA"
+      unset DEPLOY_SHA
+      ;;
+    rollback)
+      read -rp "ROLLBACK_SHA（此前成功 Actions 的完整提交 SHA）: " ROLLBACK_SHA
+      if [[ ! "$ROLLBACK_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'ROLLBACK_SHA 必须是 40 位小写十六进制提交 SHA\n' >&2
+        exit 1
+      fi
+      IMAGE_REF="ghcr.io/zhuce30/a3-frontend:$ROLLBACK_SHA"
+      unset ROLLBACK_SHA
+      ;;
+    latest)
+      read -rp "非推荐操作；输入 latest 确认使用可变标签: " LATEST_CONFIRM
+      test "$LATEST_CONFIRM" = 'latest'
+      IMAGE_REF='ghcr.io/zhuce30/a3-frontend:latest'
+      unset LATEST_CONFIRM
+      ;;
+    *)
+      printf '操作模式只能是 deploy、rollback 或 latest\n' >&2
+      exit 1
+      ;;
+  esac
+  unset OPERATION
+
+  switch_frontend_image "$IMAGE_REF"
   unset IMAGE_REF
 )
 ```
 
-该流程不执行数据库迁移，不停止或重建 MySQL、Redis、backend、Celery worker、Celery beat。成功后再按“自动化验证”和浏览器步骤完成最终确认。
+## 运行时密钥变更
+
+`/opt/A3/.env.production` 是服务器持久化运行时配置，不由镜像携带，也不应被 `git pull` 覆盖。只修改前端运行时密钥时，目标重建 frontend 让新值生效，仍然禁止构建镜像：
+
+```bash
+(
+  set -euo pipefail
+  cd /opt/A3
+  sudo test -f .env.production
+  test "$(sudo stat -c '%U:%G %a' .env.production)" = 'root:root 600'
+  sudo -H env -u DOCKER_CONFIG docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build --no-deps --force-recreate frontend
+)
+```
+
+不要为前端镜像或密钥变更执行数据库迁移，也不要停止、重建 MySQL、Redis、backend、Celery worker 或 Celery beat。
 
 ## 失败处理
 
-- Actions 失败不会发布新的可部署标签，也不会改变 VPS 当前服务。
-- 标准部署的 `pull frontend` 失败发生在 `up` 之前，当前 frontend 服务和本地镜像继续运行。
-- 安全切换在配置变更前先执行 `docker pull`；拉取失败不会触碰 `.env.production`。变更后的失败由 ERR trap 恢复旧配置和旧 frontend。
-- 前端启动、恢复或代理异常时查看日志，并保留终端错误输出用于排查：
+- Actions 失败不会产生可部署的 SHA 镜像，不要执行生产事务。
+- 目标镜像在配置快照和变更之前预拉取；拉取失败时当前 frontend 服务、配置和本地镜像保持不变。
+- 配置变更后出现命令失败、正常异常退出或 `HUP/INT/TERM` 信号时，恢复处理器会恢复快照并只重建旧 frontend、重启 Caddy。
+- 前端启动、恢复或代理异常时保留终端错误输出，并查看日志：
 
 ```bash
 sudo -H env -u DOCKER_CONFIG docker compose --env-file /opt/A3/.env.production -f /opt/A3/docker-compose.yml -f /opt/A3/docker-compose.prod.yml logs --tail=200 frontend caddy
