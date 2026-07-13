@@ -18,7 +18,7 @@ pnpm build
 2. 私有 GHCR 包存在与目标完整提交 SHA 一致的标签，且镜像 OCI revision 标签可验证。
 3. GitHub 账号 `zhuce30` 可读取私有仓库和对应 GHCR 包。
 
-正常生产部署必须输入成功 Actions 运行对应的完整 40 位 `DEPLOY_SHA`。`ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}` 只用于查找镜像；事务会核对 `org.opencontainers.image.revision`，解析匹配的 `RepoDigest`，并把 `ghcr.io/zhuce30/a3-frontend@sha256:...` 写入 `A3_FRONTEND_IMAGE`。digest 才是部署和回滚的不可变身份。生产切换不使用 `latest`；Compose 中的默认 `latest` 仅用于首次引导，不属于本手册允许的生产切换路径。
+正常生产部署必须输入成功 Actions 运行对应的完整 40 位 `DEPLOY_SHA`。`ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}` 只用于部署时的一次查找；事务会核对 `org.opencontainers.image.revision`，解析匹配的 `RepoDigest`，并把 `ghcr.io/zhuce30/a3-frontend@sha256:...` 写入 `A3_FRONTEND_IMAGE`。验证成功后，事务把时间、`DEPLOY_SHA` 和 `RepoDigest` 追加到 root 专属部署历史。digest 才是部署和回滚的不可变身份。生产切换不使用 `latest`；Compose 中的默认 `latest` 仅用于首次引导，不属于本手册允许的生产切换路径。
 
 ## 目录与密钥所有权
 
@@ -128,11 +128,11 @@ pnpm build
 下面唯一的事务同时处理：
 
 - `deploy`：正常部署，必须输入成功 Actions 对应的 `DEPLOY_SHA`，并先以 `admin` 身份 fast-forward 拉取集成分支。
-- `rollback`：回滚，必须输入此前成功 Actions 对应的 `ROLLBACK_SHA`。
+- `rollback`：回滚，必须从部署历史选择配对的 `ROLLBACK_SHA` 和 64 位小写十六进制 `ROLLBACK_DIGEST`；只拉取该 digest，不再解析 SHA 标签。
 
 部署源码清洁检查只覆盖 `OpenMAIC`、两个 Compose 文件、`Caddyfile` 和 `.github`。因此 `.env.production` 及其他已知控制面运行时文件不会误阻塞部署，但任何相关源码、编排或代理配置改动都会立即终止事务。
 
-`switch_frontend_image` 的固定顺序是：用完整 SHA 拉取标签、核对 OCI revision、解析唯一匹配的 `RepoDigest`、验证环境文件、创建 `root:root 0600` 快照、把 digest 同目录原子写入、只重建 frontend、重启 Caddy、执行有界 HTTP 和七服务断言，验证通过后才删除快照并标记成功。
+部署路径先用完整 SHA 标签解析一次唯一 `RepoDigest`；回滚路径直接使用历史中的 digest。两条路径都会验证 digest 镜像的 OCI revision，再创建 `root:root 0600` 配置快照、把 digest 同目录原子写入、只重建 frontend、重启 Caddy并执行有界 HTTP 和七服务断言。正常部署还必须成功追加部署历史，随后立即标记事务成功并禁用恢复 trap，最后才清理快照。
 
 `EXIT/HUP/INT/TERM` 共用恢复处理器。处理器先禁用全部 trap，再分别记录配置恢复、旧 frontend 重建、Caddy 重启和七服务检查状态。四步都成功时才删除快照，并保留原失败或信号状态退出；任一步失败都会打印独立的 `ROLLBACK FAILED`，保留快照路径并用恢复失败状态退出。数据库和队列服务不会被停止或重建。
 
@@ -142,6 +142,7 @@ pnpm build
   cd /opt/A3
 
   ENV_FILE='/opt/A3/.env.production'
+  HISTORY_FILE='/var/lib/a3-deploy/frontend-image-history.log'
   INTEGRATION_BRANCH='codex/a3-latest-integration'
   COMPOSE_ARGS=(--env-file "$ENV_FILE" -f /opt/A3/docker-compose.yml -f /opt/A3/docker-compose.prod.yml)
   SNAPSHOT=''
@@ -256,17 +257,28 @@ pnpm build
     assert_relevant_paths_clean
   }
 
-  resolve_verified_digest() {
-    local tag_ref=$1
+  verify_image_revision() {
+    local image_ref=$1
     local expected_revision=$2
     local image_revision
-    local digest_matches=()
 
     image_revision="$(
       sudo -H env -u DOCKER_CONFIG docker image inspect \
-        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$tag_ref"
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_ref"
     )"
     test "$image_revision" = "$expected_revision"
+  }
+
+  resolve_deploy_digest() {
+    local tag_ref=$1
+    local expected_revision=$2
+    local digest_matches=()
+    local digest_ref
+
+    [[ "$tag_ref" =~ ^ghcr\.io/zhuce30/a3-frontend:[0-9a-f]{40}$ ]]
+    [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]]
+    sudo -H env -u DOCKER_CONFIG docker pull "$tag_ref" >&2
+    verify_image_revision "$tag_ref" "$expected_revision"
 
     mapfile -t digest_matches < <(
       sudo -H env -u DOCKER_CONFIG docker image inspect \
@@ -275,22 +287,56 @@ pnpm build
         sort -u
     )
     test "${#digest_matches[@]}" -eq 1
-    printf '%s\n' "${digest_matches[0]}"
+    digest_ref="${digest_matches[0]}"
+    verify_image_revision "$digest_ref" "$expected_revision"
+    printf '%s\n' "$digest_ref"
+  }
+
+  pull_verified_digest() {
+    local digest_ref=$1
+    local expected_revision=$2
+
+    [[ "$digest_ref" =~ ^ghcr\.io/zhuce30/a3-frontend@sha256:[0-9a-f]{64}$ ]]
+    [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]]
+    sudo -H env -u DOCKER_CONFIG docker pull "$digest_ref"
+    verify_image_revision "$digest_ref" "$expected_revision"
+  }
+
+  append_deployment_history() {
+    local deploy_sha=$1
+    local digest_ref=$2
+
+    sudo bash -s -- "$HISTORY_FILE" "$deploy_sha" "$digest_ref" <<'ROOT_HISTORY'
+set -euo pipefail
+history_file=$1
+deploy_sha=$2
+digest_ref=$3
+history_dir="${history_file%/*}"
+[[ "$deploy_sha" =~ ^[0-9a-f]{40}$ ]]
+[[ "$digest_ref" =~ ^ghcr\.io/zhuce30/a3-frontend@sha256:[0-9a-f]{64}$ ]]
+install -d -o root -g root -m 0700 "$history_dir"
+if [ ! -e "$history_file" ]; then
+  install -o root -g root -m 0600 /dev/null "$history_file"
+fi
+test "$(stat -c '%U:%G %a' "$history_file")" = 'root:root 600'
+timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+printf '%s DEPLOY_SHA=%s RepoDigest=%s\n' "$timestamp" "$deploy_sha" "$digest_ref" >>"$history_file"
+ROOT_HISTORY
   }
 
   switch_frontend_image() {
-    local tag_ref=$1
+    local digest_ref=$1
     local expected_revision=$2
-    local digest_ref
+    local history_sha=$3
 
-    [[ "$tag_ref" =~ ^ghcr\.io/zhuce30/a3-frontend:[0-9a-f]{40}$ ]]
+    [[ "$digest_ref" =~ ^ghcr\.io/zhuce30/a3-frontend@sha256:[0-9a-f]{64}$ ]]
     [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]]
+    if [ -n "$history_sha" ]; then
+      test "$history_sha" = "$expected_revision"
+    fi
     sudo test -f "$ENV_FILE"
     test "$(sudo stat -c '%U:%G %a' "$ENV_FILE")" = 'root:root 600'
-
-    sudo -H env -u DOCKER_CONFIG docker pull "$tag_ref"
-    digest_ref="$(resolve_verified_digest "$tag_ref" "$expected_revision")"
-    [[ "$digest_ref" =~ ^ghcr\.io/zhuce30/a3-frontend@sha256:[0-9a-f]{64}$ ]]
+    verify_image_revision "$digest_ref" "$expected_revision"
 
     SNAPSHOT="$(
       sudo bash -s -- "$ENV_FILE" <<'ROOT_SNAPSHOT'
@@ -343,10 +389,17 @@ ROOT_UPSERT
     sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" restart caddy
     verify_runtime
 
-    sudo rm -f "$SNAPSHOT"
-    SNAPSHOT=''
+    if [ -n "$history_sha" ]; then
+      append_deployment_history "$history_sha" "$digest_ref"
+    fi
+
     TRANSACTION_SUCCESS=1
     trap - EXIT HUP INT TERM
+    if sudo rm -f "$SNAPSHOT"; then
+      SNAPSHOT=''
+    else
+      printf 'WARNING: deployment succeeded but snapshot cleanup failed; retained at %s\n' "$SNAPSHOT" >&2
+    fi
   }
 
   read -rp "操作模式（deploy/rollback）: " OPERATION
@@ -359,16 +412,26 @@ ROOT_UPSERT
       fi
       prepare_deploy_source
       TARGET_SHA="$DEPLOY_SHA"
-      IMAGE_TAG="ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}"
+      DEPLOY_TAG="ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}"
+      TARGET_DIGEST="$(resolve_deploy_digest "$DEPLOY_TAG" "$DEPLOY_SHA")"
+      HISTORY_SHA="$DEPLOY_SHA"
       ;;
     rollback)
-      read -rp "ROLLBACK_SHA（此前成功 Actions 的完整提交 SHA）: " ROLLBACK_SHA
+      read -rp "ROLLBACK_SHA（从部署历史选择完整提交 SHA）: " ROLLBACK_SHA
       if [[ ! "$ROLLBACK_SHA" =~ ^[0-9a-f]{40}$ ]]; then
         printf 'ROLLBACK_SHA 必须是 40 位小写十六进制提交 SHA\n' >&2
         exit 1
       fi
+      read -rp "ROLLBACK_DIGEST（同一条历史记录的 64 位 digest）: " ROLLBACK_DIGEST
+      if [[ ! "$ROLLBACK_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+        printf 'ROLLBACK_DIGEST 必须是 64 位小写十六进制 digest\n' >&2
+        exit 1
+      fi
+      ROLLBACK_IMAGE="ghcr.io/zhuce30/a3-frontend@sha256:${ROLLBACK_DIGEST}"
+      pull_verified_digest "$ROLLBACK_IMAGE" "$ROLLBACK_SHA"
       TARGET_SHA="$ROLLBACK_SHA"
-      IMAGE_TAG="ghcr.io/zhuce30/a3-frontend:${ROLLBACK_SHA}"
+      TARGET_DIGEST="$ROLLBACK_IMAGE"
+      HISTORY_SHA=''
       ;;
     *)
       printf '操作模式只能是 deploy 或 rollback\n' >&2
@@ -377,8 +440,22 @@ ROOT_UPSERT
   esac
   unset OPERATION
 
-  switch_frontend_image "$IMAGE_TAG" "$TARGET_SHA"
-  unset DEPLOY_SHA ROLLBACK_SHA TARGET_SHA IMAGE_TAG
+  switch_frontend_image "$TARGET_DIGEST" "$TARGET_SHA" "$HISTORY_SHA"
+  unset DEPLOY_SHA DEPLOY_TAG ROLLBACK_SHA ROLLBACK_DIGEST ROLLBACK_IMAGE TARGET_SHA TARGET_DIGEST HISTORY_SHA
+)
+```
+
+## 查看部署历史
+
+部署历史文件只记录 UTC 时间、完整 `DEPLOY_SHA` 和已验证 `RepoDigest`，不记录环境变量、令牌或其他密钥。文件固定为 `root:root 0600`，父目录固定为 `root:root 0700`。选择回滚参数时必须从同一行取出 SHA 和 digest；不要自行重新解析 SHA 标签。
+
+```bash
+(
+  set -euo pipefail
+  HISTORY_FILE='/var/lib/a3-deploy/frontend-image-history.log'
+  sudo test -f "$HISTORY_FILE"
+  test "$(sudo stat -c '%U:%G %a' "$HISTORY_FILE")" = 'root:root 600'
+  sudo tail -n 20 "$HISTORY_FILE"
 )
 ```
 
@@ -401,7 +478,7 @@ ROOT_UPSERT
 ## 失败处理
 
 - Actions 失败不会产生可部署的 SHA 镜像，不要执行生产事务。
-- 目标完整 SHA 标签在配置快照和变更之前预拉取并验证 revision/digest；任一验证失败时当前 frontend 服务和配置保持不变。
+- 正常部署在配置快照和变更之前用完整 SHA 标签解析并验证 digest；回滚直接拉取历史中的 digest 并验证 revision。任一验证失败时当前 frontend 服务和配置保持不变。
 - 配置变更后出现命令失败、正常异常退出或 `HUP/INT/TERM` 信号时，恢复处理器会从快照恢复旧 digest，并只重建旧 frontend、重启 Caddy。
 - 自动恢复未完整成功时，不要删除输出的快照；终端会显示 `ROLLBACK FAILED` 和保留路径，供人工检查和恢复。
 - 前端启动、恢复或代理异常时保留终端错误输出，并查看日志：

@@ -4,7 +4,7 @@
 
 **Goal:** Publish the A3 frontend as a private GHCR image from GitHub Actions and deploy it to the production VPS without running builds on the VPS.
 
-**Architecture:** A branch-scoped GitHub Actions workflow builds `OpenMAIC/Dockerfile` for `linux/amd64` and publishes full-SHA plus `latest` lookup tags to GHCR. Production accepts a full `DEPLOY_SHA`, fast-forward updates the clean integration branch to that exact `HEAD`, verifies `org.opencontainers.image.revision`, resolves the matching `RepoDigest`, and persists the immutable `repo@sha256` identity through `A3_FRONTEND_IMAGE`. Runtime secrets remain in the server-only `.env.production`; deployment and recovery are one bounded, recoverable transaction.
+**Architecture:** A branch-scoped GitHub Actions workflow builds `OpenMAIC/Dockerfile` for `linux/amd64` and publishes full-SHA plus `latest` lookup tags to GHCR. Normal deploy accepts a full `DEPLOY_SHA`, fast-forward updates the clean integration branch to that exact `HEAD`, resolves the lookup tag once, verifies `org.opencontainers.image.revision`, persists the immutable `repo@sha256` identity through `A3_FRONTEND_IMAGE`, and writes a root-only deployment history record. Rollback consumes paired `ROLLBACK_SHA` and `ROLLBACK_DIGEST` values from that history and pulls the digest directly. Runtime secrets remain in the server-only `.env.production`; deployment and recovery are one bounded, recoverable transaction.
 
 **Tech Stack:** GitHub Actions, Docker Buildx, GHCR, Docker Compose, Vitest, Next.js 16
 
@@ -36,7 +36,7 @@ const composePath = path.join(root, 'docker-compose.prod.yml');
 const envTemplatePath = path.join(root, '.env.production.template');
 
 describe('A3 private GHCR frontend deployment', () => {
-  it('builds and publishes amd64 latest and immutable frontend tags', () => {
+  it('builds and publishes amd64 latest and full-SHA lookup tags', () => {
     expect(fs.existsSync(workflowPath)).toBe(true);
     const workflow = fs.readFileSync(workflowPath, 'utf8');
     expect(workflow).toContain('packages: write');
@@ -235,7 +235,7 @@ curl -sS --connect-timeout 3 --max-time 10 https://api.zhuce.work/api/auth/csrf/
 curl -i --connect-timeout 3 --max-time 10 https://a3.zhuce.work/api/a3/tasks
 ```
 
-Rollback uses `ROLLBACK_SHA`, selected from a previously successful GitHub Actions run, as the lookup tag. It must verify the OCI revision and persist the resolved digest; it must not write the SHA tag or `latest` to `A3_FRONTEND_IMAGE`.
+Rollback requires `ROLLBACK_SHA` and `ROLLBACK_DIGEST` selected from the same root-owned `0600` deployment history line. It pulls `ghcr.io/zhuce30/a3-frontend@sha256:${ROLLBACK_DIGEST}` directly, verifies the OCI revision equals `ROLLBACK_SHA`, and persists that already immutable digest; it must not resolve the SHA tag or write `latest` to `A3_FRONTEND_IMAGE`.
 
 - [ ] **Step 4: Commit the runbook**
 
@@ -301,7 +301,7 @@ The operator follows `docs/A3_GHCR前端镜像部署.md`, confirms all seven ser
 
 - [ ] **Step 1: Harden the deployment contract first**
 
-Assert the workflow's integration-branch/path/manual triggers, `contents: read`, OCI source/revision labels, and existing pinned-action/build boundaries. Assert that the runbook binds branch `HEAD` to `DEPLOY_SHA`, resolves a matching `RepoDigest`, verifies `org.opencontainers.image.revision`, persists a digest in `A3_FRONTEND_IMAGE`, never switches production to `latest`, bounds curl readiness, and retains snapshots after failed recovery.
+Assert the workflow's integration-branch/path/manual triggers, `contents: read`, OCI source/revision labels, and existing pinned-action/build boundaries. Assert that the runbook binds branch `HEAD` to `DEPLOY_SHA`, resolves a matching `RepoDigest`, verifies `org.opencontainers.image.revision`, persists a digest in `A3_FRONTEND_IMAGE`, records successful deploy history without secrets, never switches production to `latest`, bounds curl readiness, and retains snapshots after failed recovery.
 
 - [ ] **Step 2: Observe RED and commit the contract independently**
 
@@ -316,13 +316,13 @@ Expected: the new assertions fail against the tag-based, single-attempt runbook 
 
 The operator enters a full 40-character `DEPLOY_SHA`. As `admin`, require a clean path-scoped deployment tree, fetch and `pull --ff-only` the integration branch, then require `HEAD == DEPLOY_SHA`. Pull `ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}`, inspect `.RepoDigests`, verify `org.opencontainers.image.revision == DEPLOY_SHA`, and persist the unique matching `ghcr.io/zhuce30/a3-frontend@sha256:...` value.
 
-Rollback performs the same tag lookup and revision verification for `ROLLBACK_SHA`; SHA tags are lookup handles while the digest is the immutable runtime identity.
+Rollback requires paired `ROLLBACK_SHA` and `ROLLBACK_DIGEST` values from deployment history, pulls the digest directly, and verifies its revision. It never repeats the mutable SHA tag lookup; SHA tags are deploy-time lookup handles while the digest is the immutable runtime identity.
 
 - [ ] **Step 4: Bound readiness and make recovery auditable**
 
 Run readiness at most 12 times with a 5-second interval. Every curl uses `--connect-timeout 3 --max-time 10`; success requires root `308` with `Location: /a3`, CSRF `success: true`, unauthenticated tasks `401`, and exactly the seven expected services.
 
-Recovery disables traps first, records restore/frontend/Caddy/running-check statuses, deletes the snapshot only after complete recovery, preserves the original status on successful recovery, and prints distinct `ROLLBACK FAILED` output with the retained snapshot path when any recovery step fails.
+Recovery disables traps first, records restore/frontend/Caddy/running-check statuses, deletes the snapshot only after complete recovery, preserves the original status on successful recovery, and prints distinct `ROLLBACK FAILED` output with the retained snapshot path when any recovery step fails. On a successful deployment, append the deployment history first, then set `TRANSACTION_SUCCESS=1` and disable all traps before best-effort snapshot cleanup; cleanup failure prints a warning and cannot trigger recovery.
 
 - [ ] **Step 5: Verify and commit documentation implementation**
 

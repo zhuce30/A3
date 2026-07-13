@@ -39,7 +39,7 @@ The production Compose override reads the frontend image from `A3_FRONTEND_IMAGE
 A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend@sha256:<verified-64-hex-digest>
 ```
 
-The full `DEPLOY_SHA` tag is a lookup handle, not the deployed identity. The server pulls `ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}`, resolves the matching `RepoDigest` with `docker image inspect`, and requires the image label `org.opencontainers.image.revision` to equal `DEPLOY_SHA`. Only that `repo@sha256:...` value is persisted in `A3_FRONTEND_IMAGE`.
+The full `DEPLOY_SHA` tag is a mutable lookup handle, not the deployed identity. The server pulls `ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}` once during a normal deploy, resolves the matching `RepoDigest` with `docker image inspect`, and requires the image label `org.opencontainers.image.revision` to equal `DEPLOY_SHA`. Only that `repo@sha256:...` value is persisted in `A3_FRONTEND_IMAGE`.
 
 The existing `build` definition remains available for local development and emergency use, but production deployment commands always use `up --no-build`. Production never switches to `latest`.
 
@@ -55,16 +55,17 @@ The token is entered interactively through `docker login ghcr.io --password-stdi
 
 1. GitHub Actions builds and publishes the frontend image.
 2. The server verifies that the relevant deployment paths are clean, fetches and fast-forward pulls `codex/a3-latest-integration` as `admin`, and requires repository `HEAD` to equal the full `DEPLOY_SHA`. Runtime control files outside `OpenMAIC`, the Compose files, `Caddyfile`, and `.github` do not block the path-scoped cleanliness check.
-3. The server pulls the full-SHA image tag, verifies `org.opencontainers.image.revision`, resolves the matching GHCR `RepoDigest`, and snapshots `.env.production`.
+3. The server pulls the full-SHA lookup tag once, verifies `org.opencontainers.image.revision`, resolves the matching GHCR `RepoDigest`, and snapshots `.env.production`.
 4. The transaction writes the digest to `A3_FRONTEND_IMAGE`, recreates only `frontend`, and restarts Caddy without building.
 5. A bounded 12-attempt, 5-second readiness loop uses curl connect/max timeouts and requires the root `308` redirect to `/a3`, successful CSRF response, unauthenticated tasks `401`, and exactly seven running Compose services.
-6. Only after all checks pass does the transaction delete its snapshot.
+6. After readiness passes, a normal deploy appends UTC timestamp, `DEPLOY_SHA`, and verified `RepoDigest` to the root-owned `0600` deployment history file. No secrets or runtime environment values are recorded.
+7. The transaction sets its success marker and disables all recovery traps before snapshot cleanup. Cleanup failure emits an explicit warning and retains the snapshot without rolling back the verified deployment.
 
 The database and queues remain running during frontend deployment.
 
 ## Rollback
 
-Rollback accepts a known-good full `ROLLBACK_SHA`, pulls that tag, verifies the same OCI revision label, resolves its `RepoDigest`, and persists the digest before recreating the frontend. No source rebuild or database operation is involved.
+Rollback requires a paired `ROLLBACK_SHA` and 64-character lowercase hexadecimal `ROLLBACK_DIGEST` selected from one deployment history line. It constructs `ghcr.io/zhuce30/a3-frontend@sha256:${ROLLBACK_DIGEST}`, pulls that digest directly, verifies `org.opencontainers.image.revision == ROLLBACK_SHA`, and switches using the same immutable digest. Rollback never pulls or resolves the SHA lookup tag again. No source rebuild or database operation is involved.
 
 Automatic transaction recovery disables traps before doing any work and records config restore, frontend recreation, Caddy restart, and running-service check statuses independently. It deletes the snapshot only when all recovery steps succeed and then exits with the original failure or signal status. Incomplete recovery prints `ROLLBACK FAILED`, retains the snapshot path for manual repair, and exits with a distinct recovery-failure status.
 
