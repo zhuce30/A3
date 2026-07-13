@@ -20,6 +20,9 @@ RUN pnpm install --frozen-lockfile
 # ---- Stage 3: Builder ----
 FROM base AS builder
 
+ARG NEXT_PUBLIC_A3_API_BASE_URL=http://localhost:8000
+ENV NEXT_PUBLIC_A3_API_BASE_URL=$NEXT_PUBLIC_A3_API_BASE_URL
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/packages ./packages
 COPY . .

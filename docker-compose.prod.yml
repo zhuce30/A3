@@ -87,6 +87,9 @@ services:
 
   frontend:
     restart: unless-stopped
+    build:
+      args:
+        NEXT_PUBLIC_A3_API_BASE_URL: ${NEXT_PUBLIC_A3_API_BASE_URL:-https://api.zhuce.work}
     env_file:
       - .env.production
     ports: !reset []
