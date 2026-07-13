@@ -100,6 +100,12 @@ export async function GET(request: NextRequest) {
       baseUrl: value('A3_VISION_COACHING_BASE_URL', value('A3_COACHING_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')),
       model: value('A3_VISION_COACHING_MODEL', 'qwen-vl-plus'),
     }),
+    check('realtimeCoachingModel', configured('DASHSCOPE_API_KEY', 'A3_COACHING_API_KEY', 'QWEN_API_KEY', 'ASR_QWEN_API_KEY', 'OPENAI_API_KEY') ? 'ok' : 'warning', 'Realtime coaching provider configuration', {
+      configured: configured('DASHSCOPE_API_KEY', 'A3_COACHING_API_KEY', 'QWEN_API_KEY', 'ASR_QWEN_API_KEY', 'OPENAI_API_KEY'),
+      provider: value('A3_REALTIME_PROVIDER', configured('OPENAI_API_KEY') ? 'openai_realtime_webrtc' : 'dashscope_qwen_omni_realtime'),
+      proxyUrl: value('A3_REALTIME_WS_PROXY_URL', 'wss://a3.zhuce.work/a3/realtime/ws'),
+      model: value('DASHSCOPE_REALTIME_MODEL', value('OPENAI_REALTIME_MODEL', 'qwen3.5-omni-plus-realtime')),
+    }),
     check('speechRecognition', configured('ASR_QWEN_API_KEY', 'ASR_OPENAI_API_KEY', 'ASR_LEMONADE_BASE_URL') ? 'ok' : 'warning', 'Speech recognition provider configuration', {
       configured: configured('ASR_QWEN_API_KEY', 'ASR_OPENAI_API_KEY', 'ASR_LEMONADE_BASE_URL'),
       qwen: configured('ASR_QWEN_API_KEY'),

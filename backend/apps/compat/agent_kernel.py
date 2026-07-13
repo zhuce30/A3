@@ -974,9 +974,14 @@ class TeacherAgent(BaseAgent):
         target = qa_context.get("target") if isinstance(qa_context.get("target"), dict) else {}
         llm_result = generate_tutoring_answer(question, target=target, sources=sources)
         answer = str(llm_result.get("answer") or "").strip()
+        model_runtime = {
+            "provider": str(llm_result.get("provider") or ""),
+            "model": str(llm_result.get("model") or ""),
+            "fallback": bool(llm_result.get("fallback")),
+        }
         return AgentResult(
-            output={"draftAnswer": answer},
-            state_patch={"draftAnswer": answer},
+            output={"draftAnswer": answer, "modelRuntime": model_runtime},
+            state_patch={"draftAnswer": answer, "modelRuntime": model_runtime},
             evidence={
                 "sourceCount": len(sources),
                 "sourceTitles": [str(source.get("title") or "") for source in sources[:3] if isinstance(source, dict)],

@@ -25,14 +25,21 @@ def chat_completion(
 ) -> dict:
     api_key = (
         os.getenv("A3_LLM_API_KEY")
+        or os.getenv("A3_COACHING_API_KEY")
         or os.getenv("DASHSCOPE_API_KEY")
+        or os.getenv("QWEN_API_KEY")
         or os.getenv("OPENAI_API_KEY")
         or ""
     ).strip()
     if not api_key:
         raise LLMUnavailable("A3_LLM_API_KEY is not configured")
-    base_url = (os.getenv("A3_LLM_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
-    model = os.getenv("A3_LLM_MODEL") or os.getenv("AI_MODEL") or DEFAULT_MODEL
+    base_url = (
+        os.getenv("A3_LLM_BASE_URL")
+        or os.getenv("A3_COACHING_BASE_URL")
+        or os.getenv("DASHSCOPE_BASE_URL")
+        or DEFAULT_BASE_URL
+    ).rstrip("/")
+    model = os.getenv("A3_LLM_MODEL") or os.getenv("A3_COACHING_MODEL") or os.getenv("AI_MODEL") or DEFAULT_MODEL
     timeout = timeout_seconds if timeout_seconds is not None else float(os.getenv("A3_LLM_TIMEOUT_SECONDS", "12"))
     payload = {
         "model": model,

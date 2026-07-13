@@ -121,6 +121,7 @@ describe('/api/a3/coaching/respond', () => {
         verified: true,
         citations: [],
         claims: [],
+        modelRuntime: { provider: 'dashscope', model: 'qwen-plus', fallback: false },
       });
     const { POST } = await import('@/app/api/a3/coaching/respond/route');
 
@@ -137,6 +138,8 @@ describe('/api/a3/coaching/respond', () => {
     }) as never);
 
     expect(response.status).toBe(200);
+    const payload = await response.clone().json();
+    expect(payload.modelRuntime).toEqual({ provider: 'dashscope', model: 'qwen-plus', fallback: false });
     const upstreamPath = fetchA3DjangoJson.mock.calls[1][0] as string;
     expect(decodeURIComponent(upstreamPath)).not.toContain('最近对话：');
     expect(decodeURIComponent(upstreamPath)).toContain('它和开环控制有什么区别？');

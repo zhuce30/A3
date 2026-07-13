@@ -12,7 +12,10 @@ const bindHost = process.env.A3_REALTIME_WS_PROXY_HOST || '127.0.0.1';
 const djangoBaseUrl = process.env.A3_API_BASE_URL || process.env.NEXT_PUBLIC_A3_API_BASE_URL || 'http://localhost:8000';
 const dashScopeUrl = process.env.DASHSCOPE_REALTIME_URL || 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime';
 const dashScopeModel = process.env.DASHSCOPE_REALTIME_MODEL || 'qwen3.5-omni-plus-realtime';
-const dashScopeApiKey = process.env.DASHSCOPE_API_KEY;
+const dashScopeApiKey = process.env.DASHSCOPE_API_KEY
+  || process.env.A3_COACHING_API_KEY
+  || process.env.QWEN_API_KEY
+  || process.env.ASR_QWEN_API_KEY;
 
 const server = http.createServer((request, response) => {
   if (request.url === '/health') {

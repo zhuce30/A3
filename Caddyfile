@@ -2,6 +2,8 @@ a3.zhuce.work {
 	encode zstd gzip
 	@root path /
 	redir @root /a3 308
+	@realtime path /a3/realtime/ws
+	reverse_proxy @realtime realtime-proxy:3003
 	reverse_proxy frontend:3000
 }
 

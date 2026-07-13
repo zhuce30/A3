@@ -39,7 +39,10 @@ async function exchangeOpenAIRealtimeSdp(model: string, offerSdp: string, safety
 }
 
 async function exchangeDashScopeRealtimeSdp(model: string, offerSdp: string) {
-  const apiKey = process.env.DASHSCOPE_API_KEY;
+  const apiKey = process.env.DASHSCOPE_API_KEY
+    || process.env.A3_COACHING_API_KEY
+    || process.env.QWEN_API_KEY
+    || process.env.ASR_QWEN_API_KEY;
   const endpoint = process.env.DASHSCOPE_REALTIME_WEBRTC_ENDPOINT;
   if (!apiKey) return { success: false, error: 'DASHSCOPE_API_KEY 未配置' };
   if (!endpoint) return { success: false, error: 'DASHSCOPE_REALTIME_WEBRTC_ENDPOINT 未配置，无法进行 DashScope WebRTC SDP 交换' };

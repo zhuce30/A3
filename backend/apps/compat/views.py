@@ -721,6 +721,7 @@ def qa_interact(request):
         "success": kernel_result.success,
         "traceId": kernel_result.trace["traceId"],
         "answer": answer,
+        "modelRuntime": kernel_result.output.get("modelRuntime") or {},
         "sources": kernel_result.output.get("sources") or [],
         "retrievalMode": kernel_result.output.get("retrievalMode") or "unknown",
         "followUps": kernel_result.output.get("followUps") or [],

@@ -6,7 +6,10 @@ type CreateRealtimeSessionInput = {
 };
 
 export async function createDashScopeRealtimeSession(input: CreateRealtimeSessionInput): Promise<A3RealtimeCoachingSession> {
-  const apiKey = process.env.DASHSCOPE_API_KEY;
+  const apiKey = process.env.DASHSCOPE_API_KEY
+    || process.env.A3_COACHING_API_KEY
+    || process.env.QWEN_API_KEY
+    || process.env.ASR_QWEN_API_KEY;
   const model = process.env.DASHSCOPE_REALTIME_MODEL || 'qwen3.5-omni-plus-realtime';
   const websocketUrl = process.env.DASHSCOPE_REALTIME_URL || 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime';
   const proxyUrl = process.env.A3_REALTIME_WS_PROXY_URL || 'ws://127.0.0.1:3003/a3/realtime/ws';

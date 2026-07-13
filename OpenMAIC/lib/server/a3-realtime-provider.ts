@@ -34,7 +34,9 @@ export function selectA3RealtimeProvider(preferredProvider?: A3RealtimeProvider)
   }
   const configured = process.env.A3_REALTIME_PROVIDER;
   if (configured === 'openai_realtime_webrtc' || configured === 'dashscope_qwen_omni_realtime') return configured;
-  if (process.env.DASHSCOPE_API_KEY) return 'dashscope_qwen_omni_realtime';
+  if (process.env.DASHSCOPE_API_KEY || process.env.A3_COACHING_API_KEY || process.env.QWEN_API_KEY || process.env.ASR_QWEN_API_KEY) {
+    return 'dashscope_qwen_omni_realtime';
+  }
   if (process.env.OPENAI_API_KEY) return 'openai_realtime_webrtc';
   return 'local_fallback_record_then_respond';
 }

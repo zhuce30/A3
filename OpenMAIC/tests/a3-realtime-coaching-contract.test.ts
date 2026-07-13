@@ -19,6 +19,9 @@ const packagePath = path.resolve(root, 'package.json');
 const callComponentPath = path.resolve(root, 'components/a3/features/coaching/realtime-coaching-call.tsx');
 const hookPath = path.resolve(root, 'components/a3/features/coaching/use-realtime-coaching.ts');
 const coachingViewPath = path.resolve(root, 'components/a3/features/coaching-view.tsx');
+const dockerfilePath = path.resolve(root, 'Dockerfile');
+const composePath = path.resolve(root, '../docker-compose.prod.yml');
+const caddyPath = path.resolve(root, '../Caddyfile');
 
 function read(filePath: string) {
   return fs.readFileSync(filePath, 'utf8');
@@ -46,10 +49,31 @@ describe('A3 realtime coaching contracts', () => {
     expect(provider).toContain('createA3RealtimeSession');
     expect(openai).toContain('process.env.OPENAI_API_KEY');
     expect(dashscope).toContain('process.env.DASHSCOPE_API_KEY');
+    expect(dashscope).toContain('process.env.A3_COACHING_API_KEY');
+    expect(dashscope).toContain('process.env.QWEN_API_KEY');
     expect(dashscope).toContain('DASHSCOPE_REALTIME_URL');
     expect(dashscope).toContain('websocket_proxy');
     expect(`${provider}\n${openai}\n${dashscope}`).not.toContain('NEXT_PUBLIC_OPENAI_API_KEY');
     expect(`${provider}\n${openai}\n${dashscope}`).not.toContain('NEXT_PUBLIC_DASHSCOPE_API_KEY');
+  });
+
+  it('packages and runs the DashScope proxy behind same-origin secure WebSocket routing', () => {
+    const dockerfile = read(dockerfilePath);
+    const compose = read(composePath);
+    const caddy = read(caddyPath);
+    const dashscope = read(dashscopeProviderPath);
+
+    expect(dockerfile).toContain('/app/scripts/a3-dashscope-realtime-proxy.mjs');
+    expect(dockerfile).toContain('/opt/runtime-node-modules/ws');
+    expect(dockerfile).toContain('./node_modules/ws');
+    expect(dockerfile).toContain("import WebSocket from 'ws'");
+    expect(compose).toContain('realtime-proxy:');
+    expect(compose).toContain('command: ["node", "scripts/a3-dashscope-realtime-proxy.mjs"]');
+    expect(compose).toContain('A3_REALTIME_WS_PROXY_HOST: 0.0.0.0');
+    expect(compose).toContain('A3_REALTIME_WS_PROXY_URL: ${A3_REALTIME_WS_PROXY_URL:-wss://a3.zhuce.work/a3/realtime/ws}');
+    expect(caddy).toContain('@realtime path /a3/realtime/ws');
+    expect(caddy).toContain('reverse_proxy @realtime realtime-proxy:3003');
+    expect(dashscope).toContain('process.env.A3_REALTIME_WS_PROXY_URL');
   });
 
   it('exposes realtime coaching API routes', () => {

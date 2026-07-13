@@ -34,12 +34,14 @@ type TranscriptMessage = {
   safety?: SafetyStatus | null;
   refusalReason?: string;
   degraded?: boolean;
+  modelRuntime?: ModelRuntime;
   createdAt?: string;
 };
 
 type Citation = { id?: string; title?: string; location?: string; type?: string; sourceTypeLabel?: string; sourceOrigin?: string; score?: number | null; snippet?: string };
 type Claim = { id: string; text: string; verified: boolean; overlap?: number; citation?: Citation | null };
 type SafetyStatus = { safe: boolean; category: string; reason: string };
+type ModelRuntime = { provider?: string; model?: string; fallback?: boolean };
 
 type CoachingSessionResponse = {
   success: boolean;
@@ -68,6 +70,8 @@ type CoachingReplyResponse = {
   claims?: Claim[];
   safety?: SafetyStatus | null;
   refusalReason?: string;
+  degraded?: boolean;
+  modelRuntime?: ModelRuntime;
 };
 type CoachingNotice = {
   text: string;
@@ -320,6 +324,8 @@ function CoachingTextWorkspace({ target }: { target?: ClassroomContext['target']
         claims: result.claims ?? [],
         safety: result.safety,
         refusalReason: result.refusalReason ?? '',
+        degraded: Boolean(result.degraded || result.modelRuntime?.fallback),
+        modelRuntime: result.modelRuntime,
         createdAt: new Date().toISOString(),
       };
       setMessages((current) => [...current, assistantMessage]);
@@ -433,6 +439,11 @@ function CoachingTextWorkspace({ target }: { target?: ClassroomContext['target']
                 <div className="mt-1">
                   {message.role === 'assistant' ? <A3Markdown>{message.content}</A3Markdown> : <p className="whitespace-pre-wrap">{message.content}</p>}
                 </div>
+                {message.role === 'assistant' && message.modelRuntime && (
+                  <div className={cn('mt-2 text-xs font-medium', message.modelRuntime.fallback ? 'text-amber-700' : 'text-emerald-700')}>
+                    {message.modelRuntime.fallback ? '规则降级' : '模型已接入'} · {message.modelRuntime.provider || 'unknown'} · {message.modelRuntime.model || '未返回模型名'}
+                  </div>
+                )}
                 {message.role === 'assistant' && message.verified !== undefined && <CoachingVerification message={message} />}
                 {message.role === 'assistant' && (
                   <Button type="button" size="sm" variant="outline" className="mt-3 bg-white" disabled={savingNoteId === message.id} onClick={() => saveAsNote(message)}>

@@ -29,7 +29,14 @@ type BackendQaResponse = {
   citations?: Citation[];
   followUps?: FollowUpSuggestion[];
   traceId?: string;
+  modelRuntime?: ModelRuntime;
   error?: string;
+};
+
+type ModelRuntime = {
+  provider?: string;
+  model?: string;
+  fallback?: boolean;
 };
 
 type FollowUpSuggestion = {
@@ -149,6 +156,7 @@ export async function POST(request: NextRequest) {
       retrievalMode: result.retrievalMode ?? 'unknown',
       followUps: normalizeFollowUps(result.followUps),
       traceId: result.traceId ?? '',
+      modelRuntime: result.modelRuntime ?? {},
     });
   } catch (error) {
     return apiError('INTERNAL_ERROR', 500, 'AI 辅导服务暂时不可用', error instanceof Error ? error.message : undefined);

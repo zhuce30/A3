@@ -110,6 +110,27 @@ services:
       A3_COACHING_MODEL: ${A3_COACHING_MODEL:-qwen-plus}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
       ASR_QWEN_API_KEY: ${ASR_QWEN_API_KEY:-}
+      A3_REALTIME_WS_PROXY_URL: ${A3_REALTIME_WS_PROXY_URL:-wss://a3.zhuce.work/a3/realtime/ws}
+
+  realtime-proxy:
+    image: ${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}
+    restart: unless-stopped
+    command: ["node", "scripts/a3-dashscope-realtime-proxy.mjs"]
+    env_file:
+      - .env.production
+    expose:
+      - "3003"
+    environment:
+      A3_API_BASE_URL: http://backend:8000
+      A3_REALTIME_WS_PROXY_HOST: 0.0.0.0
+      A3_REALTIME_WS_PROXY_PORT: "3003"
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3003/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
   caddy:
     image: caddy:2.8-alpine
@@ -124,6 +145,7 @@ services:
     depends_on:
       - frontend
       - backend
+      - realtime-proxy
 
 volumes:
   a3-caddy-data:

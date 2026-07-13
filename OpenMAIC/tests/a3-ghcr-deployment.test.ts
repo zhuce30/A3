@@ -26,7 +26,7 @@ type WorkflowDocument = {
 };
 
 type ComposeDocument = {
-  services?: Record<string, { image?: unknown }>;
+  services?: Record<string, { image?: unknown; command?: unknown; environment?: unknown }>;
 };
 
 const resetSequenceType = new yaml.Type('!reset', {
@@ -154,6 +154,9 @@ describe('A3 private GHCR frontend deployment', () => {
     expect(compose.services?.frontend?.image).toBe(
       '${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}',
     );
+    expect(compose.services?.['realtime-proxy']?.image).toBe(
+      '${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}',
+    );
     expect(envTemplate).toMatch(
       /^A3_FRONTEND_IMAGE=ghcr\.io\/zhuce30\/a3-frontend@sha256:REPLACE_WITH_VERIFIED_64_HEX_DIGEST$/m,
     );
@@ -201,7 +204,7 @@ describe('A3 private GHCR frontend deployment', () => {
     expect(runbook).toContain('.get("success") is True');
     expect(runbook).toContain("test \"$task_status\" = '401'");
     expect(runbook).toContain(
-      "printf '%s\\n' backend caddy celery celery-beat frontend mysql redis | sort",
+      "printf '%s\\n' backend caddy celery celery-beat frontend mysql realtime-proxy redis | sort",
     );
   });
 

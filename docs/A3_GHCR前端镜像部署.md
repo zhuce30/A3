@@ -66,7 +66,7 @@ pnpm build
 - 根路径状态为 `308` 且 `Location` 为 `/a3`。
 - CSRF JSON 的 `success` 为 `true`。
 - 未登录任务接口为 `401`，不能是 `500`。
-- 运行中的 Compose 服务恰好为 `backend`、`caddy`、`celery`、`celery-beat`、`frontend`、`mysql`、`redis`。
+- 运行中的 Compose 服务恰好为 `backend`、`caddy`、`celery`、`celery-beat`、`frontend`、`mysql`、`realtime-proxy`、`redis`。
 
 检查最多执行 12 次，每次失败后等待 5 秒；所有公开 HTTP 请求都限制 3 秒连接时间和 10 秒总时间。失败会停止子 shell，不会退出当前交互 shell。临时文件只保存公开响应头，并由 trap 清理。
 
@@ -85,7 +85,7 @@ pnpm build
       : >"$root_headers"
       root_status=''
       task_status=''
-      expected_services="$(printf '%s\n' backend caddy celery celery-beat frontend mysql redis | sort)"
+      expected_services="$(printf '%s\n' backend caddy celery celery-beat frontend mysql realtime-proxy redis | sort)"
 
       if root_status="$(curl -sS --connect-timeout 3 --max-time 10 -o /dev/null -D "$root_headers" -w '%{http_code}' https://a3.zhuce.work/)" &&
          test "$root_status" = '308' &&
@@ -99,7 +99,7 @@ pnpm build
              sort
          )" &&
          test "$running_services" = "$expected_services"; then
-        printf 'verification passed: HTTP assertions and exact seven running services\n'
+        printf 'verification passed: HTTP assertions and exact eight running services\n'
         exit 0
       fi
 
@@ -132,9 +132,9 @@ pnpm build
 
 部署源码清洁检查只覆盖 `OpenMAIC`、两个 Compose 文件、`Caddyfile` 和 `.github`。因此 `.env.production` 及其他已知控制面运行时文件不会误阻塞部署，但任何相关源码、编排或代理配置改动都会立即终止事务。
 
-部署路径先用完整 SHA 标签解析一次唯一 `RepoDigest`；回滚路径直接使用历史中的 digest。两条路径都会验证 digest 镜像的 OCI revision，再创建 `root:root 0600` 配置快照、把 digest 同目录原子写入、只重建 frontend、重启 Caddy并执行有界 HTTP 和七服务断言。正常部署还必须成功追加部署历史，随后立即标记事务成功并禁用恢复 trap，最后才清理快照。
+部署路径先用完整 SHA 标签解析一次唯一 `RepoDigest`；回滚路径直接使用历史中的 digest。两条路径都会验证 digest 镜像的 OCI revision，再创建 `root:root 0600` 配置快照、把 digest 同目录原子写入、只重建 frontend 与 realtime-proxy、重启 Caddy 并执行有界 HTTP 和八服务断言。正常部署还必须成功追加部署历史，随后立即标记事务成功并禁用恢复 trap，最后才清理快照。
 
-`EXIT/HUP/INT/TERM` 共用恢复处理器。处理器先禁用全部 trap，再分别记录配置恢复、旧 frontend 重建、Caddy 重启和七服务检查状态。四步都成功时才删除快照，并保留原失败或信号状态退出；任一步失败都会打印独立的 `ROLLBACK FAILED`，保留快照路径并用恢复失败状态退出。数据库和队列服务不会被停止或重建。
+`EXIT/HUP/INT/TERM` 共用恢复处理器。处理器先禁用全部 trap，再分别记录配置恢复、旧 frontend/realtime-proxy 重建、Caddy 重启和八服务检查状态。四步都成功时才删除快照，并保留原失败或信号状态退出；任一步失败都会打印独立的 `ROLLBACK FAILED`，保留快照路径并用恢复失败状态退出。数据库和队列服务不会被停止或重建。
 
 ```bash
 (
@@ -150,7 +150,7 @@ pnpm build
 
   verify_running_services() {
     local expected_services running_services
-    expected_services="$(printf '%s\n' backend caddy celery celery-beat frontend mysql redis | sort)"
+    expected_services="$(printf '%s\n' backend caddy celery celery-beat frontend mysql realtime-proxy redis | sort)"
     running_services="$(
       sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" ps --status running --services |
         sort
@@ -216,7 +216,7 @@ pnpm build
     fi
 
     sudo install -o root -g root -m 0600 "$SNAPSHOT" "$ENV_FILE" || restore_status=$?
-    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps --force-recreate frontend || frontend_status=$?
+    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps --force-recreate frontend realtime-proxy || frontend_status=$?
     sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" restart caddy || caddy_status=$?
     verify_running_services || running_status=$?
 
@@ -385,7 +385,7 @@ ROOT_UPSERT
 
     test "$(sudo stat -c '%U:%G %a' "$ENV_FILE")" = 'root:root 600'
     sudo grep -Fxq "A3_FRONTEND_IMAGE=$digest_ref" "$ENV_FILE"
-    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps --force-recreate frontend
+    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps --force-recreate frontend realtime-proxy
     sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" restart caddy
     verify_runtime
 
@@ -469,7 +469,7 @@ ROOT_UPSERT
   cd /opt/A3
   sudo test -f .env.production
   test "$(sudo stat -c '%U:%G %a' .env.production)" = 'root:root 600'
-  sudo -H env -u DOCKER_CONFIG docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build --no-deps --force-recreate frontend
+  sudo -H env -u DOCKER_CONFIG docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build --no-deps --force-recreate frontend realtime-proxy
 )
 ```
 
@@ -479,10 +479,10 @@ ROOT_UPSERT
 
 - Actions 失败不会产生可部署的 SHA 镜像，不要执行生产事务。
 - 正常部署在配置快照和变更之前用完整 SHA 标签解析并验证 digest；回滚直接拉取历史中的 digest 并验证 revision。任一验证失败时当前 frontend 服务和配置保持不变。
-- 配置变更后出现命令失败、正常异常退出或 `HUP/INT/TERM` 信号时，恢复处理器会从快照恢复旧 digest，并只重建旧 frontend、重启 Caddy。
+- 配置变更后出现命令失败、正常异常退出或 `HUP/INT/TERM` 信号时，恢复处理器会从快照恢复旧 digest，并只重建旧 frontend/realtime-proxy、重启 Caddy。
 - 自动恢复未完整成功时，不要删除输出的快照；终端会显示 `ROLLBACK FAILED` 和保留路径，供人工检查和恢复。
 - 前端启动、恢复或代理异常时保留终端错误输出，并查看日志：
 
 ```bash
-sudo -H env -u DOCKER_CONFIG docker compose --env-file /opt/A3/.env.production -f /opt/A3/docker-compose.yml -f /opt/A3/docker-compose.prod.yml logs --tail=200 frontend caddy
+sudo -H env -u DOCKER_CONFIG docker compose --env-file /opt/A3/.env.production -f /opt/A3/docker-compose.yml -f /opt/A3/docker-compose.prod.yml logs --tail=200 frontend realtime-proxy caddy
 ```
