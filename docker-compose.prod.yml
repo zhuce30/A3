@@ -31,6 +31,9 @@ services:
       DJANGO_DEBUG: "0"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env.production}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-api.zhuce.work,localhost,127.0.0.1,backend}
+      DJANGO_SESSION_COOKIE_NAME: ${DJANGO_SESSION_COOKIE_NAME:-a3_sessionid}
+      DJANGO_SESSION_COOKIE_DOMAIN: ${DJANGO_SESSION_COOKIE_DOMAIN:-.zhuce.work}
+      DJANGO_SESSION_COOKIE_SECURE: ${DJANGO_SESSION_COOKIE_SECURE:-1}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://a3.zhuce.work,https://zhuce.work,https://www.zhuce.work}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-a3_learning}
       MYSQL_USER: ${MYSQL_USER:-a3}
@@ -54,6 +57,9 @@ services:
       DJANGO_DEBUG: "0"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env.production}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-api.zhuce.work,localhost,127.0.0.1,backend}
+      DJANGO_SESSION_COOKIE_NAME: ${DJANGO_SESSION_COOKIE_NAME:-a3_sessionid}
+      DJANGO_SESSION_COOKIE_DOMAIN: ${DJANGO_SESSION_COOKIE_DOMAIN:-.zhuce.work}
+      DJANGO_SESSION_COOKIE_SECURE: ${DJANGO_SESSION_COOKIE_SECURE:-1}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://a3.zhuce.work,https://zhuce.work,https://www.zhuce.work}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-a3_learning}
       MYSQL_USER: ${MYSQL_USER:-a3}
@@ -77,6 +83,9 @@ services:
       DJANGO_DEBUG: "0"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env.production}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-api.zhuce.work,localhost,127.0.0.1,backend}
+      DJANGO_SESSION_COOKIE_NAME: ${DJANGO_SESSION_COOKIE_NAME:-a3_sessionid}
+      DJANGO_SESSION_COOKIE_DOMAIN: ${DJANGO_SESSION_COOKIE_DOMAIN:-.zhuce.work}
+      DJANGO_SESSION_COOKIE_SECURE: ${DJANGO_SESSION_COOKIE_SECURE:-1}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://a3.zhuce.work,https://zhuce.work,https://www.zhuce.work}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-a3_learning}
       MYSQL_USER: ${MYSQL_USER:-a3}
