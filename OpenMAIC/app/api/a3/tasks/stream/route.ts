@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { resolveA3InternalFrontendEndpoint } from '@/lib/server/a3-django-api';
 
 const TASKS_EVENT = 'event: tasks';
 const HEARTBEAT_EVENT = 'event: heartbeat';
@@ -36,7 +37,7 @@ export async function GET(request: NextRequest) {
 
       const pushTasks = async () => {
         try {
-          const response = await fetch(new URL('/api/a3/tasks', request.nextUrl.origin), {
+          const response = await fetch(resolveA3InternalFrontendEndpoint('/api/a3/tasks', request.nextUrl.origin), {
             headers: request.headers.get('cookie') ? { cookie: request.headers.get('cookie') || '' } : {},
             cache: 'no-store',
           });

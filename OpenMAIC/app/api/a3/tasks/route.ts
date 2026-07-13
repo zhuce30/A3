@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
-import { fetchA3DjangoJson } from '@/lib/server/a3-django-api';
+import { fetchA3DjangoJson, resolveA3InternalFrontendEndpoint } from '@/lib/server/a3-django-api';
 
 type RawTaskResponse = {
   success?: boolean;
@@ -55,10 +55,7 @@ export async function GET(request: NextRequest) {
     const [resourceResult, knowledgeResult, videoResult] = await Promise.all([
       safeDjangoTaskRequest('/api/resources/jobs/', cookieHeader),
       safeDjangoTaskRequest('/api/kb/jobs/', cookieHeader),
-      fetch(new URL('/api/a3/resources/openmaic-video', request.nextUrl.origin), {
-        headers: cookieHeader ? { cookie: cookieHeader } : {},
-        cache: 'no-store',
-      }).then((response) => response.json().catch(() => ({ success: false, jobs: [] })) as Promise<RawTaskResponse>),
+      safeInternalVideoTaskRequest(request.nextUrl.origin, cookieHeader),
     ]);
 
     if (resourceResult.degraded && knowledgeResult.degraded && videoResult.success === false) {
@@ -95,6 +92,29 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     return apiError('INTERNAL_ERROR', 500, '任务中心暂时不可用', error instanceof Error ? error.message : undefined);
+  }
+}
+
+async function safeInternalVideoTaskRequest(
+  requestOrigin: string,
+  cookieHeader: string | null,
+): Promise<RawTaskResponse & { degraded?: boolean }> {
+  try {
+    const response = await fetch(
+      resolveA3InternalFrontendEndpoint('/api/a3/resources/openmaic-video', requestOrigin),
+      {
+        headers: cookieHeader ? { cookie: cookieHeader } : {},
+        cache: 'no-store',
+      },
+    );
+    return await response.json().catch(() => ({ success: false, jobs: [] })) as RawTaskResponse;
+  } catch (error) {
+    return {
+      success: false,
+      degraded: true,
+      jobs: [],
+      error: error instanceof Error ? `视频任务源暂不可用：${error.message}` : '视频任务源暂不可用',
+    };
   }
 }
 
