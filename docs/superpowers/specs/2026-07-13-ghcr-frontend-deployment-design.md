@@ -33,13 +33,15 @@ No SMTP password, provider API key, Django secret, or database credential is pas
 
 ## Compose Integration
 
-The production Compose override assigns the frontend image through:
+The production Compose override reads the frontend image from `A3_FRONTEND_IMAGE`. The checked-in Compose fallback remains available for initial configuration discovery, but every production switch writes an immutable verified digest:
 
 ```text
-A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend:latest
+A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend@sha256:<verified-64-hex-digest>
 ```
 
-The existing `build` definition remains available for local development and emergency use, but production deployment commands use `docker compose pull frontend` followed by `up --no-build`.
+The full `DEPLOY_SHA` tag is a lookup handle, not the deployed identity. The server pulls `ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}`, resolves the matching `RepoDigest` with `docker image inspect`, and requires the image label `org.opencontainers.image.revision` to equal `DEPLOY_SHA`. Only that `repo@sha256:...` value is persisted in `A3_FRONTEND_IMAGE`.
+
+The existing `build` definition remains available for local development and emergency use, but production deployment commands always use `up --no-build`. Production never switches to `latest`.
 
 Runtime secrets continue to enter the frontend and backend containers from `.env.production`. Updating that file requires container recreation, not image rebuilding.
 
@@ -52,22 +54,25 @@ The token is entered interactively through `docker login ghcr.io --password-stdi
 ## Deployment Flow
 
 1. GitHub Actions builds and publishes the frontend image.
-2. The server pulls the latest deployment branch.
-3. The server pulls `A3_FRONTEND_IMAGE` from GHCR.
-4. Compose recreates only `frontend` and restarts Caddy without building.
-5. Health checks verify the frontend, root redirect, backend CSRF endpoint, and `/api/a3/tasks` behavior.
+2. The server verifies that the relevant deployment paths are clean, fetches and fast-forward pulls `codex/a3-latest-integration` as `admin`, and requires repository `HEAD` to equal the full `DEPLOY_SHA`. Runtime control files outside `OpenMAIC`, the Compose files, `Caddyfile`, and `.github` do not block the path-scoped cleanliness check.
+3. The server pulls the full-SHA image tag, verifies `org.opencontainers.image.revision`, resolves the matching GHCR `RepoDigest`, and snapshots `.env.production`.
+4. The transaction writes the digest to `A3_FRONTEND_IMAGE`, recreates only `frontend`, and restarts Caddy without building.
+5. A bounded 12-attempt, 5-second readiness loop uses curl connect/max timeouts and requires the root `308` redirect to `/a3`, successful CSRF response, unauthenticated tasks `401`, and exactly seven running Compose services.
+6. Only after all checks pass does the transaction delete its snapshot.
 
 The database and queues remain running during frontend deployment.
 
 ## Rollback
 
-Every image is tagged with its source commit SHA. To roll back, set `A3_FRONTEND_IMAGE` to a known-good SHA tag in `.env.production`, pull that image, and recreate only the frontend container. No source rebuild or database operation is involved.
+Rollback accepts a known-good full `ROLLBACK_SHA`, pulls that tag, verifies the same OCI revision label, resolves its `RepoDigest`, and persists the digest before recreating the frontend. No source rebuild or database operation is involved.
+
+Automatic transaction recovery disables traps before doing any work and records config restore, frontend recreation, Caddy restart, and running-service check statuses independently. It deletes the snapshot only when all recovery steps succeed and then exits with the original failure or signal status. Incomplete recovery prints `ROLLBACK FAILED`, retains the snapshot path for manual repair, and exits with a distinct recovery-failure status.
 
 ## Failure Handling
 
 - A failed Actions build publishes no new `latest` image.
-- A failed `docker compose pull frontend` leaves the currently running image untouched.
-- A failed frontend start is diagnosed through `docker compose logs frontend caddy`; rollback uses the previous SHA tag.
+- A failed full-SHA pull, missing/mismatched OCI revision, or missing matching `RepoDigest` occurs before the environment snapshot and leaves the running deployment untouched.
+- A failed frontend start is diagnosed through `docker compose logs frontend caddy`; recovery restores the previous digest from the retained snapshot.
 - Production deployment never runs `build` or `--build`, preventing another VPS resource-exhaustion incident.
 
 ## Verification

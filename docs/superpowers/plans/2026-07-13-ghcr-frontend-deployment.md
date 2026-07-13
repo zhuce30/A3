@@ -4,7 +4,7 @@
 
 **Goal:** Publish the A3 frontend as a private GHCR image from GitHub Actions and deploy it to the production VPS without running builds on the VPS.
 
-**Architecture:** A branch-scoped GitHub Actions workflow builds `OpenMAIC/Dockerfile` for `linux/amd64` and publishes immutable SHA plus `latest` tags to GHCR. The production Compose override selects that image through `A3_FRONTEND_IMAGE`, while runtime secrets remain in the server-only `.env.production`; a concise runbook covers login, pull, deploy, verification, and rollback.
+**Architecture:** A branch-scoped GitHub Actions workflow builds `OpenMAIC/Dockerfile` for `linux/amd64` and publishes full-SHA plus `latest` lookup tags to GHCR. Production accepts a full `DEPLOY_SHA`, fast-forward updates the clean integration branch to that exact `HEAD`, verifies `org.opencontainers.image.revision`, resolves the matching `RepoDigest`, and persists the immutable `repo@sha256` identity through `A3_FRONTEND_IMAGE`. Runtime secrets remain in the server-only `.env.production`; deployment and recovery are one bounded, recoverable transaction.
 
 **Tech Stack:** GitHub Actions, Docker Buildx, GHCR, Docker Compose, Vitest, Next.js 16
 
@@ -14,7 +14,7 @@
 
 - Create `.github/workflows/build-frontend-image.yml`: build and publish the private frontend image.
 - Modify `docker-compose.prod.yml`: select the prebuilt GHCR image in production.
-- Modify `.env.production.template`: document the image reference without adding credentials.
+- Modify `.env.production.template`: document the verified digest image reference without adding credentials.
 - Create `OpenMAIC/tests/a3-ghcr-deployment.test.ts`: enforce workflow, image, secret-boundary, and no-server-build contracts.
 - Create `docs/A3_GHCR前端镜像部署.md`: operator commands for authentication, deployment, verification, and rollback.
 
@@ -53,7 +53,9 @@ describe('A3 private GHCR frontend deployment', () => {
     const compose = fs.readFileSync(composePath, 'utf8');
     const envTemplate = fs.readFileSync(envTemplatePath, 'utf8');
     expect(compose).toContain('image: ${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}');
-    expect(envTemplate).toContain('A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend:latest');
+    expect(envTemplate).toContain(
+      'A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend@sha256:REPLACE_WITH_VERIFIED_64_HEX_DIGEST',
+    );
   });
 });
 ```
@@ -173,13 +175,13 @@ Add this directly under the `frontend:` service key, before `restart`:
 
 Keep the existing `build.args` block for local and emergency builds. Production commands must continue to use `--no-build`.
 
-- [ ] **Step 2: Document the default image in the environment template**
+- [ ] **Step 2: Document the verified image identity in the environment template**
 
 Add under the public domain variables:
 
 ```dotenv
-# Prebuilt frontend image. Use an immutable SHA tag for rollback.
-A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend:latest
+# Resolve the full DEPLOY_SHA tag, verify its OCI revision, and store the verified RepoDigest.
+A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend@sha256:REPLACE_WITH_VERIFIED_64_HEX_DIGEST
 ```
 
 - [ ] **Step 3: Run the deployment contract and verify GREEN**
@@ -218,13 +220,7 @@ unset GHCR_TOKEN
 
 - [ ] **Step 2: Document pull-only deployment**
 
-```bash
-cd /opt/A3
-sudo -u admin git pull origin codex/a3-latest-integration
-sudo docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml pull frontend
-sudo docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build --no-deps frontend
-sudo docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml restart caddy
-```
+The unified transaction must require a clean path-scoped integration branch, fetch and `pull --ff-only` as `admin`, and require `HEAD == DEPLOY_SHA`. It pulls the full-SHA tag, verifies `org.opencontainers.image.revision`, resolves `.RepoDigests`, writes the matching digest to `A3_FRONTEND_IMAGE`, and recreates only the frontend with `--no-build` before restarting Caddy.
 
 The runbook must state explicitly that production must not execute `docker compose build`, `docker compose up --build`, or `pnpm build`.
 
@@ -234,19 +230,12 @@ Verification commands:
 
 ```bash
 sudo docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml ps
-curl -I https://a3.zhuce.work
-curl -sS https://api.zhuce.work/api/auth/csrf/
-curl -i https://a3.zhuce.work/api/a3/tasks
+curl -I --connect-timeout 3 --max-time 10 https://a3.zhuce.work
+curl -sS --connect-timeout 3 --max-time 10 https://api.zhuce.work/api/auth/csrf/
+curl -i --connect-timeout 3 --max-time 10 https://a3.zhuce.work/api/a3/tasks
 ```
 
-Rollback commands use `ROLLBACK_SHA`, selected from a previously successful GitHub Actions run:
-
-```bash
-test -n "$ROLLBACK_SHA"
-sed -i "s|^A3_FRONTEND_IMAGE=.*|A3_FRONTEND_IMAGE=ghcr.io/zhuce30/a3-frontend:${ROLLBACK_SHA}|" .env.production
-sudo docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml pull frontend
-sudo docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build --no-deps frontend
-```
+Rollback uses `ROLLBACK_SHA`, selected from a previously successful GitHub Actions run, as the lookup tag. It must verify the OCI revision and persist the resolved digest; it must not write the SHA tag or `latest` to `A3_FRONTEND_IMAGE`.
 
 - [ ] **Step 4: Commit the runbook**
 
@@ -300,3 +289,41 @@ Expected: the newest workflow run completes successfully and publishes both fron
 - [ ] **Step 5: Hand off the one-time server PAT login and pull-only deployment**
 
 The operator follows `docs/A3_GHCR前端镜像部署.md`, confirms all seven services are `Up`, then verifies that unauthenticated `/api/a3/tasks` returns `401` rather than `500`.
+
+### Task 6: Final review hardening
+
+**Files:**
+- Modify: `OpenMAIC/tests/a3-ghcr-deployment.test.ts`
+- Modify: `.env.production.template`
+- Modify: `docs/A3_GHCR前端镜像部署.md`
+- Modify: `docs/superpowers/specs/2026-07-13-ghcr-frontend-deployment-design.md`
+- Modify: `docs/superpowers/plans/2026-07-13-ghcr-frontend-deployment.md`
+
+- [ ] **Step 1: Harden the deployment contract first**
+
+Assert the workflow's integration-branch/path/manual triggers, `contents: read`, OCI source/revision labels, and existing pinned-action/build boundaries. Assert that the runbook binds branch `HEAD` to `DEPLOY_SHA`, resolves a matching `RepoDigest`, verifies `org.opencontainers.image.revision`, persists a digest in `A3_FRONTEND_IMAGE`, never switches production to `latest`, bounds curl readiness, and retains snapshots after failed recovery.
+
+- [ ] **Step 2: Observe RED and commit the contract independently**
+
+```powershell
+cd OpenMAIC
+pnpm.cmd vitest run tests/a3-ghcr-deployment.test.ts
+```
+
+Expected: the new assertions fail against the tag-based, single-attempt runbook and template. Commit only the test as `test: cover digest-based frontend deployment`.
+
+- [ ] **Step 3: Implement verified digest deployment**
+
+The operator enters a full 40-character `DEPLOY_SHA`. As `admin`, require a clean path-scoped deployment tree, fetch and `pull --ff-only` the integration branch, then require `HEAD == DEPLOY_SHA`. Pull `ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}`, inspect `.RepoDigests`, verify `org.opencontainers.image.revision == DEPLOY_SHA`, and persist the unique matching `ghcr.io/zhuce30/a3-frontend@sha256:...` value.
+
+Rollback performs the same tag lookup and revision verification for `ROLLBACK_SHA`; SHA tags are lookup handles while the digest is the immutable runtime identity.
+
+- [ ] **Step 4: Bound readiness and make recovery auditable**
+
+Run readiness at most 12 times with a 5-second interval. Every curl uses `--connect-timeout 3 --max-time 10`; success requires root `308` with `Location: /a3`, CSRF `success: true`, unauthenticated tasks `401`, and exactly the seven expected services.
+
+Recovery disables traps first, records restore/frontend/Caddy/running-check statuses, deletes the snapshot only after complete recovery, preserves the original status on successful recovery, and prints distinct `ROLLBACK FAILED` output with the retained snapshot path when any recovery step fails.
+
+- [ ] **Step 5: Verify and commit documentation implementation**
+
+Run the focused deployment and tasks tests, syntax-check every runbook Bash fence, run targeted TypeScript/lint checks as practical, then run diff, ownership-scope, placeholder-secret, and `latest` switch scans. Commit the four documentation/template files as `docs: deploy frontend by verified image digest`.

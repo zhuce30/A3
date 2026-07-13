@@ -15,10 +15,10 @@ pnpm build
 部署前确认：
 
 1. `Build frontend image` Actions 在 `codex/a3-latest-integration` 的目标提交上成功。
-2. 私有 GHCR 包存在与目标完整提交 SHA 一致的不可变标签。
+2. 私有 GHCR 包存在与目标完整提交 SHA 一致的标签，且镜像 OCI revision 标签可验证。
 3. GitHub 账号 `zhuce30` 可读取私有仓库和对应 GHCR 包。
 
-正常生产部署必须使用成功 Actions 运行对应的完整 40 位 `DEPLOY_SHA`，镜像固定为 `ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}`。回滚同样只能使用此前成功 Actions 对应的完整 SHA。生产切换不使用 `latest`，因为可变标签无法保证部署和回滚指向同一镜像；Compose 中的默认 `latest` 仅用于首次引导，不属于本手册允许的生产切换路径。
+正常生产部署必须输入成功 Actions 运行对应的完整 40 位 `DEPLOY_SHA`。`ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}` 只用于查找镜像；事务会核对 `org.opencontainers.image.revision`，解析匹配的 `RepoDigest`，并把 `ghcr.io/zhuce30/a3-frontend@sha256:...` 写入 `A3_FRONTEND_IMAGE`。digest 才是部署和回滚的不可变身份。生产切换不使用 `latest`；Compose 中的默认 `latest` 仅用于首次引导，不属于本手册允许的生产切换路径。
 
 ## 目录与密钥所有权
 
@@ -68,33 +68,51 @@ pnpm build
 - 未登录任务接口为 `401`，不能是 `500`。
 - 运行中的 Compose 服务恰好为 `backend`、`caddy`、`celery`、`celery-beat`、`frontend`、`mysql`、`redis`。
 
-失败会停止子 shell，不会退出当前交互 shell。临时文件只保存公开响应头，并由 trap 清理。
+检查最多执行 12 次，每次失败后等待 5 秒；所有公开 HTTP 请求都限制 3 秒连接时间和 10 秒总时间。失败会停止子 shell，不会退出当前交互 shell。临时文件只保存公开响应头，并由 trap 清理。
 
 ```bash
 (
   set -euo pipefail
-  ROOT_HEADERS="$(mktemp)"
-  trap 'rm -f "$ROOT_HEADERS"' EXIT
   COMPOSE_ARGS=(--env-file /opt/A3/.env.production -f /opt/A3/docker-compose.yml -f /opt/A3/docker-compose.prod.yml)
 
-  ROOT_STATUS="$(curl -sS -o /dev/null -D "$ROOT_HEADERS" -w '%{http_code}' https://a3.zhuce.work/)"
-  test "$ROOT_STATUS" = '308'
-  tr -d '\r' <"$ROOT_HEADERS" | grep -Eiq '^location:[[:space:]]*/a3$'
+  verify_public_runtime() (
+    set -uo pipefail
+    local attempt root_headers root_status task_status expected_services running_services
+    root_headers="$(mktemp)" || exit 1
+    trap 'rm -f "$root_headers"' EXIT
 
-  curl -fsS https://api.zhuce.work/api/auth/csrf/ |
-    python3 -c 'import json, sys; assert json.load(sys.stdin).get("success") is True'
+    for attempt in {1..12}; do
+      : >"$root_headers"
+      root_status=''
+      task_status=''
+      expected_services="$(printf '%s\n' backend caddy celery celery-beat frontend mysql redis | sort)"
 
-  TASK_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' https://a3.zhuce.work/api/a3/tasks)"
-  test "$TASK_STATUS" = '401'
+      if root_status="$(curl -sS --connect-timeout 3 --max-time 10 -o /dev/null -D "$root_headers" -w '%{http_code}' https://a3.zhuce.work/)" &&
+         test "$root_status" = '308' &&
+         tr -d '\r' <"$root_headers" | grep -Eiq '^location:[[:space:]]*/a3$' &&
+         curl -fsS --connect-timeout 3 --max-time 10 https://api.zhuce.work/api/auth/csrf/ |
+           python3 -c 'import json, sys; assert json.load(sys.stdin).get("success") is True' &&
+         task_status="$(curl -sS --connect-timeout 3 --max-time 10 -o /dev/null -w '%{http_code}' https://a3.zhuce.work/api/a3/tasks)" &&
+         test "$task_status" = '401' &&
+         running_services="$(
+           sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" ps --status running --services |
+             sort
+         )" &&
+         test "$running_services" = "$expected_services"; then
+        printf 'verification passed: HTTP assertions and exact seven running services\n'
+        exit 0
+      fi
 
-  EXPECTED_SERVICES="$(printf '%s\n' backend caddy celery celery-beat frontend mysql redis | sort)"
-  RUNNING_SERVICES="$(
-    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" ps --status running --services |
-      sort
-  )"
-  test "$RUNNING_SERVICES" = "$EXPECTED_SERVICES"
+      if [ "$attempt" -lt 12 ]; then
+        sleep 5
+      fi
+    done
 
-  printf 'verification passed: HTTP assertions and exact seven running services\n'
+    printf 'verification failed after 12 attempts\n' >&2
+    exit 1
+  )
+
+  verify_public_runtime
 )
 ```
 
@@ -112,9 +130,11 @@ pnpm build
 - `deploy`：正常部署，必须输入成功 Actions 对应的 `DEPLOY_SHA`，并先以 `admin` 身份 fast-forward 拉取集成分支。
 - `rollback`：回滚，必须输入此前成功 Actions 对应的 `ROLLBACK_SHA`。
 
-`switch_frontend_image` 的固定顺序是：验证镜像引用和环境文件、预拉取目标镜像、创建 `root:root 0600` 快照、同目录原子更新、只重建 frontend、重启 Caddy、断言 HTTP 和七个服务，验证通过后才删除快照并标记成功。
+部署源码清洁检查只覆盖 `OpenMAIC`、两个 Compose 文件、`Caddyfile` 和 `.github`。因此 `.env.production` 及其他已知控制面运行时文件不会误阻塞部署，但任何相关源码、编排或代理配置改动都会立即终止事务。
 
-`EXIT/HUP/INT/TERM` 共用恢复处理器。事务未标记成功且快照仍存在时，处理器先禁用全部 trap，恢复旧配置，只强制重建旧 frontend 并重启 Caddy，最后保留原失败或信号状态退出。数据库和队列服务不会被停止或重建。
+`switch_frontend_image` 的固定顺序是：用完整 SHA 拉取标签、核对 OCI revision、解析唯一匹配的 `RepoDigest`、验证环境文件、创建 `root:root 0600` 快照、把 digest 同目录原子写入、只重建 frontend、重启 Caddy、执行有界 HTTP 和七服务断言，验证通过后才删除快照并标记成功。
+
+`EXIT/HUP/INT/TERM` 共用恢复处理器。处理器先禁用全部 trap，再分别记录配置恢复、旧 frontend 重建、Caddy 重启和七服务检查状态。四步都成功时才删除快照，并保留原失败或信号状态退出；任一步失败都会打印独立的 `ROLLBACK FAILED`，保留快照路径并用恢复失败状态退出。数据库和队列服务不会被停止或重建。
 
 ```bash
 (
@@ -122,32 +142,50 @@ pnpm build
   cd /opt/A3
 
   ENV_FILE='/opt/A3/.env.production'
+  INTEGRATION_BRANCH='codex/a3-latest-integration'
   COMPOSE_ARGS=(--env-file "$ENV_FILE" -f /opt/A3/docker-compose.yml -f /opt/A3/docker-compose.prod.yml)
   SNAPSHOT=''
   TRANSACTION_SUCCESS=0
 
-  verify_runtime() (
-    set -uo pipefail
-    local root_headers root_status task_status expected_services running_services
-    root_headers="$(mktemp)" || exit 1
-    trap 'rm -f "$root_headers"' EXIT
-
-    root_status="$(curl -sS -o /dev/null -D "$root_headers" -w '%{http_code}' https://a3.zhuce.work/)" || exit 1
-    test "$root_status" = '308' || exit 1
-    tr -d '\r' <"$root_headers" | grep -Eiq '^location:[[:space:]]*/a3$' || exit 1
-
-    curl -fsS https://api.zhuce.work/api/auth/csrf/ |
-      python3 -c 'import json, sys; assert json.load(sys.stdin).get("success") is True' || exit 1
-
-    task_status="$(curl -sS -o /dev/null -w '%{http_code}' https://a3.zhuce.work/api/a3/tasks)" || exit 1
-    test "$task_status" = '401' || exit 1
-
+  verify_running_services() {
+    local expected_services running_services
     expected_services="$(printf '%s\n' backend caddy celery celery-beat frontend mysql redis | sort)"
     running_services="$(
       sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" ps --status running --services |
         sort
-    )" || exit 1
-    test "$running_services" = "$expected_services" || exit 1
+    )" || return 1
+    test "$running_services" = "$expected_services"
+  }
+
+  verify_runtime() (
+    set -uo pipefail
+    local attempt root_headers root_status task_status
+    root_headers="$(mktemp)" || exit 1
+    trap 'rm -f "$root_headers"' EXIT
+
+    for attempt in {1..12}; do
+      : >"$root_headers"
+      root_status=''
+      task_status=''
+
+      if root_status="$(curl -sS --connect-timeout 3 --max-time 10 -o /dev/null -D "$root_headers" -w '%{http_code}' https://a3.zhuce.work/)" &&
+         test "$root_status" = '308' &&
+         tr -d '\r' <"$root_headers" | grep -Eiq '^location:[[:space:]]*/a3$' &&
+         curl -fsS --connect-timeout 3 --max-time 10 https://api.zhuce.work/api/auth/csrf/ |
+           python3 -c 'import json, sys; assert json.load(sys.stdin).get("success") is True' &&
+         task_status="$(curl -sS --connect-timeout 3 --max-time 10 -o /dev/null -w '%{http_code}' https://a3.zhuce.work/api/a3/tasks)" &&
+         test "$task_status" = '401' &&
+         verify_running_services; then
+        exit 0
+      fi
+
+      if [ "$attempt" -lt 12 ]; then
+        sleep 5
+      fi
+    done
+
+    printf 'public readiness failed after 12 attempts\n' >&2
+    exit 1
   )
 
   recover_transaction() {
@@ -156,39 +194,103 @@ pnpm build
     trap - EXIT HUP INT TERM
     set +e
 
+    local restore_status=0
+    local frontend_status=0
+    local caddy_status=0
+    local running_status=0
+
     case "$trigger" in
       HUP) rc=129 ;;
       INT) rc=130 ;;
       TERM) rc=143 ;;
     esac
 
-    if [ "$TRANSACTION_SUCCESS" -ne 1 ] &&
-       [ -n "$SNAPSHOT" ] &&
-       sudo test -f "$SNAPSHOT"; then
-      sudo mv -f "$SNAPSHOT" "$ENV_FILE"
-      sudo chown root:root "$ENV_FILE"
-      sudo chmod 0600 "$ENV_FILE"
-      SNAPSHOT=''
-      sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps --force-recreate frontend
-      sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" restart caddy
+    if [ "$TRANSACTION_SUCCESS" -eq 1 ]; then
+      exit "$rc"
     fi
 
-    exit "$rc"
+    if [ -z "$SNAPSHOT" ] || ! sudo test -f "$SNAPSHOT"; then
+      printf 'ROLLBACK FAILED: snapshot unavailable; manual recovery required\n' >&2
+      exit 125
+    fi
+
+    sudo install -o root -g root -m 0600 "$SNAPSHOT" "$ENV_FILE" || restore_status=$?
+    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps --force-recreate frontend || frontend_status=$?
+    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" restart caddy || caddy_status=$?
+    verify_running_services || running_status=$?
+
+    if [ "$restore_status" -eq 0 ] &&
+       [ "$frontend_status" -eq 0 ] &&
+       [ "$caddy_status" -eq 0 ] &&
+       [ "$running_status" -eq 0 ] &&
+       sudo rm -f "$SNAPSHOT"; then
+      SNAPSHOT=''
+      printf 'rollback succeeded; preserving original exit status %s\n' "$rc" >&2
+      exit "$rc"
+    fi
+
+    printf 'ROLLBACK FAILED: restore=%s frontend=%s caddy=%s running=%s; snapshot retained at %s\n' \
+      "$restore_status" "$frontend_status" "$caddy_status" "$running_status" "$SNAPSHOT" >&2
+    exit 125
+  }
+
+  assert_relevant_paths_clean() {
+    local dirty_paths
+    dirty_paths="$(
+      sudo -H -u admin git -C /opt/A3 status --porcelain --untracked-files=all -- OpenMAIC docker-compose.yml docker-compose.prod.yml Caddyfile .github
+    )"
+    if [ -n "$dirty_paths" ]; then
+      printf 'deployment paths are not clean:\n%s\n' "$dirty_paths" >&2
+      return 1
+    fi
+  }
+
+  prepare_deploy_source() {
+    local current_branch
+    current_branch="$(sudo -H -u admin git -C /opt/A3 symbolic-ref --short HEAD)"
+    test "$current_branch" = "$INTEGRATION_BRANCH"
+    assert_relevant_paths_clean
+    sudo -H -u admin git -C /opt/A3 fetch --prune origin "$INTEGRATION_BRANCH"
+    sudo -H -u admin git -C /opt/A3 pull --ff-only origin "$INTEGRATION_BRANCH"
+    test "$(sudo -H -u admin git -C /opt/A3 rev-parse HEAD)" = "$DEPLOY_SHA"
+    assert_relevant_paths_clean
+  }
+
+  resolve_verified_digest() {
+    local tag_ref=$1
+    local expected_revision=$2
+    local image_revision
+    local digest_matches=()
+
+    image_revision="$(
+      sudo -H env -u DOCKER_CONFIG docker image inspect \
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$tag_ref"
+    )"
+    test "$image_revision" = "$expected_revision"
+
+    mapfile -t digest_matches < <(
+      sudo -H env -u DOCKER_CONFIG docker image inspect \
+        --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag_ref" |
+        grep -E '^ghcr\.io/zhuce30/a3-frontend@sha256:[0-9a-f]{64}$' |
+        sort -u
+    )
+    test "${#digest_matches[@]}" -eq 1
+    printf '%s\n' "${digest_matches[0]}"
   }
 
   switch_frontend_image() {
-    local image_ref=$1
+    local tag_ref=$1
+    local expected_revision=$2
+    local digest_ref
 
-    [[ "$image_ref" =~ ^ghcr\.io/zhuce30/a3-frontend:[0-9a-f]{40}$ ]]
+    [[ "$tag_ref" =~ ^ghcr\.io/zhuce30/a3-frontend:[0-9a-f]{40}$ ]]
+    [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]]
     sudo test -f "$ENV_FILE"
     test "$(sudo stat -c '%U:%G %a' "$ENV_FILE")" = 'root:root 600'
 
-    sudo -H env -u DOCKER_CONFIG docker pull "$image_ref"
-
-    trap 'recover_transaction EXIT' EXIT
-    trap 'recover_transaction HUP' HUP
-    trap 'recover_transaction INT' INT
-    trap 'recover_transaction TERM' TERM
+    sudo -H env -u DOCKER_CONFIG docker pull "$tag_ref"
+    digest_ref="$(resolve_verified_digest "$tag_ref" "$expected_revision")"
+    [[ "$digest_ref" =~ ^ghcr\.io/zhuce30/a3-frontend@sha256:[0-9a-f]{64}$ ]]
 
     SNAPSHOT="$(
       sudo bash -s -- "$ENV_FILE" <<'ROOT_SNAPSHOT'
@@ -203,16 +305,21 @@ trap - EXIT
 ROOT_SNAPSHOT
     )"
 
-    sudo bash -s -- "$ENV_FILE" "$image_ref" <<'ROOT_UPSERT'
+    trap 'recover_transaction EXIT' EXIT
+    trap 'recover_transaction HUP' HUP
+    trap 'recover_transaction INT' INT
+    trap 'recover_transaction TERM' TERM
+
+    sudo bash -s -- "$ENV_FILE" "$digest_ref" <<'ROOT_UPSERT'
 set -euo pipefail
 env_file=$1
-image_ref=$2
+digest_ref=$2
 tmp="$(mktemp "${env_file}.new.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
-awk -v image_ref="$image_ref" '
+awk -v digest_ref="$digest_ref" '
   /^A3_FRONTEND_IMAGE=/ {
     if (!seen) {
-      print "A3_FRONTEND_IMAGE=" image_ref
+      print "A3_FRONTEND_IMAGE=" digest_ref
       seen = 1
     }
     next
@@ -220,7 +327,7 @@ awk -v image_ref="$image_ref" '
   { print }
   END {
     if (!seen) {
-      print "A3_FRONTEND_IMAGE=" image_ref
+      print "A3_FRONTEND_IMAGE=" digest_ref
     }
   }
 ' "$env_file" >"$tmp"
@@ -231,7 +338,8 @@ trap - EXIT
 ROOT_UPSERT
 
     test "$(sudo stat -c '%U:%G %a' "$ENV_FILE")" = 'root:root 600'
-    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps frontend
+    sudo grep -Fxq "A3_FRONTEND_IMAGE=$digest_ref" "$ENV_FILE"
+    sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" up -d --no-build --no-deps --force-recreate frontend
     sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" restart caddy
     verify_runtime
 
@@ -249,9 +357,9 @@ ROOT_UPSERT
         printf 'DEPLOY_SHA 必须是 40 位小写十六进制提交 SHA\n' >&2
         exit 1
       fi
-      sudo -H -u admin git -C /opt/A3 pull --ff-only origin codex/a3-latest-integration
-      IMAGE_REF="ghcr.io/zhuce30/a3-frontend:$DEPLOY_SHA"
-      unset DEPLOY_SHA
+      prepare_deploy_source
+      TARGET_SHA="$DEPLOY_SHA"
+      IMAGE_TAG="ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}"
       ;;
     rollback)
       read -rp "ROLLBACK_SHA（此前成功 Actions 的完整提交 SHA）: " ROLLBACK_SHA
@@ -259,8 +367,8 @@ ROOT_UPSERT
         printf 'ROLLBACK_SHA 必须是 40 位小写十六进制提交 SHA\n' >&2
         exit 1
       fi
-      IMAGE_REF="ghcr.io/zhuce30/a3-frontend:$ROLLBACK_SHA"
-      unset ROLLBACK_SHA
+      TARGET_SHA="$ROLLBACK_SHA"
+      IMAGE_TAG="ghcr.io/zhuce30/a3-frontend:${ROLLBACK_SHA}"
       ;;
     *)
       printf '操作模式只能是 deploy 或 rollback\n' >&2
@@ -269,8 +377,8 @@ ROOT_UPSERT
   esac
   unset OPERATION
 
-  switch_frontend_image "$IMAGE_REF"
-  unset IMAGE_REF
+  switch_frontend_image "$IMAGE_TAG" "$TARGET_SHA"
+  unset DEPLOY_SHA ROLLBACK_SHA TARGET_SHA IMAGE_TAG
 )
 ```
 
@@ -293,8 +401,9 @@ ROOT_UPSERT
 ## 失败处理
 
 - Actions 失败不会产生可部署的 SHA 镜像，不要执行生产事务。
-- 目标镜像在配置快照和变更之前预拉取；拉取失败时当前 frontend 服务、配置和本地镜像保持不变。
-- 配置变更后出现命令失败、正常异常退出或 `HUP/INT/TERM` 信号时，恢复处理器会恢复快照并只重建旧 frontend、重启 Caddy。
+- 目标完整 SHA 标签在配置快照和变更之前预拉取并验证 revision/digest；任一验证失败时当前 frontend 服务和配置保持不变。
+- 配置变更后出现命令失败、正常异常退出或 `HUP/INT/TERM` 信号时，恢复处理器会从快照恢复旧 digest，并只重建旧 frontend、重启 Caddy。
+- 自动恢复未完整成功时，不要删除输出的快照；终端会显示 `ROLLBACK FAILED` 和保留路径，供人工检查和恢复。
 - 前端启动、恢复或代理异常时保留终端错误输出，并查看日志：
 
 ```bash
