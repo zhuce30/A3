@@ -1,5 +1,7 @@
 a3.zhuce.work {
 	encode zstd gzip
+	@root path /
+	redir @root /a3 308
 	reverse_proxy frontend:3000
 }
 
