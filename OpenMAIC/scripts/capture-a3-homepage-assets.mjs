@@ -26,6 +26,7 @@ const expectedAssets = [
   'profile.webp',
   'diagnostic.webp',
   'knowledge-base.webp',
+  'multimodal-resources.webp',
   'classroom.webp',
   'teacher-workbench.webp',
   'teacher-fallback.webp',
@@ -58,6 +59,22 @@ const studentAssets = [
     ready: async (page) =>
       page.getByTestId('a3-kb-resource-row').first().waitFor({ timeout: 60_000 }),
     height: 960,
+  },
+  {
+    route: '/a3/resources/latest',
+    filename: 'multimodal-resources.webp',
+    testId: 'a3-resource-pack-detail',
+    focusTestId: 'a3-resource-pack-detail-resource',
+    focusAncestor: 'div',
+    ready: async (page) => {
+      const resourceEntries = page.getByTestId('a3-resource-pack-detail-resource');
+      await resourceEntries.first().waitFor({ timeout: 60_000 });
+      const entryCount = await resourceEntries.count();
+      if (entryCount < 1) {
+        throw new Error('multimodal-resources.webp requires at least one real resource entry');
+      }
+    },
+    height: 900,
   },
   {
     route: '/a3/classroom',
@@ -165,10 +182,10 @@ async function openVerifiedLoginPage(page) {
     throw new Error(`A3 截图服务发生跨 origin 跳转：${page.url()}`);
   }
   try {
+    await page.getByLabel('账号').waitFor({ state: 'visible', timeout: 15_000 });
     await page
-      .getByTestId('a3-login-learning-preview')
+      .locator('input[autocomplete="current-password"]')
       .waitFor({ state: 'visible', timeout: 15_000 });
-    await page.locator('main input').nth(1).waitFor({ state: 'visible', timeout: 15_000 });
     await page.getByRole('button', { name: '登录', exact: true }).waitFor({
       state: 'visible',
       timeout: 15_000,

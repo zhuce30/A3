@@ -5,6 +5,15 @@ import sharp from 'sharp';
 
 const SCREENSHOT_DIR = path.resolve(process.cwd(), 'test-results');
 const TERMINAL_RENDERERS = ['vrm', 'vrm_idle_animation', 'primitive', 'static_fallback'];
+const RESOURCE_TYPE_LABELS = [
+  '课程讲解文档',
+  '知识点速记卡',
+  '知识点思维导图',
+  '专项练习题',
+  '工程实践案例',
+  '代码类实操案例',
+  '短视频/动画脚本',
+] as const;
 
 test.setTimeout(90_000);
 
@@ -108,6 +117,30 @@ async function expectProductImagesReadable(page: Page) {
     expect(geometry.imageBox.left).toBeGreaterThanOrEqual((geometry.frameBox?.left ?? 0) - 1);
     expect(geometry.imageBox.right).toBeLessThanOrEqual((geometry.frameBox?.right ?? 0) + 1);
   }
+}
+
+async function expectResourceShowcaseReadable(page: Page) {
+  const section = page.getByTestId('a3-homepage-resources');
+  await section.scrollIntoViewIfNeeded();
+  await expect(section).toBeVisible();
+
+  for (const label of RESOURCE_TYPE_LABELS) {
+    await expect(section.getByText(label, { exact: true })).toBeVisible();
+  }
+
+  const image = section.getByRole('img', { name: '个性化多模态资源包界面' });
+  const index = section.getByRole('list', { name: '多模态资源类型' });
+  const cta = section.getByRole('link', { name: '查看个性化资源' });
+  await expect(image).toBeVisible();
+  await expect(cta).toBeVisible();
+  await expect.poll(() => image.evaluate((node) => node.complete && node.naturalWidth > 0)).toBe(true);
+  expect(await section.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+  expect(await cta.evaluate((node) => node.scrollHeight <= node.clientHeight + 1)).toBe(true);
+
+  const [indexBox, imageBox] = await Promise.all([index.boundingBox(), image.boundingBox()]);
+  expect(indexBox).not.toBeNull();
+  expect(imageBox).not.toBeNull();
+  expect(boxesOverlap(indexBox!, imageBox!)).toBe(false);
 }
 
 async function expectHeaderAndHero(page: Page, viewportHeight: number) {
@@ -285,6 +318,7 @@ for (const viewport of [
       animations: 'disabled',
     });
     await expectProductImagesReadable(page);
+    await expectResourceShowcaseReadable(page);
 
     const footer = page.locator('footer');
     await footer.scrollIntoViewIfNeeded();
@@ -364,6 +398,7 @@ test('reduced motion keeps every key chapter and the static hero readable', asyn
     'a3-homepage-profile',
     'a3-homepage-diagnostic',
     'a3-homepage-knowledge',
+    'a3-homepage-resources',
     'a3-homepage-classroom',
     'a3-homepage-coaching',
     'a3-homepage-evidence',

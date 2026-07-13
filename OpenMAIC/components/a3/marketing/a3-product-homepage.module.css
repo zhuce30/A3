@@ -312,6 +312,7 @@
 
 .story,
 .knowledgeBand,
+.resourceShowcase,
 .evidenceSection,
 .closingSection {
   scroll-margin-top: 88px;
@@ -497,6 +498,113 @@
   width: min(100% - 48px, 1440px);
   margin: 0 auto;
   padding: 176px 0;
+}
+
+.resourceShowcase {
+  width: min(100% - 48px, 1440px);
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(300px, 0.62fr) minmax(0, 1.5fr);
+  grid-template-rows: auto 1fr auto;
+  column-gap: clamp(56px, 8vw, 132px);
+  padding: 176px 0;
+}
+
+.resourceIntro {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.resourceIntro h2 {
+  margin: 0;
+  color: #f5f7f2;
+  font-size: 52px;
+  font-weight: 820;
+  line-height: 1.08;
+  letter-spacing: 0;
+}
+
+.resourceIntro > p:not(.eyebrow) {
+  max-width: 500px;
+  margin: 22px 0 0;
+  color: #adb4aa;
+  font-size: 17px;
+  line-height: 1.75;
+}
+
+.resourceIndex {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: end;
+  margin: 48px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.resourceIndex li {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 4px 12px;
+  padding: 15px 0;
+  border-bottom: 1px solid rgb(245 247 242 / 13%);
+}
+
+.resourceIndex li:first-child {
+  border-top: 1px solid rgb(245 247 242 / 13%);
+}
+
+.resourceIndex span {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  color: #d9ff62;
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1.55;
+}
+
+.resourceIndex strong {
+  min-width: 0;
+  color: #eef1eb;
+  font-size: 15px;
+  font-weight: 720;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.resourceIndex p {
+  min-width: 0;
+  margin: 0;
+  color: #8f978d;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.resourceProductFrame {
+  position: relative;
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  align-self: center;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgb(245 247 242 / 18%);
+  border-radius: 8px;
+  background: #eef2f6;
+  box-shadow: 0 34px 90px rgb(0 0 0 / 34%);
+}
+
+.resourceProductFrame img {
+  object-fit: contain;
+  object-position: center;
+}
+
+.resourceCta {
+  grid-column: 1;
+  grid-row: 3;
+  justify-self: start;
 }
 
 .classroomControls {
@@ -929,6 +1037,7 @@
 
   .story,
   .knowledgeBand,
+  .resourceShowcase,
   .evidenceSection,
   .closingSection {
     scroll-margin-top: 76px;
@@ -973,12 +1082,14 @@
   }
 
   .storyCopy h2,
+  .resourceIntro h2,
   .evidenceCopy h2,
   .closingSection h2 {
     font-size: 38px;
   }
 
   .storyCopy > p:not(.eyebrow),
+  .resourceIntro > p:not(.eyebrow),
   .evidenceCopy > p:last-child {
     margin-top: 16px;
     font-size: 15px;
@@ -1034,6 +1145,40 @@
   .classroomBand {
     width: 100%;
     padding: 104px 0;
+  }
+
+  .resourceShowcase {
+    width: min(100% - 36px, 680px);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+    gap: 0;
+    padding: 104px 0;
+  }
+
+  .resourceIntro,
+  .resourceIndex,
+  .resourceProductFrame,
+  .resourceCta {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .resourceIndex {
+    margin-top: 40px;
+  }
+
+  .resourceIndex li {
+    grid-template-columns: 32px minmax(0, 1fr);
+    padding: 14px 0;
+  }
+
+  .resourceProductFrame {
+    aspect-ratio: 4 / 3;
+    margin-top: 38px;
+  }
+
+  .resourceCta {
+    margin-top: 26px;
   }
 
   .classroomControls {

@@ -764,6 +764,17 @@ def list_resource_packs(user) -> list[dict]:
     profile = LearnerProfile.objects.filter(user=user).first()
     extra = profile.extra_profile if profile and isinstance(profile.extra_profile, dict) else {}
     packs = extra.get("resourcePacks") if isinstance(extra.get("resourcePacks"), list) else []
+    if not packs:
+        logs = ResourcePackLog.objects.filter(user=user, source="resource_generation").order_by(
+            "-completed_at", "-created_at"
+        )[:30]
+        packs = [
+            log.payload
+            for log in logs
+            if isinstance(log.payload, dict)
+            and log.payload.get("resourcePackId")
+            and isinstance(log.payload.get("resources"), list)
+        ]
     return [_attach_openmaic_artifacts(user, pack) for pack in packs]
 
 

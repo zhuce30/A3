@@ -11,6 +11,7 @@ import {
   A3_HOMEPAGE_FOOTER,
   A3_HOMEPAGE_HERO_MEDIA,
   A3_HOMEPAGE_NAV,
+  A3_HOMEPAGE_RESOURCE_TYPES,
   A3_HOMEPAGE_STORY,
 } from '@/components/a3/marketing/a3-homepage-content';
 import { A3HomepageHero } from '@/components/a3/marketing/a3-homepage-hero';
@@ -34,6 +35,7 @@ const expectedAssets = [
   'profile.webp',
   'diagnostic.webp',
   'knowledge-base.webp',
+  'multimodal-resources.webp',
   'classroom.webp',
   'teacher-workbench.webp',
   'teacher-fallback.webp',
@@ -42,6 +44,10 @@ const expectedAssets = [
 const marketingDir = path.resolve(process.cwd(), 'components/a3/marketing');
 const homepageSource = fs.readFileSync(path.join(marketingDir, 'a3-product-homepage.tsx'), 'utf8');
 const storySource = fs.readFileSync(path.join(marketingDir, 'a3-homepage-story.tsx'), 'utf8');
+const resourceShowcaseSource = fs.readFileSync(
+  path.join(marketingDir, 'a3-homepage-resource-showcase.tsx'),
+  'utf8',
+);
 const teacherSource = fs.readFileSync(
   path.join(marketingDir, 'a3-homepage-teacher-stage.tsx'),
   'utf8',
@@ -108,6 +114,7 @@ describe('A3 product homepage learning story modules', () => {
       'profile',
       'diagnostic',
       'knowledge',
+      'resources',
       'classroom',
       'coaching',
       'evidence',
@@ -175,6 +182,24 @@ describe('A3 product homepage learning story modules', () => {
       expect(markup).toContain(label);
     }
     expect(storySource).not.toContain('<svg');
+  });
+
+  it('renders the seven real resource types between knowledge and classroom', () => {
+    const markup = renderToStaticMarkup(createElement(storyModule.A3HomepageStory));
+    const resourcesStart = markup.indexOf('data-testid="a3-homepage-resources"');
+    const classroomStart = markup.indexOf('data-testid="a3-homepage-classroom"');
+
+    expect(resourcesStart).toBeGreaterThan(-1);
+    expect(classroomStart).toBeGreaterThan(resourcesStart);
+    expect(markup).toContain('aria-label="多模态资源类型"');
+    expect(markup).toContain('alt="个性化多模态资源包界面"');
+    expect(markup).toContain('href="/a3/recommendations"');
+    for (const resource of A3_HOMEPAGE_RESOURCE_TYPES) {
+      expect(markup).toContain(resource.label);
+      expect(markup).toContain(resource.use);
+    }
+    expect(resourceShowcaseSource).not.toContain('/api/resources/generate/');
+    expect(resourceShowcaseSource).not.toContain('a3PostJson');
   });
 
   it('changes the read-only classroom presentation without calling a product API', () => {
@@ -290,6 +315,21 @@ describe('A3 product homepage learning story modules', () => {
     expect(captureSource).not.toContain("focusHeading: '班级学情概览'");
   });
 
+  it('captures a real resource-pack result through the read-only homepage pipeline', () => {
+    expect(captureSource).toContain("filename: 'multimodal-resources.webp'");
+    expect(captureSource).toContain("route: '/a3/resources/latest'");
+    expect(captureSource).toContain("testId: 'a3-resource-pack-detail'");
+    expect(captureSource).toContain("focusTestId: 'a3-resource-pack-detail-resource'");
+    expect(captureSource).toContain("getByTestId('a3-resource-pack-detail-resource')");
+    expect(captureSource).toContain("'multimodal-resources.webp'");
+  });
+
+  it('validates the current login form before capture instead of a removed preview marker', () => {
+    expect(captureSource).toContain("getByLabel('账号')");
+    expect(captureSource).toContain("input[autocomplete=\"current-password\"]");
+    expect(captureSource).not.toContain('a3-login-learning-preview');
+  });
+
   it('uses only approved evidence and keeps team details in the footer', () => {
     authState.user = null;
     const markup = renderToStaticMarkup(createElement(A3ProductHomepage));
@@ -306,7 +346,7 @@ describe('A3 product homepage learning story modules', () => {
   });
 
   it('keeps private implementation details and capture APIs out of the public story', () => {
-    const combined = `${homepageSource}\n${storySource}\n${teacherSource}`;
+    const combined = `${homepageSource}\n${storySource}\n${resourceShowcaseSource}\n${teacherSource}`;
 
     expect(combined).not.toContain('OpenMAIC');
     expect(combined).not.toMatch(/[A-Z]:\\\\/);
@@ -367,6 +407,27 @@ describe('A3 product homepage assets', () => {
 });
 
 describe('A3 product homepage content contract', () => {
+  it('publishes every canonical multimodal resource type in backend order', () => {
+    expect(A3_HOMEPAGE_RESOURCE_TYPES.map((item) => item.type)).toEqual([
+      'lecture_doc',
+      'knowledge_card',
+      'mind_map',
+      'practice_set',
+      'case_study',
+      'code_lab',
+      'micro_video_script',
+    ]);
+    expect(A3_HOMEPAGE_RESOURCE_TYPES.map((item) => item.label)).toEqual([
+      '课程讲解文档',
+      '知识点速记卡',
+      '知识点思维导图',
+      '专项练习题',
+      '工程实践案例',
+      '代码类实操案例',
+      '短视频/动画脚本',
+    ]);
+  });
+
   it('uses the exact approved navigation labels and anchors', () => {
     expect(A3_HOMEPAGE_NAV).toEqual([
       { label: '产品能力', href: '#capabilities' },
@@ -412,8 +473,16 @@ describe('A3 product homepage content contract', () => {
         alt: '操作系统本地知识库界面',
       },
       {
+        id: 'resources',
+        index: '04 / RESOURCES',
+        title: '同一个目标，生成不同学习资源。',
+        summary: '讲义、卡片、导图、练习、案例、代码和视频脚本，都围绕你的当前目标组织。',
+        media: '/a3/assets/homepage/multimodal-resources.webp',
+        alt: '个性化多模态资源包界面',
+      },
+      {
         id: 'classroom',
-        index: '04 / CLASSROOM',
+        index: '05 / CLASSROOM',
         title: '走进为你生成的课堂。',
         summary: '讲解紧跟你的薄弱点，也保留每一条资料来源。',
         media: '/a3/assets/homepage/classroom.webp',
@@ -421,7 +490,7 @@ describe('A3 product homepage content contract', () => {
       },
       {
         id: 'coaching',
-        index: '05 / COACHING',
+        index: '06 / COACHING',
         title: '随时有人陪你学懂。',
         summary: '看见问题、听懂追问，再陪你把难点讲明白。',
         media: '/a3/assets/homepage/teacher-fallback.webp',
@@ -429,7 +498,7 @@ describe('A3 product homepage content contract', () => {
       },
       {
         id: 'evidence',
-        index: '06 / EVIDENCE',
+        index: '07 / EVIDENCE',
         title: '每一步，都有据可循。',
         summary: '从资料来源到学习进展，过程清清楚楚。',
         media: null,
@@ -437,7 +506,7 @@ describe('A3 product homepage content contract', () => {
       },
       {
         id: 'teacher',
-        index: '07 / TEACHER',
+        index: '08 / TEACHER',
         title: '及时看见，也能及时介入。',
         summary: '教师看见班级薄弱点和课堂任务队列，在需要时及时介入。',
         media: '/a3/assets/homepage/teacher-workbench.webp',

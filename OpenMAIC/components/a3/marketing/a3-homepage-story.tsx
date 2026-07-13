@@ -5,6 +5,7 @@ import { useState } from 'react';
 import { A3_HOMEPAGE_EVIDENCE, A3_HOMEPAGE_FOOTER, A3_HOMEPAGE_STORY } from './a3-homepage-content';
 import { A3HomepageTeacherStage } from './a3-homepage-teacher-stage';
 import { A3HomepageProductMedia } from './a3-homepage-product-media';
+import { A3HomepageResourceShowcase } from './a3-homepage-resource-showcase';
 import styles from './a3-product-homepage.module.css';
 
 type StoryItem = (typeof A3_HOMEPAGE_STORY)[number];
@@ -156,13 +157,14 @@ function ClosingSection() {
 
 export function A3HomepageStory() {
   const [classroomMode, setClassroomMode] = useState<ClassroomMode>('lesson');
-  const [profile, diagnostic, knowledge, classroom, coaching, evidence, teacher] =
+  const [profile, diagnostic, knowledge, resources, classroom, coaching, evidence, teacher] =
     A3_HOMEPAGE_STORY;
 
   if (
     !profile ||
     !diagnostic ||
     !knowledge ||
+    !resources ||
     !classroom ||
     !coaching ||
     !evidence ||
@@ -170,6 +172,7 @@ export function A3HomepageStory() {
     !isProductStoryItem(profile) ||
     !isProductStoryItem(diagnostic) ||
     !isProductStoryItem(knowledge) ||
+    !isProductStoryItem(resources) ||
     !isProductStoryItem(classroom) ||
     !isProductStoryItem(teacher)
   ) {
@@ -185,6 +188,8 @@ export function A3HomepageStory() {
         <ProductStorySection item={knowledge} />
         <KnowledgeFlow />
       </div>
+
+      <A3HomepageResourceShowcase item={resources} />
 
       <div className={styles.classroomBand}>
         <ProductStorySection item={classroom} />
