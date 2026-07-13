@@ -86,6 +86,7 @@ services:
       A3_SEED_DEMO_DATA: "0"
 
   frontend:
+    image: ${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}
     restart: unless-stopped
     build:
       args:
