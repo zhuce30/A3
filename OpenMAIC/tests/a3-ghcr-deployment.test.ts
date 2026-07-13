@@ -12,7 +12,10 @@ type WorkflowStep = {
 type WorkflowDocument = {
   concurrency?: Record<string, unknown>;
   permissions?: Record<string, unknown>;
-  jobs?: Record<string, { if?: unknown; steps?: WorkflowStep[] }>;
+  jobs?: Record<
+    string,
+    { concurrency?: Record<string, unknown>; if?: unknown; steps?: WorkflowStep[] }
+  >;
 };
 
 type ComposeDocument = {
@@ -79,10 +82,11 @@ describe('A3 private GHCR frontend deployment', () => {
     );
 
     expect(buildJob?.if).toBe("${{ github.ref == 'refs/heads/codex/a3-latest-integration' }}");
-    expect(workflow.concurrency).toEqual({
+    expect(buildJob?.concurrency).toEqual({
       group: 'a3-frontend-image',
       'cancel-in-progress': true,
     });
+    expect(workflow.concurrency).toBeUndefined();
     expect(workflow.permissions?.packages).toBe('write');
     expect(checkoutStep?.with).toMatchObject({
       'persist-credentials': false,

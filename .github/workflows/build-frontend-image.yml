@@ -13,13 +13,12 @@ permissions:
   contents: read
   packages: write
 
-concurrency:
-  group: a3-frontend-image
-  cancel-in-progress: true
-
 jobs:
   build-and-push:
     if: ${{ github.ref == 'refs/heads/codex/a3-latest-integration' }}
+    concurrency:
+      group: a3-frontend-image
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
