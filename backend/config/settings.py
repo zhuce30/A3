@@ -7,6 +7,7 @@ from celery.schedules import crontab
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
+from backend.config.cache import build_cache_config
 from backend.core.settings import BACKEND_ROOT
 
 load_dotenv(BACKEND_ROOT / ".env", override=True)
@@ -93,6 +94,14 @@ DATABASES = {
         },
     }
 }
+
+CACHE_REDIS_URL = os.getenv("CACHE_REDIS_URL", "").strip()
+if not DEBUG and not CACHE_REDIS_URL:
+    raise ImproperlyConfigured(
+        "CACHE_REDIS_URL must be set when DJANGO_DEBUG=0 so verification codes "
+        "are shared between web workers"
+    )
+CACHES = build_cache_config(CACHE_REDIS_URL)
 
 AUTH_USER_MODEL = "accounts.User"
 

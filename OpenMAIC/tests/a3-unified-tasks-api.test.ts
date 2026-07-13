@@ -15,6 +15,7 @@ vi.mock('@/lib/server/a3-django-api', async (importOriginal) => {
 const tasksRoutePath = path.resolve(process.cwd(), 'app/api/a3/tasks/route.ts');
 const tasksStreamRoutePath = path.resolve(process.cwd(), 'app/api/a3/tasks/stream/route.ts');
 const resourceJobsRoutePath = path.resolve(process.cwd(), 'app/api/a3/resources/jobs/route.ts');
+const topActionsPath = path.resolve(process.cwd(), 'components/a3/layout/a3-top-actions.tsx');
 
 describe('A3 unified task APIs', () => {
   it('exposes a unified task list endpoint across resource, video, and knowledge workflows', () => {
@@ -56,6 +57,14 @@ describe('A3 unified task APIs', () => {
     expect(source).toContain('persistResourceGenerationJob');
     expect(source).toContain('patchResourceGenerationJob');
     expect(source).not.toContain('const resourceGenerationJobs = new Map');
+  });
+
+  it('does not poll protected task or notification APIs before login', () => {
+    const source = fs.readFileSync(topActionsPath, 'utf8');
+
+    expect(source).toContain('useA3CurrentUser');
+    expect(source).toContain('if (!currentUser) return;');
+    expect(source).toContain('}, [currentUser]);');
   });
 });
 

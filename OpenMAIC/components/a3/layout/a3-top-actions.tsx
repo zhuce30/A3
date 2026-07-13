@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { Activity, ArrowRight, Bell, CheckCheck, ChevronDown, CircleHelp, Clock3, Globe2, Loader2, Moon, Search, Sun, XCircle } from 'lucide-react';
+import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import type { A3Notification, A3NotificationsResponse } from '@/lib/a3/engagement-types';
 import { searchA3HelpArticles } from '@/lib/a3/help-content';
@@ -65,6 +66,7 @@ type A3TasksResponse = {
 
 export function A3TopActions({ compact = false }: { compact?: boolean }) {
   const [activePanel, setActivePanel] = useState<Panel>(null);
+  const currentUser = useA3CurrentUser();
   const { locale, messages, setLocale } = useA3Locale();
   const [helpQuery, setHelpQuery] = useState('');
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -85,6 +87,7 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
   }, [theme]);
 
   useEffect(() => {
+    if (!currentUser) return;
     let cancelled = false;
     async function loadNotifications() {
       const result = await a3GetJson<A3NotificationsResponse>('/api/engagement/notifications/?limit=5');
@@ -94,9 +97,10 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [currentUser]);
 
   useEffect(() => {
+    if (!currentUser) return;
     let cancelled = false;
 
     async function loadTasks() {
@@ -142,7 +146,7 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
       eventSource.close();
       window.clearInterval(fallbackTimer);
     };
-  }, []);
+  }, [currentUser]);
 
   const unreadCount = useMemo(() => notifications.filter((item) => item.unread).length, [notifications]);
   const runningTaskCount = taskSummary?.running ?? tasks.filter((task) => isTaskRunning(task.status)).length;
