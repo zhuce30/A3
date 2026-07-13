@@ -18,7 +18,7 @@ pnpm build
 2. 私有 GHCR 包存在与目标完整提交 SHA 一致的不可变标签。
 3. GitHub 账号 `zhuce30` 可读取私有仓库和对应 GHCR 包。
 
-正常生产部署必须使用成功 Actions 运行对应的完整 40 位 `DEPLOY_SHA`，镜像固定为 `ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}`。禁止把可变 `latest` 作为日常部署目标；`latest` 仅保留为显式、非推荐的便利选项，并且也必须经过同一恢复事务。
+正常生产部署必须使用成功 Actions 运行对应的完整 40 位 `DEPLOY_SHA`，镜像固定为 `ghcr.io/zhuce30/a3-frontend:${DEPLOY_SHA}`。回滚同样只能使用此前成功 Actions 对应的完整 SHA。生产切换不使用 `latest`，因为可变标签无法保证部署和回滚指向同一镜像；Compose 中的默认 `latest` 仅用于首次引导，不属于本手册允许的生产切换路径。
 
 ## 目录与密钥所有权
 
@@ -111,7 +111,6 @@ pnpm build
 
 - `deploy`：正常部署，必须输入成功 Actions 对应的 `DEPLOY_SHA`，并先以 `admin` 身份 fast-forward 拉取集成分支。
 - `rollback`：回滚，必须输入此前成功 Actions 对应的 `ROLLBACK_SHA`。
-- `latest`：显式、非推荐的便利操作；不能替代正常的不可变 SHA 部署。
 
 `switch_frontend_image` 的固定顺序是：验证镜像引用和环境文件、预拉取目标镜像、创建 `root:root 0600` 快照、同目录原子更新、只重建 frontend、重启 Caddy、断言 HTTP 和七个服务，验证通过后才删除快照并标记成功。
 
@@ -180,7 +179,7 @@ pnpm build
   switch_frontend_image() {
     local image_ref=$1
 
-    [[ "$image_ref" =~ ^ghcr\.io/zhuce30/a3-frontend:([0-9a-f]{40}|latest)$ ]]
+    [[ "$image_ref" =~ ^ghcr\.io/zhuce30/a3-frontend:[0-9a-f]{40}$ ]]
     sudo test -f "$ENV_FILE"
     test "$(sudo stat -c '%U:%G %a' "$ENV_FILE")" = 'root:root 600'
 
@@ -242,7 +241,7 @@ ROOT_UPSERT
     trap - EXIT HUP INT TERM
   }
 
-  read -rp "操作模式（deploy/rollback/latest）: " OPERATION
+  read -rp "操作模式（deploy/rollback）: " OPERATION
   case "$OPERATION" in
     deploy)
       read -rp "DEPLOY_SHA（本次成功 Actions 的完整提交 SHA）: " DEPLOY_SHA
@@ -263,14 +262,8 @@ ROOT_UPSERT
       IMAGE_REF="ghcr.io/zhuce30/a3-frontend:$ROLLBACK_SHA"
       unset ROLLBACK_SHA
       ;;
-    latest)
-      read -rp "非推荐操作；输入 latest 确认使用可变标签: " LATEST_CONFIRM
-      test "$LATEST_CONFIRM" = 'latest'
-      IMAGE_REF='ghcr.io/zhuce30/a3-frontend:latest'
-      unset LATEST_CONFIRM
-      ;;
     *)
-      printf '操作模式只能是 deploy、rollback 或 latest\n' >&2
+      printf '操作模式只能是 deploy 或 rollback\n' >&2
       exit 1
       ;;
   esac
