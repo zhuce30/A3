@@ -39,7 +39,12 @@ import type { DynamicProfileInsight } from '@/components/a3/profile/dynamic-prof
 import { AgentDecisionEvidence } from '@/components/a3/ui/agent-decision-evidence';
 import { a3GetJson, a3PatchJson, a3PostJson } from '@/lib/a3/api-client';
 import { getA3NextPathForUser, resolveA3LoginDestination } from '@/lib/a3/auth-navigation';
-import { mergeInterviewProfile, normalizeLearningProfileForOptions } from '@/lib/a3/profile-setup';
+import {
+  createEmptyLearningProfile,
+  getMissingLearningProfileFields,
+  mergeInterviewProfile,
+  normalizeLearningProfileForOptions,
+} from '@/lib/a3/profile-setup';
 import {
   pendingProfileUpdateCount,
   profileDimensionLabel,
@@ -185,23 +190,7 @@ const defaultLearningProfileOptions: LearningProfileOptions = {
   ],
 };
 
-const defaultProfile: A3LearningProfile = {
-  majorDirection: '计算机科学与技术',
-  grade: '大二',
-  foundationLevel: '基础一般',
-  learningGoals: ['掌握操作系统'],
-  learningPreferences: ['课堂讲解', '图解流程'],
-  dailyStudyTime: '60',
-  weakPoints: ['处理机调度算法', '虚拟内存与页面置换'],
-  expectedResources: ['视频课程', '课件讲义', '练习题库'],
-  pace: 'standard',
-};
-
-function firstOption(values: string[], fallback: string) {
-  return values[0] ?? fallback;
-}
-
-function normalizeMultiSelection(selected: unknown, values: string[], fallback: string[]) {
+function normalizeMultiSelection(selected: unknown, values: string[]) {
   const allowed = new Set(values);
   const source = Array.isArray(selected)
     ? selected
@@ -209,7 +198,7 @@ function normalizeMultiSelection(selected: unknown, values: string[], fallback: 
       ? Object.values(selected).flatMap((value) => (Array.isArray(value) ? value : [value]))
       : [];
   const next = source.map((item) => String(item).trim()).filter((item) => allowed.has(item));
-  return next.length ? next : fallback.filter((item) => allowed.has(item)).slice(0, 2);
+  return next;
 }
 
 function buildProfileInterviewExample(courseTitle: string) {
@@ -864,9 +853,9 @@ export function ProfileSetupPage() {
   const [options, setOptions] = useState<LearningProfileOptions>(defaultLearningProfileOptions);
   const [optionsCourse, setOptionsCourse] = useState('操作系统');
   const [loadingOptions, setLoadingOptions] = useState(true);
-  const [profile, setProfile] = useState<A3LearningProfile>(defaultProfile);
+  const [profile, setProfile] = useState<A3LearningProfile>(() => createEmptyLearningProfile());
   const [saveResult, setSaveResult] = useState<ApiResult | null>(null);
-  const [interviewText, setInterviewText] = useState(() => buildProfileInterviewExample(optionsCourse));
+  const [interviewText, setInterviewText] = useState('');
   const [interviewLoading, setInterviewLoading] = useState(false);
   const [interviewResult, setInterviewResult] = useState<ProfileInterviewResult | null>(null);
   const [interviewMessages, setInterviewMessages] = useState<ProfileInterviewMessage[]>([
@@ -902,21 +891,16 @@ export function ProfileSetupPage() {
       }
       setOptions(result.options);
       setOptionsCourse(result.course?.title ?? '当前课程');
-      const weakValues = result.options.weakPoints.map((item) => item.value);
-      const paceValues = result.options.paces.map((item) => item.value);
-      setProfile((current) => ({
+      const storedProfile = currentUser?.learningProfile;
+      setProfile((current) => normalizeLearningProfileForOptions({
         ...current,
-        ...currentUser?.learningProfile,
-        majorDirection: result.options.majorDirections.includes(currentUser?.learningProfile?.majorDirection ?? current.majorDirection) ? (currentUser?.learningProfile?.majorDirection ?? current.majorDirection) : firstOption(result.options.majorDirections, defaultProfile.majorDirection),
-        grade: result.options.grades.includes(currentUser?.learningProfile?.grade ?? current.grade) ? (currentUser?.learningProfile?.grade ?? current.grade) : firstOption(result.options.grades, defaultProfile.grade),
-        foundationLevel: result.options.foundationLevels.includes(currentUser?.learningProfile?.foundationLevel ?? current.foundationLevel) ? (currentUser?.learningProfile?.foundationLevel ?? current.foundationLevel) : firstOption(result.options.foundationLevels, defaultProfile.foundationLevel),
-        learningGoals: normalizeMultiSelection(currentUser?.learningProfile?.learningGoals ?? current.learningGoals, result.options.learningGoals, defaultProfile.learningGoals),
-        learningPreferences: normalizeMultiSelection(currentUser?.learningProfile?.learningPreferences ?? current.learningPreferences, result.options.learningPreferences, defaultProfile.learningPreferences),
-        weakPoints: normalizeMultiSelection(currentUser?.learningProfile?.weakPoints ?? current.weakPoints, weakValues, defaultProfile.weakPoints),
-        expectedResources: normalizeMultiSelection(currentUser?.learningProfile?.expectedResources ?? current.expectedResources, result.options.expectedResources, defaultProfile.expectedResources),
-        dailyStudyTime: result.options.dailyStudyTimes.includes(String(currentUser?.learningProfile?.dailyStudyTime ?? current.dailyStudyTime)) ? String(currentUser?.learningProfile?.dailyStudyTime ?? current.dailyStudyTime) : firstOption(result.options.dailyStudyTimes, defaultProfile.dailyStudyTime),
-        pace: paceValues.includes(currentUser?.learningProfile?.pace ?? current.pace) ? (currentUser?.learningProfile?.pace ?? current.pace) : defaultProfile.pace,
-      }));
+        ...storedProfile,
+        learningGoals: normalizeMultiSelection(storedProfile?.learningGoals ?? current.learningGoals, result.options.learningGoals),
+        learningPreferences: normalizeMultiSelection(storedProfile?.learningPreferences ?? current.learningPreferences, result.options.learningPreferences),
+        weakPoints: normalizeMultiSelection(storedProfile?.weakPoints ?? current.weakPoints, result.options.weakPoints.map((item) => item.value)),
+        expectedResources: normalizeMultiSelection(storedProfile?.expectedResources ?? current.expectedResources, result.options.expectedResources),
+        dailyStudyTime: String(storedProfile?.dailyStudyTime ?? current.dailyStudyTime ?? ''),
+      }, result.options));
     }
     void loadOptions();
     return () => {
@@ -1015,11 +999,16 @@ export function ProfileSetupPage() {
   }
 
   async function submit() {
-    setSubmitting(true);
     setMessage('');
     setSaveResult(null);
     const normalizedProfile = normalizeLearningProfileForOptions(profile, options);
     setProfile(normalizedProfile);
+    const missingFields = getMissingLearningProfileFields(normalizedProfile);
+    if (missingFields.length > 0) {
+      setMessage(`请先补齐：${missingFields.join('、')}`);
+      return;
+    }
+    setSubmitting(true);
     const result = await postJson('/api/profiles/learning-profile/', { ...normalizedProfile, displayName });
     setSubmitting(false);
     if (result.success) {
@@ -1096,9 +1085,10 @@ export function ProfileSetupPage() {
     ['基础水平', profile.foundationLevel],
     ['学习目标', profile.learningGoals.join('、')],
     ['学习偏好', profile.learningPreferences.join('、')],
-    ['每日时间', `${profile.dailyStudyTime} 分钟`],
+    ['每日时间', profile.dailyStudyTime ? `${profile.dailyStudyTime} 分钟` : ''],
     ['薄弱知识点', profile.weakPoints.join('、')],
     ['资源类型', profile.expectedResources.join('、')],
+    ['学习节奏', profile.pace],
   ];
   const interviewReadyToConfirm = Boolean(interviewResult?.success && (interviewResult.interviewComplete || interviewResult.interviewSession?.interviewComplete));
   const filledProfileRows = previewRows.filter(([, value]) => value && value !== '待完善').length;
@@ -1319,7 +1309,7 @@ export function ProfileSetupPage() {
                           {
                             agent: 'ProfileAgent',
                             input: `课程 ${optionsCourse}，访谈 ${interviewResult?.interviewSession?.turnCount ?? 0} 轮，字段 ${filledProfileRows} 项`,
-                            output: `基础 ${profile.foundationLevel}，每日 ${profile.dailyStudyTime} 分钟，薄弱点 ${profile.weakPoints.slice(0, 2).join('、') || '待补充'}`,
+                            output: `${profile.foundationLevel ? `基础 ${profile.foundationLevel}` : '基础待补充'}，${profile.dailyStudyTime ? `每日 ${profile.dailyStudyTime} 分钟` : '每日时间待补充'}，薄弱点 ${profile.weakPoints.slice(0, 2).join('、') || '待补充'}`,
                             evidence: interviewResult?.traceId ? `trace ${interviewResult.traceId.slice(0, 10)}` : '来自画像访谈 session 与手动校准字段',
                           },
                           {
@@ -1728,10 +1718,13 @@ function ProfilePlanningImpactPreview({
   const weakPoints = profile.weakPoints.slice(0, 2).join('、') || '待补充';
   const goals = profile.learningGoals.slice(0, 2).join('、') || '待补充';
   const resources = profile.expectedResources.slice(0, 2).join('、') || '待补充';
+  const planPace = profile.dailyStudyTime || profile.pace
+    ? `${profile.dailyStudyTime ? `${profile.dailyStudyTime} 分钟/天` : '每日时间待补充'} · ${profile.pace ? planModeLabel(profile.pace) : '学习节奏待补充'}`
+    : '待补充每日时间和学习节奏';
   const impactRows = [
     { label: '诊断会优先看', value: weakPoints },
     { label: '路径会从这里排', value: profile.foundationLevel || '待补充基础水平' },
-    { label: '计划节奏', value: `${profile.dailyStudyTime || '--'} 分钟/天 · ${planModeLabel(profile.pace)}` },
+    { label: '计划节奏', value: planPace },
     { label: '资源生成偏好', value: resources },
   ];
 

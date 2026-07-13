@@ -17,8 +17,8 @@ EXTRACTION_SYSTEM_PROMPT = """你是一个学习画像分析专家。请从学�
 - grade: 年级，如"大一""大二""大三""大四""研究生""其他"，无法判断则返回 ""
 - major_direction: 学科方向，如"计算机科学与技术""软件工程"等，无法判断则返回 ""
 - foundation_level: 基础水平，只能是以下之一："基础较弱""基础一般""基础较好""基础扎实"，无法判断则返回 ""
-- daily_study_time: 每日学习时长（分钟），整数，如 30/60/120/180，无法判断则返回 60
-- pace: 学习节奏，只能是 "relaxed"（稳扎稳打）/"standard"（标准）/"intensive"（强化提升），无法判断则返回 "standard"
+- daily_study_time: 每日学习时长（分钟），整数，如 30/60/120/180，无法判断则返回 0
+- pace: 学习节奏，只能是 "relaxed"（稳扎稳打）/"standard"（标准）/"intensive"（强化提升），无法判断则返回 ""
 - learning_goals: 学习目标列表，字符串数组，最多6项
 - weak_points: 薄弱知识点列表，字符串数组，最多8项
 - learning_preferences: 学习偏好，如 {"style": "例题推导", "format": "视频课程"}，无法判断则返回 {}
@@ -129,17 +129,11 @@ def _rule_based_profile_fallback(text: str, existing_profile: dict | None = None
         extracted["daily_study_time"] = int(minute_match.group(1))
     elif hour_match:
         extracted["daily_study_time"] = int(float(hour_match.group(1)) * 60)
-    elif existing_profile.get("daily_study_time"):
-        extracted["daily_study_time"] = existing_profile.get("daily_study_time")
-    else:
-        extracted["daily_study_time"] = 60
 
     if any(keyword in normalized or keyword in text for keyword in ("intensive", "冲刺", "强化")):
         extracted["pace"] = "intensive"
     elif any(keyword in normalized or keyword in text for keyword in ("relaxed", "轻松", "慢一点")):
         extracted["pace"] = "relaxed"
-    else:
-        extracted["pace"] = "standard"
 
     weak_points = []
     weak_rules = [

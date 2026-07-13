@@ -31,6 +31,24 @@ class ProfileSettingsTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["profile"]["extraProfile"]["consents"]["courseNotifications"], False)
 
+    def test_new_profile_does_not_invent_daily_time_or_pace(self):
+        profile = LearnerProfile.objects.create(user=self.user)
+
+        self.assertEqual(profile.daily_study_time, 0)
+        self.assertEqual(profile.pace, "")
+
+    def test_incomplete_learning_profile_cannot_complete_onboarding(self):
+        response = self.client.post(
+            "/api/profiles/learning-profile/",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.profile_completed)
+        self.assertNotEqual(self.user.onboarding_step, "complete")
+
     def test_profile_payload_includes_profile_snapshot(self):
         profile, _ = LearnerProfile.objects.update_or_create(
             user=self.user,

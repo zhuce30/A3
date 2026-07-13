@@ -1,6 +1,13 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { mergeInterviewProfile } from '@/lib/a3/profile-setup';
+import {
+  createEmptyLearningProfile,
+  getMissingLearningProfileFields,
+  mergeInterviewProfile,
+  normalizeLearningProfileForOptions,
+} from '@/lib/a3/profile-setup';
 import type { A3LearningProfile, LearningProfileOptions } from '@/lib/a3/auth-types';
 
 const options: LearningProfileOptions = {
@@ -31,6 +38,52 @@ const current: A3LearningProfile = {
 };
 
 describe('mergeInterviewProfile', () => {
+  it('wires the profile page to empty form and interview state', () => {
+    const source = fs.readFileSync(
+      path.resolve(process.cwd(), 'components/a3/auth/a3-auth-pages.tsx'),
+      'utf8',
+    );
+
+    expect(source).toContain('useState<A3LearningProfile>(() => createEmptyLearningProfile())');
+    expect(source).toContain("const [interviewText, setInterviewText] = useState('')");
+    expect(source).not.toContain('const defaultProfile');
+    expect(source).not.toContain('firstOption(');
+  });
+
+  it('starts a new learner profile without invented answers', () => {
+    expect(createEmptyLearningProfile()).toEqual({
+      majorDirection: '',
+      grade: '',
+      foundationLevel: '',
+      learningGoals: [],
+      learningPreferences: [],
+      dailyStudyTime: '',
+      weakPoints: [],
+      expectedResources: [],
+      pace: '',
+    });
+  });
+
+  it('keeps unanswered fields empty after profile options load', () => {
+    expect(normalizeLearningProfileForOptions(createEmptyLearningProfile(), options)).toEqual(
+      createEmptyLearningProfile(),
+    );
+  });
+
+  it('reports every unanswered field instead of accepting defaults', () => {
+    expect(getMissingLearningProfileFields(createEmptyLearningProfile())).toEqual([
+      '专业方向',
+      '年级',
+      '基础水平',
+      '学习目标',
+      '学习偏好',
+      '每日时间',
+      '薄弱知识点',
+      '资源类型',
+      '学习节奏',
+    ]);
+  });
+
   it('keeps learning preferences out of expected resource payloads', () => {
     const merged = mergeInterviewProfile(
       current,

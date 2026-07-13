@@ -10,6 +10,20 @@ type InterviewProfile = {
   resourcePreferences?: string[];
 };
 
+export function createEmptyLearningProfile(): A3LearningProfile {
+  return {
+    majorDirection: '',
+    grade: '',
+    foundationLevel: '',
+    learningGoals: [],
+    learningPreferences: [],
+    dailyStudyTime: '',
+    weakPoints: [],
+    expectedResources: [],
+    pace: '',
+  };
+}
+
 function pickAllowed(items: string[] | undefined, allowedItems: string[]) {
   if (!items?.length) return [];
   const allowed = new Set(allowedItems);
@@ -25,12 +39,30 @@ export function normalizeLearningProfileForOptions(
 
   return {
     ...profile,
+    majorDirection: options.majorDirections.includes(profile.majorDirection) ? profile.majorDirection : '',
+    grade: options.grades.includes(profile.grade) ? profile.grade : '',
+    foundationLevel: options.foundationLevels.includes(profile.foundationLevel) ? profile.foundationLevel : '',
     learningGoals: pickAllowed(profile.learningGoals, options.learningGoals),
     learningPreferences: pickAllowed(profile.learningPreferences, options.learningPreferences),
     weakPoints: pickAllowed(profile.weakPoints, weakPointValues),
     expectedResources: pickAllowed(profile.expectedResources, options.expectedResources),
-    pace: paceValues.includes(profile.pace) ? profile.pace : 'standard',
+    pace: paceValues.includes(profile.pace) ? profile.pace : '',
   };
+}
+
+export function getMissingLearningProfileFields(profile: A3LearningProfile): string[] {
+  const checks: Array<[string, boolean]> = [
+    ['专业方向', Boolean(profile.majorDirection)],
+    ['年级', Boolean(profile.grade)],
+    ['基础水平', Boolean(profile.foundationLevel)],
+    ['学习目标', profile.learningGoals.length > 0],
+    ['学习偏好', profile.learningPreferences.length > 0],
+    ['每日时间', Boolean(profile.dailyStudyTime)],
+    ['薄弱知识点', profile.weakPoints.length > 0],
+    ['资源类型', profile.expectedResources.length > 0],
+    ['学习节奏', Boolean(profile.pace)],
+  ];
+  return checks.filter(([, ready]) => !ready).map(([label]) => label);
 }
 
 export function mergeInterviewProfile(

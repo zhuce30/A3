@@ -315,7 +315,25 @@ def profile_next_action(user: User, profile: LearnerProfile | None) -> dict:
     return {"label": "开始入学诊断", "href": "/a3/admission-diagnostic", "reason": "画像已保存，诊断会进一步校准路径和计划"}
 
 
+def _validate_complete_learning_profile_payload(payload: dict) -> None:
+    checks = [
+        ("majorDirection", "专业方向", bool(str(payload.get("majorDirection") or "").strip())),
+        ("grade", "年级", bool(str(payload.get("grade") or "").strip())),
+        ("foundationLevel", "基础水平", bool(str(payload.get("foundationLevel") or "").strip())),
+        ("learningGoals", "学习目标", isinstance(payload.get("learningGoals"), list) and bool(payload.get("learningGoals"))),
+        ("learningPreferences", "学习偏好", isinstance(payload.get("learningPreferences"), list) and bool(payload.get("learningPreferences"))),
+        ("dailyStudyTime", "每日时间", bool(str(payload.get("dailyStudyTime") or "").strip())),
+        ("weakPoints", "薄弱知识点", isinstance(payload.get("weakPoints"), list) and bool(payload.get("weakPoints"))),
+        ("expectedResources", "资源类型", isinstance(payload.get("expectedResources"), list) and bool(payload.get("expectedResources"))),
+        ("pace", "学习节奏", bool(str(payload.get("pace") or "").strip())),
+    ]
+    missing = [label for _field, label, ready in checks if not ready]
+    if missing:
+        raise ValueError(f"请先补齐：{'、'.join(missing)}")
+
+
 def _save_learning_profile_core(user: User, payload: dict, *, refresh_learning_assets: bool = True) -> dict:
+    _validate_complete_learning_profile_payload(payload)
     display_name = _clean_string(payload.get("displayName", ""), "displayName", max_length=64)
     if display_name:
         user.display_name = display_name
@@ -390,6 +408,7 @@ def _save_learning_profile_core(user: User, payload: dict, *, refresh_learning_a
 def save_learning_profile(user: User, payload: dict) -> dict:
     from backend.apps.compat.agent_kernel import run_profile_setup_workflow
 
+    _validate_complete_learning_profile_payload(payload)
     result = run_profile_setup_workflow(user, payload)
     if not result.success:
         raise ValueError(str(result.output.get("error") or "学习画像智能体工作流执行失败"))
