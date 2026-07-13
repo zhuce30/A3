@@ -280,6 +280,92 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertGreaterEqual(len(session["messages"]), 2)
         self.assertEqual(second_payload["interviewSession"]["turnCount"], session["turnCount"])
 
+    def test_profile_interview_sparse_turns_preserve_and_extend_previous_answers(self):
+        messages = (
+            "我正在学习操作系统，基础一般，目标是补齐核心概念并能完成课程练习。每天大约40分钟，喜欢图解、例题、实验和错题复盘。",
+            "我目前大三，想要在考研中对操作系统取得更好的成绩。",
+            "薄弱点是一些概念基础知识，资源偏好是希望通过视频和代码案例来加深理解。",
+        )
+
+        with patch(
+            "backend.apps.compat.profile_interview._llm_extract_profile_dimensions",
+            side_effect=RuntimeError("force deterministic rule fallback"),
+        ):
+            payloads = []
+            for message in messages:
+                response = self.client.post(
+                    "/api/profile/interview/",
+                    data=json.dumps({"message": message}),
+                    content_type="application/json",
+                )
+                self.assertEqual(response.status_code, 200, response.content)
+                payloads.append(response.json())
+
+        second_profile = payloads[1]["profile"]
+        final_payload = payloads[2]
+        final_profile = final_payload["profile"]
+        final_missing = {
+            item["field"] for item in final_payload["missingDimensions"]
+        }
+
+        self.assertEqual(second_profile["dailyMinutes"], 40)
+        self.assertIn("掌握操作系统", second_profile["learningGoals"])
+        self.assertIn("考研复习", second_profile["learningGoals"])
+        self.assertIn("图解流程", second_profile["resourcePreferences"])
+        self.assertIn("基础概念与知识边界", final_profile["weakPoints"])
+        self.assertIn("视频讲解", final_profile["resourcePreferences"])
+        self.assertIn("代码案例", final_profile["resourcePreferences"])
+        self.assertNotIn("weakPoints", final_missing)
+        self.assertNotIn("resourcePreferences", final_missing)
+        self.assertEqual(final_payload["interviewSession"]["turnCount"], 3)
+        self.assertEqual(
+            final_payload["profileReadiness"]["dimensionCount"],
+            10 - len(final_payload["missingDimensions"]),
+        )
+
+        refreshed = LearnerProfile.objects.get(user=self.user)
+        preferred_formats = refreshed.learning_preferences.get("preferredFormats", [])
+        self.assertIn("图解流程", preferred_formats)
+        self.assertIn("视频讲解", preferred_formats)
+
+    def test_profile_interview_llm_receives_persisted_profile_and_recent_turns(self):
+        first_message = "我正在学习操作系统，基础一般，每天40分钟，喜欢图解和例题。"
+        with patch(
+            "backend.apps.compat.profile_interview._llm_extract_profile_dimensions",
+            side_effect=RuntimeError("use rules for first turn"),
+        ):
+            first_response = self.client.post(
+                "/api/profile/interview/",
+                data=json.dumps({"message": first_message}),
+                content_type="application/json",
+            )
+        self.assertEqual(first_response.status_code, 200, first_response.content)
+
+        with patch("backend.apps.compat.profile_interview.chat_completion") as chat:
+            chat.return_value = {
+                "content": "{}",
+                "provider": "dashscope",
+                "model": "qwen-plus",
+                "fallback": False,
+            }
+            second_response = self.client.post(
+                "/api/profile/interview/",
+                data=json.dumps({"message": "目标还是刚才说的课程，准备考研。"}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(second_response.status_code, 200, second_response.content)
+        llm_messages = chat.call_args.args[0]
+        context_payload = json.loads(llm_messages[-1]["content"])
+        self.assertEqual(context_payload["currentProfile"]["dailyMinutes"], 40)
+        self.assertEqual(context_payload["currentMessage"], "目标还是刚才说的课程，准备考研。")
+        self.assertTrue(
+            any(
+                item.get("role") == "user" and item.get("content") == first_message
+                for item in context_payload["recentConversation"]
+            )
+        )
+
     def test_profile_interview_session_api_restores_agent_follow_up(self):
         interview_response = self.client.post(
             "/api/profile/interview/",

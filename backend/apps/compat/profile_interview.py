@@ -49,6 +49,12 @@ ASK_PRIORITY_ORDER = [
     "motivationRisk",
 ]
 
+LEGACY_PROFILE_PLACEHOLDERS = {
+    "learning_goals": {"提升课程掌握度"},
+    "weak_points": {"当前路径节点"},
+    "expected_resources": {"知识卡片", "练习题库"},
+}
+
 PROFILE_INTERVIEW_WORKFLOW_SEQUENCE = [
     "SafetyAgent",
     "ProfileInterviewAgent",
@@ -103,13 +109,13 @@ class ProfileInterviewAgent(BaseAgent):
         extracted: dict = {}
         if action != "confirm" and safety.get("safe"):
             text = str(context.payload.get("message") or "")
-            extracted = _extract_profile_dimensions(text)
+            extracted = _extract_profile_dimensions(text, profile)
             _commit_profile(profile, extracted, text)
             profile.refresh_from_db()
         missing_dimensions = _missing_dimensions(profile)
         readiness = {
             "dimensionCount": _dimension_count(profile),
-            "status": "ready" if _dimension_count(profile) >= 8 else "partial",
+            "status": "ready" if not missing_dimensions else "partial",
             "missingDimensions": missing_dimensions,
             "interviewComplete": not missing_dimensions,
         }
@@ -151,7 +157,7 @@ class LearnerModelAgent(BaseAgent):
             state_patch={"profileCommitted": committed},
             state_diff={"User.profile_completed": "true", "User.onboarding_step": "complete"} if committed else {},
             evidence={"dimensionCount": _dimension_count(profile), "profileCommitted": committed},
-            quality={"ready": _dimension_count(profile) >= 8, "profileCommitted": committed},
+            quality={"ready": not missing_dimensions, "profileCommitted": committed},
         )
 
 
@@ -264,7 +270,7 @@ class ProfileInterviewPlannerAgent(BaseAgent):
             next_question = session["nextQuestion"]
         readiness = {
             "dimensionCount": _dimension_count(profile),
-            "status": "ready" if _dimension_count(profile) >= 8 and not missing_dimensions else "partial",
+            "status": "ready" if not missing_dimensions else "partial",
             "missingDimensions": missing_dimensions,
             "interviewComplete": not missing_dimensions,
         }
@@ -328,16 +334,19 @@ def get_profile_interview_session(user) -> dict:
         "messages": _valid_messages(session.get("messages")),
     }
     if int(merged.get("turnCount") or 0) > 0:
-        missing_dimensions = merged.get("missingDimensions") if isinstance(merged.get("missingDimensions"), list) else _missing_dimensions(profile)
-        if not isinstance(merged.get("profileSnapshot"), dict):
-            merged["profileSnapshot"] = _public_interview_profile(profile)
-        if not isinstance(merged.get("profileReadiness"), dict):
-            merged["profileReadiness"] = {
-                "dimensionCount": _dimension_count(profile),
-                "status": "ready" if _dimension_count(profile) >= 8 else "partial",
-                "missingDimensions": missing_dimensions,
-                "interviewComplete": bool(merged.get("interviewComplete")),
-            }
+        missing_dimensions = _missing_dimensions(profile)
+        ask_fields = _ask_fields(missing_dimensions)
+        merged["profileSnapshot"] = _public_interview_profile(profile)
+        merged["profileReadiness"] = {
+            "dimensionCount": _dimension_count(profile),
+            "status": "ready" if not missing_dimensions else "partial",
+            "missingDimensions": missing_dimensions,
+            "interviewComplete": not missing_dimensions,
+        }
+        merged["missingDimensions"] = missing_dimensions
+        merged["askFields"] = ask_fields
+        merged["nextQuestion"] = _next_question(ask_fields)
+        merged["interviewComplete"] = not missing_dimensions
         if not isinstance(merged.get("generated"), dict):
             merged["generated"] = {}
     return {
@@ -373,14 +382,31 @@ def confirm_profile_interview(user) -> dict:
     return output
 
 
-def _extract_profile_dimensions(text: str) -> dict:
+def _extract_profile_dimensions(text: str, profile: LearnerProfile | None = None) -> dict:
     try:
-        return _merge_extracted_profiles(_rule_extract_profile_dimensions(text), _llm_extract_profile_dimensions(text))
+        return _merge_extracted_profiles(
+            _rule_extract_profile_dimensions(text),
+            _llm_extract_profile_dimensions(
+                text,
+                profile_context=_public_interview_profile(profile) if profile is not None else {},
+                recent_messages=_recent_interview_messages(profile),
+            ),
+        )
     except Exception:
         return _rule_extract_profile_dimensions(text)
 
 
-def _llm_extract_profile_dimensions(text: str) -> dict:
+def _llm_extract_profile_dimensions(
+    text: str,
+    *,
+    profile_context: dict | None = None,
+    recent_messages: list[dict] | None = None,
+) -> dict:
+    context_payload = {
+        "currentProfile": profile_context or {},
+        "recentConversation": recent_messages or [],
+        "currentMessage": text[:3000],
+    }
     result = chat_completion(
         [
             {
@@ -390,10 +416,11 @@ def _llm_extract_profile_dimensions(text: str) -> dict:
                     "字段包括 grade, major_direction, foundation_level, daily_study_time, pace, "
                     "learning_goals, weak_points, expected_resources, learning_preferences, "
                     "cognitiveStyle, motivationRisk, learningHistory, mistakePatterns。"
-                    "不要使用默认占位补齐；无法判断的字段返回空字符串、空数组或空对象。"
+                    "历史画像和对话只用于理解本轮消息中的指代。只抽取学生本轮明确新增或修正的信息，"
+                    "不要重复输出未变化的历史字段，不要使用默认占位补齐；无法判断的字段返回空字符串、空数组或空对象。"
                 ),
             },
-            {"role": "user", "content": text[:3000]},
+            {"role": "user", "content": json.dumps(context_payload, ensure_ascii=False)},
         ],
         temperature=0.1,
         max_tokens=900,
@@ -413,6 +440,16 @@ def _llm_extract_profile_dimensions(text: str) -> dict:
     return _normalize_extracted_profile(extracted)
 
 
+def _recent_interview_messages(profile: LearnerProfile | None) -> list[dict]:
+    if profile is None:
+        return []
+    extra = profile.extra_profile if isinstance(profile.extra_profile, dict) else {}
+    session = extra.get("profileInterviewSession")
+    if not isinstance(session, dict):
+        return []
+    return _valid_messages(session.get("messages"))[-8:]
+
+
 def _rule_extract_profile_dimensions(text: str) -> dict:
     normalized = text.lower()
     grade = _extract_grade(text, normalized)
@@ -422,22 +459,24 @@ def _rule_extract_profile_dimensions(text: str) -> dict:
     daily_minutes = _extract_daily_minutes(text)
     major = _extract_major(text, normalized)
     foundation = _extract_foundation(text, normalized)
-    cognitive_style = "图解与例题驱动" if _likes_visual_examples(text, normalized) else "结构化讲解"
+    cognitive_style = "图解与例题驱动" if _likes_visual_examples(text, normalized) else ""
+    learning_preferences = {}
+    if cognitive_style:
+        learning_preferences["cognitiveStyle"] = cognitive_style
+    if resources:
+        learning_preferences["preferredFormats"] = resources
     mistake_patterns = _extract_mistake_patterns(text, normalized)
     return {
         "grade": grade,
         "major_direction": major,
-        "foundation_level": foundation or "基础一般",
+        "foundation_level": foundation,
         "daily_study_time": daily_minutes,
-        "learning_goals": learning_goals or ["提升课程掌握度"],
-        "weak_points": weak_points or ["当前路径节点"],
-        "expected_resources": resources or ["知识卡片", "练习题库"],
-        "learning_preferences": {
-            "cognitiveStyle": cognitive_style,
-            "preferredFormats": resources or ["知识卡片", "练习题库"],
-        },
+        "learning_goals": learning_goals,
+        "weak_points": weak_points,
+        "expected_resources": resources,
+        "learning_preferences": learning_preferences,
         "cognitiveStyle": cognitive_style,
-        "motivationRisk": "考研目标明确，建议保持连续反馈" if _contains_any(text, normalized, ["考研", "graduate exam"]) else "普通",
+        "motivationRisk": "考研目标明确，建议保持连续反馈" if _contains_any(text, normalized, ["考研", "graduate exam"]) else "",
         "learningHistory": _learning_history_hint(normalized),
         "mistakePatterns": mistake_patterns,
         "_llm": {"provider": "rules", "model": "", "fallback": True},
@@ -495,18 +534,38 @@ def _commit_profile(profile: LearnerProfile, extracted: dict, raw_text: str) -> 
         "major_direction",
         "foundation_level",
         "daily_study_time",
-        "learning_goals",
-        "weak_points",
-        "expected_resources",
-        "learning_preferences",
     ):
         value = extracted.get(field)
         if value:
             setattr(profile, field, value)
             updated_fields.add(field)
+
+    for field in ("learning_goals", "weak_points", "expected_resources"):
+        incoming = extracted.get(field)
+        if incoming:
+            current = getattr(profile, field, [])
+            setattr(profile, field, _merge_profile_list(field, current, incoming))
+            updated_fields.add(field)
+
+    incoming_preferences = extracted.get("learning_preferences")
+    if isinstance(incoming_preferences, dict) and incoming_preferences:
+        current_preferences = profile.learning_preferences if isinstance(profile.learning_preferences, dict) else {}
+        merged_preferences = {**current_preferences, **incoming_preferences}
+        incoming_formats = incoming_preferences.get("preferredFormats")
+        if incoming_formats:
+            merged_preferences["preferredFormats"] = _merge_profile_list(
+                "expected_resources",
+                current_preferences.get("preferredFormats", []),
+                incoming_formats,
+            )
+        profile.learning_preferences = merged_preferences
+        updated_fields.add("learning_preferences")
+
     extra = dict(profile.extra_profile or {})
-    extra["motivationRisk"] = extracted.get("motivationRisk", "")
-    extra["learningHistory"] = extracted.get("learningHistory", "")
+    if extracted.get("motivationRisk"):
+        extra["motivationRisk"] = extracted["motivationRisk"]
+    if extracted.get("learningHistory"):
+        extra["learningHistory"] = extracted["learningHistory"]
     profile.extra_profile = extra
     merge_dynamic_profile_signals(
         profile,
@@ -566,6 +625,15 @@ def _commit_profile(profile: LearnerProfile, extracted: dict, raw_text: str) -> 
     profile.save(update_fields=[*sorted(updated_fields), "extra_profile", "updated_at"])
 
 
+def _merge_profile_list(field: str, current: Any, incoming: Any) -> list[str]:
+    existing_values = _clean_text_list(current, limit=8)
+    incoming_values = _clean_text_list(incoming, limit=8)
+    legacy_placeholders = LEGACY_PROFILE_PLACEHOLDERS.get(field, set())
+    if incoming_values:
+        existing_values = [item for item in existing_values if item not in legacy_placeholders]
+    return _clean_text_list([*existing_values, *incoming_values], limit=8)
+
+
 def _commit_interview_session(
     profile: LearnerProfile,
     raw_text: str,
@@ -592,7 +660,7 @@ def _commit_interview_session(
         "profileSnapshot": _public_interview_profile(profile),
         "profileReadiness": {
             "dimensionCount": _dimension_count(profile),
-            "status": "ready" if _dimension_count(profile) >= 8 else "partial",
+            "status": "ready" if not missing_dimensions else "partial",
             "missingDimensions": missing_dimensions,
             "interviewComplete": bool(interview_complete),
         },
@@ -676,12 +744,23 @@ def _public_interview_profile(profile: LearnerProfile) -> dict:
 
 
 def _dimension_count(profile: LearnerProfile) -> int:
-    return len([value for value in _public_interview_profile(profile).values() if value])
+    return sum(
+        not _profile_dimension_missing(field, value)
+        for field, _, value in _profile_dimension_checks(profile)
+    )
 
 
 def _missing_dimensions(profile: LearnerProfile) -> list[dict]:
+    return [
+        {"field": field, "label": label}
+        for field, label, value in _profile_dimension_checks(profile)
+        if _profile_dimension_missing(field, value)
+    ]
+
+
+def _profile_dimension_checks(profile: LearnerProfile) -> tuple[tuple[str, str, Any], ...]:
     public = _public_interview_profile(profile)
-    checks = (
+    return (
         ("grade", "年级", public.get("grade")),
         ("majorDirection", "专业方向", public.get("majorDirection")),
         ("foundationLevel", "基础水平", public.get("foundationLevel")),
@@ -693,16 +772,19 @@ def _missing_dimensions(profile: LearnerProfile) -> list[dict]:
         ("learningHistory", "学习历史", public.get("learningHistory")),
         ("motivationRisk", "动机风险", public.get("motivationRisk")),
     )
-    return [{"field": field, "label": label} for field, label, value in checks if _profile_dimension_missing(field, value)]
 
 
 def _profile_dimension_missing(field: str, value: Any) -> bool:
     if not value:
         return True
-    if field in {"learningGoals", "weakPoints", "resourcePreferences"} and isinstance(value, list):
-        text = " ".join(str(item) for item in value)
-        placeholder_markers = ("当前路径节点", "提升课程掌握度", "知识卡片", "练习题库")
-        return any(marker in text for marker in placeholder_markers)
+    placeholder_fields = {
+        "learningGoals": LEGACY_PROFILE_PLACEHOLDERS["learning_goals"],
+        "weakPoints": LEGACY_PROFILE_PLACEHOLDERS["weak_points"],
+        "resourcePreferences": LEGACY_PROFILE_PLACEHOLDERS["expected_resources"],
+    }
+    if field in placeholder_fields and isinstance(value, list):
+        cleaned = _clean_text_list(value, limit=8)
+        return bool(cleaned) and all(item in placeholder_fields[field] for item in cleaned)
     return False
 
 
@@ -762,6 +844,8 @@ def _extract_grade(text: str, normalized: str) -> str:
 def _extract_major(text: str, normalized: str) -> str:
     if _contains_any(text, normalized, ["计算机", "computer science", "computer", "软件", "software"]):
         return "计算机科学与技术"
+    if _contains_any(text, normalized, ["自动化", "automation", "控制工程", "control engineering", "control theory"]):
+        return "自动化与控制工程"
     return ""
 
 
@@ -777,7 +861,7 @@ def _extract_foundation(text: str, normalized: str) -> str:
 
 def _extract_daily_minutes(text: str) -> int:
     minute_match = re.search(r"(\d{2,3})\s*(?:分钟|分|mins?|minutes?)", text, flags=re.I)
-    return int(minute_match.group(1)) if minute_match else 60
+    return int(minute_match.group(1)) if minute_match else 0
 
 
 def _extract_weak_points(text: str, normalized: str) -> list[str]:
@@ -798,8 +882,17 @@ def _extract_weak_points(text: str, normalized: str) -> list[str]:
         ("页面置换", "虚拟内存与页面置换"),
         ("文件系统", "文件系统与目录"),
         ("file system", "文件系统与目录"),
+        ("根轨迹", "根轨迹"),
+        ("root locus", "根轨迹"),
+        ("频率响应", "频率响应"),
+        ("frequency response", "频率响应"),
     )
-    return _all_label_matches(text, normalized, weak_tokens)
+    weak_points = _all_label_matches(text, normalized, weak_tokens)
+    has_weak_context = _contains_any(text, normalized, ["薄弱点", "薄弱", "不确定", "不熟", "不理解", "weak"])
+    has_concept_context = _contains_any(text, normalized, ["概念基础", "基础知识", "关键概念", "concept foundation"])
+    if has_weak_context and has_concept_context and "基础概念与知识边界" not in weak_points:
+        weak_points.append("基础概念与知识边界")
+    return weak_points
 
 
 def _extract_mistake_patterns(text: str, normalized: str) -> list[str]:
@@ -838,15 +931,23 @@ def _extract_learning_goals(text: str, normalized: str) -> list[str]:
 
 def _extract_resource_preferences(text: str, normalized: str) -> list[str]:
     resource_tokens = (
+        ("图解", "图解流程"),
         ("动画演示", "动画演示"),
         ("animation", "动画演示"),
+        ("例题", "例题推导"),
         ("例题推导", "例题推导"),
         ("examples", "例题推导"),
+        ("代码案例", "代码案例"),
+        ("代码示例", "代码案例"),
+        ("code examples", "代码案例"),
+        ("实验", "代码实验"),
         ("工程案例", "工程案例"),
         ("engineering cases", "工程案例"),
+        ("错题复盘", "错题复盘"),
         ("练习题库", "练习题库"),
         ("知识卡片", "知识卡片"),
-        ("短视频", "短视频"),
+        ("短视频", "视频讲解"),
+        ("视频", "视频讲解"),
     )
     return _all_label_matches(text, normalized, resource_tokens)
 
@@ -858,7 +959,11 @@ def _likes_visual_examples(text: str, normalized: str) -> bool:
 def _learning_history_hint(normalized: str) -> str:
     if "学过" in normalized or "learned" in normalized:
         return "有相关学习经历"
-    return "待通过诊断和学习行为持续补充"
+    if "正在学习" in normalized or "studying" in normalized:
+        return "正在学习相关课程"
+    if any(token in normalized for token in ("基础", "foundation", "control theory average")):
+        return "具备相关课程学习基础"
+    return ""
 
 
 def _contains_any(text: str, normalized: str, needles: list[str]) -> bool:
