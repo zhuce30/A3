@@ -72,7 +72,7 @@ function parseKeyValueLines(value: unknown, field: string): Array<readonly [stri
 }
 
 describe('A3 private GHCR frontend deployment', () => {
-  it('builds and publishes amd64 latest and immutable frontend tags', () => {
+  it('builds and publishes amd64 latest and full-SHA lookup tags', () => {
     expect(fs.existsSync(workflowPath)).toBe(true);
     const workflowSource = fs.readFileSync(workflowPath, 'utf8');
     const workflow = yaml.load(workflowSource) as WorkflowDocument;
@@ -230,6 +230,54 @@ describe('A3 private GHCR frontend deployment', () => {
     );
   });
 
+  it('records successful deploys and rolls back directly by recorded digest', () => {
+    const runbook = fs.readFileSync(runbookPath, 'utf8');
+    const rollbackStart = runbook.indexOf('    rollback)');
+    const rollbackEnd = runbook.indexOf('      ;;', rollbackStart);
+    const rollbackCase = runbook.slice(rollbackStart, rollbackEnd);
+
+    expect(runbook).toContain(
+      "HISTORY_FILE='/var/lib/a3-deploy/frontend-image-history.log'",
+    );
+    expect(runbook).toContain('append_deployment_history()');
+    expect(runbook).toContain('install -o root -g root -m 0600 /dev/null "$history_file"');
+    expect(runbook).toContain("date -u +'%Y-%m-%dT%H:%M:%SZ'");
+    expect(runbook).toContain("printf '%s DEPLOY_SHA=%s RepoDigest=%s\\n'");
+    expect(runbook).toContain('sudo tail -n 20 "$HISTORY_FILE"');
+
+    expect(rollbackStart).toBeGreaterThanOrEqual(0);
+    expect(rollbackEnd).toBeGreaterThan(rollbackStart);
+    expect(rollbackCase).toContain('ROLLBACK_SHA');
+    expect(rollbackCase).toContain('ROLLBACK_DIGEST');
+    expect(rollbackCase).toMatch(/\^\[0-9a-f\]\{64\}\$/);
+    expect(rollbackCase).toContain(
+      'ROLLBACK_IMAGE="ghcr.io/zhuce30/a3-frontend@sha256:${ROLLBACK_DIGEST}"',
+    );
+    expect(rollbackCase).toContain('pull_verified_digest "$ROLLBACK_IMAGE" "$ROLLBACK_SHA"');
+    expect(rollbackCase).not.toContain('resolve_deploy_digest');
+    expect(rollbackCase).not.toContain('RepoDigests');
+    expect(runbook).not.toContain('ghcr.io/zhuce30/a3-frontend:${ROLLBACK_SHA}');
+  });
+
+  it('marks success and disables recovery traps before snapshot cleanup', () => {
+    const runbook = fs.readFileSync(runbookPath, 'utf8');
+    const switchStart = runbook.indexOf('switch_frontend_image()');
+    const switchEnd = runbook.indexOf('  read -rp', switchStart);
+    const imageSwitch = runbook.slice(switchStart, switchEnd);
+    const verifyIndex = imageSwitch.indexOf('verify_runtime');
+    const historyIndex = imageSwitch.indexOf('append_deployment_history');
+    const successIndex = imageSwitch.indexOf('TRANSACTION_SUCCESS=1');
+    const trapIndex = imageSwitch.indexOf('trap - EXIT HUP INT TERM', successIndex);
+    const cleanupIndex = imageSwitch.indexOf('sudo rm -f "$SNAPSHOT"', trapIndex);
+
+    expect(verifyIndex).toBeGreaterThanOrEqual(0);
+    expect(historyIndex).toBeGreaterThan(verifyIndex);
+    expect(successIndex).toBeGreaterThan(historyIndex);
+    expect(trapIndex).toBeGreaterThan(successIndex);
+    expect(cleanupIndex).toBeGreaterThan(trapIndex);
+    expect(imageSwitch).toContain('WARNING: deployment succeeded but snapshot cleanup failed');
+  });
+
   it('documents SHA tag lookup and digest identity without a latest production switch', () => {
     const sources = [
       fs.readFileSync(designPath, 'utf8'),
@@ -241,8 +289,11 @@ describe('A3 private GHCR frontend deployment', () => {
       expect(source).toContain('RepoDigest');
       expect(source).toContain('org.opencontainers.image.revision');
       expect(source).toContain('A3_FRONTEND_IMAGE');
+      expect(source).toContain('ROLLBACK_DIGEST');
+      expect(source).toMatch(/deployment history/i);
       expect(source).toMatch(/digest/i);
       expect(source).not.toMatch(/set `?A3_FRONTEND_IMAGE`? to a known-good SHA tag/i);
+      expect(source).not.toMatch(/Rollback performs the same tag lookup/i);
     }
   });
 });
