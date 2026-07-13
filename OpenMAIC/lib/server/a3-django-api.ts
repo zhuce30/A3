@@ -170,3 +170,8 @@ export function resolveA3DjangoEndpoint(path: string) {
   const baseUrl = process.env.A3_API_BASE_URL || process.env.NEXT_PUBLIC_A3_API_BASE_URL || DEFAULT_A3_API_BASE_URL;
   return new URL(path, baseUrl).toString();
 }
+
+export function resolveA3InternalFrontendEndpoint(path: string, requestOrigin: string) {
+  const baseUrl = process.env.A3_INTERNAL_FRONTEND_BASE_URL?.trim() || requestOrigin;
+  return new URL(path, baseUrl).toString();
+}
