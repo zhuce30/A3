@@ -10,8 +10,9 @@ type WorkflowStep = {
 };
 
 type WorkflowDocument = {
+  concurrency?: Record<string, unknown>;
   permissions?: Record<string, unknown>;
-  jobs?: Record<string, { steps?: WorkflowStep[] }>;
+  jobs?: Record<string, { if?: unknown; steps?: WorkflowStep[] }>;
 };
 
 type ComposeDocument = {
@@ -56,11 +57,37 @@ describe('A3 private GHCR frontend deployment', () => {
     expect(fs.existsSync(workflowPath)).toBe(true);
     const workflowSource = fs.readFileSync(workflowPath, 'utf8');
     const workflow = yaml.load(workflowSource) as WorkflowDocument;
-    const steps = workflow.jobs?.['build-and-push']?.steps ?? [];
-    const loginStep = steps.find((step) => step.uses === 'docker/login-action@v3');
-    const buildStep = steps.find((step) => step.uses === 'docker/build-push-action@v6');
+    const buildJob = workflow.jobs?.['build-and-push'];
+    const steps = buildJob?.steps ?? [];
+    const checkoutStep = steps.find(
+      (step) =>
+        step.uses === 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5',
+    );
+    const setupBuildxStep = steps.find(
+      (step) =>
+        step.uses ===
+        'docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f',
+    );
+    const loginStep = steps.find(
+      (step) =>
+        step.uses === 'docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9',
+    );
+    const buildStep = steps.find(
+      (step) =>
+        step.uses ===
+        'docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8',
+    );
 
+    expect(buildJob?.if).toBe("${{ github.ref == 'refs/heads/codex/a3-latest-integration' }}");
+    expect(workflow.concurrency).toEqual({
+      group: 'a3-frontend-image',
+      'cancel-in-progress': true,
+    });
     expect(workflow.permissions?.packages).toBe('write');
+    expect(checkoutStep?.with).toMatchObject({
+      'persist-credentials': false,
+    });
+    expect(setupBuildxStep).toBeDefined();
     expect(loginStep?.with).toMatchObject({
       registry: 'ghcr.io',
       username: '${{ github.actor }}',
