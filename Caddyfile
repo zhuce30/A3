@@ -1,0 +1,13 @@
+a3.zhuce.work {
+	encode zstd gzip
+	reverse_proxy frontend:3000
+}
+
+api.zhuce.work {
+	encode zstd gzip
+	reverse_proxy backend:8000
+}
+
+zhuce.work, www.zhuce.work {
+	redir https://a3.zhuce.work{uri} 308
+}
