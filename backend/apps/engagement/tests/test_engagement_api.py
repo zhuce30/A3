@@ -141,6 +141,19 @@ class EngagementApiTests(TestCase):
     def test_rollover_reminder_uses_plan_specific_guidance(self):
         today = timezone.localdate().isoformat()
         previous_day = (timezone.localdate() - timedelta(days=1)).isoformat()
+        legacy_reminder = create_notification(
+            self.user,
+            title="有顺延任务需要处理",
+            detail="1 个任务已顺延到昨天。",
+            notification_type=NotificationType.LEARNING_TASK,
+            action_url="/a3/today",
+            payload={
+                "reminderKey": f"rollover:{previous_day}",
+                "generatedBy": "learning_reminder",
+                "actionKind": "today",
+                "rolloverTasks": 1,
+            },
+        )
 
         ensure_learning_reminders(
             self.user,
@@ -183,7 +196,7 @@ class EngagementApiTests(TestCase):
             motivation={"todayRemainingMinutes": 55, "streakDays": 1, "todayTotalTasks": 2},
         )
 
-        reminder = UserNotification.objects.get(user=self.user, title="有顺延任务需要处理")
+        reminder = UserNotification.objects.get(user=self.user, payload__reminderKey=f"rollover:{today}")
         payload = serialize_notification(reminder)
         self.assertEqual(reminder.action_url, "/a3/study-plan")
         self.assertEqual(reminder.payload["actionKind"], "plan")
@@ -191,6 +204,9 @@ class EngagementApiTests(TestCase):
         self.assertIn("2 个任务", reminder.detail)
         self.assertEqual(payload["learningLoop"]["kind"], "plan")
         self.assertIn("2 个顺延任务", payload["learningLoop"]["reason"])
+        legacy_reminder.refresh_from_db()
+        self.assertEqual(legacy_reminder.action_url, "/a3/study-plan")
+        self.assertEqual(legacy_reminder.payload["actionKind"], "plan")
 
     def test_learning_reminder_learning_loop_includes_current_plan_change(self):
         LearnerProfile.objects.create(user=self.user, foundation_level="鍩虹", daily_study_time=60)

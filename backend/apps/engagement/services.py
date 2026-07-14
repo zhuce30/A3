@@ -37,6 +37,7 @@ def ensure_learning_reminders(user, *, plan: dict | None = None, motivation: dic
     reminders = []
     plan = plan if isinstance(plan, dict) else {}
     motivation = motivation if isinstance(motivation, dict) else {}
+    _refresh_legacy_rollover_reminders(user)
     today_day = next((day for day in plan.get("days", []) if isinstance(day, dict) and day.get("date") == today), None)
     tasks = today_day.get("tasks", []) if isinstance(today_day, dict) and isinstance(today_day.get("tasks"), list) else []
     pending_tasks = [task for task in tasks if isinstance(task, dict) and task.get("status") != "completed"]
@@ -103,6 +104,22 @@ def ensure_learning_reminders(user, *, plan: dict | None = None, motivation: dic
             )
         )
     return [item for item in reminders if item is not None]
+
+
+def _refresh_legacy_rollover_reminders(user) -> None:
+    candidates = UserNotification.objects.filter(
+        user=user,
+        action_url="/a3/today",
+        payload__generatedBy="learning_reminder",
+    )
+    for notification in candidates:
+        payload = dict(notification.payload) if isinstance(notification.payload, dict) else {}
+        if not str(payload.get("reminderKey") or "").startswith("rollover:"):
+            continue
+        payload["actionKind"] = "plan"
+        notification.action_url = "/a3/study-plan"
+        notification.payload = payload
+        notification.save(update_fields=["action_url", "payload"])
 
 
 def _due_wrong_questions(user) -> list[WrongQuestion]:
