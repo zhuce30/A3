@@ -9,8 +9,9 @@ describe('A3 API client error copy', () => {
     const source = fs.readFileSync(apiClientPath, 'utf8');
 
     expect(source).toContain('无法连接 A3 后端服务');
-    expect(source).toContain('localhost:8000');
-    expect(source).toContain('请先启动 Django 后端服务');
+    expect(source).toContain('请检查网络连接后刷新页面或重试');
+    expect(source).not.toContain('无法连接 A3 后端服务（localhost:8000）');
+    expect(source).not.toContain('请先启动 Django 后端服务');
     expect(source).not.toContain('error instanceof Error ? error.message');
   });
 });

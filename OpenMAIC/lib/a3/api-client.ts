@@ -105,7 +105,7 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
 function requestFailure<T>(_error: unknown): T {
   return {
     success: false,
-    error: '无法连接 A3 后端服务（localhost:8000）。请先启动 Django 后端服务，再刷新页面或重试。',
+    error: '暂时无法连接 A3 后端服务，请检查网络连接后刷新页面或重试。',
   } as T;
 }
 

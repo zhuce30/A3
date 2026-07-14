@@ -209,6 +209,7 @@ export function KnowledgeBaseView() {
   const [wikiEvidence, setWikiEvidence] = useState<WikiEvidence[]>([]);
   const [graphEvidence, setGraphEvidence] = useState<GraphEvidence[]>([]);
   const [message, setMessage] = useState('');
+  const [loadError, setLoadError] = useState('');
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
@@ -226,9 +227,10 @@ export function KnowledgeBaseView() {
     const result = await a3GetJson<{ success: boolean; error?: string; resources: KnowledgeResource[]; stats: KnowledgeStats }>('/api/kb/resources/');
     setLoading(false);
     if (!result.success) {
-      setMessage(result.error ?? '资料读取失败');
+      setLoadError(result.error ?? '资料读取失败');
       return;
     }
+    setLoadError('');
     setResources(result.resources ?? []);
     setStats(result.stats ?? emptyStats);
   }, []);
@@ -637,6 +639,14 @@ export function KnowledgeBaseView() {
         {selectedFiles?.length ? <p className="mt-4 text-xs text-[var(--a3-text-muted)]">已选择 {selectedFiles.length} 个文件：{Array.from(selectedFiles).map((file) => file.name).join('、')}</p> : null}
       </section>
 
+      {loadError ? (
+        <div data-testid="a3-kb-load-error" role="alert" className="flex items-center justify-between gap-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          <span>{loadError}</span>
+          <Button type="button" variant="ghost" size="sm" onClick={() => void loadResources()}>
+            <RefreshCw className="size-4" />重试
+          </Button>
+        </div>
+      ) : null}
       {message ? <div data-testid="a3-kb-message" className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-800">{message}</div> : null}
       {interruptedResources.length || interruptedJobs.length ? (
         <div data-testid="a3-kb-interrupted-notice" className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
