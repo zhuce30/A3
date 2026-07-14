@@ -252,7 +252,12 @@ def _load_knowledge_base_index(
 ):
     persist_dir = persist_dir.resolve()
     faiss_path = persist_dir / "default__vector_store.json"
-    if not persist_dir.exists():
+    required_files = (
+        faiss_path,
+        persist_dir / "docstore.json",
+        persist_dir / "index_store.json",
+    )
+    if not persist_dir.exists() or any(not path.exists() for path in required_files):
         raise FileNotFoundError(f"Knowledge base index not found: {persist_dir}")
 
     cache_key = (str(persist_dir), embed_model_name)
