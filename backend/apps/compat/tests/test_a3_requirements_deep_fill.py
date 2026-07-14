@@ -1,3 +1,7 @@
+from datetime import timedelta
+
+from backend.apps.compat.models import ResourceGenerationJob
+
 from .common import *
 
 
@@ -33,6 +37,40 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertEqual(payload["job"]["jobId"], "job-resource-generation-api-001")
         self.assertEqual(payload["job"]["resourceType"], "lecture_doc")
         self.assertEqual(payload["job"]["goal"], long_goal)
+
+    @override_settings(RESOURCE_GENERATION_JOB_STALE_MINUTES=15)
+    def test_resource_generation_jobs_api_marks_only_stale_running_jobs_failed(self):
+        stale_job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-generation-stale-001",
+            user=self.user,
+            status="running",
+            progress=45,
+            stage="synthesis",
+            message="正在生成资源内容",
+        )
+        active_job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-generation-active-001",
+            user=self.user,
+            status="running",
+            progress=45,
+            stage="synthesis",
+            message="正在生成资源内容",
+        )
+        stale_at = timezone.now() - timedelta(minutes=30)
+        ResourceGenerationJob.objects.filter(id=stale_job.id).update(updated_at=stale_at)
+
+        response = self.client.get("/api/resources/jobs/")
+
+        self.assertEqual(response.status_code, 200)
+        jobs = {item["jobId"]: item for item in response.json()["jobs"]}
+        self.assertEqual(jobs[stale_job.job_id]["status"], "failed")
+        self.assertEqual(jobs[stale_job.job_id]["stage"], "interrupted")
+        self.assertEqual(jobs[stale_job.job_id]["progress"], 100)
+        self.assertTrue(jobs[stale_job.job_id]["done"])
+        self.assertIn("网络中断", jobs[stale_job.job_id]["error"])
+        self.assertEqual(jobs[active_job.job_id]["status"], "running")
+        stale_job.refresh_from_db()
+        self.assertIsNotNone(stale_job.finished_at)
 
     def test_resource_generation_has_single_kernel_entrypoint(self):
         source = Path("backend/apps/compat/resource_generation.py").read_text(encoding="utf-8")

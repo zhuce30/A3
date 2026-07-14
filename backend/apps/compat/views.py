@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from time import perf_counter
@@ -122,6 +122,30 @@ def resource_generate(request):
         return JsonResponse({"success": False, "error": f"资源包生成失败：{exc}"}, status=500)
 
 
+STALE_RESOURCE_GENERATION_JOB_MESSAGE = "资源生成任务在服务重启或网络中断后停止，请重新发起生成。"
+
+
+def fail_stale_resource_generation_jobs(user=None, *, stale_after: timedelta | None = None) -> int:
+    minutes = int(getattr(settings, "RESOURCE_GENERATION_JOB_STALE_MINUTES", 15) or 15)
+    cutoff = timezone.now() - (stale_after or timedelta(minutes=max(minutes, 1)))
+    queryset = ResourceGenerationJob.objects.filter(
+        status__in=["queued", "running"],
+        updated_at__lt=cutoff,
+    )
+    if user is not None:
+        queryset = queryset.filter(user=user)
+    now = timezone.now()
+    return queryset.update(
+        status="failed",
+        progress=100,
+        stage="interrupted",
+        message=STALE_RESOURCE_GENERATION_JOB_MESSAGE,
+        error_message=STALE_RESOURCE_GENERATION_JOB_MESSAGE,
+        finished_at=now,
+        updated_at=now,
+    )
+
+
 def serialize_resource_generation_job(job: ResourceGenerationJob) -> dict:
     result = job.result if isinstance(job.result, dict) else {}
     resource_pack = result.get("resourcePack") if isinstance(result.get("resourcePack"), dict) else None
@@ -156,6 +180,7 @@ def resource_generation_jobs(request):
     if rejected:
         return rejected
     if request.method == "GET":
+        fail_stale_resource_generation_jobs(request.user)
         queryset = ResourceGenerationJob.objects.filter(user=request.user)[:20]
         return JsonResponse({"success": True, "jobs": [serialize_resource_generation_job(job) for job in queryset]})
     try:
@@ -188,6 +213,8 @@ def resource_generation_job_detail(request, job_id):
     rejected = require_authenticated(request)
     if rejected:
         return rejected
+    if request.method == "GET":
+        fail_stale_resource_generation_jobs(request.user)
     job = get_object_or_404(ResourceGenerationJob, job_id=str(job_id), user=request.user)
     if request.method == "GET":
         return JsonResponse({"success": True, "job": serialize_resource_generation_job(job)})
