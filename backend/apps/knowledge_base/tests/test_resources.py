@@ -1278,6 +1278,43 @@ class KnowledgeResourceTests(TestCase):
         self.assertEqual(job.celery_task_id, "retry-task-id")
 
     @override_settings(KNOWLEDGE_INDEX_JOB_STALE_MINUTES=15)
+    @patch("backend.config.celery.app.control.inspect")
+    def test_resources_api_keeps_stale_heartbeat_job_running_when_celery_task_is_active(self, inspect):
+        inspect.return_value.active.return_value = {
+            "celery@worker": [{"id": "active-index-task"}],
+        }
+        job = KnowledgeIndexJob.objects.create(
+            owner=self.user,
+            job_type=IndexJobType.PARSE,
+            status=IndexJobStatus.RUNNING,
+            progress=81,
+            celery_task_id="active-index-task",
+            total_files=1,
+        )
+        resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            index_job=job,
+            original_name="long-running-graph.pdf",
+            stored_path=str(Path(self.temp_dir.name) / "long-running-graph.pdf"),
+            file_type=".pdf",
+            file_size=100,
+            status=ResourceStatus.INDEXING,
+        )
+        stale_at = timezone.now() - timedelta(minutes=30)
+        KnowledgeIndexJob.objects.filter(id=job.id).update(updated_at=stale_at)
+        KnowledgeResource.objects.filter(id=resource.id).update(updated_at=stale_at)
+
+        client = Client()
+        client.force_login(self.user)
+        response = client.get("/api/kb/resources/")
+
+        self.assertEqual(response.status_code, 200)
+        job.refresh_from_db()
+        resource.refresh_from_db()
+        self.assertEqual(job.status, IndexJobStatus.RUNNING)
+        self.assertEqual(resource.status, ResourceStatus.INDEXING)
+
+    @override_settings(KNOWLEDGE_INDEX_JOB_STALE_MINUTES=15)
     def test_resources_api_marks_stale_running_index_job_failed_after_restart(self):
         path = Path(self.temp_dir.name) / "stale-running.pdf"
         path.write_bytes(b"fake-pdf")

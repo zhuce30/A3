@@ -542,6 +542,14 @@ def fail_stale_index_jobs(owner=None, *, stale_after: timedelta | None = None) -
         queryset = queryset.filter(owner=owner)
 
     stale_jobs = list(queryset)
+    if any(job.celery_task_id for job in stale_jobs):
+        active_task_ids = _active_celery_task_ids()
+        stale_jobs = [
+            job
+            for job in stale_jobs
+            if not job.celery_task_id
+            or (active_task_ids is not None and job.celery_task_id not in active_task_ids)
+        ]
     now = timezone.now()
     for job in stale_jobs:
         interrupted_resources = list(job.resources.filter(status=ResourceStatus.INDEXING))
@@ -594,6 +602,28 @@ def fail_stale_index_jobs(owner=None, *, stale_after: timedelta | None = None) -
                 status=ResourceStatus.INDEXING,
             ).update(status=ResourceStatus.FAILED, error_message=STALE_INDEX_JOB_MESSAGE)
     return len(stale_jobs)
+
+
+def _active_celery_task_ids() -> set[str] | None:
+    from backend.config.celery import app
+
+    timeout = float(getattr(settings, "KNOWLEDGE_CELERY_INSPECT_TIMEOUT_SECONDS", 2) or 2)
+    try:
+        workers = app.control.inspect(timeout=max(timeout, 0.1)).active()
+    except Exception:
+        return None
+    if workers is None:
+        return None
+
+    task_ids: set[str] = set()
+    for tasks in workers.values():
+        for task in tasks or []:
+            if not isinstance(task, dict):
+                continue
+            task_id = str(task.get("id") or (task.get("request") or {}).get("id") or "").strip()
+            if task_id:
+                task_ids.add(task_id)
+    return task_ids
 
 
 def save_and_index_upload(owner, upload: UploadedFile) -> KnowledgeResource:
