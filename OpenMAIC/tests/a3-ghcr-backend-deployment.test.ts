@@ -65,4 +65,22 @@ describe('A3 private GHCR backend deployment', () => {
       /^A3_BACKEND_IMAGE=ghcr\.io\/zhuce30\/a3-backend@sha256:REPLACE_WITH_VERIFIED_64_HEX_DIGEST$/m,
     );
   });
+
+  it('bounds production Celery worker memory without changing Celery Beat', () => {
+    const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
+      schema: composeSchema,
+    }) as { services?: Record<string, { command?: unknown }> };
+
+    expect(compose.services?.celery?.command).toEqual([
+      'celery',
+      '-A',
+      'backend.config',
+      'worker',
+      '-l',
+      'info',
+      '--concurrency=1',
+      '--max-tasks-per-child=5',
+    ]);
+    expect(compose.services?.['celery-beat']?.command).toBeUndefined();
+  });
 });

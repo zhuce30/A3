@@ -51,6 +51,15 @@ services:
   celery:
     image: ${A3_BACKEND_IMAGE:-ghcr.io/zhuce30/a3-backend:latest}
     restart: unless-stopped
+    command:
+      - celery
+      - -A
+      - backend.config
+      - worker
+      - -l
+      - info
+      - --concurrency=1
+      - --max-tasks-per-child=5
     env_file:
       - .env.production
     environment:
