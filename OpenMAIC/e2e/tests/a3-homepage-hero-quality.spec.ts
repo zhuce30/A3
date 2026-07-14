@@ -19,14 +19,17 @@ test('closes the mobile menu when the viewport crosses into the desktop layout',
   await menuButton.click();
   const mobileNav = page.getByRole('navigation', { name: '移动端首页导航' });
   await expect(mobileNav).toBeVisible();
-  await mobileNav.getByRole('link', { name: '产品能力' }).focus();
+  await mobileNav.getByRole('link', { name: '学习闭环' }).focus();
 
   await page.setViewportSize({ width: 1440, height: 1000 });
 
   await expect(mobileNav).toHaveCount(0);
   await expect(page.getByRole('navigation', { name: '首页导航' })).toBeVisible();
   await expect(page.getByRole('link', { name: '智学引擎首页' })).toBeFocused();
-  await page.getByRole('link', { name: '开启我的智学旅程' }).first().click({ trial: true });
+  await page
+    .getByRole('main')
+    .getByRole('link', { name: '开始体验', exact: true })
+    .click({ trial: true });
   await page.getByRole('navigation', { name: '首页导航' }).getByRole('link').first().click({
     trial: true,
   });
@@ -52,7 +55,7 @@ test('keeps multiple hero screen edges visible with distinct layered transforms'
 
   const stage = page.getByTestId('a3-homepage-hero-stage');
   await expect(stage).toBeVisible();
-  await stage.focus();
+  await expect(stage).not.toHaveAttribute('tabindex', /.+/);
 
   const screens = stage.locator('figure');
   await expect(screens).toHaveCount(4);

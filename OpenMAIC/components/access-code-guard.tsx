@@ -1,9 +1,11 @@
 'use client';
 
 import { useEffect, useState, ReactNode } from 'react';
+import { usePathname } from 'next/navigation';
 import { AccessCodeModal } from '@/components/access-code-modal';
 
 export function AccessCodeGuard({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
   const [status, setStatus] = useState<{
     enabled: boolean;
     authenticated: boolean;
@@ -11,6 +13,7 @@ export function AccessCodeGuard({ children }: { children: ReactNode }) {
   }>({ enabled: false, authenticated: false, loading: true });
 
   useEffect(() => {
+    if (pathname === '/a3') return;
     let cancelled = false;
     fetch('/api/access-code/status')
       .then((res) => res.json())
@@ -32,9 +35,10 @@ export function AccessCodeGuard({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [pathname]);
 
-  const needsAuth = !status.loading && status.enabled && !status.authenticated;
+  const needsAuth =
+    pathname !== '/a3' && !status.loading && status.enabled && !status.authenticated;
 
   return (
     <>

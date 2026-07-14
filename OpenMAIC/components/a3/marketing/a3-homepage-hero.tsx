@@ -1,7 +1,4 @@
-'use client';
-
 import Link from 'next/link';
-import { motion, useReducedMotion } from 'motion/react';
 import {
   A3_HOMEPAGE_HERO,
   A3_HOMEPAGE_HERO_MEDIA,
@@ -11,30 +8,34 @@ import { A3HomepageProductMedia } from './a3-homepage-product-media';
 import styles from './a3-product-homepage.module.css';
 
 export function A3HomepageHero() {
-  const reduceMotion = useReducedMotion();
-
   return (
     <section className={styles.hero} aria-labelledby="a3-homepage-title">
       <div className={styles.heroCopy}>
+        <p className={styles.heroKicker}>为持续学习设计，不止回答一次问题</p>
         <h1 id="a3-homepage-title">
-          {A3_HOMEPAGE_HERO.titleLines[0]}
-          <br />
-          {A3_HOMEPAGE_HERO.titleLines[1]}
+          <span>{A3_HOMEPAGE_HERO.titleLines[0]}</span>
+          <span>{A3_HOMEPAGE_HERO.titleLines[1]}</span>
         </h1>
         <p className={styles.heroSupport}>{A3_HOMEPAGE_HERO.support}</p>
-        <Link className={styles.primaryCta} href={A3_HOMEPAGE_ROUTES.register}>
-          {A3_HOMEPAGE_HERO.cta}
-        </Link>
+        <div className={styles.heroActions}>
+          <Link className={styles.primaryCta} href={A3_HOMEPAGE_ROUTES.register}>
+            {A3_HOMEPAGE_HERO.cta}
+          </Link>
+          <a className={styles.secondaryCta} href={A3_HOMEPAGE_HERO.secondaryCta.href}>
+            {A3_HOMEPAGE_HERO.secondaryCta.label}
+          </a>
+        </div>
+        <ul className={styles.heroTrust} aria-label="产品可信特性">
+          <li>资料来源可追溯</li>
+          <li>学习结果会回流</li>
+          <li>教师可以介入</li>
+        </ul>
       </div>
 
-      <motion.div
+      <div
         className={styles.heroStage}
-        initial={reduceMotion ? false : { opacity: 0, y: 28 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: reduceMotion ? 0 : 0.8, ease: [0.22, 1, 0.36, 1] }}
         data-testid="a3-homepage-hero-stage"
-        tabIndex={0}
-        aria-label="智学引擎产品界面展示"
+        aria-label="智学引擎真实产品界面展示"
       >
         {A3_HOMEPAGE_HERO_MEDIA.map((item, index) => (
           <figure key={item.src} className={styles.heroScreen} data-screen={index + 1}>
@@ -46,7 +47,7 @@ export function A3HomepageHero() {
             />
           </figure>
         ))}
-      </motion.div>
+      </div>
     </section>
   );
 }

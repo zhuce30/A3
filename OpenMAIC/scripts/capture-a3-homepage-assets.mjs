@@ -1,4 +1,5 @@
 import { chromium } from '@playwright/test';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
@@ -23,20 +24,37 @@ const teacherIdentifier = process.env.A3_CAPTURE_TEACHER_IDENTIFIER ?? '13800000
 const password = process.env.A3_CAPTURE_PASSWORD ?? 'Demo@123456';
 const defaultViewport = { width: 1440, height: 1000 };
 const expectedAssets = [
+  'today-plan.webp',
   'profile.webp',
   'diagnostic.webp',
   'knowledge-base.webp',
   'multimodal-resources.webp',
   'classroom.webp',
+  'assessment-review.webp',
+  'progress-refresh.webp',
   'teacher-workbench.webp',
   'teacher-fallback.webp',
 ];
 
 const blockedWrites = [];
+const suppressedReadTracking = [];
 const failedResponses = [];
 const browserErrors = [];
 
 const studentAssets = [
+  {
+    route: '/a3/today',
+    filename: 'today-plan.webp',
+    testId: 'a3-today-view',
+    ready: async (page) => {
+      const tasks = page.getByTestId('a3-today-task');
+      await tasks.first().waitFor({ timeout: 60_000 });
+      if ((await tasks.count()) < 1) {
+        throw new Error('today-plan.webp requires at least one real today task');
+      }
+    },
+    height: 900,
+  },
   {
     route: '/a3/profile-setup',
     filename: 'profile.webp',
@@ -95,8 +113,32 @@ const studentAssets = [
     height: 900,
   },
   {
+    route: '/a3/wrong-notebook',
+    filename: 'assessment-review.webp',
+    testId: 'a3-wrong-notebook-view',
+    ready: async (page) => {
+      const wrongQuestions = page.getByTestId('a3-wrong-question-item');
+      await wrongQuestions.first().waitFor({ timeout: 60_000 });
+      if ((await wrongQuestions.count()) < 1) {
+        throw new Error('assessment-review.webp requires at least one real wrong question');
+      }
+    },
+    height: 900,
+  },
+  {
+    route: '/a3/report',
+    filename: 'progress-refresh.webp',
+    testId: 'a3-report-view',
+    focusTestId: 'a3-report-weekly-summary',
+    focusAncestor: 'div',
+    ready: async (page) =>
+      page.getByTestId('a3-report-weekly-summary').waitFor({ timeout: 60_000 }),
+    height: 760,
+  },
+  {
     route: '/a3/coaching',
     filename: 'teacher-fallback.webp',
+    reuseExisting: true,
     testId: 'a3-digital-human-avatar',
     canvasTestId: 'a3-digital-human-three-canvas',
     resizeWidth: 720,
@@ -107,12 +149,13 @@ const studentAssets = [
       await page.waitForFunction(
         () => {
           const element = document.querySelector('[data-testid="a3-digital-human-three-stage"]');
-          return element?.getAttribute('data-avatar-renderer')?.startsWith('vrm');
+          return ['vrm', 'vrm_idle_animation', 'primitive', 'static_fallback'].includes(
+            element?.getAttribute('data-avatar-renderer') ?? '',
+          );
         },
         undefined,
         { timeout: 60_000 },
       );
-      await page.getByTestId('a3-digital-human-three-canvas').waitFor({ timeout: 60_000 });
     },
     height: 700,
   },
@@ -237,6 +280,14 @@ async function positionBelowStickyHeader(page, target, filename) {
 }
 
 async function capture(page, asset, assetOutputDir) {
+  if (asset.reuseExisting) {
+    await fs.copyFile(
+      path.join(outputDir, asset.filename),
+      path.join(assetOutputDir, asset.filename),
+    );
+    console.log(`${asset.filename}: reused validated published asset`);
+    return;
+  }
   await page.setViewportSize(asset.viewport ?? defaultViewport);
   await page.goto(`${baseURL}${asset.route}`, { waitUntil: 'domcontentloaded' });
   const pageTarget = page.getByTestId(asset.testId).first();
@@ -305,12 +356,17 @@ async function capture(page, asset, assetOutputDir) {
 
   let png;
   if (asset.canvasTestId) {
-    png = await captureCanvasCompositor(page.getByTestId(asset.canvasTestId), {
-      maxAttempts: 6,
-      retryDelayMs: 250,
-      label: asset.filename,
-      screenshotStyle: A3_DIGITAL_HUMAN_CAPTURE_STYLE,
-    });
+    const canvas = page.getByTestId(asset.canvasTestId);
+    if ((await canvas.count()) > 0 && (await canvas.isVisible().catch(() => false))) {
+      png = await captureCanvasCompositor(canvas, {
+        maxAttempts: 6,
+        retryDelayMs: 250,
+        label: asset.filename,
+        screenshotStyle: A3_DIGITAL_HUMAN_CAPTURE_STYLE,
+      });
+    } else {
+      png = await target.screenshot({ type: 'png', animations: 'disabled' });
+    }
   } else {
     png = await target.screenshot({
       type: 'png',
@@ -349,7 +405,13 @@ async function captureForAccount(browser, identifier, assets, assetOutputDir) {
   await installCaptureRequestPolicy(context, {
     captureOrigin: new URL(baseURL).origin,
     loginOrigin,
-    onBlockedWrite: (write) => blockedWrites.push(write),
+    onBlockedWrite: (write) => {
+      if (new URL(write.url).pathname === '/api/learning/events/') {
+        suppressedReadTracking.push(write);
+        return;
+      }
+      blockedWrites.push(write);
+    },
   });
   const page = await context.newPage();
   const monitorFailedResponses = watchPage(page);
@@ -380,6 +442,11 @@ await runAtomicAssetCapture({
         `Capture blocked forbidden business writes before sending:\n${blockedWrites
           .map((write) => `${write.method} ${write.url}`)
           .join('\n')}`,
+      );
+    }
+    if (suppressedReadTracking.length) {
+      console.log(
+        `suppressed ${suppressedReadTracking.length} read-only page-view events before sending`,
       );
     }
     if (failedResponses.length) {

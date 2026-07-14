@@ -44,7 +44,11 @@ export function A3HomepageResourceShowcase({ item }: { item: ResourceStoryItem }
         />
       </figure>
 
-      <Link className={`${styles.sectionLink} ${styles.resourceCta}`} href="/a3/recommendations">
+      <Link
+        className={`${styles.sectionLink} ${styles.resourceCta}`}
+        href="/a3/recommendations"
+        prefetch={false}
+      >
         查看个性化资源
       </Link>
     </section>

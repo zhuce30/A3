@@ -9,6 +9,33 @@ async function stubAnonymousUser(page: Page) {
   );
 }
 
+async function waitForStableHomepage(page: Page) {
+  await page.waitForFunction(async () => {
+    const root = document.querySelector('[data-testid="a3-product-homepage"]');
+    if (!root) return false;
+    await new Promise((resolve) => window.setTimeout(resolve, 150));
+    return (
+      root.isConnected && root === document.querySelector('[data-testid="a3-product-homepage"]')
+    );
+  });
+}
+
+async function scrollHomepageTeacherIntoView(page: Page) {
+  await waitForStableHomepage(page);
+  await page.waitForFunction(() => {
+    const stage = document.querySelector<HTMLElement>(
+      'main [data-testid="a3-homepage-teacher-stage"]',
+    );
+    return stage?.isConnected && stage.getBoundingClientRect().height > 0;
+  });
+  await page.evaluate(() => {
+    document
+      .querySelector<HTMLElement>('main [data-testid="a3-homepage-teacher-stage"]')
+      ?.scrollIntoView({ block: 'center' });
+  });
+  return page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
+}
+
 test.beforeEach(async ({ page }) => {
   await stubAnonymousUser(page);
 });
@@ -20,22 +47,21 @@ test('keeps product media readable and geometrically stable when every image fai
   await page.route('**/a3/assets/homepage/*.webp', (route) => route.abort('failed'));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/a3');
+  await waitForStableHomepage(page);
 
   const hero = page.getByTestId('a3-homepage-hero-stage');
-  const cta = page.getByRole('link', { name: '开启我的智学旅程' }).first();
+  const cta = page.getByRole('main').getByRole('link', { name: '开始体验', exact: true });
   await expect(hero).toBeVisible();
   await expect(cta).toBeVisible();
   await cta.click({ trial: true });
-  await expect(hero.getByRole('img', { name: '学习画像界面' })).toBeVisible();
+  await expect(hero.getByRole('img', { name: '今日任务与学习计划界面' })).toBeVisible();
 
   const profileSection = page.getByTestId('a3-homepage-profile');
   await profileSection.scrollIntoViewIfNeeded();
   await expect(profileSection.getByText('产品界面暂未加载')).toBeVisible();
-  const storyFrame = profileSection.getByRole('img', {
-    name: '学习画像设置界面',
-  });
-  await expect(storyFrame).toContainText('产品界面暂未加载');
-  await expect(storyFrame).toContainText('你仍可继续浏览完整学习流程。');
+  const storyFrame = profileSection.locator('figure');
+  await expect(storyFrame.getByText('产品界面暂未加载')).toBeVisible();
+  await expect(storyFrame.getByText('你仍可继续浏览完整学习流程。')).toBeVisible();
 
   const storyBox = await storyFrame.boundingBox();
   expect(storyBox?.width).toBeGreaterThan(300);
@@ -78,8 +104,7 @@ test('does not initialize the teacher renderer or observer with reduced motion',
     });
   });
   await page.goto('/a3');
-  const stage = page.getByTestId('a3-homepage-teacher-stage');
-  await stage.scrollIntoViewIfNeeded();
+  const stage = await scrollHomepageTeacherIntoView(page);
 
   await expect(stage.getByTestId('a3-homepage-teacher-fallback')).toBeVisible();
   await expect(stage.getByTestId('a3-digital-human-avatar')).toHaveCount(0);
@@ -105,6 +130,7 @@ test('keeps the static reduced-motion hero screen framed on desktop and mobile',
   ]) {
     await page.setViewportSize(viewport);
     await page.goto('/a3');
+    await waitForStableHomepage(page);
 
     const screens = page.getByTestId('a3-homepage-hero-stage').locator('figure');
     const firstScreen = screens.first();
@@ -168,6 +194,7 @@ test('reacts to reduced-motion changes and cleans up the pending observer', asyn
     });
   });
   await page.goto('/a3');
+  await waitForStableHomepage(page);
   await expect
     .poll(() =>
       page.evaluate(
@@ -212,6 +239,7 @@ test('returns focus to the mobile menu trigger after Escape and same-page naviga
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/a3');
+  await waitForStableHomepage(page);
   const openMenu = page.getByRole('button', { name: '打开导航' });
 
   await openMenu.click();
@@ -224,10 +252,10 @@ test('returns focus to the mobile menu trigger after Escape and same-page naviga
   await page
     .getByRole('navigation', { name: '移动端首页导航' })
     .getByRole('link', {
-      name: '产品能力',
+      name: '学习闭环',
     })
     .click();
-  await expect(page).toHaveURL(/#capabilities$/);
+  await expect(page).toHaveURL(/#daily-learning$/);
   await expect(page.getByRole('navigation', { name: '移动端首页导航' })).toHaveCount(0);
   await expect(openMenu).toBeFocused();
   await expect(closeMenu).toHaveCount(0);
@@ -238,6 +266,7 @@ test('uses a contained single-column mobile story without horizontal overflow', 
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/a3');
+  await waitForStableHomepage(page);
 
   const headerBox = await page.locator('header').boundingBox();
   expect(headerBox?.height).toBe(64);

@@ -1,9 +1,9 @@
 'use client';
 
 import Link from 'next/link';
+import Image from 'next/image';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DigitalHumanAvatar } from '@/components/a3/features/coaching/digital-human-avatar';
-import { A3HomepageProductMedia } from './a3-homepage-product-media';
 import styles from './a3-product-homepage.module.css';
 
 export const A3_HOMEPAGE_TEACHER_ROOT_MARGIN = '160px';
@@ -109,6 +109,7 @@ export function A3HomepageTeacherStage() {
   const [rendererReady, setRendererReady] = useState(false);
   const [preserveFallback, setPreserveFallback] = useState(false);
   const [fallbackVisible, setFallbackVisible] = useState(true);
+  const [fallbackImageFailed, setFallbackImageFailed] = useState(false);
   const resetToStaticFallback = useCallback(() => {
     setActive(false);
     setDemoPhase('static');
@@ -297,13 +298,24 @@ export function A3HomepageTeacherStage() {
             }}
             onTransitionCancel={() => dismissFallback('transition_cancel')}
           >
-            <A3HomepageProductMedia
-              src="/a3/assets/homepage/teacher-fallback.webp"
-              alt="数字教师实时辅导界面"
-              sizes="(max-width: 768px) 100vw, 92vw"
-              fallbackKind="teacher"
-              onReady={() => setVisualReady(true)}
-            />
+            {fallbackImageFailed ? (
+              <div className={styles.mediaFallback} role="img" aria-label="数字教师实时辅导界面">
+                <strong>数字教师画面暂未加载</strong>
+                <span>你仍可继续浏览完整学习流程。</span>
+              </div>
+            ) : (
+              <Image
+                src="/a3/assets/homepage/teacher-fallback.webp"
+                alt="数字教师实时辅导界面"
+                fill
+                sizes="(max-width: 768px) 100vw, 92vw"
+                onLoad={() => setVisualReady(true)}
+                onError={() => {
+                  setFallbackImageFailed(true);
+                  setVisualReady(true);
+                }}
+              />
+            )}
           </div>
         ) : null}
       </div>
@@ -317,7 +329,7 @@ export function A3HomepageTeacherStage() {
           正在倾听：进程调度为什么会发生饥饿？
         </div>
       ) : null}
-      <Link className={styles.teacherLink} href="/a3/coaching">
+      <Link className={styles.teacherLink} href="/a3/coaching" prefetch={false}>
         进入实时辅导
       </Link>
     </div>

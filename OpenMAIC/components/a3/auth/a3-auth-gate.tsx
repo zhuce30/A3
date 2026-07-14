@@ -55,6 +55,7 @@ function A3AuthGateWithLocation({ children }: { children: React.ReactNode }) {
   );
 
   useEffect(() => {
+    if (isPublicPath) return;
     let alive = true;
     a3GetJson<{ user?: A3PublicUser | null }>('/api/auth/me/')
       .then((data) => {
@@ -66,7 +67,7 @@ function A3AuthGateWithLocation({ children }: { children: React.ReactNode }) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [isPublicPath]);
 
   useEffect(() => {
     function handleUserUpdated(event: Event) {

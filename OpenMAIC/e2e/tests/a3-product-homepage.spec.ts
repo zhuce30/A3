@@ -27,6 +27,33 @@ async function stubAnonymousUser(page: Page, delayMs = 0) {
   });
 }
 
+async function waitForStableHomepage(page: Page) {
+  await page.waitForFunction(async () => {
+    const root = document.querySelector('[data-testid="a3-product-homepage"]');
+    if (!root) return false;
+    await new Promise((resolve) => window.setTimeout(resolve, 150));
+    return (
+      root.isConnected && root === document.querySelector('[data-testid="a3-product-homepage"]')
+    );
+  });
+}
+
+async function scrollHomepageTeacherIntoView(page: Page) {
+  await waitForStableHomepage(page);
+  await page.waitForFunction(() => {
+    const stage = document.querySelector<HTMLElement>(
+      'main [data-testid="a3-homepage-teacher-stage"]',
+    );
+    return stage?.isConnected && stage.getBoundingClientRect().height > 0;
+  });
+  await page.evaluate(() => {
+    document
+      .querySelector<HTMLElement>('main [data-testid="a3-homepage-teacher-stage"]')
+      ?.scrollIntoView({ block: 'center' });
+  });
+  return page.getByRole('main').getByTestId('a3-homepage-teacher-stage');
+}
+
 async function compositedPixelStats(locator: Locator, centerRatio = 1) {
   const screenshot = await locator.screenshot();
   const source = sharp(screenshot);
@@ -109,10 +136,17 @@ async function expectProductImagesReadable(page: Page) {
       naturalHeight: node.naturalHeight,
       imageBox: node.getBoundingClientRect().toJSON(),
       frameBox: node.parentElement?.getBoundingClientRect().toJSON() ?? null,
+      isTopLayer: (() => {
+        const box = node.getBoundingClientRect();
+        return (
+          document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === node
+        );
+      })(),
     }));
     expect(geometry.naturalWidth).toBeGreaterThan(300);
     expect(Math.min(geometry.naturalWidth, geometry.naturalHeight)).toBeGreaterThan(120);
     expect(geometry.naturalWidth * geometry.naturalHeight).toBeGreaterThan(40_000);
+    expect(geometry.isTopLayer).toBe(true);
     expect(geometry.frameBox).not.toBeNull();
     expect(geometry.imageBox.left).toBeGreaterThanOrEqual((geometry.frameBox?.left ?? 0) - 1);
     expect(geometry.imageBox.right).toBeLessThanOrEqual((geometry.frameBox?.right ?? 0) + 1);
@@ -133,7 +167,9 @@ async function expectResourceShowcaseReadable(page: Page) {
   const cta = section.getByRole('link', { name: '查看个性化资源' });
   await expect(image).toBeVisible();
   await expect(cta).toBeVisible();
-  await expect.poll(() => image.evaluate((node) => node.complete && node.naturalWidth > 0)).toBe(true);
+  await expect
+    .poll(() => image.evaluate((node) => node.complete && node.naturalWidth > 0))
+    .toBe(true);
   expect(await section.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
   expect(await cta.evaluate((node) => node.scrollHeight <= node.clientHeight + 1)).toBe(true);
 
@@ -146,13 +182,17 @@ async function expectResourceShowcaseReadable(page: Page) {
 async function expectHeaderAndHero(page: Page, viewportHeight: number) {
   const header = page.locator('header');
   const brand = page.getByRole('link', { name: '智学引擎首页' });
-  const headerCta = header.getByRole('link', { name: '开启旅程' });
-  const heading = page.getByRole('heading', { name: '每一步学习， 都更懂你。' });
-  const support = page.getByText('一群懂学习的智能体，陪你找到自己的节奏。');
-  const heroCta = page.getByRole('link', { name: '开启我的智学旅程' }).first();
+  const headerCta = header.getByRole('link', { name: '开始体验' });
+  const heading = page.getByRole('heading', {
+    name: '智学引擎 把每一次学习，接到下一步。',
+  });
+  const support = page.getByText(
+    '从诊断、今日计划到课堂、测评和错题复习，每一次结果都会更新后续安排。',
+  );
+  const heroCta = page.getByRole('main').getByRole('link', { name: '开始体验', exact: true });
   const firstImage = page
     .getByTestId('a3-homepage-hero-stage')
-    .getByRole('img', { name: '学习画像界面' });
+    .getByRole('img', { name: '今日任务与学习计划界面' });
 
   await expect(brand).toBeVisible();
   await expect(headerCta).toBeVisible();
@@ -184,17 +224,17 @@ async function expectHeaderAndHero(page: Page, viewportHeight: number) {
   expect(boxesOverlap(heroCtaBox!, imageBox!)).toBe(false);
 
   const nextSectionTop = await page
-    .getByTestId('a3-homepage-profile')
+    .getByTestId('a3-homepage-today')
     .evaluate((node) => node.getBoundingClientRect().top);
   expect(nextSectionTop).toBeLessThan(viewportHeight - 8);
   expect(nextSectionTop).toBeGreaterThan(viewportHeight * 0.78);
-  const nextChapterLabel = page.getByTestId('a3-homepage-profile').getByText('01 / PROFILE');
+  const nextChapterLabel = page.getByTestId('a3-homepage-today').getByText('01 / TODAY');
   const nextChapterBox = await nextChapterLabel.boundingBox();
   expect(nextChapterBox).not.toBeNull();
   expect(nextChapterBox?.y).toBeLessThan(viewportHeight - 8);
 }
 
-test('renders the public product homepage before a slow auth check resolves', async ({ page }) => {
+test('renders the public product homepage without starting an auth check', async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, '__a3HomepagePaintMs', {
       configurable: true,
@@ -209,47 +249,56 @@ test('renders the public product homepage before a slow auth check resolves', as
     });
     observer.observe(document, { childList: true, subtree: true });
   });
-  let authStarted = false;
-  let authResolved = false;
-  let releaseAuth: (() => void) | undefined;
-  const deferredAuth = new Promise<void>((resolve) => {
-    releaseAuth = resolve;
-  });
+  const unrelatedRequests: string[] = [];
   await page.route('**/api/auth/me/', async (route) => {
-    authStarted = true;
-    await deferredAuth;
-    authResolved = true;
+    unrelatedRequests.push('/api/auth/me/');
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({ success: true, user: null }),
     });
   });
+  await page.route('**/api/server-providers', async (route) => {
+    unrelatedRequests.push('/api/server-providers');
+    await route.fulfill({ contentType: 'application/json', body: '[]' });
+  });
+  await page.route('**/api/access-code/status', async (route) => {
+    unrelatedRequests.push('/api/access-code/status');
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ enabled: false, authenticated: false }),
+    });
+  });
   await page.goto('/a3', { waitUntil: 'commit' });
   await expect(page.getByTestId('a3-product-homepage')).toBeVisible();
-  await expect(page.getByRole('heading', { name: '每一步学习， 都更懂你。' })).toBeVisible();
-  await expect(page.getByRole('link', { name: '开启我的智学旅程' }).first()).toBeVisible();
-  await expect.poll(() => authStarted).toBe(true);
-  expect(authResolved).toBe(false);
+  await expect(
+    page.getByRole('heading', { name: '智学引擎 把每一次学习，接到下一步。' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('main').getByRole('link', { name: '开始体验', exact: true }),
+  ).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(unrelatedRequests).toEqual([]);
   const homepagePaintMs = await page.evaluate(
     () => (window as typeof window & { __a3HomepagePaintMs: number | null }).__a3HomepagePaintMs,
   );
+  const responseEndMs = await page.evaluate(() => {
+    const navigation = performance.getEntriesByType('navigation')[0] as
+      | PerformanceNavigationTiming
+      | undefined;
+    return navigation?.responseEnd ?? 0;
+  });
   expect(homepagePaintMs).not.toBeNull();
-  expect(homepagePaintMs).toBeLessThan(1_000);
-  releaseAuth?.();
-  await expect.poll(() => authResolved).toBe(true);
+  expect((homepagePaintMs ?? Number.POSITIVE_INFINITY) - responseEndMs).toBeLessThan(1_000);
 });
 
-test('review entry exposes the approved account without bypassing login', async ({ page }) => {
+test('login entry opens the real login page without a review shortcut', async ({ page }) => {
   await stubAnonymousUser(page);
   await page.goto('/a3');
-  await page.getByRole('link', { name: '评审体验' }).first().click();
+  await page.getByRole('link', { name: '登录', exact: true }).first().click();
 
-  await expect(page).toHaveURL(/\/a3\/login\?mode=review$/);
-  await expect(page.getByTestId('a3-review-login-panel')).toBeVisible();
-  await page.getByTestId('a3-review-fill-account').click();
-  await expect(page.getByLabel('账号')).toHaveValue('13800000001');
-  await expect(page.locator('input[autocomplete="current-password"]')).toHaveValue('Demo@123456');
-  await expect(page).toHaveURL(/\/a3\/login/);
+  await expect(page).toHaveURL(/\/a3\/login$/);
+  await expect(page.getByLabel('账号')).toBeVisible();
+  await expect(page.locator('input[autocomplete="current-password"]')).toBeVisible();
 });
 
 test('anchors reveal real evidence and classroom citations without mutating data', async ({
@@ -269,16 +318,16 @@ test('anchors reveal real evidence and classroom citations without mutating data
   await page.goto('/a3');
 
   const desktopNav = page.getByRole('navigation', { name: '首页导航' });
-  for (const anchor of ['#capabilities', '#learning-loop', '#evidence', '#contact']) {
+  for (const anchor of ['#daily-learning', '#product-evidence', '#evidence', '#teacher']) {
     await desktopNav.locator(`a[href="${anchor}"]`).click();
     await expect(page).toHaveURL(new RegExp(`${anchor}$`));
     await expect(page.locator(anchor)).toBeInViewport();
   }
 
   const evidence = page.getByTestId('a3-homepage-evidence');
-  await expect(evidence).toContainText('资料可检索');
-  await expect(evidence).toContainText('来源可验证');
-  await expect(evidence).toContainText('结果会写回');
+  await expect(evidence).toContainText('53 条用例');
+  await expect(evidence).toContainText('18 条流程');
+  await expect(evidence).toContainText('六类资源');
 
   const classroomModes = page.getByRole('group', { name: '课堂展示模式' });
   await classroomModes.getByRole('button', { name: '引用' }).click();
@@ -294,8 +343,8 @@ test('deep coaching entry sends a guest through login with a safe return target'
 }) => {
   await stubAnonymousUser(page);
   await page.goto('/a3');
-  await page.getByTestId('a3-homepage-teacher-stage').scrollIntoViewIfNeeded();
-  await page.getByRole('link', { name: '进入实时辅导' }).click();
+  const teacherStage = await scrollHomepageTeacherIntoView(page);
+  await teacherStage.getByRole('link', { name: '进入实时辅导' }).click();
   await expect(page).toHaveURL(/\/a3\/login\?next=%2Fa3%2Fcoaching$/);
   expect(new URL(page.url()).searchParams.get('next')).toBe('/a3/coaching');
 });
@@ -322,28 +371,24 @@ for (const viewport of [
 
     const footer = page.locator('footer');
     await footer.scrollIntoViewIfNeeded();
-    const competition = footer.getByText(
-      '比赛：A3-基于大模型的个性化资源生成与学习多智能体系统开发',
-    );
-    const email = footer.getByRole('link', { name: '邮箱：3062221819@qq.com' });
-    await expect(competition).toBeVisible();
-    await expect(email).toBeVisible();
-    const [competitionBox, emailBox] = await Promise.all([
-      competition.boundingBox(),
-      email.boundingBox(),
+    const copyright = footer.getByText('智学引擎产品团队');
+    const help = footer.getByRole('link', { name: '产品帮助中心' });
+    await expect(copyright).toBeVisible();
+    await expect(help).toBeVisible();
+    const [copyrightBox, helpBox] = await Promise.all([
+      copyright.boundingBox(),
+      help.boundingBox(),
     ]);
-    expect(competitionBox).not.toBeNull();
-    expect(emailBox).not.toBeNull();
+    expect(copyrightBox).not.toBeNull();
+    expect(helpBox).not.toBeNull();
     const boxesOverlap = !(
-      (competitionBox?.x ?? 0) + (competitionBox?.width ?? 0) <= (emailBox?.x ?? 0) ||
-      (emailBox?.x ?? 0) + (emailBox?.width ?? 0) <= (competitionBox?.x ?? 0) ||
-      (competitionBox?.y ?? 0) + (competitionBox?.height ?? 0) <= (emailBox?.y ?? 0) ||
-      (emailBox?.y ?? 0) + (emailBox?.height ?? 0) <= (competitionBox?.y ?? 0)
+      (copyrightBox?.x ?? 0) + (copyrightBox?.width ?? 0) <= (helpBox?.x ?? 0) ||
+      (helpBox?.x ?? 0) + (helpBox?.width ?? 0) <= (copyrightBox?.x ?? 0) ||
+      (copyrightBox?.y ?? 0) + (copyrightBox?.height ?? 0) <= (helpBox?.y ?? 0) ||
+      (helpBox?.y ?? 0) + (helpBox?.height ?? 0) <= (copyrightBox?.y ?? 0)
     );
     expect(boxesOverlap).toBe(false);
-    expect(await competition.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(
-      true,
-    );
+    expect(await copyright.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
     await expectNoHorizontalOverflow(page);
     await footer.screenshot({
       path: path.join(SCREENSHOT_DIR, `a3-homepage-${viewport.name}-footer.png`),
@@ -388,21 +433,24 @@ test('reduced motion keeps every key chapter and the static hero readable', asyn
 
   const firstHeroImage = page
     .getByTestId('a3-homepage-hero-stage')
-    .getByRole('img', { name: '学习画像界面' });
+    .getByRole('img', { name: '今日任务与学习计划界面' });
   await expect(firstHeroImage).toBeVisible();
   await expect
     .poll(() => firstHeroImage.evaluate((node) => node.complete && node.naturalWidth > 0))
     .toBe(true);
 
   for (const testId of [
+    'a3-homepage-today',
     'a3-homepage-profile',
     'a3-homepage-diagnostic',
     'a3-homepage-knowledge',
     'a3-homepage-resources',
     'a3-homepage-classroom',
     'a3-homepage-coaching',
-    'a3-homepage-evidence',
+    'a3-homepage-assessment-review',
+    'a3-homepage-progress-refresh',
     'a3-homepage-teacher',
+    'a3-homepage-evidence',
   ]) {
     const chapter = page.getByTestId(testId);
     await chapter.scrollIntoViewIfNeeded();
