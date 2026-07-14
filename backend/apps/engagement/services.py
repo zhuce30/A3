@@ -66,7 +66,7 @@ def ensure_learning_reminders(user, *, plan: dict | None = None, motivation: dic
                 title="有顺延任务需要处理",
                 detail=f"{len(rollover_tasks)} 个任务已顺延到今天，建议优先完成。",
                 notification_type=NotificationType.LEARNING_TASK,
-                action_url="/a3/today",
+                action_url="/a3/study-plan",
                 payload={"rolloverTasks": len(rollover_tasks), **({"planChange": plan_change} if plan_change else {})},
             )
         )
@@ -133,21 +133,29 @@ def _ensure_reminder(
     action_url: str,
     payload: dict[str, Any] | None = None,
 ) -> UserNotification | None:
-    if UserNotification.objects.filter(user=user, payload__reminderKey=key).exists():
-        return None
     metadata = payload if isinstance(payload, dict) else {}
+    next_payload = {
+        **metadata,
+        "reminderKey": key,
+        "generatedBy": "learning_reminder",
+        "actionKind": _action_kind(action_url),
+    }
+    existing = UserNotification.objects.filter(user=user, payload__reminderKey=key).first()
+    if existing:
+        existing.title = title
+        existing.detail = detail
+        existing.notification_type = notification_type
+        existing.action_url = action_url
+        existing.payload = next_payload
+        existing.save(update_fields=["title", "detail", "notification_type", "action_url", "payload"])
+        return existing
     return create_notification(
         user,
         title=title,
         detail=detail,
         notification_type=notification_type,
         action_url=action_url,
-        payload={
-            **metadata,
-            "reminderKey": key,
-            "generatedBy": "learning_reminder",
-            "actionKind": _action_kind(action_url),
-        },
+        payload=next_payload,
     )
 
 

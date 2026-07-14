@@ -142,7 +142,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
       </aside>
 
       <div className="md:pl-[248px]">
-        <header className="sticky top-0 z-20 flex h-[72px] min-w-0 items-center justify-between gap-2 border-b border-[var(--a3-border)] bg-[var(--a3-surface)] px-3 backdrop-blur sm:px-4 md:px-6">
+        <header className="sticky top-0 z-40 flex h-[72px] min-w-0 items-center justify-between gap-2 border-b border-[var(--a3-border)] bg-[var(--a3-surface)] px-3 backdrop-blur sm:px-4 md:px-6">
           <div className="flex min-w-0 items-center gap-3">
             <div className="md:hidden">
               <div className="flex size-10 items-center justify-center rounded-xl bg-blue-600 font-bold text-white shadow-[0_10px_22px_rgba(37,99,235,0.22)]">

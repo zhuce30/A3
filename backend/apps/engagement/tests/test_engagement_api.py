@@ -9,7 +9,7 @@ from django.utils import timezone
 from backend.apps.accounts.models import User
 from backend.apps.assessments.models import Question, WrongQuestion
 from backend.apps.engagement.models import NotificationType, UserFavorite, UserNotification
-from backend.apps.engagement.services import create_notification
+from backend.apps.engagement.services import create_notification, ensure_learning_reminders, serialize_notification
 from backend.apps.learning.models import Course
 from backend.apps.learning.services import assign_resource_pack_to_today, generate_learning_path, generate_study_plan
 from backend.apps.profiles.models import LearnerProfile
@@ -137,6 +137,60 @@ class EngagementApiTests(TestCase):
         review_group = next(item for item in payload["actionGroups"] if item["kind"] == "review")
         self.assertEqual(review_group["learningLoop"]["kind"], "review")
         self.assertEqual(review_group["learningLoop"]["nextAction"]["href"], "/a3/wrong-notebook")
+
+    def test_rollover_reminder_uses_plan_specific_guidance(self):
+        today = timezone.localdate().isoformat()
+        previous_day = (timezone.localdate() - timedelta(days=1)).isoformat()
+
+        ensure_learning_reminders(
+            self.user,
+            plan={
+                "days": [{
+                    "date": today,
+                    "tasks": [{
+                        "id": "rollover-task-1",
+                        "title": "复习死锁检测",
+                        "status": "pending",
+                        "rolledOverFrom": previous_day,
+                    }],
+                }],
+                "reviewQueue": [],
+            },
+            motivation={"todayRemainingMinutes": 30, "streakDays": 1, "todayTotalTasks": 1},
+        )
+        ensure_learning_reminders(
+            self.user,
+            plan={
+                "days": [{
+                    "date": today,
+                    "tasks": [
+                        {
+                            "id": "rollover-task-1",
+                            "title": "复习死锁检测",
+                            "status": "pending",
+                            "rolledOverFrom": previous_day,
+                        },
+                        {
+                            "id": "rollover-task-2",
+                            "title": "完成银行家算法练习",
+                            "status": "pending",
+                            "rolledOverFrom": previous_day,
+                        },
+                    ],
+                }],
+                "reviewQueue": [],
+            },
+            motivation={"todayRemainingMinutes": 55, "streakDays": 1, "todayTotalTasks": 2},
+        )
+
+        reminder = UserNotification.objects.get(user=self.user, title="有顺延任务需要处理")
+        payload = serialize_notification(reminder)
+        self.assertEqual(reminder.action_url, "/a3/study-plan")
+        self.assertEqual(reminder.payload["actionKind"], "plan")
+        self.assertEqual(reminder.payload["rolloverTasks"], 2)
+        self.assertIn("2 个任务", reminder.detail)
+        self.assertEqual(payload["learningLoop"]["kind"], "plan")
+        self.assertIn("2 个顺延任务", payload["learningLoop"]["reason"])
 
     def test_learning_reminder_learning_loop_includes_current_plan_change(self):
         LearnerProfile.objects.create(user=self.user, foundation_level="鍩虹", daily_study_time=60)

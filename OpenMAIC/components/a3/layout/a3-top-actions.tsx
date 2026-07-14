@@ -75,6 +75,7 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
     return savedTheme === 'dark' ? 'dark' : 'light';
   });
   const [notifications, setNotifications] = useState<A3Notification[]>([]);
+  const [notificationSummary, setNotificationSummary] = useState<A3NotificationsResponse['summary'] | null>(null);
   const [tasks, setTasks] = useState<A3UnifiedTask[]>([]);
   const [taskSummary, setTaskSummary] = useState<A3TasksResponse['summary'] | null>(null);
   const [taskError, setTaskError] = useState('');
@@ -90,8 +91,11 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
     if (!currentUser) return;
     let cancelled = false;
     async function loadNotifications() {
-      const result = await a3GetJson<A3NotificationsResponse>('/api/engagement/notifications/?limit=5');
-      if (!cancelled && result.success) setNotifications(result.notifications);
+      const result = await a3GetJson<A3NotificationsResponse>('/api/engagement/notifications/?limit=10');
+      if (!cancelled && result.success) {
+        setNotifications(result.notifications);
+        setNotificationSummary(result.summary);
+      }
     }
     void loadNotifications();
     return () => {
@@ -148,7 +152,7 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
     };
   }, [currentUser]);
 
-  const unreadCount = useMemo(() => notifications.filter((item) => item.unread).length, [notifications]);
+  const unreadCount = notificationSummary?.unread ?? notifications.filter((item) => item.unread).length;
   const runningTaskCount = taskSummary?.running ?? tasks.filter((task) => isTaskRunning(task.status)).length;
   const failedTaskCount = taskSummary?.failed ?? tasks.filter((task) => task.status === 'failed').length;
   const visibleTasks = tasks.slice(0, 6);
@@ -163,9 +167,10 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
   }
 
   async function markAllRead() {
-    const result = await a3PostJson<{ success: boolean }>('/api/engagement/notifications/read-all/', {});
+    const result = await a3PostJson<Pick<A3NotificationsResponse, 'success' | 'summary'>>('/api/engagement/notifications/read-all/', {});
     if (result.success) {
       setNotifications((items) => items.map((item) => ({ ...item, unread: false, readAt: item.readAt ?? new Date().toISOString() })));
+      setNotificationSummary(result.summary);
     }
   }
 
@@ -177,6 +182,7 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
     const result = await a3PostJson<{ success: boolean; notification?: A3Notification }>(`/api/engagement/notifications/${item.id}/read/`, {});
     if (result.success && result.notification) {
       setNotifications((items) => items.map((entry) => (entry.id === item.id ? result.notification! : entry)));
+      setNotificationSummary((summary) => summary ? { ...summary, unread: Math.max(0, summary.unread - 1) } : summary);
     }
     closePanel();
   }
@@ -308,69 +314,71 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
           )}
         </button>
         {activePanel === 'notifications' && (
-          <div data-testid="a3-top-notifications-panel" className="absolute right-0 top-12 z-50 w-[360px] rounded-2xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 shadow-[var(--a3-shadow)]">
-            <div className="flex items-center justify-between">
+          <div data-testid="a3-top-notifications-panel" className="fixed inset-x-2 top-[68px] z-50 flex max-h-[calc(100dvh-88px)] w-auto flex-col overflow-hidden rounded-2xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] shadow-[var(--a3-shadow)] sm:absolute sm:inset-x-auto sm:right-0 sm:top-12 sm:w-[380px]">
+            <div className="flex shrink-0 items-center justify-between border-b border-[var(--a3-border)] px-4 py-3">
               <h3 className="font-semibold text-[var(--a3-text)]">{messages.notifications}</h3>
               <button type="button" onClick={() => void markAllRead()} className="flex items-center gap-1 text-xs font-medium text-blue-600">
                 <CheckCheck className="size-4" />{messages.markAllRead}
               </button>
             </div>
-            <div className="mt-3 space-y-2">
-              {notifications.map((item) => (
-                <Link
-                  key={item.id}
-                  href={item.actionUrl || '/a3/notifications'}
-                  onClick={() => void markRead(item)}
-                  data-testid="a3-top-notification-item"
-                  className="block w-full rounded-xl bg-[var(--a3-surface-muted)] p-3 text-left hover:bg-blue-50 dark:hover:bg-blue-950/40"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium text-[var(--a3-text)]">{item.title}</span>
-                    {item.unread && <span className="size-2 rounded-full bg-red-500" />}
-                  </div>
-                  <p className="mt-1 text-sm leading-5 text-[var(--a3-text-muted)]">{item.detail}</p>
-                  {isTeacherNotification(item) && (
-                    <div data-testid="a3-top-teacher-notification-context" className="mt-2 flex flex-wrap gap-1.5">
-                      {topTeacherChips(item).map((chip) => (
-                        <span key={chip} className="rounded-full bg-orange-50 px-2 py-0.5 text-[11px] font-medium text-orange-800 dark:bg-orange-950/40 dark:text-orange-100">
-                          {chip}
-                        </span>
-                      ))}
+            <div data-testid="a3-top-notifications-scroll" aria-label="通知列表" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
+              <div className="space-y-2">
+                {notifications.map((item) => (
+                  <Link
+                    key={item.id}
+                    href={item.actionUrl || '/a3/notifications'}
+                    onClick={() => void markRead(item)}
+                    data-testid="a3-top-notification-item"
+                    className="block w-full rounded-xl bg-[var(--a3-surface-muted)] p-3 text-left hover:bg-blue-50 dark:hover:bg-blue-950/40"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="line-clamp-1 min-w-0 font-medium text-[var(--a3-text)]">{item.title}</span>
+                      {item.unread && <span className="mt-1.5 size-2 shrink-0 rounded-full bg-red-500" />}
                     </div>
-                  )}
-                  {isReviewNotification(item) && (
-                    <div data-testid="a3-top-review-notification-context" className="mt-2 flex flex-wrap gap-1.5">
-                      {topReviewChips(item).map((chip) => (
-                        <span key={chip} className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
-                          {chip}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {item.learningLoop && (
-                    <div data-testid="a3-top-notification-learning-loop" className="mt-2 rounded-lg bg-blue-50 px-2.5 py-2 text-xs leading-5 text-blue-700 dark:bg-blue-950/40 dark:text-blue-200">
-                      <div>{item.learningLoop.reason}</div>
-                      <div className="mt-1">{item.learningLoop.expectedFeedback}</div>
-                      {item.learningLoop.planChange?.currentChange && (
-                        <div data-testid="a3-top-notification-plan-change" className="mt-2 rounded-md bg-white/80 px-2 py-1.5 text-blue-900 dark:bg-blue-900/50 dark:text-blue-100">
-                          <div className="font-semibold">{item.learningLoop.planChange.currentChange.title}</div>
-                          {item.learningLoop.planChange.currentChange.detail && (
-                            <div className="mt-1">{item.learningLoop.planChange.currentChange.detail}</div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <p className="mt-2 text-xs text-[var(--a3-text-muted)]">{new Date(item.createdAt).toLocaleString('zh-CN')}</p>
-                </Link>
-              ))}
-              {!notifications.length && (
-                <div className="rounded-xl bg-[var(--a3-surface-muted)] p-4 text-center text-sm text-[var(--a3-text-muted)]">暂无通知</div>
-              )}
+                    <p className="mt-1 line-clamp-2 text-sm leading-5 text-[var(--a3-text-muted)]">{item.detail}</p>
+                    {isTeacherNotification(item) && (
+                      <div data-testid="a3-top-teacher-notification-context" className="mt-2 flex flex-wrap gap-1.5">
+                        {topTeacherChips(item).map((chip) => (
+                          <span key={chip} className="rounded-full bg-orange-50 px-2 py-0.5 text-[11px] font-medium text-orange-800 dark:bg-orange-950/40 dark:text-orange-100">
+                            {chip}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {isReviewNotification(item) && (
+                      <div data-testid="a3-top-review-notification-context" className="mt-2 flex flex-wrap gap-1.5">
+                        {topReviewChips(item).map((chip) => (
+                          <span key={chip} className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
+                            {chip}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {item.learningLoop && (
+                      <div data-testid="a3-top-notification-learning-loop" className="mt-2 border-t border-blue-100 pt-2 text-xs leading-5 text-blue-700 dark:border-blue-900/60 dark:text-blue-200">
+                        <p className="line-clamp-2">{item.learningLoop.reason}</p>
+                        {item.learningLoop.planChange?.currentChange && (
+                          <p data-testid="a3-top-notification-plan-change" className="mt-1 line-clamp-2 font-medium text-blue-900 dark:text-blue-100">
+                            {item.learningLoop.planChange.currentChange.title}
+                            {item.learningLoop.planChange.currentChange.detail ? `：${item.learningLoop.planChange.currentChange.detail}` : ''}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    <p className="mt-2 text-xs text-[var(--a3-text-muted)]">{new Date(item.createdAt).toLocaleString('zh-CN')}</p>
+                  </Link>
+                ))}
+                {!notifications.length && (
+                  <div className="rounded-xl bg-[var(--a3-surface-muted)] p-4 text-center text-sm text-[var(--a3-text-muted)]">暂无通知</div>
+                )}
+              </div>
             </div>
-            <Link href="/a3/notifications" onClick={closePanel} className="mt-3 block rounded-xl border border-[var(--a3-border)] py-2 text-center text-sm font-medium text-blue-600 dark:text-blue-300">
-              {messages.viewAllNotifications}
-            </Link>
+            <div className="shrink-0 border-t border-[var(--a3-border)] px-4 py-3">
+              <Link href="/a3/notifications" onClick={closePanel} className="flex items-center justify-center gap-1.5 rounded-xl border border-[var(--a3-border)] py-2 text-center text-sm font-medium text-blue-600 dark:text-blue-300">
+                {messages.viewAllNotifications}
+                <ArrowRight className="size-4" />
+              </Link>
+            </div>
           </div>
         )}
       </div>
