@@ -29,6 +29,7 @@ pandas
 
 pypdf
 pypdfium2
+cryptography>=3.1
 python-pptx
 openpyxl
 rapidocr-onnxruntime

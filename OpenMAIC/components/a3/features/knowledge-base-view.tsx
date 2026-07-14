@@ -783,7 +783,7 @@ export function KnowledgeBaseView() {
                       <div className="mt-1 text-xs text-[var(--a3-text-muted)]">{job.progressDetail?.phaseLabel || jobSummaryText(job)}</div>
                     </div>
                     <div className="shrink-0">
-                      <StatusPill status={job.status} />
+                      <StatusPill status={jobDisplayStatus(job)} />
                     </div>
                   </div>
                   <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[var(--a3-surface-muted)]">
@@ -1163,6 +1163,12 @@ function jobSummaryText(job: KnowledgeJob) {
   return `排队中，共 ${total || 1} 个文件`;
 }
 
+function jobDisplayStatus(job: KnowledgeJob) {
+  const failed = job.summary?.failed ?? (job.resources ?? []).filter((resource) => resource.status === 'failed').length;
+  if (job.status === 'succeeded' && failed > 0) return 'partial_failure' as const;
+  return job.status;
+}
+
 function formatJobTime(job: KnowledgeJob) {
   const value = job.finishedAt || job.startedAt || job.createdAt;
   if (!value) return '';
@@ -1254,8 +1260,20 @@ function ResourceQualitySummary({ resource }: { resource: KnowledgeResource }) {
       <div>质量 {percent(multimodal.qualityScore)} · 乱码率 {percent(multimodal.garbledRatio)} · {multimodal.citationReadiness ? '可引用' : '需增强解析'}</div>
       <WikiStatusLine wiki={resource.wiki} />
       <div>{provider}{multimodal.warnings?.length ? ` · 警告 ${multimodal.warnings.length}` : ''}</div>
+      {resource.error ? (
+        <div data-testid="a3-kb-resource-error" className="mt-2 rounded-md bg-red-50 px-2 py-1.5 leading-5 text-red-700">
+          {resourceErrorMessage(resource.error)}
+        </div>
+      ) : null}
     </div>
   );
+}
+
+function resourceErrorMessage(error: string) {
+  if (error.includes('cryptography>=3.1 is required for AES algorithm')) {
+    return 'PDF 使用 AES 加密，但当前解析服务缺少解密组件。更新服务后请点击“重解析”。';
+  }
+  return `解析失败：${error}`;
 }
 
 function WikiStatusLine({ wiki }: { wiki?: KnowledgeWikiSummary }) {
@@ -1321,7 +1339,7 @@ function ScopePill({ scope, label }: { scope?: ResourceScope; label?: string }) 
   return <A3Pill tone="blue">{label || '课程资料'}</A3Pill>;
 }
 
-function StatusPill({ status }: { status: KnowledgeResource['status'] | KnowledgeJob['status'] }) {
+function StatusPill({ status }: { status: KnowledgeResource['status'] | KnowledgeJob['status'] | 'partial_failure' }) {
   const map: Record<string, { label: string; tone: 'green' | 'orange' | 'red' | 'blue' | 'slate' }> = {
     uploaded: { label: '待处理', tone: 'slate' },
     indexing: { label: '处理中', tone: 'blue' },
@@ -1331,6 +1349,7 @@ function StatusPill({ status }: { status: KnowledgeResource['status'] | Knowledg
     queued: { label: '排队中', tone: 'slate' },
     running: { label: '运行中', tone: 'blue' },
     succeeded: { label: '成功', tone: 'green' },
+    partial_failure: { label: '部分失败', tone: 'orange' },
   };
   const item = map[status] ?? { label: status, tone: 'slate' as const };
   return <A3Pill tone={item.tone}>{item.label}</A3Pill>;
