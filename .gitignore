@@ -28,6 +28,7 @@ server_err.log
 .agents/
 .claude/
 .nested-git-backups/
+.worktrees/
 
 # Environment and secrets
 .env
