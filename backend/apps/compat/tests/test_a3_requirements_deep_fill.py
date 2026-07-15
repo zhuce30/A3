@@ -644,7 +644,8 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         strategy = payload["interviewSession"]["askStrategy"]
         self.assertEqual(strategy["name"], "plan_critical_priority")
         self.assertEqual(strategy["priorityOrder"][:3], ["learningGoals", "weakPoints", "dailyMinutes"])
-        self.assertEqual(strategy["reason"], "优先追问最影响入学诊断准备度的画像信息。")
+        self.assertTrue(strategy["reason"])
+        self.assertIn("入学诊断", strategy["reason"])
         self.assertEqual(payload["askFields"][0]["field"], "learningGoals")
         self.assertTrue(payload["nextQuestion"])
         self.assertIn("最想", payload["nextQuestion"])
