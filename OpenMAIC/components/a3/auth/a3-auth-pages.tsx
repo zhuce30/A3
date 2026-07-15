@@ -288,9 +288,6 @@ function LearningPreviewPanel() {
       <div className="mb-7">
         <p className="mb-4 text-sm font-semibold uppercase tracking-[0.22em] text-blue-600">A3 LEARNING ENGINE</p>
         <h1 className="max-w-[760px] text-5xl font-semibold leading-tight tracking-[-0.02em]">登录后回到真实的学习闭环。</h1>
-        <p className="mt-5 max-w-[680px] text-lg leading-8 text-slate-600">
-          A3 不把登录页做成静态展示。账号通过后端校验后，会根据你的画像、授权和学习记录进入对应工作区。
-        </p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -488,11 +485,6 @@ export function LoginPage({
           <Button type="button" disabled={submitting} onClick={() => void submit()} className="h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg hover:from-blue-700 hover:to-violet-700">
             {submitting ? <><Loader2 className="size-4 animate-spin" />登录中...</> : '登录'}
           </Button>
-          {!reviewMode ? (
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-500">
-              账号由注册流程或管理员开通产生；普通登录不会填入固定测试账号。
-            </div>
-          ) : null}
           <div className="text-center text-sm text-slate-500">
             还没有账号？ <Link href="/a3/register" className="font-semibold text-blue-600">立即注册</Link>
           </div>
