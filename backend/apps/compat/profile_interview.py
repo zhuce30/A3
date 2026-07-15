@@ -31,6 +31,7 @@ EMPTY_PROFILE_INTERVIEW_SESSION = {
     "interviewComplete": False,
     "profileCommitted": False,
     "confirmedAt": "",
+    "generated": {"path": False, "studyPlan": False},
     "planningDeferred": True,
     "planningDeferredReason": PLANNING_DEFERRED_REASON,
     "messages": [],
@@ -342,12 +343,12 @@ def get_profile_interview_session(user) -> dict:
     session = extra.get("profileInterviewSession")
     if not isinstance(session, dict):
         return dict(EMPTY_PROFILE_INTERVIEW_SESSION)
+    planning_state = _restore_interview_planning_state(session)
     merged = {
         **EMPTY_PROFILE_INTERVIEW_SESSION,
         **session,
         "messages": _valid_messages(session.get("messages")),
-        "planningDeferred": True,
-        "planningDeferredReason": PLANNING_DEFERRED_REASON,
+        **planning_state,
     }
     if int(merged.get("turnCount") or 0) > 0:
         missing_dimensions = _missing_dimensions(profile)
@@ -363,9 +364,32 @@ def get_profile_interview_session(user) -> dict:
         merged["askFields"] = ask_fields
         merged["nextQuestion"] = _next_question(ask_fields)
         merged["interviewComplete"] = not missing_dimensions
-        merged["generated"] = {"path": False, "studyPlan": False}
     return {
         **merged,
+    }
+
+
+def _restore_interview_planning_state(session: dict) -> dict:
+    stored_generated = session.get("generated")
+    generated = dict(stored_generated) if isinstance(stored_generated, dict) else {}
+    has_historical_generation = bool(generated.get("path") or generated.get("studyPlan"))
+    if not has_historical_generation:
+        generated.setdefault("path", False)
+        generated.setdefault("studyPlan", False)
+
+    if "planningDeferred" in session:
+        planning_deferred = session["planningDeferred"]
+    else:
+        planning_deferred = not has_historical_generation
+    if "planningDeferredReason" in session:
+        planning_deferred_reason = session["planningDeferredReason"]
+    else:
+        planning_deferred_reason = PLANNING_DEFERRED_REASON if planning_deferred else ""
+
+    return {
+        "generated": generated,
+        "planningDeferred": planning_deferred,
+        "planningDeferredReason": planning_deferred_reason,
     }
 
 

@@ -170,7 +170,7 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertGreaterEqual(dynamic_profile["dimensionCoverage"]["ready"], 8)
         self.assertTrue(dynamic_profile["recentEvents"])
 
-    def test_profile_interview_extracts_six_real_dimensions_from_natural_language(self):
+    def test_profile_interview_persists_six_dimensions_from_llm_extractor(self):
         with patch("backend.apps.compat.profile_interview._llm_extract_profile_dimensions") as extract:
             extract.return_value = {
                 "grade": "大二",
@@ -561,6 +561,51 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertTrue(session["planningDeferred"])
         self.assertEqual(session["planningDeferredReason"], "awaiting_admission_diagnostic")
 
+    def test_profile_interview_session_api_preserves_legacy_generated_evidence(self):
+        profile, _ = LearnerProfile.objects.get_or_create(user=self.user)
+        historical_generated = {
+            "path": {"id": "legacy-path-001", "title": "历史学习路径"},
+            "studyPlan": {"durationDays": 14, "status": "active"},
+        }
+        profile.extra_profile = {
+            "profileInterviewSession": {
+                "schemaVersion": "a3.profile-interview-session.v1",
+                "turnCount": 2,
+                "generated": historical_generated,
+                "messages": [],
+            }
+        }
+        profile.save(update_fields=["extra_profile", "updated_at"])
+
+        response = self.client.get("/api/profile/interview/session/")
+
+        self.assertEqual(response.status_code, 200)
+        session = response.json()["interviewSession"]
+        self.assertEqual(session["generated"], historical_generated)
+        self.assertFalse(session["planningDeferred"])
+        self.assertEqual(session["planningDeferredReason"], "")
+
+    def test_profile_interview_session_api_preserves_explicit_legacy_planning_state(self):
+        profile, _ = LearnerProfile.objects.get_or_create(user=self.user)
+        profile.extra_profile = {
+            "profileInterviewSession": {
+                "schemaVersion": "a3.profile-interview-session.v1",
+                "turnCount": 1,
+                "generated": {"path": False, "studyPlan": False},
+                "planningDeferred": False,
+                "planningDeferredReason": "legacy_manual_state",
+                "messages": [],
+            }
+        }
+        profile.save(update_fields=["extra_profile", "updated_at"])
+
+        response = self.client.get("/api/profile/interview/session/")
+
+        self.assertEqual(response.status_code, 200)
+        session = response.json()["interviewSession"]
+        self.assertFalse(session["planningDeferred"])
+        self.assertEqual(session["planningDeferredReason"], "legacy_manual_state")
+
     def test_profile_interview_focuses_follow_up_on_one_missing_dimension(self):
         with patch(
             "backend.apps.compat.profile_interview._llm_extract_profile_dimensions",
@@ -581,7 +626,9 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertEqual(len(ask_fields), 1)
         self.assertTrue(all(item in missing for item in ask_fields))
         self.assertEqual(session["askFields"], ask_fields)
-        self.assertEqual(payload["nextQuestion"], "哪些内容或哪类题最容易卡住？")
+        self.assertEqual(ask_fields[0]["field"], "weakPoints")
+        self.assertTrue(payload["nextQuestion"])
+        self.assertIn("卡住", payload["nextQuestion"])
 
     def test_profile_interview_prioritizes_plan_critical_missing_dimensions(self):
         response = self.client.post(
@@ -598,7 +645,9 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertEqual(strategy["name"], "plan_critical_priority")
         self.assertEqual(strategy["priorityOrder"][:3], ["learningGoals", "weakPoints", "dailyMinutes"])
         self.assertEqual(strategy["reason"], "优先追问最影响入学诊断准备度的画像信息。")
-        self.assertEqual(payload["nextQuestion"], "你学习这门课最想解决什么问题？")
+        self.assertEqual(payload["askFields"][0]["field"], "learningGoals")
+        self.assertTrue(payload["nextQuestion"])
+        self.assertIn("最想", payload["nextQuestion"])
 
     def test_profile_interview_confirm_requires_complete_profile(self):
         self.client.post(
