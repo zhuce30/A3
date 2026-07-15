@@ -8,6 +8,7 @@ import {
   mergeInterviewProfile,
   mergeProfileInterviewResponseState,
   normalizeLearningProfileForOptions,
+  transitionProfileInterviewUiState,
 } from '@/lib/a3/profile-setup';
 import type { A3LearningProfile, LearningProfileOptions } from '@/lib/a3/auth-types';
 
@@ -157,5 +158,71 @@ describe('mergeProfileInterviewResponseState', () => {
     };
 
     expect(mergeProfileInterviewResponseState(previous, incoming)).toEqual(incoming);
+  });
+});
+
+describe('transitionProfileInterviewUiState', () => {
+  const previousResult: InterviewResponseState = {
+    success: true,
+    profileCommitted: true,
+    interviewSession: {
+      id: 'session-old',
+      messages: [{ role: 'agent', content: '请继续回答' }],
+    },
+    missingDimensions: [{ field: 'grade', label: '年级' }],
+    profile: { grade: '待确认' },
+  };
+  const previousMissingDimensions = ['年级'];
+  const previousMessages = [{ role: 'agent', content: '请继续回答' }];
+
+  it('preserves prior UI state when the incomplete response omits replacement data', () => {
+    const incomingResult: InterviewResponseState = {
+      success: true,
+      error: '还需要补充一项信息',
+      profileCommitted: false,
+    };
+
+    expect(transitionProfileInterviewUiState({
+      previousResult,
+      previousMissingDimensions,
+      previousMessages,
+      incomingResult,
+      incomingMessages: [],
+    })).toEqual({
+      result: {
+        ...incomingResult,
+        interviewSession: previousResult.interviewSession,
+        missingDimensions: previousResult.missingDimensions,
+        profile: previousResult.profile,
+      },
+      missingDimensions: previousMissingDimensions,
+      messages: previousMessages,
+    });
+  });
+
+  it('replaces explicit session, empty missing state, and non-empty messages', () => {
+    const incomingResult: InterviewResponseState = {
+      success: true,
+      profileCommitted: false,
+      interviewSession: { id: 'session-new', messages: [{ role: 'agent', content: '新问题' }] },
+      missingDimensions: [],
+    };
+    const incomingMessages = [{ role: 'agent', content: '新问题' }];
+
+    expect(transitionProfileInterviewUiState({
+      previousResult,
+      previousMissingDimensions,
+      previousMessages,
+      incomingResult,
+      incomingMissingDimensions: [],
+      incomingMessages,
+    })).toEqual({
+      result: {
+        ...incomingResult,
+        profile: previousResult.profile,
+      },
+      missingDimensions: [],
+      messages: incomingMessages,
+    });
   });
 });

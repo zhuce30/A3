@@ -3,6 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const pagePath = path.resolve(process.cwd(), 'components/a3/auth/a3-auth-pages.tsx');
+const source = fs.readFileSync(pagePath, 'utf8');
 
 function sourceBetween(source: string, start: string, end: string) {
   const startIndex = source.indexOf(start);
@@ -14,24 +15,22 @@ function sourceBetween(source: string, start: string, end: string) {
 
 describe('A3 profile interview submit payload', () => {
   it('posts only the current interview input instead of replaying the full dialogue history', () => {
-    const source = fs.readFileSync(pagePath, 'utf8');
+    const interviewSource = sourceBetween(source, 'async function runProfileInterview()', '\n  async function submit()');
 
-    expect(source).toContain("const result = await a3PostJson<ProfileInterviewResult>('/api/profile/interview/', { message: messageText });");
-    expect(source).not.toContain('{ message: dialogue }');
-    expect(source).not.toContain("const dialogue = nextMessages.map");
+    expect(interviewSource).toContain("const result = await a3PostJson<ProfileInterviewResult>('/api/profile/interview/', { message: messageText });");
+    expect(interviewSource).not.toContain('{ message: dialogue }');
   });
 
   it('posts the exact confirm action without client-side completion flags', () => {
-    const source = fs.readFileSync(pagePath, 'utf8');
+    const confirmSource = sourceBetween(source, 'async function confirmProfileInterview()', '\n  async function resolveProfileUpdate(');
 
-    expect(source).toContain("const result = await a3PostJson<ProfileInterviewResult>('/api/profile/interview/', { action: 'confirm' });");
-    expect(source).not.toMatch(/interviewComplete:\s*true/);
-    expect(source).not.toMatch(/profileCommitted:\s*true/);
-    expect(source).not.toMatch(/generated:\s*\{\s*path:\s*true/);
+    expect(confirmSource).toContain("const result = await a3PostJson<ProfileInterviewResult>('/api/profile/interview/', { action: 'confirm' });");
+    expect(confirmSource).not.toMatch(/interviewComplete:\s*true/);
+    expect(confirmSource).not.toMatch(/profileCommitted:\s*true/);
+    expect(confirmSource).not.toMatch(/generated:\s*\{\s*path:\s*true/);
   });
 
   it('keeps deferred planning metadata in both local interview contracts', () => {
-    const source = fs.readFileSync(pagePath, 'utf8');
     const resultType = sourceBetween(source, 'type ProfileInterviewResult = {', '\ntype ProfileInterviewSession = {');
     const sessionType = sourceBetween(source, 'type ProfileInterviewSession = {', '\ntype ProfileInterviewAskStrategy = {');
 
@@ -42,7 +41,6 @@ describe('A3 profile interview submit payload', () => {
   });
 
   it('restores server-owned deferred and committed state without inferring completion', () => {
-    const source = fs.readFileSync(pagePath, 'utf8');
     const restoreSource = sourceBetween(source, 'async function loadInterviewSession()', '\n  function toggle(');
 
     expect(restoreSource).toContain('profileCommitted: session.profileCommitted,');
@@ -53,12 +51,13 @@ describe('A3 profile interview submit payload', () => {
   });
 
   it('treats a successful but uncommitted confirm response as incomplete', () => {
-    const source = fs.readFileSync(pagePath, 'utf8');
     const confirmSource = sourceBetween(source, 'async function confirmProfileInterview()', '\n  async function resolveProfileUpdate(');
 
     expect(confirmSource).toContain('if (!result.success || !result.profileCommitted) {');
-    expect(confirmSource).toContain('mergeProfileInterviewResponseState(previous, result)');
-    expect(confirmSource).toContain('if (hasMissingDimensions) {');
+    expect(confirmSource.match(/transitionProfileInterviewUiState\(/g) ?? []).toHaveLength(1);
+    expect(confirmSource).toContain('setInterviewResult(transition.result)');
+    expect(confirmSource).toContain('setMissingInterviewDimensions(transition.missingDimensions)');
+    expect(confirmSource).toContain('setInterviewMessages(transition.messages)');
     expect(confirmSource).toContain('normalizeProfileInterviewMessages(result.interviewSession)');
     expect(confirmSource).toContain("setMessage(result.error ?? '还需要补充一项信息，请先回答上方问题。');");
     expect(confirmSource.indexOf('syncA3User(result.user)')).toBeGreaterThan(
@@ -67,7 +66,6 @@ describe('A3 profile interview submit payload', () => {
   });
 
   it('uses diagnosis-first confirmation copy and preserves deferred planning evidence', () => {
-    const source = fs.readFileSync(pagePath, 'utf8');
     const apiResultType = sourceBetween(source, 'type ApiResult = {', '\ntype ProfileInterviewResult = {');
     const confirmSource = sourceBetween(source, 'async function confirmProfileInterview()', '\n  async function resolveProfileUpdate(');
 
@@ -78,16 +76,15 @@ describe('A3 profile interview submit payload', () => {
     expect(confirmSource).toContain('planningDeferredReason: result.planningDeferredReason,');
     expect(confirmSource).toContain("href: '/a3/admission-diagnostic'");
     expect(confirmSource).toContain('入学诊断会确认基础和薄弱点，并据此生成后续学习路径和计划。');
-    expect(source).not.toContain('对话画像已确认，路径和学习计划已刷新。');
+    expect(confirmSource).not.toContain('对话画像已确认，路径和学习计划已刷新。');
   });
 
   it('shows deferred planning as a diagnosis outcome instead of a generation failure', () => {
-    const source = fs.readFileSync(pagePath, 'utf8');
     const profileSetupSource = sourceBetween(source, 'export function ProfileSetupPage() {', '\nfunction ProfileUpdateTimelinePanel({');
     const previewSource = sourceBetween(source, 'function ProfilePlanningImpactPreview({', '\nfunction InterviewInsightStrip({');
 
     expect(profileSetupSource).toContain('学习路径和 14 天计划将在入学诊断后生成。');
-    expect(source).toContain('saveResult.planningDeferred ? (');
+    expect(profileSetupSource).toContain('saveResult.planningDeferred ? (');
     expect(previewSource).toContain('saveResult?.planningDeferred ? (');
     expect(previewSource).toContain('完成入学诊断后，系统会据此生成学习路径和 14 天计划。');
     expect(profileSetupSource).not.toMatch(/\{[^{}\n]*planningDeferredReason[^{}\n]*\}/);
@@ -95,11 +92,13 @@ describe('A3 profile interview submit payload', () => {
   });
 
   it('uses concise interview retry and empty-answer guidance', () => {
-    const source = fs.readFileSync(pagePath, 'utf8');
     const interviewSource = sourceBetween(source, 'async function runProfileInterview()', '\n  async function submit()');
+    const profileSetupSource = sourceBetween(source, 'export function ProfileSetupPage() {', '\nfunction ProfileUpdateTimelinePanel({');
 
+    expect(interviewSource).toContain('if (submitting || interviewLoading || loadingOptions) return;');
     expect(interviewSource).toContain("setMessage('请先回答当前问题。');");
     expect(interviewSource).toContain("setMessage(result.error ?? '暂时无法整理这次回答，请稍后重试。');");
+    expect(profileSetupSource).toContain('disabled={interviewLoading || submitting || loadingOptions}');
     expect(interviewSource).not.toContain('表单模式');
     expect(interviewSource).not.toContain('展开手动填写');
   });

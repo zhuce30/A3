@@ -49,6 +49,34 @@ export function mergeProfileInterviewResponseState<T extends ProfileInterviewRes
   return merged;
 }
 
+type ProfileInterviewUiTransitionInput<T extends ProfileInterviewResponseState, M> = {
+  previousResult: T | null;
+  previousMissingDimensions: string[];
+  previousMessages: M[];
+  incomingResult: T;
+  incomingMissingDimensions?: string[];
+  incomingMessages?: M[];
+};
+
+export function transitionProfileInterviewUiState<T extends ProfileInterviewResponseState, M>({
+  previousResult,
+  previousMissingDimensions,
+  previousMessages,
+  incomingResult,
+  incomingMissingDimensions,
+  incomingMessages,
+}: ProfileInterviewUiTransitionInput<T, M>): {
+  result: T;
+  missingDimensions: string[];
+  messages: M[];
+} {
+  return {
+    result: mergeProfileInterviewResponseState(previousResult, incomingResult),
+    missingDimensions: incomingMissingDimensions ?? previousMissingDimensions,
+    messages: incomingMessages?.length ? incomingMessages : previousMessages,
+  };
+}
+
 export function createEmptyLearningProfile(): A3LearningProfile {
   return {
     majorDirection: '',

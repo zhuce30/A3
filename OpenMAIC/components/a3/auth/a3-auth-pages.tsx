@@ -42,8 +42,8 @@ import {
   createEmptyLearningProfile,
   getMissingLearningProfileFields,
   mergeInterviewProfile,
-  mergeProfileInterviewResponseState,
   normalizeLearningProfileForOptions,
+  transitionProfileInterviewUiState,
 } from '@/lib/a3/profile-setup';
 import {
   profileDimensionLabel,
@@ -978,6 +978,7 @@ export function ProfileSetupPage() {
   }
 
   async function runProfileInterview() {
+    if (submitting || interviewLoading || loadingOptions) return;
     const messageText = interviewText.trim();
     if (!messageText) {
       setMessage('请先回答当前问题。');
@@ -1049,16 +1050,26 @@ export function ProfileSetupPage() {
     const result = await a3PostJson<ProfileInterviewResult>('/api/profile/interview/', { action: 'confirm' });
     setSubmitting(false);
     if (!result.success || !result.profileCommitted) {
-      setInterviewResult((previous) => mergeProfileInterviewResponseState(previous, result));
       const hasMissingDimensions = Object.prototype.hasOwnProperty.call(result, 'missingDimensions')
         || Boolean(result.profileReadiness && Object.prototype.hasOwnProperty.call(result.profileReadiness, 'missingDimensions'))
         || Boolean(result.interviewSession && Object.prototype.hasOwnProperty.call(result.interviewSession, 'missingDimensions'));
-      if (hasMissingDimensions) {
-        const missing = result.missingDimensions ?? result.profileReadiness?.missingDimensions ?? result.interviewSession?.missingDimensions ?? [];
-        setMissingInterviewDimensions(missing.map((item) => item.label).filter(Boolean));
-      }
+      const incomingMissingDimensions = hasMissingDimensions
+        ? (result.missingDimensions ?? result.profileReadiness?.missingDimensions ?? result.interviewSession?.missingDimensions ?? [])
+          .map((item) => item.label)
+          .filter(Boolean)
+        : undefined;
       const sessionMessages = normalizeProfileInterviewMessages(result.interviewSession);
-      if (sessionMessages.length) setInterviewMessages(sessionMessages);
+      const transition = transitionProfileInterviewUiState({
+        previousResult: interviewResult,
+        previousMissingDimensions: missingInterviewDimensions,
+        previousMessages: interviewMessages,
+        incomingResult: result,
+        incomingMissingDimensions,
+        incomingMessages: sessionMessages,
+      });
+      setInterviewResult(transition.result);
+      setMissingInterviewDimensions(transition.missingDimensions);
+      setInterviewMessages(transition.messages);
       setMessage(result.error ?? '还需要补充一项信息，请先回答上方问题。');
       return;
     }
@@ -1245,7 +1256,7 @@ export function ProfileSetupPage() {
                 />
               )}
               <div className="mt-4 flex flex-wrap gap-3">
-                <Button data-testid="a3-profile-interview-generate" type="button" disabled={interviewLoading} onClick={runProfileInterview} className="h-11 bg-blue-600 px-5 text-white hover:bg-blue-700">
+                <Button data-testid="a3-profile-interview-generate" type="button" disabled={interviewLoading || submitting || loadingOptions} onClick={runProfileInterview} className="h-11 bg-blue-600 px-5 text-white hover:bg-blue-700">
                   {interviewLoading ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
                   发送并整理
                 </Button>
