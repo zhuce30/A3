@@ -31,6 +31,8 @@ EMPTY_PROFILE_INTERVIEW_SESSION = {
     "interviewComplete": False,
     "profileCommitted": False,
     "confirmedAt": "",
+    "planningDeferred": True,
+    "planningDeferredReason": PLANNING_DEFERRED_REASON,
     "messages": [],
     "updatedAt": "",
 }
@@ -344,6 +346,8 @@ def get_profile_interview_session(user) -> dict:
         **EMPTY_PROFILE_INTERVIEW_SESSION,
         **session,
         "messages": _valid_messages(session.get("messages")),
+        "planningDeferred": True,
+        "planningDeferredReason": PLANNING_DEFERRED_REASON,
     }
     if int(merged.get("turnCount") or 0) > 0:
         missing_dimensions = _missing_dimensions(profile)
@@ -681,6 +685,8 @@ def _commit_interview_session(
         "nextQuestion": next_question,
         "interviewComplete": bool(interview_complete),
         "generated": generated or {},
+        "planningDeferred": True,
+        "planningDeferredReason": PLANNING_DEFERRED_REASON,
         "messages": messages[-12:],
         "updatedAt": now,
     }
@@ -727,6 +733,8 @@ def _update_interview_session_commit_state(
         "profileCommitted": bool(committed),
         "confirmedAt": now if committed else str(session.get("confirmedAt") or ""),
         "generated": generated if generated is not None else session.get("generated", {}),
+        "planningDeferred": True,
+        "planningDeferredReason": PLANNING_DEFERRED_REASON,
         "messages": messages[-12:],
         "updatedAt": now,
     }

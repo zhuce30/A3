@@ -202,7 +202,19 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertEqual(profile["resourcePreferences"], ["视频讲解", "例题推导"])
         self.assertFalse(payload["generated"]["path"])
         self.assertFalse(payload["generated"]["studyPlan"])
+        self.assertTrue(payload["planningDeferred"])
+        self.assertEqual(payload["planningDeferredReason"], "awaiting_admission_diagnostic")
+        self.assertTrue(payload["interviewSession"]["planningDeferred"])
+        self.assertEqual(
+            payload["interviewSession"]["planningDeferredReason"],
+            "awaiting_admission_diagnostic",
+        )
         self.assertFalse(LearningPath.objects.filter(user=self.user, status="active").exists())
+        refreshed = LearnerProfile.objects.get(user=self.user)
+        self.assertFalse(refreshed.extra_profile.get("studyPlan"))
+        persisted_session = refreshed.extra_profile["profileInterviewSession"]
+        self.assertTrue(persisted_session["planningDeferred"])
+        self.assertEqual(persisted_session["planningDeferredReason"], "awaiting_admission_diagnostic")
 
     def test_profile_interview_rule_fallback_extracts_mistake_patterns(self):
         with patch("backend.apps.compat.profile_interview._llm_extract_profile_dimensions") as extract:
@@ -486,6 +498,17 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertTrue(any(item.get("role") == "user" for item in session["messages"]))
         self.assertTrue(any(item.get("role") == "agent" for item in session["messages"]))
         self.assertEqual(session["messages"][-1]["content"], session["nextQuestion"])
+        self.assertTrue(session["planningDeferred"])
+        self.assertEqual(session["planningDeferredReason"], "awaiting_admission_diagnostic")
+
+    def test_profile_interview_empty_session_defaults_to_deferred_planning(self):
+        response = self.client.get("/api/profile/interview/session/")
+
+        self.assertEqual(response.status_code, 200)
+        session = response.json()["interviewSession"]
+        self.assertEqual(session["turnCount"], 0)
+        self.assertTrue(session["planningDeferred"])
+        self.assertEqual(session["planningDeferredReason"], "awaiting_admission_diagnostic")
 
     def test_profile_interview_uses_latest_student_turn_when_legacy_dialogue_is_posted(self):
         legacy_dialogue = "\n".join([
@@ -518,6 +541,7 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
             "profileInterviewSession": {
                 "schemaVersion": "a3.profile-interview-session.v1",
                 "turnCount": 1,
+                "legacyMarker": "preserved",
                 "messages": [
                     {"role": "user", "content": legacy_dialogue},
                     {"role": "agent", "content": "画像信息已经比较完整。"},
@@ -529,9 +553,13 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         response = self.client.get("/api/profile/interview/session/")
 
         self.assertEqual(response.status_code, 200)
-        messages = response.json()["interviewSession"]["messages"]
+        session = response.json()["interviewSession"]
+        messages = session["messages"]
         self.assertEqual(messages[0]["content"], "最新补充：我每天 40 分钟，喜欢动画和工程案例。")
         self.assertNotIn("画像访谈Agent", messages[0]["content"])
+        self.assertEqual(session["legacyMarker"], "preserved")
+        self.assertTrue(session["planningDeferred"])
+        self.assertEqual(session["planningDeferredReason"], "awaiting_admission_diagnostic")
 
     def test_profile_interview_focuses_follow_up_on_one_missing_dimension(self):
         with patch(
@@ -622,11 +650,20 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertTrue(payload["planningDeferred"])
         self.assertEqual(payload["planningDeferredReason"], "awaiting_admission_diagnostic")
         self.assertEqual(payload["interviewSession"]["generated"], payload["generated"])
+        self.assertTrue(payload["interviewSession"]["planningDeferred"])
+        self.assertEqual(
+            payload["interviewSession"]["planningDeferredReason"],
+            "awaiting_admission_diagnostic",
+        )
         self.user.refresh_from_db()
         self.assertTrue(self.user.profile_completed)
         self.assertEqual(self.user.onboarding_step, "complete")
         refreshed = LearnerProfile.objects.get(user=self.user)
         self.assertFalse(refreshed.extra_profile.get("studyPlan"))
+        self.assertFalse(LearningPath.objects.filter(user=self.user, status="active").exists())
+        persisted_session = refreshed.extra_profile["profileInterviewSession"]
+        self.assertTrue(persisted_session["planningDeferred"])
+        self.assertEqual(persisted_session["planningDeferredReason"], "awaiting_admission_diagnostic")
         run = AgentRun.objects.prefetch_related("steps").get(trace_id=payload["traceId"])
         self.assertEqual(run.workflow, "profile_interview")
         steps = list(run.steps.order_by("order"))
