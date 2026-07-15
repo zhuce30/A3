@@ -4,12 +4,16 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
 ENV PYTHONPATH=/app
+ENV A3_SOFFICE_PATH=/usr/bin/soffice
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     default-libmysqlclient-dev \
+    fontconfig \
+    fonts-noto-cjk \
+    libreoffice-impress \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
