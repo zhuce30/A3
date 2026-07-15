@@ -34,6 +34,8 @@ PROFILE_STRING_LIMITS = {
 ONBOARDING_STEPS = {"role", "phone", "welcome", "privacy", "profile", "complete"}
 PROFILE_LIST_LIMIT = 12
 PROFILE_LIST_ITEM_LIMIT = 128
+PROFILE_COMPLETION_MODE_COMPLETE = "complete"
+PROFILE_COMPLETION_MODE_DIAGNOSTIC_READY = "diagnostic_ready"
 
 PROFILE_STATIC_OPTIONS = {
     "majorDirections": [
@@ -306,34 +308,87 @@ def profile_readiness(profile: LearnerProfile | None) -> dict:
     }
 
 
+def setup_readiness(profile: LearnerProfile | None) -> dict:
+    required_fields = [
+        ("majorDirection", bool(profile and profile.major_direction)),
+        ("grade", bool(profile and profile.grade)),
+        ("learningGoals", bool(profile and profile.learning_goals)),
+        ("learningPreferences", bool(profile and profile.learning_preferences)),
+        ("dailyStudyTime", bool(profile and profile.daily_study_time)),
+        ("expectedResources", bool(profile and profile.expected_resources)),
+    ]
+    deferred_dimensions = [
+        field
+        for field, ready in [
+            ("foundationLevel", bool(profile and profile.foundation_level)),
+            ("weakPoints", bool(profile and profile.weak_points)),
+            ("pace", bool(profile and profile.pace)),
+        ]
+        if not ready
+    ]
+    missing_required_fields = [field for field, ready in required_fields if not ready]
+    return {
+        "status": "ready_for_diagnostic" if not missing_required_fields else "incomplete",
+        "missingRequiredFields": missing_required_fields,
+        "deferredDimensions": deferred_dimensions,
+    }
+
+
 def profile_next_action(user: User, profile: LearnerProfile | None) -> dict:
-    readiness = profile_readiness(profile)
+    readiness = setup_readiness(profile)
     if not user.privacy_accepted:
         return {"label": "完成隐私授权", "href": "/a3/privacy", "reason": "未授权前不进行个性化画像处理"}
-    if readiness["status"] != "ready":
+    if readiness["status"] != "ready_for_diagnostic":
         return {"label": "补齐学习画像", "href": "/a3/profile-setup", "reason": "关键画像字段仍不完整"}
-    return {"label": "开始入学诊断", "href": "/a3/admission-diagnostic", "reason": "画像已保存，诊断会进一步校准路径和计划"}
+    return {
+        "label": "开始入学诊断",
+        "href": "/a3/admission-diagnostic",
+        "reason": "学习设置已保存，诊断会补齐基础和薄弱点",
+    }
 
 
-def _validate_complete_learning_profile_payload(payload: dict) -> None:
+def _profile_completion_mode(payload: dict) -> str:
+    raw_mode = payload.get("completionMode")
+    if raw_mode is None or (isinstance(raw_mode, str) and not raw_mode.strip()):
+        return PROFILE_COMPLETION_MODE_COMPLETE
+    if not isinstance(raw_mode, str):
+        raise ValueError("completionMode 不受支持")
+    mode = raw_mode.strip()
+    if mode not in {PROFILE_COMPLETION_MODE_COMPLETE, PROFILE_COMPLETION_MODE_DIAGNOSTIC_READY}:
+        raise ValueError("completionMode 不受支持")
+    return mode
+
+
+def _validate_learning_profile_payload(payload: dict) -> str:
+    mode = _profile_completion_mode(payload)
     checks = [
         ("majorDirection", "专业方向", bool(str(payload.get("majorDirection") or "").strip())),
         ("grade", "年级", bool(str(payload.get("grade") or "").strip())),
-        ("foundationLevel", "基础水平", bool(str(payload.get("foundationLevel") or "").strip())),
         ("learningGoals", "学习目标", isinstance(payload.get("learningGoals"), list) and bool(payload.get("learningGoals"))),
         ("learningPreferences", "学习偏好", isinstance(payload.get("learningPreferences"), list) and bool(payload.get("learningPreferences"))),
         ("dailyStudyTime", "每日时间", bool(str(payload.get("dailyStudyTime") or "").strip())),
-        ("weakPoints", "薄弱知识点", isinstance(payload.get("weakPoints"), list) and bool(payload.get("weakPoints"))),
         ("expectedResources", "资源类型", isinstance(payload.get("expectedResources"), list) and bool(payload.get("expectedResources"))),
-        ("pace", "学习节奏", bool(str(payload.get("pace") or "").strip())),
     ]
+    if mode == PROFILE_COMPLETION_MODE_COMPLETE:
+        checks.extend(
+            [
+                ("foundationLevel", "基础水平", bool(str(payload.get("foundationLevel") or "").strip())),
+                ("weakPoints", "薄弱知识点", isinstance(payload.get("weakPoints"), list) and bool(payload.get("weakPoints"))),
+                ("pace", "学习节奏", bool(str(payload.get("pace") or "").strip())),
+            ]
+        )
     missing = [label for _field, label, ready in checks if not ready]
     if missing:
         raise ValueError(f"请先补齐：{'、'.join(missing)}")
+    return mode
+
+
+def _validate_complete_learning_profile_payload(payload: dict) -> str:
+    return _validate_learning_profile_payload(payload)
 
 
 def _save_learning_profile_core(user: User, payload: dict, *, refresh_learning_assets: bool = True) -> dict:
-    _validate_complete_learning_profile_payload(payload)
+    completion_mode = _validate_learning_profile_payload(payload)
     display_name = _clean_string(payload.get("displayName", ""), "displayName", max_length=64)
     if display_name:
         user.display_name = display_name
@@ -360,7 +415,15 @@ def _save_learning_profile_core(user: User, payload: dict, *, refresh_learning_a
         if input_key in payload:
             value = payload[input_key]
             if input_key in {"majorDirection", "grade", "foundationLevel", "pace"}:
-                value = _clean_choice(value, input_key, allowed[input_key])
+                value = _clean_choice(
+                    value,
+                    input_key,
+                    allowed[input_key],
+                    required=not (
+                        completion_mode == PROFILE_COMPLETION_MODE_DIAGNOSTIC_READY
+                        and input_key in {"foundationLevel", "pace"}
+                    ),
+                )
             elif input_key == "dailyStudyTime":
                 value = _clean_choice(value, input_key, allowed[input_key])
                 value = int(value)
@@ -374,8 +437,11 @@ def _save_learning_profile_core(user: User, payload: dict, *, refresh_learning_a
         changed_fields.append("updated_at")
         profile.save(update_fields=changed_fields)
 
-    user.profile_completed = True
-    user.onboarding_step = "complete"
+    readiness = setup_readiness(profile)
+    profile_setup_complete = readiness["status"] == "ready_for_diagnostic"
+    user.profile_completed = profile_setup_complete
+    if profile_setup_complete:
+        user.onboarding_step = "complete"
     user.save(update_fields=["profile_completed", "onboarding_step", "updated_at"])
     generated = {"path": False, "studyPlan": False}
     generation_error = ""
@@ -395,6 +461,8 @@ def _save_learning_profile_core(user: User, payload: dict, *, refresh_learning_a
     payload.update(
         {
             "profileReadiness": profile_readiness(profile),
+            "setupReadiness": setup_readiness(profile),
+            "completionMode": completion_mode,
             "nextAction": profile_next_action(user, profile),
             "generated": generated,
             "personalizationImpact": personalization_impact(user, profile),
@@ -408,7 +476,7 @@ def _save_learning_profile_core(user: User, payload: dict, *, refresh_learning_a
 def save_learning_profile(user: User, payload: dict) -> dict:
     from backend.apps.compat.agent_kernel import run_profile_setup_workflow
 
-    _validate_complete_learning_profile_payload(payload)
+    completion_mode = _validate_learning_profile_payload(payload)
     result = run_profile_setup_workflow(user, payload)
     if not result.success:
         raise ValueError(str(result.output.get("error") or "学习画像智能体工作流执行失败"))
@@ -417,6 +485,8 @@ def save_learning_profile(user: User, payload: dict) -> dict:
     response.update(
         {
             "profileReadiness": profile_readiness(profile),
+            "setupReadiness": setup_readiness(profile),
+            "completionMode": completion_mode,
             "nextAction": profile_next_action(user, profile),
             "generated": {
                 "path": bool(result.state.get("pathGenerated")),

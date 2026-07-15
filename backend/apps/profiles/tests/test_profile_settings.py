@@ -16,6 +16,18 @@ class ProfileSettingsTests(TestCase):
         self.client = Client()
         self.client.force_login(self.user)
 
+    def diagnostic_ready_payload(self):
+        options = self.client.get("/api/profiles/options/").json()["options"]
+        return {
+            "completionMode": "diagnostic_ready",
+            "majorDirection": options["majorDirections"][0],
+            "grade": options["grades"][0],
+            "learningGoals": [options["learningGoals"][0]],
+            "learningPreferences": [options["learningPreferences"][0]],
+            "dailyStudyTime": options["dailyStudyTimes"][0],
+            "expectedResources": [options["expectedResources"][0]],
+        }
+
     def test_optional_consents_are_saved_to_extra_profile(self):
         response = self.client.patch(
             "/api/profiles/me/",
@@ -48,6 +60,51 @@ class ProfileSettingsTests(TestCase):
         self.user.refresh_from_db()
         self.assertFalse(self.user.profile_completed)
         self.assertNotEqual(self.user.onboarding_step, "complete")
+
+    def test_diagnostic_ready_profile_defers_diagnostic_dimensions(self):
+        response = self.client.post(
+            "/api/profiles/learning-profile/",
+            data=json.dumps(self.diagnostic_ready_payload()),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        readiness = response.json()["setupReadiness"]
+        self.assertEqual(readiness["status"], "ready_for_diagnostic")
+        self.assertEqual(readiness["deferredDimensions"], ["foundationLevel", "weakPoints", "pace"])
+        profile = LearnerProfile.objects.get(user=self.user)
+        self.assertEqual(profile.foundation_level, "")
+        self.assertEqual(profile.weak_points, [])
+        self.assertEqual(profile.pace, "")
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.profile_completed)
+        self.assertEqual(self.user.onboarding_step, "complete")
+
+    def test_partial_profile_without_completion_mode_remains_strict(self):
+        payload = self.diagnostic_ready_payload()
+        payload.pop("completionMode")
+
+        response = self.client.post(
+            "/api/profiles/learning-profile/",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("基础水平", response.json()["error"])
+
+    def test_diagnostic_ready_profile_still_requires_learning_preferences(self):
+        payload = self.diagnostic_ready_payload()
+        payload["learningPreferences"] = []
+
+        response = self.client.post(
+            "/api/profiles/learning-profile/",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("学习偏好", response.json()["error"])
 
     def test_profile_payload_includes_profile_snapshot(self):
         profile, _ = LearnerProfile.objects.update_or_create(
