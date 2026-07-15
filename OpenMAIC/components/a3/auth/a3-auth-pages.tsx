@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -842,6 +842,7 @@ export function ProfileSetupPage() {
   const [submitting, setSubmitting] = useState(false);
   const [options, setOptions] = useState<LearningProfileOptions>(defaultLearningProfileOptions);
   const [optionsCourse, setOptionsCourse] = useState('操作系统');
+  const [loadingOptions, setLoadingOptions] = useState(true);
   const [profile, setProfile] = useState<A3LearningProfile>(() => createEmptyLearningProfile());
   const [saveResult, setSaveResult] = useState<ApiResult | null>(null);
   const [interviewText, setInterviewText] = useState('');
@@ -856,6 +857,8 @@ export function ProfileSetupPage() {
   const [profileSnapshot, setProfileSnapshot] = useState<A3ProfileSnapshot | null>(null);
   const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
   const [profileUpdateBusyId, setProfileUpdateBusyId] = useState('');
+  const interviewThreadRef = useRef<HTMLDivElement>(null);
+  const optionsLoadRef = useRef<Promise<LearningProfileOptions | null> | null>(null);
 
   const loadDynamicProfile = useCallback(async () => {
     const result = await a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/');
@@ -868,9 +871,13 @@ export function ProfileSetupPage() {
 
   useEffect(() => {
     let active = true;
+    setLoadingOptions(true);
+    const optionsRequest = a3GetJson<LearningProfileOptionsResponse>('/api/profiles/options/');
+    optionsLoadRef.current = optionsRequest.then((result) => (result.success ? result.options : null));
     async function loadOptions() {
-      const result = await a3GetJson<LearningProfileOptionsResponse>('/api/profiles/options/');
+      const result = await optionsRequest;
       if (!active) return;
+      setLoadingOptions(false);
       if (!result.success) {
         setMessage(result.error ?? '画像选项加载失败，请确认后端服务正常');
         return;
@@ -906,6 +913,14 @@ export function ProfileSetupPage() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    const hasHistory = interviewMessages.some((item) => item.role === 'user') || Boolean(interviewResult?.success);
+    if (!hasHistory) return;
+    const thread = interviewThreadRef.current;
+    if (!thread) return;
+    thread.scrollTo({ top: thread.scrollHeight, behavior: 'auto' });
+  }, [interviewMessages, interviewResult?.success]);
 
   useEffect(() => {
     let active = true;
@@ -972,7 +987,8 @@ export function ProfileSetupPage() {
     }
     const extracted = result.profile;
     if (extracted) {
-      setProfile((current) => mergeInterviewProfile(current, extracted, options));
+      const loadedOptions = await optionsLoadRef.current;
+      setProfile((current) => mergeInterviewProfile(current, extracted, loadedOptions ?? options));
     }
     const backendMissing = result.missingDimensions ?? result.profileReadiness?.missingDimensions;
     const missing = backendMissing?.length ? backendMissing.map((item) => item.label || item.field) : getMissingProfileDimensions(result.profile);
@@ -1080,6 +1096,23 @@ export function ProfileSetupPage() {
   const filledProfileRows = previewRows.filter(([, value]) => value && value !== '待完善').length;
   const profileCompleteness = Math.round((filledProfileRows * 100) / previewRows.length);
   const hasInterviewHistory = interviewMessages.some((item) => item.role === 'user') || Boolean(interviewResult?.success);
+  const hasProfileInputData = previewRows.slice(1).some(([, value]) => Boolean(value));
+  const hasProfileSnapshotData = Boolean(
+    (profileSnapshot?.signalSummary?.total ?? 0) > 0
+    || Object.values(profileSnapshot?.dimensions ?? {}).some((dimension) => !dimension.missing),
+  );
+  const hasDynamicProfileData = hasProfileSnapshotData || Boolean(
+    dynamicProfile && (
+      (dynamicProfile.learningEventsSummary?.total ?? 0) > 0
+      || (dynamicProfile.mistakePatterns?.length ?? 0) > 0
+      || (dynamicProfile.resourcePreferenceEvidence?.length ?? 0) > 0
+      || Boolean(dynamicProfile.cognitiveStyle || dynamicProfile.learningHistory || dynamicProfile.motivationRisk)
+      || Object.values(dynamicProfile.dimensions ?? {}).some((dimension) => !dimension.missing)
+    ),
+  );
+  const hasProfileUpdateData = Boolean(profileFeed?.timeline?.length || profileFeed?.confirmationQueue?.length);
+  const showInterviewInsights = hasInterviewHistory || Boolean(interviewResult) || Boolean(saveResult) || hasProfileInputData || hasDynamicProfileData;
+  const showProfileSetupPanels = showInterviewInsights || hasProfileUpdateData;
 
   function goBack() {
     if (typeof window !== 'undefined' && window.history.length > 1) {
@@ -1112,7 +1145,9 @@ export function ProfileSetupPage() {
           </div>
           <div className="flex items-center gap-3 lg:justify-end">
             <span className="text-sm text-slate-500">当前课程</span>
-            <span className="rounded-full border border-blue-100 bg-blue-50 px-3 py-1.5 text-sm font-semibold text-blue-700">{optionsCourse}</span>
+            <span aria-live="polite" className="rounded-full border border-blue-100 bg-blue-50 px-3 py-1.5 text-sm font-semibold text-blue-700">
+              {loadingOptions ? '正在加载课程信息' : optionsCourse}
+            </span>
           </div>
         </div>
         <section className="mb-7 overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.07)]">
@@ -1142,6 +1177,7 @@ export function ProfileSetupPage() {
                 </div>
               </div>
               <div
+                ref={interviewThreadRef}
                 className={hasInterviewHistory ? 'mt-5 max-h-[420px] min-h-[240px] space-y-3 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 p-2' : 'mt-5 max-h-[420px] overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 p-4'}
                 data-testid="a3-profile-interview-thread"
               >
@@ -1183,11 +1219,13 @@ export function ProfileSetupPage() {
                   ))}
                 </div>
               )}
-              <InterviewInsightStrip
-                interviewResult={interviewResult}
-                dynamicProfile={dynamicProfile}
-                missingCount={missingInterviewDimensions.length}
-              />
+              {showInterviewInsights && (
+                <InterviewInsightStrip
+                  interviewResult={interviewResult}
+                  dynamicProfile={dynamicProfile}
+                  missingCount={missingInterviewDimensions.length}
+                />
+              )}
               <div className="mt-4 flex flex-wrap gap-3">
                 <Button data-testid="a3-profile-interview-generate" type="button" disabled={interviewLoading} onClick={runProfileInterview} className="h-11 bg-blue-600 px-5 text-white hover:bg-blue-700">
                   {interviewLoading ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
@@ -1209,25 +1247,40 @@ export function ProfileSetupPage() {
               </div>
             </div>
             <div className="space-y-4 xl:sticky xl:top-6">
-              <ProfilePlanningImpactPreview
-                courseTitle={optionsCourse}
-                profile={profile}
-                completeness={profileCompleteness}
-                saveResult={saveResult}
-              />
-              <DynamicProfileInsightPanel
-                dynamicProfile={dynamicProfile}
-                profileSnapshot={profileSnapshot}
-                compact
-                title="系统已了解"
-                subtitle="根据你的回答和学习记录持续整理。"
-              />
-              <ProfileUpdateTimelinePanel
-                feed={profileFeed}
-                busyId={profileUpdateBusyId}
-                onConfirm={(id) => resolveProfileUpdate(id, 'confirm')}
-                onReject={(id) => resolveProfileUpdate(id, 'reject')}
-              />
+              {!showProfileSetupPanels ? (
+                <div data-testid="a3-profile-progressive-empty" className="flex items-start gap-3 px-1 py-2 text-sm leading-6 text-slate-500">
+                  <Sparkles className="mt-0.5 size-4 shrink-0 text-blue-600" />
+                  <p>系统会整理学习目标、基础、时间和偏好，并用于后续诊断和学习安排。</p>
+                </div>
+              ) : (
+                <>
+                  {showInterviewInsights && (
+                    <ProfilePlanningImpactPreview
+                      courseTitle={optionsCourse}
+                      profile={profile}
+                      completeness={profileCompleteness}
+                      saveResult={saveResult}
+                    />
+                  )}
+                  {dynamicProfile && hasDynamicProfileData && (
+                    <DynamicProfileInsightPanel
+                      dynamicProfile={dynamicProfile}
+                      profileSnapshot={profileSnapshot}
+                      compact
+                      title="系统已了解"
+                      subtitle="根据你的回答和学习记录持续整理。"
+                    />
+                  )}
+                  {hasProfileUpdateData && (
+                    <ProfileUpdateTimelinePanel
+                      feed={profileFeed}
+                      busyId={profileUpdateBusyId}
+                      onConfirm={(id) => resolveProfileUpdate(id, 'confirm')}
+                      onReject={(id) => resolveProfileUpdate(id, 'reject')}
+                    />
+                  )}
+                </>
+              )}
             </div>
           </div>
         </section>
@@ -1261,8 +1314,8 @@ export function ProfileSetupPage() {
               <p className="mt-2 text-sm leading-6 text-blue-900/75">
                 保存后生成诊断、路径和计划。
               </p>
-              <Button data-testid="a3-profile-setup-submit" disabled={submitting} onClick={submit} className="mt-4 h-12 w-full rounded-xl bg-blue-600 text-base hover:bg-blue-700">
-                {submitting ? '正在保存...' : '保存画像并生成规划'}
+              <Button data-testid="a3-profile-setup-submit" disabled={submitting || loadingOptions} onClick={submit} className="mt-4 h-12 w-full rounded-xl bg-blue-600 text-base hover:bg-blue-700">
+                {loadingOptions ? '正在加载课程信息...' : submitting ? '正在保存...' : '保存画像并生成规划'}
               </Button>
               <p className="mt-3 text-xs leading-5 text-blue-900/60">仅用于个性化学习，可随时修改。</p>
             </div>
