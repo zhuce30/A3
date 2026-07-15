@@ -708,6 +708,14 @@ class CompatApiTests(CompatApiTestCase):
 
         self.assertEqual(tuple(PROFILE_EXTRACT_WORKFLOW_SEQUENCE), contract.required_steps)
 
+    def test_profile_setup_workflow_contract_matches_kernel_agent_sequence(self):
+        from backend.apps.compat.agent_kernel import PROFILE_SETUP_WORKFLOW_SEQUENCE
+        from backend.apps.compat.agent_workflows import get_agent_workflow_contract
+
+        contract = get_agent_workflow_contract("profile_setup")
+
+        self.assertEqual(tuple(PROFILE_SETUP_WORKFLOW_SEQUENCE), contract.required_steps)
+
 
     def test_path_generate_workflow_contract_matches_kernel_agent_sequence(self):
         from backend.apps.compat.agent_kernel import PATH_GENERATE_WORKFLOW_SEQUENCE

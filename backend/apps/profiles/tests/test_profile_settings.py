@@ -80,6 +80,34 @@ class ProfileSettingsTests(TestCase):
         self.assertTrue(self.user.profile_completed)
         self.assertEqual(self.user.onboarding_step, "complete")
 
+    def test_diagnostic_ready_profile_keeps_agent_steps_and_defers_generation(self):
+        response = self.client.post(
+            "/api/profiles/learning-profile/",
+            data=json.dumps(self.diagnostic_ready_payload()),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data["generated"], {"path": False, "studyPlan": False})
+        self.assertFalse(LearningPath.objects.filter(user=self.user, status="active").exists())
+
+        run = AgentRun.objects.prefetch_related("steps").get(trace_id=data["traceId"])
+        steps = list(run.steps.order_by("order"))
+        self.assertEqual(
+            [step.name for step in steps],
+            ["ProfileNormalizeAgent", "ProfileCommitAgent", "PlannerAgent", "StudyPlanAgent"],
+        )
+        step_by_name = {step.name: step for step in steps}
+        self.assertEqual(
+            step_by_name["PlannerAgent"].metadata["evidence"]["reason"],
+            "awaiting_admission_diagnostic",
+        )
+        self.assertEqual(
+            step_by_name["StudyPlanAgent"].metadata["evidence"]["reason"],
+            "awaiting_admission_diagnostic",
+        )
+
     def test_partial_profile_without_completion_mode_remains_strict(self):
         payload = self.diagnostic_ready_payload()
         payload.pop("completionMode")

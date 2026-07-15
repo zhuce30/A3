@@ -388,6 +388,18 @@ class PlannerAgent(BaseAgent):
                 detail="Confirm diagnostic-generated learning path is explainable.",
             )
         if context.workflow == "profile_setup":
+            if context.state.get("planningDeferred"):
+                return AgentResult(
+                    output={"path": None, "pathGenerated": False, "planningDeferred": True},
+                    state_patch={"path": None, "pathGenerated": False, "planningDeferred": True},
+                    state_diff={"LearningPath": "deferred"},
+                    evidence={
+                        "reason": "awaiting_admission_diagnostic",
+                        "completionMode": "diagnostic_ready",
+                    },
+                    quality={"deferredSafely": True, "hasPathItems": False},
+                    detail="Defer learning path generation until the admission diagnostic is complete.",
+                )
             path = generate_learning_path(context.user, force=True)
             path_payload = serialize_path(path)
             items = path_payload.get("items") if isinstance(path_payload.get("items"), list) else []
@@ -890,6 +902,8 @@ class ProfileNormalizeAgent(BaseAgent):
 
     def run(self, context: AgentContext) -> AgentResult:
         payload = context.payload if isinstance(context.payload, dict) else {}
+        completion_mode = str(payload.get("completionMode") or "complete")
+        planning_deferred = completion_mode == "diagnostic_ready"
         multi_fields = ("learningGoals", "weakPoints", "learningPreferences", "expectedResources")
         selected_counts = {
             field: len(payload.get(field) or []) if isinstance(payload.get(field), list) else 0
@@ -901,20 +915,36 @@ class ProfileNormalizeAgent(BaseAgent):
             if str(payload.get(field) or "").strip()
         ]
         return AgentResult(
-            output={"normalizedProfileInput": payload},
+            output={
+                "normalizedProfileInput": payload,
+                "completionMode": completion_mode,
+                "planningDeferred": planning_deferred,
+            },
             state_patch={
                 "normalizedProfileInput": payload,
                 "weakPoints": payload.get("weakPoints") if isinstance(payload.get("weakPoints"), list) else [],
+                "completionMode": completion_mode,
+                "planningDeferred": planning_deferred,
             },
             input_summary={"fieldCount": len(payload)},
-            output_summary={"scalarFields": len(scalar_fields), "multiSelections": selected_counts},
+            output_summary={
+                "scalarFields": len(scalar_fields),
+                "multiSelections": selected_counts,
+                "completionMode": completion_mode,
+                "planningDeferred": planning_deferred,
+            },
             state_diff={"profileInput": "normalized"},
             evidence={
                 "source": "structured_profile_setup_form",
                 "scalarFieldCount": len(scalar_fields),
                 "multiFieldCounts": selected_counts,
+                "completionMode": completion_mode,
+                "planningDeferred": planning_deferred,
             },
-            quality={"hasRequiredProfileSignals": bool(scalar_fields) and bool(selected_counts.get("weakPoints"))},
+            quality={
+                "hasRequiredProfileSignals": bool(scalar_fields)
+                and (planning_deferred or bool(selected_counts.get("weakPoints")))
+            },
         )
 
 
@@ -946,9 +976,20 @@ class ProfileCommitAgent(BaseAgent):
         ]
         updated_fields = [field for field in profile_fields if profile.get(field)]
         weak_points = profile.get("weakPoints") if isinstance(profile.get("weakPoints"), list) else []
+        setup_readiness = result.get("setupReadiness")
         return AgentResult(
-            output={"profile": profile, "profileSetupResult": result, "updatedFields": updated_fields},
-            state_patch={"profile": profile, "profileCommitted": bool(profile), "weakPoints": weak_points},
+            output={
+                "profile": profile,
+                "profileSetupResult": result,
+                "updatedFields": updated_fields,
+                "setupReadiness": setup_readiness,
+            },
+            state_patch={
+                "profile": profile,
+                "profileCommitted": bool(profile),
+                "weakPoints": weak_points,
+                "setupReadiness": setup_readiness,
+            },
             input_summary={"normalizedFields": len(payload)},
             output_summary={"updatedFields": updated_fields, "weakPoints": len(weak_points)},
             state_diff={"LearnerProfile": "persisted", "User.onboarding_step": "complete"},
@@ -957,8 +998,13 @@ class ProfileCommitAgent(BaseAgent):
                 "updatedFieldCount": len(updated_fields),
                 "weakPointCount": len(weak_points),
                 "profileId": profile.get("id") or "",
+                "setupReadiness": setup_readiness,
             },
-            quality={"profileCommitted": bool(profile), "profileReady": result.get("profileReadiness", {}).get("status") == "ready"},
+            quality={
+                "profileCommitted": bool(profile),
+                "profileReady": result.get("profileReadiness", {}).get("status") == "ready",
+                "setupReadiness": setup_readiness,
+            },
         )
 
 
@@ -1989,6 +2035,26 @@ class StudyPlanAgent(BaseAgent):
                 detail="Refresh study plan after learning path generation.",
             )
         if context.workflow == "profile_setup":
+            if context.state.get("planningDeferred"):
+                return AgentResult(
+                    output={
+                        "studyPlan": None,
+                        "studyPlanGenerated": False,
+                        "studyPlanDeferred": True,
+                    },
+                    state_patch={
+                        "studyPlan": None,
+                        "studyPlanGenerated": False,
+                        "studyPlanDeferred": True,
+                    },
+                    state_diff={"studyPlan": "deferred"},
+                    evidence={
+                        "reason": "awaiting_admission_diagnostic",
+                        "completionMode": "diagnostic_ready",
+                    },
+                    quality={"deferredSafely": True, "hasTodayTasks": False},
+                    detail="Defer study plan generation until the admission diagnostic is complete.",
+                )
             study_plan = generate_study_plan(context.user, duration_days=14, force=True)
             days = study_plan.get("days") if isinstance(study_plan.get("days"), list) else []
             today_tasks = len((days or [{}])[0].get("tasks", []))
