@@ -64,7 +64,7 @@ type A3TasksResponse = {
   };
 };
 
-export function A3TopActions({ compact = false }: { compact?: boolean }) {
+export function A3TopActions({ compact = false, showThemeToggle = true }: { compact?: boolean; showThemeToggle?: boolean }) {
   const [activePanel, setActivePanel] = useState<Panel>(null);
   const currentUser = useA3CurrentUser();
   const { locale, messages, setLocale } = useA3Locale();
@@ -488,19 +488,21 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
         )}
       </div>
 
-      <button
-        type="button"
-        onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
-        className={cn(
-          'hidden h-10 w-[86px] items-center rounded-full border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-1 shadow-sm transition-colors sm:flex',
-          theme === 'dark' && 'bg-slate-900',
-        )}
-        aria-label={messages.themeToggle}
-      >
-        <span className={cn('flex size-8 items-center justify-center rounded-full transition-all', theme === 'light' ? 'translate-x-0 bg-blue-50 text-slate-800' : 'translate-x-10 bg-slate-700 text-white')}>
-          {theme === 'light' ? <Sun className="size-5" /> : <Moon className="size-5" />}
-        </span>
-      </button>
+      {showThemeToggle && (
+        <button
+          type="button"
+          onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
+          className={cn(
+            'hidden h-10 w-[86px] items-center rounded-full border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-1 shadow-sm transition-colors sm:flex',
+            theme === 'dark' && 'bg-slate-900',
+          )}
+          aria-label={messages.themeToggle}
+        >
+          <span className={cn('flex size-8 items-center justify-center rounded-full transition-all', theme === 'light' ? 'translate-x-0 bg-blue-50 text-slate-800' : 'translate-x-10 bg-slate-700 text-white')}>
+            {theme === 'light' ? <Sun className="size-5" /> : <Moon className="size-5" />}
+          </span>
+        </button>
+      )}
     </div>
   );
 }

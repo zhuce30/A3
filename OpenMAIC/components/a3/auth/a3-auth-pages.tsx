@@ -229,7 +229,7 @@ function AuthFrame({ children, variant = 'learning' }: { children: React.ReactNo
   ];
 
   return (
-    <div className="min-h-screen bg-[#f4f7ff] text-slate-950">
+    <div className="min-h-screen bg-[#f4f7ff] text-slate-950 [--a3-border:rgba(203,213,225,0.9)] [--a3-surface-solid:#ffffff] [--a3-surface-muted:#f8fafc] [--a3-text:#0f172a] [--a3-text-muted:#64748b]">
       <header className="flex h-[88px] items-center justify-between border-b border-slate-200/80 bg-white/75 px-5 backdrop-blur md:px-10">
         <Link href="/a3/login" className="flex items-center gap-3">
           <div className="flex size-12 items-center justify-center rounded-[14px] bg-gradient-to-br from-blue-500 to-violet-600 text-xl font-bold text-white shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
@@ -240,7 +240,7 @@ function AuthFrame({ children, variant = 'learning' }: { children: React.ReactNo
             <div className="text-xs font-medium uppercase tracking-wide text-slate-500">AI Learning</div>
           </div>
         </Link>
-        <div className="hidden md:block"><A3TopActions /></div>
+        <div className="hidden md:block"><A3TopActions showThemeToggle={false} /></div>
       </header>
 
       <main className="mx-auto grid min-h-[calc(100vh-88px)] max-w-[1480px] items-center gap-8 px-5 py-8 lg:grid-cols-[minmax(0,1fr)_500px] lg:px-10 xl:gap-12">
@@ -610,7 +610,7 @@ export function ForgotPasswordPage() {
 
 function SimpleFlowFrame({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-[#f4f7ff] px-5 py-8 text-slate-950 md:px-10">
+    <div className="min-h-screen bg-[#f4f7ff] px-5 py-8 text-slate-950 [--a3-border:rgba(203,213,225,0.9)] [--a3-surface-solid:#ffffff] [--a3-surface-muted:#f8fafc] [--a3-text:#0f172a] [--a3-text-muted:#64748b] md:px-10">
       <header className="mx-auto flex max-w-[1500px] items-center justify-between">
         <Link href="/a3/dashboard" className="flex items-center gap-3">
           <div className="flex size-12 items-center justify-center rounded-[14px] bg-gradient-to-br from-blue-500 to-violet-600 text-xl font-bold text-white">A</div>
@@ -620,7 +620,7 @@ function SimpleFlowFrame({ children }: { children: React.ReactNode }) {
           </div>
         </Link>
         <div className="hidden md:block">
-          <A3TopActions />
+          <A3TopActions showThemeToggle={false} />
         </div>
       </header>
       <main className="mx-auto mt-8 max-w-[1500px]">{children}</main>
@@ -733,10 +733,10 @@ export function WelcomePage() {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const cards = [
-    ['确认授权', '只在必要范围内使用账号、通知和学习数据。', ShieldCheck],
-    ['建立画像', '用目标、基础、时间和薄弱点生成初始画像。', User],
-    ['生成路径', '后端会根据画像创建学习路径和周期计划。', Target],
-    ['回到任务', '首启完成后进入今日任务、课堂和复习闭环。', Clock3],
+    ['了解授权', '查看哪些学习数据会被使用，并自主选择可选授权。', ShieldCheck],
+    ['完善画像', '填写目标、基础、时间和薄弱点，让学习安排更适合你。', User],
+    ['生成计划', '根据你的画像安排学习路径、周期计划和今日任务。', Target],
+    ['开始学习', '完成设置后进入今日任务、课堂和复习。', Clock3],
   ] as const;
 
   async function start() {
@@ -761,9 +761,9 @@ export function WelcomePage() {
     <SimpleFlowFrame>
       <div className="grid gap-8 rounded-[28px] border border-slate-200 bg-white p-8 shadow-[0_24px_70px_rgba(15,23,42,0.10)] lg:grid-cols-[minmax(0,1fr)_390px]">
         <section>
-          <p className="text-sm font-semibold uppercase tracking-[0.22em] text-blue-600">FIRST RUN</p>
-          <h1 className="mt-4 max-w-4xl text-4xl font-semibold tracking-[-0.02em] md:text-6xl">你好，{user?.displayName || '同学'}。先完成学习引擎初始化。</h1>
-          <p className="mt-6 max-w-3xl text-lg leading-8 text-slate-600">这一步不会生成静态演示内容。系统会按真实账号状态继续隐私授权、画像采集，并在完成后生成你的学习路径和今日任务。</p>
+          <p className="text-sm font-semibold uppercase tracking-[0.22em] text-blue-600">首次使用</p>
+          <h1 className="mt-4 max-w-4xl text-4xl font-semibold tracking-[-0.02em] md:text-6xl">你好，{user?.displayName || '同学'}。完善几项学习设置。</h1>
+          <p className="mt-6 max-w-3xl text-lg leading-8 text-slate-600">用几分钟确认数据授权并告诉我们你的目标、基础和学习习惯。完成后，你会获得专属学习路径和今日任务。</p>
           <div className="mt-8 grid gap-4 md:grid-cols-2">
             {cards.map(([title, desc, Icon], index) => (
               <div key={title} className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
@@ -782,10 +782,10 @@ export function WelcomePage() {
           <div className="rounded-2xl bg-white p-4 shadow-[0_16px_40px_rgba(37,99,235,0.10)]">
             <img src="/a3/assets/onboarding/welcome-robot.webp" alt="A3 学习引擎助手" className="mx-auto h-40 w-full object-contain" />
           </div>
-          <h2 className="mt-6 text-2xl font-semibold leading-tight">下一步会写回你的首启进度。</h2>
-          <p className="mt-3 text-sm leading-6 text-slate-600">点击后会调用资料接口更新 onboardingStep，然后进入隐私授权页。</p>
+          <h2 className="mt-6 text-2xl font-semibold leading-tight">接下来先确认数据授权。</h2>
+          <p className="mt-3 text-sm leading-6 text-slate-600">你可以查看每项数据的用途，并决定是否开启通知和个性化推荐。</p>
           <Button disabled={submitting} onClick={start} className="mt-8 h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg text-white hover:from-blue-700 hover:to-violet-700">
-            {submitting ? '正在进入...' : '继续初始化'}<ArrowRight className="ml-2 size-5" />
+            {submitting ? '正在进入...' : '开始设置'}<ArrowRight className="ml-2 size-5" />
           </Button>
         </aside>
       </div>
@@ -1121,9 +1121,9 @@ export function ProfileSetupPage() {
     },
     {
       index: '4',
-      title: 'Agent 追问',
+      title: '智能补充',
       detail: interviewReadyToConfirm ? '画像已可确认' : missingInterviewDimensions.length ? `还需补 ${missingInterviewDimensions.length} 项` : '用一句话补齐关键信息',
-      meta: pendingProfileUpdates > 0 ? `${pendingProfileUpdates} 条变化待确认` : interviewResult?.traceId ? `trace ${interviewResult.traceId.slice(0, 8)}` : 'ProfileAgent',
+      meta: pendingProfileUpdates > 0 ? `${pendingProfileUpdates} 条变化待确认` : interviewResult?.traceId ? '已完成信息提取' : '等待补充',
       active: Boolean(interviewResult?.success || pendingProfileUpdates > 0),
     },
   ];
@@ -1226,7 +1226,7 @@ export function ProfileSetupPage() {
                 )}
                 {hasInterviewHistory && interviewMessages.map((item, index) => (
                   <div key={`${item.role}-${index}`} className={item.role === 'user' ? 'w-full rounded-2xl bg-blue-600 px-4 py-3 text-sm leading-6 text-white shadow-[0_12px_24px_rgba(37,99,235,0.18)]' : 'w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-600 shadow-sm'}>
-                    <div className="mb-1 text-xs font-semibold opacity-70">{item.role === 'user' ? '我' : '画像访谈 Agent'}</div>
+                    <div className="mb-1 text-xs font-semibold opacity-70">{item.role === 'user' ? '我' : '画像助手'}</div>
                     {item.content}
                   </div>
                 ))}
@@ -1754,7 +1754,7 @@ function ProfilePlanningImpactPreview({
         </div>
       ) : (
         <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
-          保存后，PlannerAgent 会把这些输入写回学习路径、周期计划和今日任务。
+          保存后，学习路径、周期计划和今日任务会根据这些信息自动更新。
         </div>
       )}
     </div>

@@ -366,6 +366,34 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertIn("图解流程", preferred_formats)
         self.assertIn("视频讲解", preferred_formats)
 
+    def test_profile_interview_rule_fallback_keeps_explicit_progressive_cognitive_style(self):
+        message = (
+            "我正在学习操作系统，我还没怎么学，学的一般，每天就学习30分钟，"
+            "薄弱点在概念上不太清楚，资源偏好是一些优质课程导学。"
+            "我认知风格上偏向于由浅入深认知，专业方向我是软件工程专业。"
+        )
+
+        with patch(
+            "backend.apps.compat.profile_interview._llm_extract_profile_dimensions",
+            side_effect=RuntimeError("force deterministic rule fallback"),
+        ):
+            response = self.client.post(
+                "/api/profile/interview/",
+                data=json.dumps({"message": message}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        missing_fields = {item["field"] for item in payload["missingDimensions"]}
+        self.assertEqual(payload["profile"]["majorDirection"], "软件工程")
+        self.assertEqual(payload["profile"]["cognitiveStyle"], "由浅入深")
+        self.assertIn("课程导学", payload["profile"]["resourcePreferences"])
+        self.assertNotIn("majorDirection", missing_fields)
+        self.assertNotIn("cognitiveStyle", missing_fields)
+        self.assertNotIn("resourcePreferences", missing_fields)
+        self.assertNotIn("认知风格", payload["nextQuestion"])
+
     def test_profile_interview_llm_receives_persisted_profile_and_recent_turns(self):
         first_message = "我正在学习操作系统，基础一般，每天40分钟，喜欢图解和例题。"
         with patch(

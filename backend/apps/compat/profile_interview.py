@@ -459,7 +459,7 @@ def _rule_extract_profile_dimensions(text: str) -> dict:
     daily_minutes = _extract_daily_minutes(text)
     major = _extract_major(text, normalized)
     foundation = _extract_foundation(text, normalized)
-    cognitive_style = "图解与例题驱动" if _likes_visual_examples(text, normalized) else ""
+    cognitive_style = _extract_cognitive_style(text, normalized)
     learning_preferences = {}
     if cognitive_style:
         learning_preferences["cognitiveStyle"] = cognitive_style
@@ -842,7 +842,9 @@ def _extract_grade(text: str, normalized: str) -> str:
 
 
 def _extract_major(text: str, normalized: str) -> str:
-    if _contains_any(text, normalized, ["计算机", "computer science", "computer", "软件", "software"]):
+    if _contains_any(text, normalized, ["软件工程", "software engineering"]):
+        return "软件工程"
+    if _contains_any(text, normalized, ["计算机", "computer science", "computer"]):
         return "计算机科学与技术"
     if _contains_any(text, normalized, ["自动化", "automation", "控制工程", "control engineering", "control theory"]):
         return "自动化与控制工程"
@@ -931,6 +933,8 @@ def _extract_learning_goals(text: str, normalized: str) -> list[str]:
 
 def _extract_resource_preferences(text: str, normalized: str) -> list[str]:
     resource_tokens = (
+        ("课程导学", "课程导学"),
+        ("优质课程", "课程导学"),
         ("图解", "图解流程"),
         ("动画演示", "动画演示"),
         ("animation", "动画演示"),
@@ -954,6 +958,18 @@ def _extract_resource_preferences(text: str, normalized: str) -> list[str]:
 
 def _likes_visual_examples(text: str, normalized: str) -> bool:
     return _contains_any(text, normalized, ["动画", "图", "例题", "animation", "examples", "visual"])
+
+
+def _extract_cognitive_style(text: str, normalized: str) -> str:
+    if _contains_any(text, normalized, ["由浅入深", "循序渐进", "从基础到进阶", "step by step"]):
+        return "由浅入深"
+    if _contains_any(text, normalized, ["先框架后细节", "先整体后细节", "先看框架"]):
+        return "先框架后细节"
+    if _contains_any(text, normalized, ["动手实践", "边做边学", "实践驱动", "learn by doing"]):
+        return "实践驱动"
+    if _likes_visual_examples(text, normalized):
+        return "图解与例题驱动"
+    return ""
 
 
 def _learning_history_hint(normalized: str) -> str:

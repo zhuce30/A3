@@ -140,6 +140,7 @@ const MAX_CLASSROOM_IMAGE_BYTES = 6 * 1024 * 1024;
 const CLASSROOM_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp']);
 const CLASSROOM_ASR_PROVIDER_ID = 'qwen-asr';
 const CLASSROOM_ASR_MODEL_ID = 'qwen3-asr-flash';
+const CLASSROOM_OUTLINE_BUTTON_CLASS = 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:text-slate-950 dark:border-slate-200 dark:bg-white dark:text-slate-700 dark:hover:bg-slate-50 dark:hover:text-slate-950 dark:disabled:border-slate-200 dark:disabled:bg-slate-100 dark:disabled:text-slate-500 dark:disabled:opacity-100';
 
 const classroomCopy = {
   'zh-CN': {
@@ -1005,7 +1006,7 @@ export function ClassroomViewRedesign() {
         />
       )}
 
-      <section className="min-w-0 rounded-[18px] border border-slate-200 bg-white shadow-sm">
+      <section className="min-w-0 rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm" data-testid="a3-classroom-workspace">
         <WorkspaceHeader
           copy={copy}
           classroom={classroom}
@@ -1173,17 +1174,17 @@ function WorkspaceHeader({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button asChild size="sm" variant="outline" className="bg-white">
+          <Button asChild size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS}>
             <Link href="/a3/learning-path">
               <Route className="size-4" />
               {copy.learningPath}
             </Link>
           </Button>
-          <Button size="sm" variant="outline" onClick={onRefresh} disabled={loading} className="bg-white">
+          <Button size="sm" variant="outline" onClick={onRefresh} disabled={loading} className={CLASSROOM_OUTLINE_BUTTON_CLASS}>
             {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
             {copy.refreshContext}
           </Button>
-          <Button size="sm" variant="outline" onClick={onToggleDrawer} className="bg-white">
+          <Button size="sm" variant="outline" onClick={onToggleDrawer} className={CLASSROOM_OUTLINE_BUTTON_CLASS}>
             {drawerOpen ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
             {copy.sidePanel}
           </Button>
@@ -1222,7 +1223,7 @@ function OpenMAICInlineBar({ copy, artifact }: { copy: ClassroomCopy; artifact: 
               </Link>
             </Button>
           ) : (
-            <Button asChild size="sm" variant="outline" className="bg-white">
+            <Button asChild size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS}>
               <Link href="/a3/recommendations">
                 <UploadCloud className="size-4" />
                 {copy.generateResourceClassroom}
@@ -1355,7 +1356,7 @@ function LessonRunway({
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
         {prompts.map((item) => (
-          <Button key={item.label} size="sm" variant="outline" className="bg-white" disabled={asking || !target} onClick={() => onAsk(item.prompt)}>
+          <Button key={item.label} size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS} disabled={asking || !target} onClick={() => onAsk(item.prompt)}>
             {item.label}
           </Button>
         ))}
@@ -1436,15 +1437,15 @@ function Composer({
             onScopeChange={onScopeChange}
           />
           <div className="flex flex-wrap gap-2">
-            <Button type="button" size="sm" variant="outline" className="bg-white" disabled={asking} onClick={onNewDialogue}>
+            <Button type="button" size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS} disabled={asking} onClick={onNewDialogue}>
               <Plus className="size-4" />
               {copy.shortNewDialogue}
             </Button>
-            <Button type="button" size="sm" variant="outline" className="bg-white" onClick={() => onOpenDrawer('practice')}>
+            <Button type="button" size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS} onClick={() => onOpenDrawer('practice')}>
               <ClipboardCheck className="size-4" />
               {copy.practiceTab}
             </Button>
-            <Button type="button" size="sm" variant="outline" className="bg-white" onClick={() => onOpenDrawer('actions')}>
+            <Button type="button" size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS} onClick={() => onOpenDrawer('actions')}>
               <ListChecks className="size-4" />
               {copy.actionsTab}
             </Button>
@@ -1496,7 +1497,7 @@ function Composer({
           />
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <Button type="button" variant="outline" disabled={asking || !target} className="size-10 rounded-xl bg-white p-0" title={copy.attachImage} onClick={() => imageInputRef.current?.click()}>
+              <Button type="button" variant="outline" disabled={asking || !target} className={cn('size-10 rounded-xl p-0', CLASSROOM_OUTLINE_BUTTON_CLASS)} title={copy.attachImage} onClick={() => imageInputRef.current?.click()}>
                 <ImageIcon className="size-4" />
               </Button>
               <Button
@@ -1505,7 +1506,7 @@ function Composer({
                 disabled={asking || voiceTranscribing || !target || Boolean(viewingHistoryId)}
                 aria-pressed={voiceListening}
                 data-testid="a3-classroom-voice-input"
-                className={cn('size-10 rounded-xl p-0 transition', voiceListening ? 'border-blue-300 bg-blue-50 text-blue-700' : 'bg-white')}
+                className={cn('size-10 rounded-xl p-0 transition', CLASSROOM_OUTLINE_BUTTON_CLASS, voiceListening && 'border-blue-300 bg-blue-50 text-blue-700')}
                 title={voiceListening ? copy.finishVoice : copy.voiceInput}
                 onClick={onToggleVoice}
               >
