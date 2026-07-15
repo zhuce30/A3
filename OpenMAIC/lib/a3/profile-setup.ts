@@ -10,6 +10,45 @@ type InterviewProfile = {
   resourcePreferences?: string[];
 };
 
+type ProfileInterviewResponseState = {
+  success: boolean;
+  error?: string;
+  profileCommitted?: boolean;
+  interviewSession?: unknown;
+  missingDimensions?: unknown;
+  profileReadiness?: unknown;
+  askFields?: unknown;
+  nextQuestion?: string;
+  profile?: unknown;
+};
+
+const PRESERVED_INTERVIEW_STATE_KEYS = [
+  'interviewSession',
+  'missingDimensions',
+  'profileReadiness',
+  'askFields',
+  'nextQuestion',
+  'profile',
+] as const satisfies ReadonlyArray<keyof ProfileInterviewResponseState>;
+
+export function mergeProfileInterviewResponseState<T extends ProfileInterviewResponseState>(
+  previous: T | null,
+  incoming: T,
+): T {
+  if (!previous) return incoming;
+
+  const merged = { ...incoming } as T & ProfileInterviewResponseState;
+  for (const key of PRESERVED_INTERVIEW_STATE_KEYS) {
+    if (
+      !Object.prototype.hasOwnProperty.call(incoming, key)
+      && Object.prototype.hasOwnProperty.call(previous, key)
+    ) {
+      Object.assign(merged, { [key]: previous[key] });
+    }
+  }
+  return merged;
+}
+
 export function createEmptyLearningProfile(): A3LearningProfile {
   return {
     majorDirection: '',

@@ -42,6 +42,7 @@ import {
   createEmptyLearningProfile,
   getMissingLearningProfileFields,
   mergeInterviewProfile,
+  mergeProfileInterviewResponseState,
   normalizeLearningProfileForOptions,
 } from '@/lib/a3/profile-setup';
 import {
@@ -1047,15 +1048,21 @@ export function ProfileSetupPage() {
     setSaveResult(null);
     const result = await a3PostJson<ProfileInterviewResult>('/api/profile/interview/', { action: 'confirm' });
     setSubmitting(false);
-    setInterviewResult(result);
     if (!result.success || !result.profileCommitted) {
-      const missing = result.missingDimensions ?? result.profileReadiness?.missingDimensions ?? result.interviewSession?.missingDimensions ?? [];
-      setMissingInterviewDimensions(missing.map((item) => item.label).filter(Boolean));
+      setInterviewResult((previous) => mergeProfileInterviewResponseState(previous, result));
+      const hasMissingDimensions = Object.prototype.hasOwnProperty.call(result, 'missingDimensions')
+        || Boolean(result.profileReadiness && Object.prototype.hasOwnProperty.call(result.profileReadiness, 'missingDimensions'))
+        || Boolean(result.interviewSession && Object.prototype.hasOwnProperty.call(result.interviewSession, 'missingDimensions'));
+      if (hasMissingDimensions) {
+        const missing = result.missingDimensions ?? result.profileReadiness?.missingDimensions ?? result.interviewSession?.missingDimensions ?? [];
+        setMissingInterviewDimensions(missing.map((item) => item.label).filter(Boolean));
+      }
       const sessionMessages = normalizeProfileInterviewMessages(result.interviewSession);
       if (sessionMessages.length) setInterviewMessages(sessionMessages);
       setMessage(result.error ?? '还需要补充一项信息，请先回答上方问题。');
       return;
     }
+    setInterviewResult(result);
     if (result.user) syncA3User(result.user);
     const sessionMessages = normalizeProfileInterviewMessages(result.interviewSession);
     if (sessionMessages.length) setInterviewMessages(sessionMessages);
@@ -1370,14 +1377,13 @@ export function ProfileSetupPage() {
               </div>
               <div className="mt-3 grid gap-2 text-xs text-emerald-800">
                 {saveResult.planningDeferred ? (
-                  <div>学习路径和 14 天计划将在入学诊断后生成</div>
+                  <div>学习路径和 14 天计划将在入学诊断后生成。</div>
                 ) : (
                   <>
                     <div>学习路径：{saveResult.generated?.path ? '已刷新' : '待生成'}</div>
                     <div>14 天学习计划：{saveResult.generated?.studyPlan ? '已生成' : '待生成'}</div>
                   </>
                 )}
-                {saveResult.planningDeferredReason && <div>安排说明：{saveResult.planningDeferredReason}</div>}
                 {!saveResult.planningDeferred && saveResult.generationError && <div className="text-orange-700">生成提示：{saveResult.generationError}</div>}
                 {saveResult.nextAction?.reason && <div>下一步依据：{saveResult.nextAction.reason}</div>}
               </div>

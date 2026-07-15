@@ -57,6 +57,8 @@ describe('A3 profile interview submit payload', () => {
     const confirmSource = sourceBetween(source, 'async function confirmProfileInterview()', '\n  async function resolveProfileUpdate(');
 
     expect(confirmSource).toContain('if (!result.success || !result.profileCommitted) {');
+    expect(confirmSource).toContain('mergeProfileInterviewResponseState(previous, result)');
+    expect(confirmSource).toContain('if (hasMissingDimensions) {');
     expect(confirmSource).toContain('normalizeProfileInterviewMessages(result.interviewSession)');
     expect(confirmSource).toContain("setMessage(result.error ?? '还需要补充一项信息，请先回答上方问题。');");
     expect(confirmSource.indexOf('syncA3User(result.user)')).toBeGreaterThan(
@@ -81,12 +83,15 @@ describe('A3 profile interview submit payload', () => {
 
   it('shows deferred planning as a diagnosis outcome instead of a generation failure', () => {
     const source = fs.readFileSync(pagePath, 'utf8');
+    const profileSetupSource = sourceBetween(source, 'export function ProfileSetupPage() {', '\nfunction ProfileUpdateTimelinePanel({');
     const previewSource = sourceBetween(source, 'function ProfilePlanningImpactPreview({', '\nfunction InterviewInsightStrip({');
 
-    expect(source).toContain('学习路径和 14 天计划将在入学诊断后生成');
+    expect(profileSetupSource).toContain('学习路径和 14 天计划将在入学诊断后生成。');
     expect(source).toContain('saveResult.planningDeferred ? (');
     expect(previewSource).toContain('saveResult?.planningDeferred ? (');
     expect(previewSource).toContain('完成入学诊断后，系统会据此生成学习路径和 14 天计划。');
+    expect(profileSetupSource).not.toMatch(/\{[^{}\n]*planningDeferredReason[^{}\n]*\}/);
+    expect(profileSetupSource).not.toContain('awaiting_admission_diagnostic');
   });
 
   it('uses concise interview retry and empty-answer guidance', () => {

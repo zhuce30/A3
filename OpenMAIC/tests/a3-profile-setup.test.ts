@@ -6,6 +6,7 @@ import {
   createEmptyLearningProfile,
   getMissingLearningProfileFields,
   mergeInterviewProfile,
+  mergeProfileInterviewResponseState,
   normalizeLearningProfileForOptions,
 } from '@/lib/a3/profile-setup';
 import type { A3LearningProfile, LearningProfileOptions } from '@/lib/a3/auth-types';
@@ -35,6 +36,18 @@ const current: A3LearningProfile = {
   weakPoints: ['根轨迹'],
   expectedResources: ['视频课程'],
   pace: 'standard',
+};
+
+type InterviewResponseState = {
+  success: boolean;
+  error?: string;
+  profileCommitted?: boolean;
+  interviewSession?: { id: string; messages?: Array<{ role: string; content: string }> };
+  missingDimensions?: Array<{ field: string; label: string }>;
+  profileReadiness?: { status: string; missingDimensions?: Array<{ field: string; label: string }> };
+  askFields?: Array<{ field: string; label: string }>;
+  nextQuestion?: string;
+  profile?: { grade: string };
 };
 
 describe('mergeInterviewProfile', () => {
@@ -95,5 +108,54 @@ describe('mergeInterviewProfile', () => {
 
     expect(merged.learningPreferences).toEqual(['动画演示', '例题推导', '工程案例']);
     expect(merged.expectedResources).toEqual(['视频课程', '课件讲义']);
+  });
+});
+
+describe('mergeProfileInterviewResponseState', () => {
+  const previous: InterviewResponseState = {
+    success: true,
+    profileCommitted: true,
+    interviewSession: {
+      id: 'session-old',
+      messages: [{ role: 'agent', content: '请继续回答' }],
+    },
+    missingDimensions: [{ field: 'grade', label: '年级' }],
+    profileReadiness: {
+      status: 'partial',
+      missingDimensions: [{ field: 'grade', label: '年级' }],
+    },
+    askFields: [{ field: 'grade', label: '年级' }],
+    nextQuestion: '你目前是哪个年级？',
+    profile: { grade: '待确认' },
+  };
+
+  it('preserves prior interview state when an incomplete response omits it', () => {
+    const incoming: InterviewResponseState = { success: true, profileCommitted: false };
+
+    expect(mergeProfileInterviewResponseState(previous, incoming)).toEqual({
+      ...incoming,
+      interviewSession: previous.interviewSession,
+      missingDimensions: previous.missingDimensions,
+      profileReadiness: previous.profileReadiness,
+      askFields: previous.askFields,
+      nextQuestion: previous.nextQuestion,
+      profile: previous.profile,
+    });
+  });
+
+  it('uses explicitly returned interview state instead of the prior values', () => {
+    const incoming: InterviewResponseState = {
+      success: false,
+      error: '仍需补充',
+      profileCommitted: false,
+      interviewSession: { id: 'session-new', messages: [] },
+      missingDimensions: [],
+      profileReadiness: { status: 'ready', missingDimensions: [] },
+      askFields: [],
+      nextQuestion: '',
+      profile: { grade: '大二' },
+    };
+
+    expect(mergeProfileInterviewResponseState(previous, incoming)).toEqual(incoming);
   });
 });
