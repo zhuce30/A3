@@ -348,9 +348,9 @@ def profile_next_action(user: User, profile: LearnerProfile | None) -> dict:
 
 
 def _profile_completion_mode(payload: dict) -> str:
-    raw_mode = payload.get("completionMode")
-    if raw_mode is None or (isinstance(raw_mode, str) and not raw_mode.strip()):
+    if "completionMode" not in payload:
         return PROFILE_COMPLETION_MODE_COMPLETE
+    raw_mode = payload["completionMode"]
     if not isinstance(raw_mode, str):
         raise ValueError("completionMode 不受支持")
     mode = raw_mode.strip()

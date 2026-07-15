@@ -106,6 +106,21 @@ class ProfileSettingsTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("学习偏好", response.json()["error"])
 
+    def test_learning_profile_rejects_invalid_completion_modes(self):
+        for completion_mode in ["", None, "unsupported", []]:
+            with self.subTest(completion_mode=completion_mode):
+                payload = self.diagnostic_ready_payload()
+                payload["completionMode"] = completion_mode
+
+                response = self.client.post(
+                    "/api/profiles/learning-profile/",
+                    data=json.dumps(payload),
+                    content_type="application/json",
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("completionMode", response.json()["error"])
+
     def test_profile_payload_includes_profile_snapshot(self):
         profile, _ = LearnerProfile.objects.update_or_create(
             user=self.user,
