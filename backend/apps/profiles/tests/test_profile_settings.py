@@ -91,6 +91,8 @@ class ProfileSettingsTests(TestCase):
         data = response.json()
         self.assertEqual(data["generated"], {"path": False, "studyPlan": False})
         self.assertFalse(LearningPath.objects.filter(user=self.user, status="active").exists())
+        profile = LearnerProfile.objects.get(user=self.user)
+        self.assertFalse(profile.extra_profile.get("studyPlan"))
 
         run = AgentRun.objects.prefetch_related("steps").get(trace_id=data["traceId"])
         steps = list(run.steps.order_by("order"))
@@ -99,6 +101,11 @@ class ProfileSettingsTests(TestCase):
             ["ProfileNormalizeAgent", "ProfileCommitAgent", "PlannerAgent", "StudyPlanAgent"],
         )
         step_by_name = {step.name: step for step in steps}
+        normalize_evidence = step_by_name["ProfileNormalizeAgent"].metadata["evidence"]
+        self.assertEqual(normalize_evidence["completionMode"], "diagnostic_ready")
+        self.assertTrue(normalize_evidence["planningDeferred"])
+        commit_evidence = step_by_name["ProfileCommitAgent"].metadata["evidence"]
+        self.assertEqual(commit_evidence["setupReadiness"], data["setupReadiness"])
         self.assertEqual(
             step_by_name["PlannerAgent"].metadata["evidence"]["reason"],
             "awaiting_admission_diagnostic",
@@ -106,6 +113,39 @@ class ProfileSettingsTests(TestCase):
         self.assertEqual(
             step_by_name["StudyPlanAgent"].metadata["evidence"]["reason"],
             "awaiting_admission_diagnostic",
+        )
+
+    def test_explicit_complete_profile_generates_path_and_study_plan(self):
+        options = self.client.get("/api/profiles/options/").json()["options"]
+        payload = {
+            "completionMode": "complete",
+            "displayName": "Explicit Complete Learner",
+            "majorDirection": options["majorDirections"][0],
+            "grade": options["grades"][0],
+            "foundationLevel": options["foundationLevels"][0],
+            "dailyStudyTime": options["dailyStudyTimes"][0],
+            "pace": options["paces"][0]["value"],
+            "learningGoals": [options["learningGoals"][0]],
+            "learningPreferences": [options["learningPreferences"][0]],
+            "expectedResources": [options["expectedResources"][0]],
+            "weakPoints": [options["weakPoints"][0]["value"]],
+        }
+
+        response = self.client.post(
+            "/api/profiles/learning-profile/",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertTrue(data["generated"]["path"])
+        self.assertTrue(data["generated"]["studyPlan"])
+        self.assertTrue(LearningPath.objects.filter(user=self.user, status="active").exists())
+        run = AgentRun.objects.prefetch_related("steps").get(trace_id=data["traceId"])
+        self.assertEqual(
+            list(run.steps.order_by("order").values_list("name", flat=True)),
+            ["ProfileNormalizeAgent", "ProfileCommitAgent", "PlannerAgent", "StudyPlanAgent"],
         )
 
     def test_partial_profile_without_completion_mode_remains_strict(self):
