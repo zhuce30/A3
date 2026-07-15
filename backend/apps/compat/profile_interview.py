@@ -9,8 +9,6 @@ from django.utils import timezone
 from backend.apps.compat.agent_kernel import AgentContext, AgentKernel, AgentResult, BaseAgent, build_recent_run_circuit_breaker
 from backend.apps.compat.safety import check_learning_safety
 from backend.apps.accounts.services import public_user
-from backend.apps.learning.models import Course
-from backend.apps.learning.services import generate_learning_path, generate_study_plan
 from backend.apps.compat.llm import chat_completion
 from backend.apps.profiles.dynamic_profile import append_learning_event, merge_dynamic_profile_signals
 from backend.apps.profiles.models import LearnerProfile
@@ -20,6 +18,7 @@ from backend.apps.profiles.profile_signals import append_profile_signal
 
 SESSION_SCHEMA_VERSION = "a3.profile-interview-session.v1"
 PROFILE_INTERVIEW_PROFILE_SCHEMA_VERSION = "a3.profile-interview.profile.v2"
+PLANNING_DEFERRED_REASON = "awaiting_admission_diagnostic"
 
 EMPTY_PROFILE_INTERVIEW_SESSION = {
     "schemaVersion": SESSION_SCHEMA_VERSION,
@@ -186,7 +185,7 @@ class ProfileInterviewMemoryCommitAgent(BaseAgent):
                 ask_strategy=_ask_strategy(),
                 next_question=_next_question(ask_fields),
                 committed=False,
-                generated={},
+                generated={"path": False, "studyPlan": False},
             )
         return AgentResult(
             output={"memoryCommitted": True, **({"interviewSession": session} if session else {})},
@@ -200,11 +199,16 @@ class ProfileInterviewMemoryCommitAgent(BaseAgent):
 class ProfileInterviewPlannerAgent(BaseAgent):
     name = "PlannerAgent"
     role = "path planning"
-    detail = "Refresh learning path and study plan from the interview profile."
+    detail = "Defer learning path and study plan generation until admission diagnostic."
     output_schema = {
         "type": "object",
-        "properties": {"interviewSession": {"type": "object"}, "generated": {"type": "object"}},
-        "required": ["interviewSession", "generated"],
+        "properties": {
+            "interviewSession": {"type": "object"},
+            "generated": {"type": "object"},
+            "planningDeferred": {"type": "boolean"},
+            "planningDeferredReason": {"type": "string"},
+        },
+        "required": ["interviewSession", "generated", "planningDeferred", "planningDeferredReason"],
     }
 
     def run(self, context: AgentContext) -> AgentResult:
@@ -214,14 +218,8 @@ class ProfileInterviewPlannerAgent(BaseAgent):
         missing_dimensions = context.state.get("missingDimensions") if isinstance(context.state.get("missingDimensions"), list) else []
         ask_fields = _ask_fields(missing_dimensions)
         ask_strategy = _ask_strategy()
-        path_payload = None
-        plan_payload = None
-        should_generate = action != "confirm" or not missing_dimensions
-        course = Course.objects.filter(is_active=True).first() if should_generate else None
-        if course:
-            path = generate_learning_path(context.user, course=course, force=True)
-            plan_payload = generate_study_plan(context.user, duration_days=14, force=True)
-            path_payload = {"id": str(path.id), "title": path.title}
+        generated = {"path": False, "studyPlan": False}
+        profile_committed = bool(context.state.get("profileCommitted"))
         if action == "confirm":
             if missing_dimensions:
                 session = context.state.get("interviewSession") if isinstance(context.state.get("interviewSession"), dict) else _update_interview_session_commit_state(
@@ -232,7 +230,7 @@ class ProfileInterviewPlannerAgent(BaseAgent):
                     ask_strategy=ask_strategy,
                     next_question=_next_question(ask_fields),
                     committed=False,
-                    generated={},
+                    generated=generated,
                 )
                 success = False
                 error = "画像信息尚不完整，请先回答本轮追问后再确认。"
@@ -247,8 +245,8 @@ class ProfileInterviewPlannerAgent(BaseAgent):
                     ask_fields=[],
                     ask_strategy=ask_strategy,
                     next_question=next_question,
-                    committed=True,
-                    generated={"path": path_payload, "studyPlan": bool(plan_payload)},
+                    committed=profile_committed,
+                    generated=generated,
                 )
                 success = True
                 error = ""
@@ -263,7 +261,7 @@ class ProfileInterviewPlannerAgent(BaseAgent):
                 ask_strategy=ask_strategy,
                 next_question=_next_question(ask_fields),
                 interview_complete=interview_complete,
-                generated={"path": path_payload, "studyPlan": bool(plan_payload)},
+                generated=generated,
             )
             success = True
             error = ""
@@ -274,7 +272,6 @@ class ProfileInterviewPlannerAgent(BaseAgent):
             "missingDimensions": missing_dimensions,
             "interviewComplete": not missing_dimensions,
         }
-        generated = {"path": path_payload, "studyPlan": bool(plan_payload)}
         return AgentResult(
             output={
                 "success": success,
@@ -286,15 +283,30 @@ class ProfileInterviewPlannerAgent(BaseAgent):
                 "askStrategy": ask_strategy,
                 "nextQuestion": next_question,
                 "interviewComplete": not missing_dimensions,
-                "profileCommitted": bool(context.state.get("profileCommitted")),
+                "profileCommitted": profile_committed,
                 "interviewSession": session,
                 "generated": generated,
+                "planningDeferred": True,
+                "planningDeferredReason": PLANNING_DEFERRED_REASON,
             },
-            state_patch={"interviewSession": session, "generated": generated},
-            output_summary={"pathGenerated": bool(path_payload), "planGenerated": bool(plan_payload), "success": success},
-            state_diff={"LearningPath": "refreshed", "StudyPlan": "refreshed", "profileInterviewSession": "updated"},
-            evidence={"pathGenerated": bool(path_payload), "planGenerated": bool(plan_payload)},
-            quality={"readyForDiagnostic": bool(path_payload and plan_payload) if success else False},
+            state_patch={
+                "interviewSession": session,
+                "generated": generated,
+                "planningDeferred": True,
+                "planningDeferredReason": PLANNING_DEFERRED_REASON,
+            },
+            output_summary={"pathGenerated": False, "planGenerated": False, "success": success},
+            state_diff={"profileInterviewSession": "updated"},
+            evidence={
+                "pathGenerated": False,
+                "planGenerated": False,
+                "planningDeferred": True,
+                "planningDeferredReason": PLANNING_DEFERRED_REASON,
+            },
+            quality={
+                "profileComplete": not missing_dimensions,
+                "readyForDiagnostic": profile_committed,
+            },
         )
 
 
@@ -347,8 +359,7 @@ def get_profile_interview_session(user) -> dict:
         merged["askFields"] = ask_fields
         merged["nextQuestion"] = _next_question(ask_fields)
         merged["interviewComplete"] = not missing_dimensions
-        if not isinstance(merged.get("generated"), dict):
-            merged["generated"] = {}
+        merged["generated"] = {"path": False, "studyPlan": False}
     return {
         **merged,
     }
@@ -761,16 +772,16 @@ def _missing_dimensions(profile: LearnerProfile) -> list[dict]:
 def _profile_dimension_checks(profile: LearnerProfile) -> tuple[tuple[str, str, Any], ...]:
     public = _public_interview_profile(profile)
     return (
-        ("grade", "年级", public.get("grade")),
+        ("grade", "年级阶段", public.get("grade")),
         ("majorDirection", "专业方向", public.get("majorDirection")),
-        ("foundationLevel", "基础水平", public.get("foundationLevel")),
-        ("dailyMinutes", "每日时间", public.get("dailyMinutes")),
+        ("foundationLevel", "当前基础", public.get("foundationLevel")),
+        ("dailyMinutes", "每天可用时间", public.get("dailyMinutes")),
         ("learningGoals", "学习目标", public.get("learningGoals")),
-        ("weakPoints", "薄弱点", public.get("weakPoints")),
-        ("resourcePreferences", "资源偏好", public.get("resourcePreferences")),
-        ("cognitiveStyle", "认知风格", public.get("cognitiveStyle")),
-        ("learningHistory", "学习历史", public.get("learningHistory")),
-        ("motivationRisk", "动机风险", public.get("motivationRisk")),
+        ("weakPoints", "容易卡住的内容", public.get("weakPoints")),
+        ("resourcePreferences", "希望获得的资料", public.get("resourcePreferences")),
+        ("cognitiveStyle", "更容易理解的讲解方式", public.get("cognitiveStyle")),
+        ("learningHistory", "学习经历", public.get("learningHistory")),
+        ("motivationRisk", "坚持学习时的困难", public.get("motivationRisk")),
     )
 
 
@@ -792,7 +803,7 @@ def _ask_strategy() -> dict:
     return {
         "name": "plan_critical_priority",
         "priorityOrder": ASK_PRIORITY_ORDER,
-        "reason": "优先追问最影响计划生成、推荐排序和薄弱点补救的画像字段。",
+        "reason": "优先追问最影响入学诊断准备度的画像信息。",
     }
 
 
@@ -801,14 +812,26 @@ def _ask_fields(missing_dimensions: list[dict]) -> list[dict]:
     return sorted(
         missing_dimensions,
         key=lambda item: (priority.get(str(item.get("field") or ""), 999), str(item.get("field") or "")),
-    )[:2]
+    )[:1]
 
 
 def _next_question(ask_fields: list[dict]) -> str:
     if not ask_fields:
-        return "画像信息已经比较完整。你可以确认画像并进入学习诊断。"
-    labels = "、".join(str(item.get("label") or item.get("field")) for item in ask_fields)
-    return f"这一轮先补充：{labels}。请用一句话回答，我会再继续追问其他维度。"
+        return "画像信息已经完整，请确认画像并开始入学诊断。"
+    questions = {
+        "learningGoals": "你学习这门课最想解决什么问题？",
+        "weakPoints": "哪些内容或哪类题最容易卡住？",
+        "dailyMinutes": "每天通常能安排多少分钟学习？",
+        "foundationLevel": "以前学到什么程度，独立做题时感觉怎样？",
+        "resourcePreferences": "希望优先获得视频、讲义、例题还是练习？",
+        "cognitiveStyle": "看概念、跟例题还是动手操作，哪种更容易理解？",
+        "majorDirection": "你的专业或学习方向是什么？",
+        "grade": "你目前处于哪个年级或学习阶段？",
+        "learningHistory": "以前学过哪些相关课程或内容？",
+        "motivationRisk": "最近坚持学习时最容易遇到什么困难？",
+    }
+    field = str(ask_fields[0].get("field") or "")
+    return questions.get(field, "请再补充一项学习画像信息。")
 
 
 def _valid_messages(value: Any) -> list[dict]:

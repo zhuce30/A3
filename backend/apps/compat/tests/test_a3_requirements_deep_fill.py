@@ -170,6 +170,40 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertGreaterEqual(dynamic_profile["dimensionCoverage"]["ready"], 8)
         self.assertTrue(dynamic_profile["recentEvents"])
 
+    def test_profile_interview_extracts_six_real_dimensions_from_natural_language(self):
+        with patch("backend.apps.compat.profile_interview._llm_extract_profile_dimensions") as extract:
+            extract.return_value = {
+                "grade": "大二",
+                "major_direction": "软件工程",
+                "daily_study_time": 40,
+                "learning_goals": ["独立完成操作系统课程项目"],
+                "expected_resources": ["视频讲解", "例题推导"],
+                "learningHistory": "学过程序设计和数据结构",
+                "_llm": {"provider": "dashscope", "model": "qwen-plus", "fallback": False},
+            }
+
+            response = self.client.post(
+                "/api/profile/interview/",
+                data=json.dumps({
+                    "message": "我是软件工程大二学生，学过程序设计和数据结构，想独立完成操作系统课程项目。每天能学40分钟，希望先看视频和例题。"
+                }),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        profile = payload["profile"]
+        self.assertGreaterEqual(payload["profileReadiness"]["dimensionCount"], 6)
+        self.assertEqual(profile["grade"], "大二")
+        self.assertEqual(profile["majorDirection"], "软件工程")
+        self.assertEqual(profile["dailyMinutes"], 40)
+        self.assertEqual(profile["learningGoals"], ["独立完成操作系统课程项目"])
+        self.assertEqual(profile["learningHistory"], "学过程序设计和数据结构")
+        self.assertEqual(profile["resourcePreferences"], ["视频讲解", "例题推导"])
+        self.assertFalse(payload["generated"]["path"])
+        self.assertFalse(payload["generated"]["studyPlan"])
+        self.assertFalse(LearningPath.objects.filter(user=self.user, status="active").exists())
+
     def test_profile_interview_rule_fallback_extracts_mistake_patterns(self):
         with patch("backend.apps.compat.profile_interview._llm_extract_profile_dimensions") as extract:
             extract.side_effect = ValueError("llm unavailable")
@@ -499,12 +533,16 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertEqual(messages[0]["content"], "最新补充：我每天 40 分钟，喜欢动画和工程案例。")
         self.assertNotIn("画像访谈Agent", messages[0]["content"])
 
-    def test_profile_interview_focuses_follow_up_on_one_or_two_missing_dimensions(self):
-        response = self.client.post(
-            "/api/profile/interview/",
-            data=json.dumps({"message": "prefer examples and can study 40 minutes daily"}),
-            content_type="application/json",
-        )
+    def test_profile_interview_focuses_follow_up_on_one_missing_dimension(self):
+        with patch(
+            "backend.apps.compat.profile_interview._llm_extract_profile_dimensions",
+            side_effect=RuntimeError("force deterministic rule fallback"),
+        ):
+            response = self.client.post(
+                "/api/profile/interview/",
+                data=json.dumps({"message": "prefer examples and can study 40 minutes daily"}),
+                content_type="application/json",
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -512,10 +550,10 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         ask_fields = payload["askFields"]
         session = payload["interviewSession"]
         self.assertGreaterEqual(len(missing), 1)
-        self.assertGreaterEqual(len(ask_fields), 1)
-        self.assertLessEqual(len(ask_fields), 2)
+        self.assertEqual(len(ask_fields), 1)
         self.assertTrue(all(item in missing for item in ask_fields))
         self.assertEqual(session["askFields"], ask_fields)
+        self.assertEqual(payload["nextQuestion"], "哪些内容或哪类题最容易卡住？")
 
     def test_profile_interview_prioritizes_plan_critical_missing_dimensions(self):
         response = self.client.post(
@@ -527,10 +565,12 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         ask_field_names = [item["field"] for item in payload["askFields"]]
-        self.assertEqual(ask_field_names, ["learningGoals", "weakPoints"])
+        self.assertEqual(ask_field_names, ["learningGoals"])
         strategy = payload["interviewSession"]["askStrategy"]
         self.assertEqual(strategy["name"], "plan_critical_priority")
         self.assertEqual(strategy["priorityOrder"][:3], ["learningGoals", "weakPoints", "dailyMinutes"])
+        self.assertEqual(strategy["reason"], "优先追问最影响入学诊断准备度的画像信息。")
+        self.assertEqual(payload["nextQuestion"], "你学习这门课最想解决什么问题？")
 
     def test_profile_interview_confirm_requires_complete_profile(self):
         self.client.post(
@@ -550,8 +590,12 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertFalse(payload["success"])
         self.assertIn("missingDimensions", payload)
         self.assertGreaterEqual(len(payload["missingDimensions"]), 1)
+        self.assertEqual(payload["generated"], {"path": False, "studyPlan": False})
+        self.assertEqual(payload["interviewSession"]["generated"], payload["generated"])
+        self.assertTrue(payload["planningDeferred"])
+        self.assertEqual(payload["planningDeferredReason"], "awaiting_admission_diagnostic")
 
-    def test_profile_interview_confirm_commits_profile_and_refreshes_plan(self):
+    def test_profile_interview_confirm_commits_profile_and_defers_plan_until_diagnostic(self):
         interview_response = self.client.post(
             "/api/profile/interview/",
             data=json.dumps({
@@ -573,13 +617,16 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertTrue(payload["profileCommitted"])
         self.assertTrue(payload["interviewSession"]["profileCommitted"])
         self.assertIn("confirmedAt", payload["interviewSession"])
-        self.assertTrue(payload["generated"]["path"])
-        self.assertTrue(payload["generated"]["studyPlan"])
+        self.assertFalse(payload["generated"]["path"])
+        self.assertFalse(payload["generated"]["studyPlan"])
+        self.assertTrue(payload["planningDeferred"])
+        self.assertEqual(payload["planningDeferredReason"], "awaiting_admission_diagnostic")
+        self.assertEqual(payload["interviewSession"]["generated"], payload["generated"])
         self.user.refresh_from_db()
         self.assertTrue(self.user.profile_completed)
         self.assertEqual(self.user.onboarding_step, "complete")
         refreshed = LearnerProfile.objects.get(user=self.user)
-        self.assertTrue(refreshed.extra_profile.get("studyPlan"))
+        self.assertFalse(refreshed.extra_profile.get("studyPlan"))
         run = AgentRun.objects.prefetch_related("steps").get(trace_id=payload["traceId"])
         self.assertEqual(run.workflow, "profile_interview")
         steps = list(run.steps.order_by("order"))
@@ -587,6 +634,14 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
             [step.name for step in steps],
             ["SafetyAgent", "ProfileInterviewAgent", "LearnerModelAgent", "MemoryCommitAgent", "PlannerAgent"],
         )
+        planner = steps[-1]
+        self.assertTrue(planner.metadata["evidence"]["planningDeferred"])
+        self.assertEqual(
+            planner.metadata["evidence"]["planningDeferredReason"],
+            "awaiting_admission_diagnostic",
+        )
+        self.assertNotIn("LearningPath", planner.metadata["stateDiff"])
+        self.assertNotIn("StudyPlan", planner.metadata["stateDiff"])
         for step in steps:
             self.assertIn("runtimePolicy", step.metadata)
             self.assertEqual(step.metadata["outputSchema"]["mode"], "agent_output")
