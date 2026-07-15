@@ -211,8 +211,8 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
           )}
         </button>
         {activePanel === 'tasks' && (
-          <div data-testid="a3-top-tasks-panel" className="absolute right-0 top-12 z-50 w-[390px] rounded-2xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 shadow-[var(--a3-shadow)]">
-            <div className="flex items-start justify-between gap-3">
+          <div data-testid="a3-top-tasks-panel" className="fixed inset-x-2 top-[68px] z-50 flex max-h-[calc(100dvh-88px)] w-auto flex-col overflow-hidden rounded-2xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] shadow-[var(--a3-shadow)] sm:absolute sm:inset-x-auto sm:right-0 sm:top-12 sm:w-[390px]">
+            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--a3-border)] px-4 py-3">
               <div>
                 <h3 className="font-semibold text-[var(--a3-text)]">任务中心</h3>
                 <p className="mt-1 text-xs text-[var(--a3-text-muted)]">
@@ -225,12 +225,13 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
             </div>
 
             {taskError && (
-              <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-5 text-rose-700">
+              <div className="mx-4 mt-3 shrink-0 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-5 text-rose-700">
                 {taskError}
               </div>
             )}
 
-            <div className="mt-3 space-y-2">
+            <div data-testid="a3-top-tasks-scroll" aria-label="任务列表" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
+              <div className="space-y-2">
               {visibleTasks.map((task) => (
                 <Link
                   key={`${task.type}:${task.id}`}
@@ -293,6 +294,7 @@ export function A3TopActions({ compact = false }: { compact?: boolean }) {
                   <p className="mt-1 text-xs leading-5 text-[var(--a3-text-muted)]">生成资源、视频或上传资料后，这里会显示进度和失败原因。</p>
                 </div>
               )}
+              </div>
             </div>
           </div>
         )}

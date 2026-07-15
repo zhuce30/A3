@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fontconfig \
     fonts-noto-cjk \
     libreoffice-impress \
+    libreoffice-writer \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 

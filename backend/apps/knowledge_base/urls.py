@@ -8,6 +8,7 @@ from backend.apps.knowledge_base import views
 urlpatterns = [
     path("library/", views.curated_library, name="knowledge-base-curated-library"),
     path("library/<str:resource_code>/", views.curated_library_detail, name="knowledge-base-curated-library-detail"),
+    path("library/<str:resource_code>/preview/", views.curated_library_preview, name="knowledge-base-curated-library-preview"),
     path("library/<str:resource_code>/content/", views.curated_library_content, name="knowledge-base-curated-library-content"),
     path("graph/", views.material_graph, name="knowledge-base-material-graph"),
     path("resources/", views.resources, name="knowledge-base-resources"),

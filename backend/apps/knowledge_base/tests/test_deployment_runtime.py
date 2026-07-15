@@ -9,3 +9,4 @@ class BackendContainerRuntimeTests(SimpleTestCase):
         contents = dockerfile.read_text(encoding="utf-8")
 
         self.assertIn("libreoffice-impress", contents)
+        self.assertIn("libreoffice-writer", contents)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import uuid
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -10,10 +11,15 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.urls import reverse
 from docx import Document
 from openpyxl import Workbook
 
 from backend.apps.accounts.models import User
+from backend.apps.knowledge_base.docx_preview import (
+    DocxPreviewSourceUnavailable,
+    DocxPreviewUnavailable,
+)
 from backend.apps.knowledge_base.models import (
     CuratedLearningResource,
     CuratedResourceDeliveryMode,
@@ -223,6 +229,126 @@ class CuratedLearningResourceModelTests(TestCase):
         self.assertEqual(resource.knowledge_resource, knowledge_resource)
         self.assertEqual(list(resource.knowledge_points.values_list("code", flat=True)), [point.code])
         self.assertEqual(knowledge_resource.curated_resource, resource)
+
+
+class CuratedResourcePreviewApiTests(TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+        self.source = self.root / "managed.docx"
+        write_sample_docx(self.source)
+        suffix = str(uuid.uuid4().int)[-8:]
+        self.user = User.objects.create_user(phone=f"139{suffix}", password="secure-pass-123")
+        self.course = Course.objects.create(code=f"OS-PREVIEW-{suffix}", title="操作系统预览")
+        self.knowledge_resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            original_name="managed.docx",
+            stored_path=str(self.source),
+            file_type=".docx",
+            resource_scope=ResourceScope.GLOBAL,
+            course_key=self.course.code,
+            visibility="shared",
+        )
+        self.resource = CuratedLearningResource.objects.create(
+            resource_code=f"OS-DOC-PREVIEW-{suffix}",
+            course=self.course,
+            knowledge_resource=self.knowledge_resource,
+            resource_type=CuratedResourceType.LECTURE_DOC,
+            delivery_mode=CuratedResourceDeliveryMode.INTERNAL_DOCUMENT,
+            title="Word 在线预览测试",
+            verification_status=CuratedResourceVerificationStatus.VERIFIED,
+            content_hash="abcdef123456",
+        )
+        self.preview_url = reverse("knowledge-base-curated-library-preview", args=[self.resource.resource_code])
+        self.content_url = reverse("knowledge-base-curated-library-content", args=[self.resource.resource_code])
+        self.detail_url = reverse("knowledge-base-curated-library-detail", args=[self.resource.resource_code])
+
+    def test_authenticated_user_receives_inline_private_pdf(self):
+        pdf = self.root / "preview.pdf"
+        pdf.write_bytes(b"%PDF-1.4\npreview")
+        self.client.force_login(self.user)
+
+        with patch("backend.apps.knowledge_base.views.get_or_create_docx_preview", return_value=pdf):
+            response = self.client.get(self.preview_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertTrue(response["Content-Disposition"].startswith("inline"))
+        self.assertEqual(response["Cache-Control"], "private, max-age=86400")
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(b"".join(response.streaming_content), b"%PDF-1.4\npreview")
+
+    def test_preview_requires_authentication(self):
+        response = self.client.get(self.preview_url)
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"], "请先登录")
+
+    def test_inactive_or_unverified_resources_are_hidden(self):
+        self.client.force_login(self.user)
+        self.resource.is_active = False
+        self.resource.save(update_fields=["is_active"])
+
+        response = self.client.get(self.preview_url)
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_external_resource_cannot_use_document_preview(self):
+        self.client.force_login(self.user)
+        self.resource.delivery_mode = CuratedResourceDeliveryMode.EXTERNAL_LINK
+        self.resource.external_url = "https://www.bilibili.com/video/BVTEST"
+        self.resource.knowledge_resource = None
+        self.resource.save(update_fields=["delivery_mode", "external_url", "knowledge_resource"])
+
+        response = self.client.get(self.preview_url)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Word", response.json()["error"])
+
+    def test_missing_source_and_conversion_failure_have_readable_errors(self):
+        self.client.force_login(self.user)
+        with patch(
+            "backend.apps.knowledge_base.views.get_or_create_docx_preview",
+            side_effect=DocxPreviewSourceUnavailable("资料原文件暂时不可用"),
+        ):
+            missing = self.client.get(self.preview_url)
+        with patch(
+            "backend.apps.knowledge_base.views.get_or_create_docx_preview",
+            side_effect=DocxPreviewUnavailable("internal converter detail /secret/path"),
+        ):
+            unavailable = self.client.get(self.preview_url)
+
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["error"], "资料原文件暂时不可用")
+        self.assertEqual(unavailable.status_code, 503)
+        self.assertEqual(unavailable.json()["error"], "Word 在线预览暂时不可用，可下载原文档")
+        self.assertNotIn("/secret/path", unavailable.content.decode("utf-8"))
+
+    def test_content_endpoint_downloads_the_original_docx_as_attachment(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(self.content_url)
+        downloaded = b"".join(response.streaming_content)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response["Content-Disposition"].startswith("attachment"))
+        self.assertIn("managed.docx", response["Content-Disposition"])
+        self.assertEqual(downloaded, self.source.read_bytes())
+
+    def test_detail_splits_preview_and_download_actions_without_storage_path(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(self.detail_url)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["resource"]
+        self.assertFalse(payload["action"]["external"])
+        self.assertEqual(payload["action"]["preview"]["href"], self.preview_url)
+        self.assertEqual(payload["action"]["preview"]["label"], "在线预览")
+        self.assertEqual(payload["action"]["download"]["href"], self.content_url)
+        self.assertEqual(payload["action"]["download"]["label"], "下载原文档")
+        self.assertNotIn("stored_path", response.content.decode("utf-8"))
 
 
 class ImportOsCuratedResourcesCommandTests(TestCase):

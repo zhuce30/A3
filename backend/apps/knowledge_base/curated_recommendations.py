@@ -227,10 +227,25 @@ def filter_curated_resources(queryset: QuerySet, *, resource_type: str = "", dif
 def serialize_curated_resource(match: CuratedResourceMatch, *, include_content: bool = False) -> dict:
     resource = match.resource
     is_internal = resource.delivery_mode == CuratedResourceDeliveryMode.INTERNAL_DOCUMENT
-    action_href = (
-        f"/api/kb/library/{resource.resource_code}/content/"
+    action = (
+        {
+            "external": False,
+            "preview": {
+                "available": bool(resource.knowledge_resource_id and resource.knowledge_resource.file_type.lower() == ".docx"),
+                "href": f"/api/kb/library/{resource.resource_code}/preview/",
+                "label": "在线预览",
+            },
+            "download": {
+                "href": f"/api/kb/library/{resource.resource_code}/content/",
+                "label": "下载原文档",
+            },
+        }
         if is_internal
-        else resource.external_url
+        else {
+            "label": "打开外部视频",
+            "href": resource.external_url,
+            "external": True,
+        }
     )
     payload = {
         "resourceCode": resource.resource_code,
@@ -262,11 +277,7 @@ def serialize_curated_resource(match: CuratedResourceMatch, *, include_content: 
             "matchedTriggers": list(match.matched_triggers),
             "rankingBasis": list(match.ranking_basis),
         },
-        "action": {
-            "label": "站内阅读文档" if is_internal else "打开外部视频",
-            "href": action_href,
-            "external": not is_internal,
-        },
+        "action": action,
         "verification": {
             "status": resource.verification_status,
             "catalogVerified": resource.verification_status == CuratedResourceVerificationStatus.VERIFIED,

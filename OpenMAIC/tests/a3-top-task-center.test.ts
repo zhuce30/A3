@@ -28,4 +28,16 @@ describe('A3 top task center panel', () => {
     expect(source).toContain('renderProgressCounters');
     expect(source).toContain('recentEvents');
   });
+
+  it('keeps the task list scrollable inside the viewport', () => {
+    const source = fs.readFileSync(topActionsPath, 'utf8');
+
+    expect(source).toContain('data-testid="a3-top-tasks-panel"');
+    expect(source).toContain('fixed inset-x-2 top-[68px]');
+    expect(source).toContain('max-h-[calc(100dvh-88px)]');
+    expect(source).toContain('sm:absolute sm:inset-x-auto sm:right-0 sm:top-12');
+    expect(source).toContain('data-testid="a3-top-tasks-scroll"');
+    expect(source).toContain('aria-label="任务列表"');
+    expect(source).toContain('min-h-0 flex-1 overflow-y-auto overscroll-contain');
+  });
 });

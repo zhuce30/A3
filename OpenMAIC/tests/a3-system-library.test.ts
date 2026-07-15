@@ -1,12 +1,30 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { normalizeA3SystemResource } from '@/lib/a3/library-types';
 
 function source(path: string) {
   return readFileSync(join(process.cwd(), path), 'utf8');
 }
 
 describe('A3 platform-managed system resource library', () => {
+  it('normalizes the legacy internal action during a rolling backend deployment', () => {
+    const normalized = normalizeA3SystemResource({
+      resourceCode: 'OS-LAB-003',
+      deliveryMode: 'internal_document',
+      action: {
+        external: false,
+        label: '站内阅读文档',
+        href: '/api/kb/library/OS-LAB-003/content/',
+      },
+    });
+
+    expect(normalized.action.external).toBe(false);
+    if (normalized.action.external) throw new Error('Expected a document action');
+    expect(normalized.action.preview.href).toBe('/api/kb/library/OS-LAB-003/preview/');
+    expect(normalized.action.download.href).toBe('/api/kb/library/OS-LAB-003/content/');
+  });
+
   it('owns independent list and detail routes under AI learning navigation', () => {
     expect(existsSync(join(process.cwd(), 'app/a3/library/page.tsx'))).toBe(true);
     expect(existsSync(join(process.cwd(), 'app/a3/library/[resourceCode]/page.tsx'))).toBe(true);
@@ -47,6 +65,30 @@ describe('A3 platform-managed system resource library', () => {
     expect(detail).toContain("record('resource_completed'");
     expect(detail).toContain('<A3Markdown');
     expect(detail).toContain('没有字幕或转写证据时，不作为回答引用');
+  });
+
+  it('previews protected DOCX resources as PDF while retaining download and Markdown fallback', () => {
+    const detail = source('components/a3/features/system-resource-detail-view.tsx');
+    const types = source('lib/a3/library-types.ts');
+
+    expect(types).toContain('preview: {');
+    expect(types).toContain('download: {');
+    expect(detail).toContain('在线预览');
+    expect(detail).toContain('下载原文档');
+    expect(detail).toContain('fetch(resolveA3Endpoint(resource.action.preview.href)');
+    expect(detail).toContain("credentials: 'include'");
+    expect(detail).toContain("contentType.includes('application/pdf')");
+    expect(detail).toContain('URL.createObjectURL');
+    expect(detail).toContain('URL.revokeObjectURL');
+    expect(detail).toContain('data-testid="a3-docx-preview-loading"');
+    expect(detail).toContain('data-testid="a3-docx-preview-error"');
+    expect(detail).toContain('data-testid="a3-docx-preview-frame"');
+    expect(detail).toContain('data-testid="a3-docx-preview-mobile-open"');
+    expect(detail).toContain('data-testid="a3-docx-markdown-fallback"');
+    expect(detail).toContain("recordDocumentAction('preview')");
+    expect(detail).toContain("recordDocumentAction('download')");
+    expect(detail).toContain('metadata: { action,');
+    expect(detail).toContain("resource.deliveryMode === 'internal_document' && !resource.action.external ? (");
   });
 
   it('surfaces personalized system resources on the existing recommendation page', () => {

@@ -11,6 +11,7 @@ from backend.apps.accounts.permissions import require_authenticated, require_tea
 from backend.apps.knowledge_base.display import format_source_display_location, format_source_type_label, source_origin_label
 from backend.apps.knowledge_base.models import (
     CuratedLearningResource,
+    CuratedResourceDeliveryMode,
     IndexJobStatus,
     KnowledgeAsset,
     KnowledgeBlock,
@@ -18,6 +19,12 @@ from backend.apps.knowledge_base.models import (
     KnowledgeResource,
     ResourceScope,
     ResourceStatus,
+)
+from backend.apps.knowledge_base.docx_preview import (
+    DocxPreviewSourceUnavailable,
+    DocxPreviewUnavailable,
+    DocxPreviewUnsupported,
+    get_or_create_docx_preview,
 )
 from backend.apps.knowledge_base.curated_recommendations import (
     CuratedResourceMatcher,
@@ -107,8 +114,43 @@ def curated_library_content(request, resource_code):
     path = Path(resource.knowledge_resource.stored_path)
     if not path.exists():
         return JsonResponse({"success": False, "error": "资料文件暂时不可用"}, status=404)
-    inline = str(request.GET.get("disposition", "inline")).strip().lower() == "inline"
+    inline = str(request.GET.get("disposition", "attachment")).strip().lower() == "inline"
     return FileResponse(path.open("rb"), as_attachment=not inline, filename=resource.knowledge_resource.original_name)
+
+
+@require_http_methods(["GET"])
+def curated_library_preview(request, resource_code):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    resource = get_object_or_404(
+        eligible_curated_resources().select_related("knowledge_resource"),
+        resource_code=resource_code,
+    )
+    if (
+        resource.delivery_mode != CuratedResourceDeliveryMode.INTERNAL_DOCUMENT
+        or not resource.knowledge_resource_id
+        or resource.knowledge_resource.file_type.lower() != ".docx"
+    ):
+        return JsonResponse({"success": False, "error": "该资料不是可在线预览的 Word 文档"}, status=400)
+    try:
+        preview_path = get_or_create_docx_preview(resource)
+    except DocxPreviewUnsupported:
+        return JsonResponse({"success": False, "error": "该资料不是可在线预览的 Word 文档"}, status=400)
+    except DocxPreviewSourceUnavailable:
+        return JsonResponse({"success": False, "error": "资料原文件暂时不可用"}, status=404)
+    except DocxPreviewUnavailable:
+        return JsonResponse({"success": False, "error": "Word 在线预览暂时不可用，可下载原文档"}, status=503)
+
+    response = FileResponse(
+        preview_path.open("rb"),
+        content_type="application/pdf",
+        as_attachment=False,
+        filename=f"{resource.resource_code}.pdf",
+    )
+    response["Cache-Control"] = "private, max-age=86400"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @require_http_methods(["GET"])
