@@ -165,7 +165,7 @@ def _infer_provider(metadata: dict) -> str:
         return "local_ocr"
     if metadata.get("vlm"):
         return "vlm"
-    if metadata.get("sourceType") in {"pptx", "pdf", "xlsx"}:
+    if metadata.get("sourceType") in {"docx", "pptx", "pdf", "xlsx"}:
         return f"native_{metadata['sourceType']}"
     return "native"
 

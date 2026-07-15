@@ -39,6 +39,16 @@ export type A3Recommendation = {
       practiceConversionRate?: number;
       postAssessmentGain?: number;
     };
+    curatedResource?: {
+      resourceCode: string;
+      resourceType: string;
+      deliveryMode: string;
+      difficulty: string;
+      estimatedMinutes: number;
+      knowledgePoints: string[];
+      catalogVerified: boolean;
+      citationEligible: boolean;
+    };
   };
 };
 

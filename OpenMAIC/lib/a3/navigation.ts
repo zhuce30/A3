@@ -43,6 +43,7 @@ export const a3NavItems: A3NavItem[] = [
     children: [
       { href: '/a3/coaching', label: '面对面辅导' },
       { href: '/a3/recommendations', label: '资源包生成' },
+      { href: '/a3/library', label: '系统资料' },
       { href: '/a3/resources', label: '资源记录' },
       { href: '/a3/favorites', label: '我的收藏' },
     ],
@@ -67,6 +68,7 @@ const secondaryNavOwners: Array<{ prefix: string; owner: string }> = [
   { prefix: '/a3/wrong-notebook', owner: '/a3/assessment' },
   { prefix: '/a3/coaching', owner: '/a3/classroom' },
   { prefix: '/a3/recommendations', owner: '/a3/classroom' },
+  { prefix: '/a3/library', owner: '/a3/classroom' },
   { prefix: '/a3/resources', owner: '/a3/classroom' },
   { prefix: '/a3/favorites', owner: '/a3/classroom' },
   { prefix: '/a3/knowledge-graph', owner: '/a3/knowledge-base' },

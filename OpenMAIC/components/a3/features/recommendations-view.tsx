@@ -24,6 +24,7 @@ import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import { buildProfileChangeInsight, buildRecommendationEffectInsight, buildRecommendationProfileRationale, type LearningFlowInsight } from '@/lib/a3/learning-flow-insights';
 import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
+import type { A3SystemLibraryResponse } from '@/lib/a3/library-types';
 import type {
   A3MultimodalArtifact,
   A3OpenMAICClassroomArtifact,
@@ -216,6 +217,7 @@ export function RecommendationsView() {
   const [longRunningProgress, setLongRunningProgress] = useState<LongRunningProgress | null>(null);
   const [recommendationsExpanded, setRecommendationsExpanded] = useState(false);
   const [profileFeed, setProfileFeed] = useState<ProfileFeedResponse | null>(null);
+  const [systemLibrary, setSystemLibrary] = useState<A3SystemLibraryResponse | null>(null);
 
   const evidence = useMemo(() => buildGenerationEvidence(context, goal, pack), [context, goal, pack]);
   const classroomArtifact = pack?.multimodalArtifacts?.find((artifact): artifact is A3OpenMAICClassroomArtifact => artifact.type === 'openmaic_classroom');
@@ -229,16 +231,18 @@ export function RecommendationsView() {
   const profileChangeInsight = useMemo(() => buildProfileChangeInsight(profileFeed), [profileFeed]);
 
   async function loadInitialContext() {
-    const [result, profileResponse] = await Promise.all([
+    const [result, profileResponse, libraryResponse] = await Promise.all([
       a3PostJson<RecommendationResponse>('/api/recommend/', {
         goal: '',
         topK: 4,
         mode: 'fast',
       }),
       a3GetJson<ProfileFeedResponse>('/api/profiles/dynamic-profile/'),
+      a3GetJson<A3SystemLibraryResponse>('/api/kb/library/?recommended=3'),
     ]);
     setLoadingContext(false);
     if (profileResponse.success) setProfileFeed(profileResponse);
+    if (libraryResponse.success) setSystemLibrary(libraryResponse);
     if (!result.success) {
       setError(result.error ?? '无法加载画像和知识库上下文。');
       return;
@@ -675,6 +679,43 @@ export function RecommendationsView() {
       {longRunningProgress && (
         <LongRunningProgressPanel progress={longRunningProgress} />
       )}
+
+      {systemLibrary?.recommended.length ? (
+        <section className="border-y border-[var(--a3-border)] py-5" data-testid="a3-curated-recommendations">
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+            <div>
+              <h2 className="flex items-center gap-2 text-lg font-semibold text-[var(--a3-text)]">
+                <BookOpenText className="size-5 text-blue-600" />
+                平台资料精准推荐
+              </h2>
+              <p className="mt-1 text-sm text-[var(--a3-text-muted)]">已入库资料按你的路径、错题、薄弱点和可用时间排序，不需要重复上传解析。</p>
+            </div>
+            <Button asChild size="sm" variant="outline" className="bg-white">
+              <Link href="/a3/library">进入系统资料库<ArrowRight className="size-4" /></Link>
+            </Button>
+          </div>
+          <div className="mt-4 grid gap-3 lg:grid-cols-3">
+            {systemLibrary.recommended.slice(0, 3).map((resource) => (
+              <Link
+                key={resource.resourceCode}
+                href={`/a3/library/${resource.resourceCode}`}
+                className="group rounded-lg border border-[var(--a3-border)] bg-white p-4 transition-colors hover:border-blue-300"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <A3Pill tone={resource.resourceType === 'video' ? 'violet' : resource.resourceType === 'code_lab' ? 'green' : 'blue'}>{resource.resourceTypeLabel}</A3Pill>
+                  <span className="text-xs font-semibold text-blue-700">匹配 {resource.personalization.score}</span>
+                </div>
+                <h3 className="mt-3 line-clamp-2 text-sm font-semibold leading-6 text-[var(--a3-text)] group-hover:text-blue-700">{resource.title}</h3>
+                <p className="mt-2 line-clamp-3 text-xs leading-5 text-[var(--a3-text-muted)]">{resource.personalization.reason}</p>
+                <div className="mt-3 flex items-center justify-between text-xs text-[var(--a3-text-muted)]">
+                  <span>{resource.estimatedMinutes} 分钟</span>
+                  <ArrowRight className="size-4 text-blue-600 transition-transform group-hover:translate-x-0.5" />
+                </div>
+              </Link>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {recommendations.length ? (
         <section className="grid gap-4">

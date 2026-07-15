@@ -5,6 +5,7 @@ from urllib.parse import quote
 
 from backend.apps.assessments.models import WrongQuestion
 from backend.apps.knowledge_base.display import format_source_display_location, format_source_type_label, safe_source_filename, source_origin_label
+from backend.apps.knowledge_base.curated_recommendations import CuratedResourceMatcher
 from backend.apps.learning.models import LearningPath, LearningPathStatus
 from backend.apps.learning.resource_attribution import attribution_by_resource_type, build_resource_effect_attribution
 from backend.apps.learning.services import classroom_context
@@ -35,6 +36,7 @@ def build_recommendation_payload(user, *, goal: str = "", top_k: int = 6, retrie
     sources = _search_sources(context, query=query, top_k=max(top_k, 5), retrieval_mode=normalized_mode)
 
     seeds = _source_recommendations(sources, profile, target)
+    seeds.extend(_curated_resource_recommendations(user))
     seeds.extend(_path_recommendations(user, profile, target))
     seeds.extend(_wrong_question_recommendations(user))
     attribution_report = build_resource_effect_attribution(user, days=30)
@@ -279,6 +281,43 @@ def _source_recommendations(sources: list, profile: LearnerProfile | None, targe
                     ],
                     "sourceEvidence": source_payload,
                     "fallback": False,
+                },
+            )
+        )
+    return seeds
+
+
+def _curated_resource_recommendations(user) -> list[RecommendationSeed]:
+    seeds: list[RecommendationSeed] = []
+    for match in CuratedResourceMatcher().match(user, limit=12):
+        resource = match.resource
+        seeds.append(
+            RecommendationSeed(
+                title=resource.title,
+                resource_type=resource.get_resource_type_display(),
+                href=f"/a3/library/{resource.resource_code}",
+                score=match.score,
+                reason=match.reason,
+                source=None,
+                evidence={
+                    "profileMatch": {
+                        "matched": bool(match.matched_triggers),
+                        "signals": list(match.matched_triggers),
+                        "reason": match.reason,
+                    },
+                    "rankingBasis": list(match.ranking_basis),
+                    "sourceEvidence": None,
+                    "fallback": False,
+                    "curatedResource": {
+                        "resourceCode": resource.resource_code,
+                        "resourceType": resource.resource_type,
+                        "deliveryMode": resource.delivery_mode,
+                        "difficulty": resource.difficulty,
+                        "estimatedMinutes": resource.estimated_minutes,
+                        "knowledgePoints": [point.title for point in resource.knowledge_points.all()],
+                        "catalogVerified": True,
+                        "citationEligible": resource.delivery_mode == "internal_document",
+                    },
                 },
             )
         )

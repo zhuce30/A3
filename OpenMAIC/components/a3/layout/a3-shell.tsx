@@ -42,6 +42,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     '/a3/courses': messages.navCourses,
     '/a3/knowledge-graph': messages.navKnowledgeGraph,
     '/a3/recommendations': messages.navRecommendations,
+    '/a3/library': messages.navSystemLibrary,
     '/a3/assessment': messages.navAssessment,
     '/a3/wrong-notebook': messages.navWrongNotebook,
     '/a3/report': messages.navReport,

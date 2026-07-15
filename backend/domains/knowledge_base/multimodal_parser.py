@@ -143,6 +143,8 @@ def parse_resource(source_path: Path, progress_callback: ProgressCallback | None
         return finalize_parse_result(_parse_image(source_path, progress_callback=progress_callback))
     if suffix == ".xlsx":
         return finalize_parse_result(_parse_xlsx(source_path))
+    if suffix == ".docx":
+        return finalize_parse_result(_parse_docx(source_path))
     if suffix == ".pdf":
         return finalize_parse_result(_parse_pdf(source_path, progress_callback=progress_callback))
     return finalize_parse_result(MultimodalParseResult(
@@ -671,6 +673,78 @@ def _parse_xlsx(source_path: Path) -> MultimodalParseResult:
         warnings=warnings,
         quality_score=0.75 if not warnings else 0.6,
         result={"sheets": len(workbook.worksheets), "parsedSheets": len(pages)},
+    )
+
+
+def _parse_docx(source_path: Path) -> MultimodalParseResult:
+    try:
+        from backend.domains.knowledge_base.docx_parser import parse_docx_blocks
+
+        content_blocks = parse_docx_blocks(source_path)
+    except Exception as exc:
+        return MultimodalParseResult(
+            parser="native",
+            status="failed",
+            warnings=[f"DOCX parse failed: {type(exc).__name__}: {exc}"],
+            quality_score=0,
+        )
+
+    if not content_blocks:
+        return MultimodalParseResult(
+            parser="native",
+            status="failed",
+            warnings=["DOCX has no extractable headings, paragraphs, or tables."],
+            quality_score=0,
+        )
+
+    pages: list[ParsedPage] = []
+    for content in content_blocks:
+        location = (
+            f"{content.section} · 表格 {content.table_index}"
+            if content.block_type == "table"
+            else f"{content.section} · 段落 {content.paragraph_start}-{content.paragraph_end}"
+        )
+        metadata = {
+            "sourceType": "docx",
+            "blockType": content.block_type,
+            "section": content.section,
+            "headingLevel": content.heading_level,
+            "blockIndex": content.block_index,
+            "paragraphStart": content.paragraph_start,
+            "paragraphEnd": content.paragraph_end,
+            "tableIndex": content.table_index,
+            "citationLabel": location,
+        }
+        pages.append(
+            ParsedPage(
+                summary=location,
+                quality_score=0.9,
+                metadata=metadata,
+                blocks=[
+                    ParsedBlock(
+                        modality="table" if content.block_type == "table" else "text",
+                        text=content.markdown,
+                        confidence=0.9,
+                        metadata=metadata,
+                    )
+                ],
+            )
+        )
+
+    sections = list(dict.fromkeys(block.section for block in content_blocks if block.section))
+    table_count = sum(1 for block in content_blocks if block.block_type == "table")
+    return MultimodalParseResult(
+        parser="native",
+        status="completed",
+        pages=pages,
+        quality_score=0.9,
+        result={
+            "sections": sections,
+            "sectionCount": len(sections),
+            "blockCount": len(content_blocks),
+            "textBlockCount": len(content_blocks) - table_count,
+            "tableCount": table_count,
+        },
     )
 
 

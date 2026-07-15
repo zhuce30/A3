@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Bell, BookOpenCheck, CheckCircle2, Clock3, Loader2, MessageCircle, RotateCcw, Sparkles } from 'lucide-react';
+import { ArrowRight, Bell, BookOpenCheck, CheckCircle2, ChevronDown, Clock3, Loader2, MessageCircle, RotateCcw, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import { buildProfileChangeInsight, buildTaskProfileRationale, buildTodayFlowInsights, type LearningFlowInsight } from '@/lib/a3/learning-flow-insights';
@@ -31,6 +31,12 @@ const policyLabel: Record<NonNullable<StudyPlan['adaptivePolicy']>['mode'], stri
   reduced_load: '降负荷',
   accelerated: '加速推进',
   standard: '标准节奏',
+};
+
+const resourceFeedbackStrategyLabel: Record<string, string> = {
+  increase_practice: '增加专项练习',
+  reduce_load: '降低今日负荷',
+  keep_current_pace: '保持当前节奏',
 };
 
 const PROFILE_SETUP_HREF = '/a3/profile-setup';
@@ -467,28 +473,62 @@ export function TodayLearningView() {
             )}
             {policy?.reason && <div className="mt-4 rounded-xl bg-blue-50 p-4 text-sm leading-6 text-blue-800">{policy.reason}</div>}
             {resourceFeedbackAdjustment && (
-              <div className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50 p-4" data-testid="a3-today-resource-feedback-adjustment">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-sm font-semibold text-emerald-950">资源反馈已调整今日任务</div>
-                  <A3Pill tone="green">{resourceFeedbackAdjustment.strategy}</A3Pill>
+              <details className="group mt-4 overflow-hidden rounded-xl border border-emerald-100 bg-emerald-50" data-testid="a3-today-resource-feedback-adjustment">
+                <summary className="flex cursor-pointer list-none items-start justify-between gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-emerald-950">资源反馈已调整今日任务</div>
+                    <p className="mt-1 line-clamp-1 text-xs leading-5 text-emerald-800">
+                      {resourceFeedbackAdjustment.reason ?? '系统已根据资源使用反馈刷新学习计划。'}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <A3Pill tone="green">
+                      {resourceFeedbackStrategyLabel[resourceFeedbackAdjustment.strategy] ?? '计划已调整'}
+                    </A3Pill>
+                    <ChevronDown className="size-4 text-emerald-700 transition-transform group-open:rotate-180" aria-hidden="true" />
+                  </div>
+                </summary>
+                <div className="border-t border-emerald-100">
+                  <div className="max-h-72 overflow-y-auto px-4 py-3">
+                    <dl className="space-y-2 text-xs">
+                      <div className="rounded-lg bg-white/75 px-3 py-2">
+                        <dt className="font-medium text-emerald-700">调整依据</dt>
+                        <dd className="mt-1 break-words leading-5 text-emerald-950">
+                          {resourceFeedbackAdjustment.reason ?? '系统已根据资源使用反馈刷新学习计划。'}
+                        </dd>
+                      </div>
+                      <div className="rounded-lg bg-white/75 px-3 py-2">
+                        <dt className="font-medium text-emerald-700">学习目标</dt>
+                        <dd className="mt-1 break-words leading-5 text-emerald-950">
+                          {resourceFeedbackAdjustment.evidence?.latestGoal || '暂未关联具体目标'}
+                        </dd>
+                      </div>
+                      <div className="rounded-lg bg-white/75 px-3 py-2">
+                        <dt className="font-medium text-emerald-700">反馈均分</dt>
+                        <dd className="mt-1 font-semibold text-emerald-950">
+                          {typeof resourceFeedbackAdjustment.evidence?.averageFeedbackScore === 'number'
+                            ? resourceFeedbackAdjustment.evidence.averageFeedbackScore
+                            : '--'}
+                        </dd>
+                      </div>
+                      <div className="rounded-lg bg-white/75 px-3 py-2">
+                        <dt className="font-medium text-emerald-700">下一步任务</dt>
+                        <dd className="mt-1 break-words leading-5 text-emerald-950">
+                          {resourceFeedbackAdjustment.nextAction?.label || '按当前计划继续学习'}
+                        </dd>
+                      </div>
+                    </dl>
+                    {resourceFeedbackAdjustment.nextAction && (
+                      <Button asChild size="sm" className="mt-3 w-full bg-emerald-600 hover:bg-emerald-700">
+                        <Link href={resourceFeedbackAdjustment.nextAction.href}>
+                          {resourceFeedbackAdjustment.nextAction.label}
+                          <ArrowRight className="size-4" />
+                        </Link>
+                      </Button>
+                    )}
+                  </div>
                 </div>
-                <p className="mt-2 text-xs leading-5 text-emerald-800">
-                  {resourceFeedbackAdjustment.reason ?? '系统已根据资源使用反馈刷新学习计划。'}
-                </p>
-                <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
-                  <span className="rounded-lg bg-white/75 px-3 py-2 text-emerald-800">目标：{resourceFeedbackAdjustment.evidence?.latestGoal || '--'}</span>
-                  <span className="rounded-lg bg-white/75 px-3 py-2 text-emerald-800">均分：{resourceFeedbackAdjustment.evidence?.averageFeedbackScore ?? 0}</span>
-                  <span className="rounded-lg bg-white/75 px-3 py-2 text-emerald-800">任务：{resourceFeedbackAdjustment.taskId ?? '--'}</span>
-                </div>
-                {resourceFeedbackAdjustment.nextAction && (
-                  <Button asChild size="sm" className="mt-3 bg-emerald-600 hover:bg-emerald-700">
-                    <Link href={resourceFeedbackAdjustment.nextAction.href}>
-                      {resourceFeedbackAdjustment.nextAction.label}
-                      <ArrowRight className="size-4" />
-                    </Link>
-                  </Button>
-                )}
-              </div>
+              </details>
             )}
             {activeTask && (
               <div className="mt-4 rounded-xl bg-[var(--a3-surface-muted)] p-4">

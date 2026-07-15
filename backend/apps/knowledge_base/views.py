@@ -10,6 +10,7 @@ from django.views.decorators.http import require_http_methods
 from backend.apps.accounts.permissions import require_authenticated, require_teacher_role
 from backend.apps.knowledge_base.display import format_source_display_location, format_source_type_label, source_origin_label
 from backend.apps.knowledge_base.models import (
+    CuratedLearningResource,
     IndexJobStatus,
     KnowledgeAsset,
     KnowledgeBlock,
@@ -17,6 +18,13 @@ from backend.apps.knowledge_base.models import (
     KnowledgeResource,
     ResourceScope,
     ResourceStatus,
+)
+from backend.apps.knowledge_base.curated_recommendations import (
+    CuratedResourceMatcher,
+    curated_resource_summary,
+    eligible_curated_resources,
+    filter_curated_resources,
+    serialize_curated_resource,
 )
 from backend.apps.knowledge_base.services import (
     accessible_resources_for_user,
@@ -41,6 +49,66 @@ from backend.apps.knowledge_base.services import (
 from backend.apps.knowledge_base.graph_builder import serialize_material_graph
 from backend.apps.knowledge_base.deep_retrieval import run_deep_retrieval_router, serialize_retrieval_plan
 from backend.domains.knowledge_base.retriever import search_knowledge_base
+
+
+@require_http_methods(["GET"])
+def curated_library(request):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    eligible = eligible_curated_resources()
+    summary = curated_resource_summary(eligible)
+    filtered = filter_curated_resources(
+        eligible,
+        resource_type=str(request.GET.get("type", "")).strip(),
+        difficulty=str(request.GET.get("difficulty", "")).strip(),
+        query=str(request.GET.get("q", "")).strip(),
+    )
+    try:
+        recommended_count = max(1, min(int(request.GET.get("recommended", 6)), 20))
+    except (TypeError, ValueError):
+        recommended_count = 6
+    matcher = CuratedResourceMatcher()
+    all_matches = matcher.match(request.user, queryset=eligible)
+    filtered_codes = set(filtered.values_list("resource_code", flat=True))
+    return JsonResponse({
+        "success": True,
+        "recommended": [serialize_curated_resource(match) for match in all_matches[:recommended_count]],
+        "resources": [serialize_curated_resource(match) for match in all_matches if match.resource.resource_code in filtered_codes],
+        "summary": summary,
+        "filters": {
+            "type": str(request.GET.get("type", "")).strip(),
+            "difficulty": str(request.GET.get("difficulty", "")).strip(),
+            "query": str(request.GET.get("q", "")).strip(),
+        },
+    })
+
+
+@require_http_methods(["GET"])
+def curated_library_detail(request, resource_code):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    resource = get_object_or_404(eligible_curated_resources(), resource_code=resource_code)
+    match = CuratedResourceMatcher().match(request.user, queryset=eligible_curated_resources().filter(id=resource.id))[0]
+    return JsonResponse({"success": True, "resource": serialize_curated_resource(match, include_content=True)})
+
+
+@require_http_methods(["GET"])
+def curated_library_content(request, resource_code):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    resource = get_object_or_404(
+        eligible_curated_resources().select_related("knowledge_resource"),
+        resource_code=resource_code,
+        knowledge_resource__isnull=False,
+    )
+    path = Path(resource.knowledge_resource.stored_path)
+    if not path.exists():
+        return JsonResponse({"success": False, "error": "资料文件暂时不可用"}, status=404)
+    inline = str(request.GET.get("disposition", "inline")).strip().lower() == "inline"
+    return FileResponse(path.open("rb"), as_attachment=not inline, filename=resource.knowledge_resource.original_name)
 
 
 @require_http_methods(["GET"])

@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -19,6 +20,29 @@ class ResourceScope(models.TextChoices):
     TEACHER = "teacher", "teacher"
     CLASS = "class", "class"
     GLOBAL = "global", "global"
+
+
+class CuratedResourceType(models.TextChoices):
+    LECTURE_DOC = "lecture_doc", "讲解文档"
+    CODE_LAB = "code_lab", "实操案例"
+    VIDEO = "video", "视频"
+
+
+class CuratedResourceDeliveryMode(models.TextChoices):
+    INTERNAL_DOCUMENT = "internal_document", "站内文档"
+    EXTERNAL_LINK = "external_link", "外部链接"
+
+
+class CuratedResourceDifficulty(models.TextChoices):
+    FOUNDATION = "foundation", "基础"
+    INTERMEDIATE = "intermediate", "中等"
+    ADVANCED = "advanced", "进阶"
+
+
+class CuratedResourceVerificationStatus(models.TextChoices):
+    VERIFIED = "verified", "已核验"
+    NEEDS_REVIEW = "needs_review", "待复核"
+    BROKEN = "broken", "不可用"
 
 
 class IndexJobType(models.TextChoices):
@@ -97,6 +121,82 @@ class KnowledgeResource(models.Model):
 
     def __str__(self) -> str:
         return self.original_name
+
+
+class CuratedLearningResource(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    resource_code = models.CharField(max_length=64, unique=True)
+    course = models.ForeignKey(
+        "learning.Course",
+        on_delete=models.CASCADE,
+        related_name="curated_resources",
+    )
+    knowledge_points = models.ManyToManyField(
+        "learning.KnowledgePoint",
+        related_name="curated_resources",
+        blank=True,
+    )
+    knowledge_resource = models.OneToOneField(
+        KnowledgeResource,
+        on_delete=models.SET_NULL,
+        related_name="curated_resource",
+        null=True,
+        blank=True,
+    )
+    resource_type = models.CharField(max_length=24, choices=CuratedResourceType.choices)
+    delivery_mode = models.CharField(max_length=24, choices=CuratedResourceDeliveryMode.choices)
+    title = models.CharField(max_length=255)
+    summary = models.TextField(blank=True)
+    external_url = models.URLField(max_length=1000, blank=True)
+    provider = models.CharField(max_length=255, blank=True)
+    difficulty = models.CharField(
+        max_length=24,
+        choices=CuratedResourceDifficulty.choices,
+        default=CuratedResourceDifficulty.INTERMEDIATE,
+    )
+    estimated_minutes = models.PositiveIntegerField(default=0)
+    key_segment = models.CharField(max_length=255, blank=True)
+    prerequisites = models.JSONField(default=list, blank=True)
+    learner_profiles = models.JSONField(default=list, blank=True)
+    weakness_triggers = models.JSONField(default=list, blank=True)
+    learning_objectives = models.JSONField(default=list, blank=True)
+    completion_criteria = models.JSONField(default=list, blank=True)
+    recommendation_template = models.TextField(blank=True)
+    keywords = models.JSONField(default=list, blank=True)
+    is_free = models.BooleanField(default=True)
+    verification_status = models.CharField(
+        max_length=24,
+        choices=CuratedResourceVerificationStatus.choices,
+        default=CuratedResourceVerificationStatus.NEEDS_REVIEW,
+    )
+    verified_at = models.DateField(null=True, blank=True)
+    content_hash = models.CharField(max_length=64, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_curated_learning_resources"
+        ordering = ["resource_code"]
+        indexes = [
+            models.Index(fields=["course", "is_active"], name="a3_curated_course_active_idx"),
+            models.Index(fields=["resource_type", "is_active"], name="a3_curated_type_active_idx"),
+            models.Index(fields=["verification_status"], name="a3_curated_verify_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.resource_code} {self.title}"
+
+    def clean(self) -> None:
+        super().clean()
+        errors = {}
+        if self.delivery_mode == CuratedResourceDeliveryMode.INTERNAL_DOCUMENT and not self.knowledge_resource_id:
+            errors["knowledge_resource"] = "站内文档必须关联知识库文件"
+        if self.delivery_mode == CuratedResourceDeliveryMode.EXTERNAL_LINK and not self.external_url.lower().startswith("https://"):
+            errors["external_url"] = "外部资源必须使用 HTTPS 链接"
+        if errors:
+            raise ValidationError(errors)
 
 
 class KnowledgeParseRun(models.Model):

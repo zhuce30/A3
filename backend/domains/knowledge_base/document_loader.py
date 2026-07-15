@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 else:
     Document = object
 
-SUPPORTED_EXTENSIONS = {".xlsx", ".pdf", ".pptx"}
+SUPPORTED_EXTENSIONS = {".docx", ".xlsx", ".pdf", ".pptx"}
 SKIPPED_EXTENSIONS: set[str] = set()
 
 
@@ -48,6 +48,8 @@ def load_documents(paths: Iterable[Path]) -> tuple[list[Document], list[dict]]:
         try:
             if suffix == ".xlsx":
                 documents.extend(_load_qa_xlsx(path))
+            elif suffix == ".docx":
+                documents.extend(_load_docx(path))
             elif suffix == ".pdf":
                 documents.extend(_load_pdf(path))
             elif suffix == ".pptx":
@@ -90,7 +92,7 @@ def _file_priority(path: Path) -> tuple[int, str]:
         return (1, text)
     if path.suffix.lower() == ".xlsx":
         return (2, text)
-    if path.suffix.lower() in {".pdf", ".pptx"}:
+    if path.suffix.lower() in {".docx", ".pdf", ".pptx"}:
         return (3, text)
     return (9, text)
 
@@ -217,6 +219,30 @@ def _load_pptx(path: Path) -> list[Document]:
             )
         )
 
+    return documents
+
+
+def _load_docx(path: Path) -> list[Document]:
+    from backend.domains.knowledge_base.docx_parser import parse_docx_blocks
+
+    documents: list[Document] = []
+    for block in parse_docx_blocks(path):
+        metadata = {
+            "source_type": "docx",
+            "source_path": str(path),
+            "course": _infer_course(path),
+            "title": block.section or path.stem,
+            "section": block.section,
+            "heading_level": block.heading_level,
+            "block_index": block.block_index,
+            "block_type": block.block_type,
+            "paragraph_start": block.paragraph_start,
+            "paragraph_end": block.paragraph_end,
+            "table_index": block.table_index,
+            "original_name": path.name,
+            "resource_type": "document",
+        }
+        documents.append(_document(text=block.markdown, metadata=metadata))
     return documents
 
 

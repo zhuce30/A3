@@ -30,7 +30,7 @@ describe('A3 student navigation consolidation', () => {
     );
 
     expect(studentGroups['/a3/today']).toEqual([
-      ['/a3/dashboard', '学习首页'],
+      ['/a3/dashboard', '首页'],
       ['/a3/notifications', '通知消息'],
     ]);
     expect(studentGroups['/a3/study-plan']).toEqual([
@@ -45,10 +45,12 @@ describe('A3 student navigation consolidation', () => {
     expect(studentGroups['/a3/classroom']).toEqual([
       ['/a3/coaching', '面对面辅导'],
       ['/a3/recommendations', '资源包生成'],
+      ['/a3/library', '系统资料'],
+      ['/a3/resources', '资源记录'],
       ['/a3/favorites', '我的收藏'],
     ]);
     expect(studentGroups['/a3/knowledge-base']).toEqual([
-      ['/a3/knowledge-graph', '本地知识图谱'],
+      ['/a3/knowledge-graph', '知识图谱'],
     ]);
     expect(studentGroups['/a3/report']).toEqual([]);
   });
@@ -64,6 +66,8 @@ describe('A3 student navigation consolidation', () => {
     expect(studentHrefs).not.toContain('/a3/courses');
     expect(studentHrefs).not.toContain('/a3/knowledge-graph');
     expect(studentHrefs).not.toContain('/a3/recommendations');
+    expect(studentHrefs).not.toContain('/a3/library');
+    expect(studentHrefs).not.toContain('/a3/resources');
     expect(studentHrefs).not.toContain('/a3/wrong-notebook');
     expect(studentHrefs).not.toContain('/a3/coaching');
     expect(studentHrefs).not.toContain('/a3/favorites');
@@ -81,6 +85,7 @@ describe('A3 student navigation consolidation', () => {
     expect(a3GetActiveNavHref('/a3/wrong-notebook')).toBe('/a3/assessment');
     expect(a3GetActiveNavHref('/a3/coaching')).toBe('/a3/classroom');
     expect(a3GetActiveNavHref('/a3/recommendations')).toBe('/a3/classroom');
+    expect(a3GetActiveNavHref('/a3/library/OS-DOC-001')).toBe('/a3/classroom');
     expect(a3GetActiveNavHref('/a3/resources/demo-pack')).toBe('/a3/classroom');
     expect(a3GetActiveNavHref('/a3/favorites')).toBe('/a3/classroom');
     expect(a3GetActiveNavHref('/a3/knowledge-graph')).toBe('/a3/knowledge-base');

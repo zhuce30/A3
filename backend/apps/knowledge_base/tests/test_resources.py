@@ -290,7 +290,7 @@ class KnowledgeResourceTests(TestCase):
         upload = SimpleUploadedFile("lesson.txt", b"text", content_type="text/plain")
 
         with override_settings(KNOWLEDGE_UPLOAD_ROOT=self.temp_dir.name):
-            with self.assertRaisesRegex(ValueError, "仅支持 PDF、PPTX、XLSX、PNG、JPG、JPEG、WEBP 文件"):
+            with self.assertRaisesRegex(ValueError, "仅支持 DOCX、PDF、PPTX、XLSX、PNG、JPG、JPEG、WEBP 文件"):
                 save_and_index_upload(self.user, upload)
 
         self.assertFalse(KnowledgeResource.objects.exists())

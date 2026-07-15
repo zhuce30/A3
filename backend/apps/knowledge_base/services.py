@@ -382,7 +382,7 @@ def save_upload(owner, upload: UploadedFile, *, resource_scope: str | None = Non
     if suffix == ".ppt":
         raise ValueError("旧版 .ppt 不能直接入库，请先转换为 .pptx")
     if suffix not in SUPPORTED_EXTENSIONS and suffix not in IMAGE_EXTENSIONS:
-        raise ValueError("仅支持 PDF、PPTX、XLSX、PNG、JPG、JPEG、WEBP 文件")
+        raise ValueError("仅支持 DOCX、PDF、PPTX、XLSX、PNG、JPG、JPEG、WEBP 文件")
     max_size = int(getattr(settings, "KNOWLEDGE_UPLOAD_MAX_BYTES", 200 * 1024 * 1024))
     if upload.size > max_size:
         raise ValueError("单个文件不能超过 200MB")

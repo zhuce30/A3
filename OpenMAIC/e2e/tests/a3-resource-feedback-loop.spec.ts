@@ -61,7 +61,12 @@ test.describe.serial('A3 resource feedback learning loop', () => {
     await expect(summary).toContainText('完成');
 
     await page.goto('/a3/today');
-    await expect(page.getByTestId('a3-today-resource-feedback-adjustment')).toBeVisible({ timeout: 60_000 });
+    const todayAdjustment = page.getByTestId('a3-today-resource-feedback-adjustment');
+    await expect(todayAdjustment).toBeVisible({ timeout: 60_000 });
+    await expect(todayAdjustment).not.toHaveAttribute('open', '');
+    await todayAdjustment.locator('summary').click();
+    await expect(todayAdjustment).toHaveAttribute('open', '');
+    await expect(todayAdjustment).not.toContainText(/increase_practice|reduce_load|keep_current_pace/);
 
     await page.goto('/a3/study-plan');
     const planAdjustment = page.getByTestId('a3-study-plan-resource-feedback-adjustment');
