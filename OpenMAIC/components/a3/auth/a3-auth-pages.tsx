@@ -36,7 +36,6 @@ import { useVerificationCode } from '@/components/a3/auth/use-verification-code'
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { DynamicProfileInsightPanel } from '@/components/a3/profile/dynamic-profile-insight-panel';
 import type { DynamicProfileInsight } from '@/components/a3/profile/dynamic-profile-insight-panel';
-import { AgentDecisionEvidence } from '@/components/a3/ui/agent-decision-evidence';
 import { a3GetJson, a3PatchJson, a3PostJson } from '@/lib/a3/api-client';
 import { getA3NextPathForUser, resolveA3LoginDestination } from '@/lib/a3/auth-navigation';
 import {
@@ -46,7 +45,6 @@ import {
   normalizeLearningProfileForOptions,
 } from '@/lib/a3/profile-setup';
 import {
-  pendingProfileUpdateCount,
   profileDimensionLabel,
   profileSourceLabel,
   profileStatusLabel,
@@ -844,18 +842,16 @@ export function ProfileSetupPage() {
   const [submitting, setSubmitting] = useState(false);
   const [options, setOptions] = useState<LearningProfileOptions>(defaultLearningProfileOptions);
   const [optionsCourse, setOptionsCourse] = useState('操作系统');
-  const [loadingOptions, setLoadingOptions] = useState(true);
   const [profile, setProfile] = useState<A3LearningProfile>(() => createEmptyLearningProfile());
   const [saveResult, setSaveResult] = useState<ApiResult | null>(null);
   const [interviewText, setInterviewText] = useState('');
   const [interviewLoading, setInterviewLoading] = useState(false);
   const [interviewResult, setInterviewResult] = useState<ProfileInterviewResult | null>(null);
   const [interviewMessages, setInterviewMessages] = useState<ProfileInterviewMessage[]>([
-    { role: 'agent', content: '请用一句话说清楚你的专业年级、基础水平、学习目标、每天可投入时间、喜欢的资源形式和薄弱知识点。' },
+    { role: 'agent', content: '先说说你学习这门课最想解决什么问题？可以只回答一个方面，不需要一次把所有信息写完整。' },
   ]);
   const [missingInterviewDimensions, setMissingInterviewDimensions] = useState<string[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [dynamicProfile, setDynamicProfile] = useState<DynamicProfileInsight | null>(null);
   const [profileSnapshot, setProfileSnapshot] = useState<A3ProfileSnapshot | null>(null);
   const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
@@ -873,10 +869,8 @@ export function ProfileSetupPage() {
   useEffect(() => {
     let active = true;
     async function loadOptions() {
-      setLoadingOptions(true);
       const result = await a3GetJson<LearningProfileOptionsResponse>('/api/profiles/options/');
       if (!active) return;
-      setLoadingOptions(false);
       if (!result.success) {
         setMessage(result.error ?? '画像选项加载失败，请确认后端服务正常');
         return;
@@ -973,7 +967,7 @@ export function ProfileSetupPage() {
     setInterviewLoading(false);
     setInterviewResult(result);
     if (!result.success) {
-      setMessage(result.error ?? '对话生成画像失败，请稍后重试或使用表单模式。');
+      setMessage(result.error ?? '学习情况整理失败，请稍后重试或展开手动填写。');
       return;
     }
     const extracted = result.profile;
@@ -1085,40 +1079,7 @@ export function ProfileSetupPage() {
   const interviewReadyToConfirm = Boolean(interviewResult?.success && (interviewResult.interviewComplete || interviewResult.interviewSession?.interviewComplete));
   const filledProfileRows = previewRows.filter(([, value]) => value && value !== '待完善').length;
   const profileCompleteness = Math.round((filledProfileRows * 100) / previewRows.length);
-  const primaryWeakPoint = profile.weakPoints[0] || '待补充';
-  const preferredResources = profile.expectedResources.slice(0, 2).join('、') || '待补充';
   const hasInterviewHistory = interviewMessages.some((item) => item.role === 'user') || Boolean(interviewResult?.success);
-  const pendingProfileUpdates = pendingProfileUpdateCount(profileFeed);
-  const planningStages = [
-    {
-      index: '1',
-      title: '学习目标',
-      detail: profile.learningGoals.slice(0, 2).join('、') || '先说明为什么学习操作系统',
-      meta: `${profile.dailyStudyTime || '--'} 分钟/天`,
-      active: Boolean(profile.learningGoals.length),
-    },
-    {
-      index: '2',
-      title: '当前基础',
-      detail: `${profile.foundationLevel || '待判断'} · ${primaryWeakPoint}`,
-      meta: profile.grade || '待补充年级',
-      active: Boolean(profile.foundationLevel && profile.weakPoints.length),
-    },
-    {
-      index: '3',
-      title: '学习偏好',
-      detail: profile.learningPreferences.slice(0, 2).join('、') || '选择适合你的学习方式',
-      meta: preferredResources,
-      active: Boolean(profile.learningPreferences.length || profile.expectedResources.length),
-    },
-    {
-      index: '4',
-      title: '智能补充',
-      detail: interviewReadyToConfirm ? '画像已可确认' : missingInterviewDimensions.length ? `还需补 ${missingInterviewDimensions.length} 项` : '用一句话补齐关键信息',
-      meta: pendingProfileUpdates > 0 ? `${pendingProfileUpdates} 条变化待确认` : interviewResult?.traceId ? '已完成信息提取' : '等待补充',
-      active: Boolean(interviewResult?.success || pendingProfileUpdates > 0),
-    },
-  ];
 
   function goBack() {
     if (typeof window !== 'undefined' && window.history.length > 1) {
@@ -1143,25 +1104,27 @@ export function ProfileSetupPage() {
               <ArrowLeft className="size-4" />
               返回上一页
             </Button>
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-600">Learner profile</p>
-            <h1 className="mt-3 text-4xl font-semibold tracking-normal text-slate-950 md:text-5xl">画像与规划输入</h1>
+            <p className="text-sm font-semibold text-blue-600">学习设置</p>
+            <h1 className="mt-3 text-4xl font-semibold tracking-normal text-slate-950 md:text-5xl">告诉我们你的学习情况</h1>
             <p className="mt-4 max-w-3xl text-base leading-7 text-slate-600">
-              完善目标、基础与偏好，系统将据此生成诊断、学习路径和今日任务。
+              不用一次说全。可以先说学习目标、以前学过什么或每天能学多久，系统会根据你的回答逐项追问，并把关键信息整理出来。
             </p>
           </div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-xs font-medium text-slate-500">当前课程</span>
-              <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">{loadingOptions ? '同步中' : '已同步'}</span>
-            </div>
-            <div className="mt-2 text-xl font-semibold text-slate-950">{optionsCourse}</div>
+          <div className="flex items-center gap-3 lg:justify-end">
+            <span className="text-sm text-slate-500">当前课程</span>
+            <span className="rounded-full border border-blue-100 bg-blue-50 px-3 py-1.5 text-sm font-semibold text-blue-700">{optionsCourse}</span>
           </div>
         </div>
         <section className="mb-7 overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.07)]">
-          <div className="border-b border-slate-200 bg-slate-50 px-5 py-5 md:px-6">
-            <div className="grid gap-3 lg:grid-cols-4">
-              {planningStages.map((stage) => (
-                <ProfilePlanningStage key={stage.index} {...stage} />
+          <div className="border-b border-slate-200 bg-slate-50 px-5 py-4 md:px-6">
+            <div className="grid gap-3 sm:grid-cols-3">
+              {['说说情况', '回答追问', '确认并开始诊断'].map((label, index) => (
+                <div key={label} className="flex items-center gap-3 py-1 sm:border-l sm:border-slate-200 sm:pl-4 first:sm:border-l-0 first:sm:pl-0">
+                  <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">
+                    {index + 1}
+                  </span>
+                  <span className="text-sm font-semibold text-slate-700">{label}</span>
+                </div>
               ))}
             </div>
           </div>
@@ -1172,26 +1135,14 @@ export function ProfileSetupPage() {
                   <Bot className="size-6" />
                 </div>
                 <div>
-                  <h2 className="text-2xl font-semibold tracking-normal text-slate-950">先用一句话完成画像</h2>
+                  <h2 className="text-2xl font-semibold tracking-normal text-slate-950">和系统聊聊你的学习情况</h2>
                   <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">
-                    写下目标、时间、薄弱点和资源偏好即可。
+                    系统会整理你的回答，并在需要时继续追问。
                   </p>
                 </div>
               </div>
-              <div className="mt-5 grid gap-3 md:grid-cols-3" data-testid="a3-profile-primary-input-summary">
-                <ProfileSignalTile label="目标" value={profile.learningGoals.slice(0, 2).join('、') || '待补充'} />
-                <ProfileSignalTile label="薄弱点" value={primaryWeakPoint} />
-                <ProfileSignalTile label="资源偏好" value={preferredResources} />
-              </div>
-              <textarea
-                data-testid="a3-profile-interview-input"
-                value={interviewText}
-                onChange={(event) => setInterviewText(event.target.value)}
-                className="mt-4 min-h-[124px] w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                placeholder={buildProfileInterviewPlaceholder(optionsCourse)}
-              />
               <div
-                className={hasInterviewHistory ? 'mt-4 max-h-[420px] min-h-[240px] space-y-3 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 p-2' : 'mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4'}
+                className={hasInterviewHistory ? 'mt-5 max-h-[420px] min-h-[240px] space-y-3 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 p-2' : 'mt-5 max-h-[420px] overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 p-4'}
                 data-testid="a3-profile-interview-thread"
               >
                 {!hasInterviewHistory && (
@@ -1201,17 +1152,10 @@ export function ProfileSetupPage() {
                         <Bot className="size-5" />
                       </div>
                       <div className="min-w-0">
-                        <div className="text-sm font-semibold text-slate-950">描述你的学习情况</div>
+                        <div className="text-sm font-semibold text-slate-950">先说说你学习这门课最想解决什么问题？</div>
                         <p className="mt-1 text-sm leading-6 text-slate-600">
-                          建议包含目标、基础、薄弱点、时间和资源偏好。
+                          可以只回答一个方面，不需要一次把所有信息写完整。
                         </p>
-                        <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold text-slate-600">
-                          <span className="rounded-full bg-slate-100 px-3 py-1">目标</span>
-                          <span className="rounded-full bg-slate-100 px-3 py-1">基础</span>
-                          <span className="rounded-full bg-slate-100 px-3 py-1">薄弱点</span>
-                          <span className="rounded-full bg-slate-100 px-3 py-1">时间</span>
-                          <span className="rounded-full bg-slate-100 px-3 py-1">资源偏好</span>
-                        </div>
                       </div>
                     </div>
                   </div>
@@ -1223,6 +1167,13 @@ export function ProfileSetupPage() {
                   </div>
                 ))}
               </div>
+              <textarea
+                data-testid="a3-profile-interview-input"
+                value={interviewText}
+                onChange={(event) => setInterviewText(event.target.value)}
+                className="mt-4 min-h-[124px] w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                placeholder={buildProfileInterviewPlaceholder(optionsCourse)}
+              />
               {missingInterviewDimensions.length > 0 && (
                 <div className="mt-3 flex flex-wrap gap-2" data-testid="a3-profile-interview-missing-dimensions">
                   {missingInterviewDimensions.map((item) => (
@@ -1240,13 +1191,15 @@ export function ProfileSetupPage() {
               <div className="mt-4 flex flex-wrap gap-3">
                 <Button data-testid="a3-profile-interview-generate" type="button" disabled={interviewLoading} onClick={runProfileInterview} className="h-11 bg-blue-600 px-5 text-white hover:bg-blue-700">
                   {interviewLoading ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-                  对话生成画像
+                  发送并整理
                 </Button>
                 <Button type="button" variant="outline" className="h-11" onClick={() => setInterviewText(buildProfileInterviewExample(optionsCourse))}>
-                  填入当前课程示例
+                  <BookOpen className="size-4" />
+                  查看示例
                 </Button>
                 <Button data-testid="a3-profile-interview-confirm" type="button" variant="outline" className="h-11" disabled={submitting || !interviewReadyToConfirm} onClick={confirmProfileInterview} title={!interviewReadyToConfirm ? '先完成画像访谈后再确认' : undefined}>
-                  确认画像并生成诊断任务
+                  <ArrowRight className="size-4" />
+                  确认并开始入学诊断
                 </Button>
                 {interviewResult?.success && !interviewReadyToConfirm && (
                   <div className="flex min-h-11 items-center rounded-xl bg-amber-50 px-3 text-xs font-semibold text-amber-700">
@@ -1266,8 +1219,8 @@ export function ProfileSetupPage() {
                 dynamicProfile={dynamicProfile}
                 profileSnapshot={profileSnapshot}
                 compact
-                title="动态画像摘要"
-                subtitle="随学习表现持续更新。"
+                title="系统已了解"
+                subtitle="根据你的回答和学习记录持续整理。"
               />
               <ProfileUpdateTimelinePanel
                 feed={profileFeed}
@@ -1275,48 +1228,6 @@ export function ProfileSetupPage() {
                 onConfirm={(id) => resolveProfileUpdate(id, 'confirm')}
                 onReject={(id) => resolveProfileUpdate(id, 'reject')}
               />
-              <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <button
-                  type="button"
-                  onClick={() => setEvidenceOpen((value) => !value)}
-                  className="flex w-full items-center justify-between gap-3 text-left"
-                  aria-expanded={evidenceOpen}
-                >
-                  <span>
-                    <span className="block text-sm font-semibold text-slate-950">Agent 决策证据</span>
-                    <span className="mt-1 block text-xs leading-5 text-slate-500">
-                      查看画像生成依据。
-                    </span>
-                  </span>
-                  <ChevronDown className={evidenceOpen ? 'size-5 shrink-0 rotate-180 text-slate-500 transition-transform' : 'size-5 shrink-0 text-slate-500 transition-transform'} />
-                </button>
-                {evidenceOpen && (
-                  <div className="mt-4 space-y-4">
-                    <ProfileSnapshotEvidenceBlock profileSnapshot={profileSnapshot} />
-                    <div data-testid="a3-profile-planning-impact">
-                      <AgentDecisionEvidence
-                        title="画像如何影响规划"
-                        compact
-                        items={[
-                          {
-                            agent: 'ProfileAgent',
-                            input: `课程 ${optionsCourse}，访谈 ${interviewResult?.interviewSession?.turnCount ?? 0} 轮，字段 ${filledProfileRows} 项`,
-                            output: `${profile.foundationLevel ? `基础 ${profile.foundationLevel}` : '基础待补充'}，${profile.dailyStudyTime ? `每日 ${profile.dailyStudyTime} 分钟` : '每日时间待补充'}，薄弱点 ${profile.weakPoints.slice(0, 2).join('、') || '待补充'}`,
-                            evidence: interviewResult?.traceId ? `trace ${interviewResult.traceId.slice(0, 10)}` : '来自画像访谈 session 与手动校准字段',
-                          },
-                          {
-                            agent: 'PlannerAgent',
-                            input: `目标 ${profile.learningGoals.slice(0, 2).join('、') || '待补充'}，偏好 ${profile.expectedResources.slice(0, 2).join('、') || '待补充'}`,
-                            output: '确认画像后刷新学习路径、入学诊断任务和周期计划',
-                            evidence: saveResult?.personalizationImpact?.explanation ?? saveResult?.nextAction?.reason ?? '保存画像后由后端生成 personalizationImpact',
-                          },
-                        ]}
-                      />
-                    </div>
-                    <AgentExtractionPanel interviewResult={interviewResult} />
-                  </div>
-                )}
-              </section>
             </div>
           </div>
         </section>
@@ -1333,8 +1244,8 @@ export function ProfileSetupPage() {
                     <SlidersHorizontal className="size-5" />
                   </span>
                   <span className="min-w-0">
-                    <span className="block text-lg font-semibold text-slate-950">手动校准画像字段</span>
-                    <span className="mt-1 block text-sm leading-5 text-slate-500">补充或修正关键字段。</span>
+                    <span className="block text-lg font-semibold text-slate-950">想自己修改？展开手动填写</span>
+                    <span className="mt-1 block text-sm leading-5 text-slate-500">可以补充或修改系统刚才整理的信息。</span>
                   </span>
                 </span>
                 <ChevronDown className={advancedOpen ? 'size-5 shrink-0 rotate-180 text-slate-500 transition-transform' : 'size-5 shrink-0 text-slate-500 transition-transform'} />
@@ -1444,98 +1355,6 @@ export function ProfileSetupPage() {
   );
 }
 
-function ProfileSnapshotEvidenceBlock({ profileSnapshot }: { profileSnapshot: A3ProfileSnapshot | null }) {
-  if (!profileSnapshot) return null;
-  const sourceRows = Object.entries(profileSnapshot.signalSummary?.bySource ?? {}).filter(([, count]) => Number(count) > 0);
-  const readinessScore = Number.isFinite(profileSnapshot.readiness?.score) ? `${profileSnapshot.readiness.score}%` : '暂无';
-  const signalTotal = Number.isFinite(profileSnapshot.signalSummary?.total) ? String(profileSnapshot.signalSummary?.total) : '暂无';
-
-  return (
-    <div data-testid="a3-profile-snapshot-evidence" className="rounded-2xl border border-indigo-100 bg-indigo-50/70 p-4 text-sm text-indigo-950">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="font-semibold">画像证据</div>
-        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-indigo-700">
-          {profileSnapshot.readiness?.status || '快照'}
-        </span>
-      </div>
-      <div className="mt-3 grid gap-2 text-xs text-indigo-800 sm:grid-cols-2">
-        <div className="flex items-center justify-between gap-3 rounded-lg bg-white/70 px-3 py-2">
-          <span>准备度</span>
-          <span className="font-semibold text-indigo-950">{readinessScore}</span>
-        </div>
-        <div className="flex items-center justify-between gap-3 rounded-lg bg-white/70 px-3 py-2">
-          <span>信号总数</span>
-          <span className="font-semibold text-indigo-950">{signalTotal}</span>
-        </div>
-      </div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {sourceRows.length ? sourceRows.map(([source, count]) => (
-          <span key={source} className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-indigo-700">
-            {profileSnapshotSourceLabel(source)} {count}
-          </span>
-        )) : (
-          <span className="text-xs font-medium text-indigo-700">暂无来源计数</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function AgentExtractionPanel({ interviewResult }: { interviewResult: ProfileInterviewResult | null }) {
-  const askFields = interviewResult?.askFields ?? interviewResult?.interviewSession?.askFields ?? [];
-  const generatedText = interviewResult?.generated
-    ? `路径 ${interviewResult.generated.path ? '已刷新' : '待生成'}，14 天计划 ${interviewResult.generated.studyPlan ? '已生成' : '待生成'}`
-    : '等待确认后刷新';
-
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-5">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-sm font-semibold text-slate-900">Agent 抽取结果</div>
-        {interviewResult?.traceId && (
-          <span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-500">
-            traceId: {interviewResult.traceId.slice(0, 12)}
-          </span>
-        )}
-      </div>
-      {interviewResult?.success ? (
-        <div className="mt-4 grid gap-3 text-xs leading-5 text-slate-600" data-testid="a3-profile-interview-result">
-          <div className="grid grid-cols-2 gap-3">
-            <AgentMetric label="画像维度" value={`${interviewResult.profileReadiness?.dimensionCount ?? '--'}`} />
-            <AgentMetric label="访谈轮次" value={`第 ${interviewResult.interviewSession?.turnCount ?? 1} 轮`} />
-          </div>
-          <div className="rounded-xl bg-white px-3 py-2">
-            <span className="font-semibold text-slate-800">traceId：</span>
-            {interviewResult.traceId?.slice(0, 12) ?? '--'}
-          </div>
-          <div className="rounded-xl bg-white px-3 py-2">
-            <span className="font-semibold text-slate-800">状态：</span>
-            {interviewResult.interviewSession?.interviewComplete ? '画像已完整' : '继续追问补齐'}
-          </div>
-          <div className="rounded-xl bg-white px-3 py-2">
-            <span className="font-semibold text-slate-800">本轮追问：</span>
-            {askFields.map((item) => item.label || item.field).join('、') || '无'}
-          </div>
-          <div className="rounded-xl bg-white px-3 py-2">
-            <span className="font-semibold text-slate-800">策略：</span>
-            {interviewResult.askStrategy?.name ?? interviewResult.interviewSession?.askStrategy?.name ?? 'plan_critical_priority'}
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-            <div className="rounded-xl bg-white px-3 py-2">年级/专业：{interviewResult.profile?.grade || '--'} / {interviewResult.profile?.majorDirection || '--'}</div>
-            <div className="rounded-xl bg-white px-3 py-2">基础/时间：{interviewResult.profile?.foundationLevel || '--'} / {interviewResult.profile?.dailyMinutes ?? '--'} 分钟</div>
-            <div className="rounded-xl bg-white px-3 py-2">薄弱点：{interviewResult.profile?.weakPoints?.join('、') || '--'}</div>
-            <div className="rounded-xl bg-white px-3 py-2">资源偏好：{interviewResult.profile?.resourcePreferences?.join('、') || '--'}</div>
-          </div>
-          <div className="rounded-xl bg-emerald-50 px-3 py-2 font-semibold text-emerald-700">{generatedText}</div>
-        </div>
-      ) : (
-        <p className="mt-4 text-sm leading-6 text-slate-500">
-          生成后会自动回填画像字段。
-        </p>
-      )}
-    </div>
-  );
-}
-
 function ProfileUpdateTimelinePanel({
   feed,
   busyId,
@@ -1553,8 +1372,8 @@ function ProfileUpdateTimelinePanel({
     <section data-testid="a3-profile-update-timeline" className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-slate-950">画像变化确认</h3>
-          <p className="mt-1 text-xs leading-5 text-slate-500">确认后写入长期画像。</p>
+          <h3 className="text-sm font-semibold text-slate-950">最近整理的信息</h3>
+          <p className="mt-1 text-xs leading-5 text-slate-500">确认后会用于后续学习安排。</p>
         </div>
         <span className={queue.length ? 'rounded-full bg-orange-50 px-2.5 py-1 text-xs font-semibold text-orange-700' : 'rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600'}>
           {queue.length ? `${queue.length} 条待确认` : '无待确认'}
@@ -1619,15 +1438,6 @@ function profileTimelineStatusClass(status: ProfileTimelineEntry['status']) {
   return 'rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600';
 }
 
-function AgentMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl bg-white px-3 py-2">
-      <div className="text-slate-500">{label}</div>
-      <div className="mt-1 text-lg font-semibold text-blue-700">{value}</div>
-    </div>
-  );
-}
-
 function ProfilePreviewStrip({ previewRows }: { previewRows: string[][] }) {
   const featured = previewRows.slice(0, 4);
   const rest = previewRows.slice(4);
@@ -1652,46 +1462,6 @@ function ProfilePreviewStrip({ previewRows }: { previewRows: string[][] }) {
           </span>
         ))}
       </div>
-    </div>
-  );
-}
-
-function ProfilePlanningStage({
-  index,
-  title,
-  detail,
-  meta,
-  active,
-}: {
-  index: string;
-  title: string;
-  detail: string;
-  meta: string;
-  active?: boolean;
-}) {
-  return (
-    <div className={active ? 'rounded-2xl border border-blue-200 bg-white p-4 shadow-sm' : 'rounded-2xl border border-slate-200 bg-white/80 p-4'}>
-      <div className="flex items-start gap-3">
-        <span className={active ? 'flex size-8 shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm font-semibold text-white' : 'flex size-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-500'}>
-          {index}
-        </span>
-        <div className="min-w-0">
-          <div className="text-sm font-semibold text-slate-950">{title}</div>
-          <div className="mt-1 line-clamp-2 min-h-9 text-xs leading-5 text-slate-500">{detail}</div>
-          <div className={active ? 'mt-2 inline-flex max-w-full rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700' : 'mt-2 inline-flex max-w-full rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-500'}>
-            <span className="truncate">{meta}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ProfileSignalTile({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4">
-      <div className="text-xs font-medium text-slate-500">{label}</div>
-      <div className="mt-2 line-clamp-2 min-h-10 text-sm font-semibold leading-5 text-slate-950">{value || '待补充'}</div>
     </div>
   );
 }
@@ -1794,16 +1564,6 @@ function planModeLabel(mode?: string) {
   if (mode === 'accelerated') return '强化推进';
   if (mode === 'standard') return '标准节奏';
   return mode || '自动适配';
-}
-
-function profileSnapshotSourceLabel(source: string) {
-  if (source === 'profile_interview') return '画像访谈';
-  if (source === 'assessment_wrong_answer') return '测评错题';
-  if (source === 'admission_diagnostic') return '入学诊断';
-  if (source === 'classroom_qa') return '课堂问答';
-  if (source === 'profile_manual_edit') return '手动校准';
-  if (source === 'stable_profile') return '基础画像';
-  return source || '其他来源';
 }
 
 function getMissingProfileDimensions(profile?: ProfileInterviewResult['profile']) {
