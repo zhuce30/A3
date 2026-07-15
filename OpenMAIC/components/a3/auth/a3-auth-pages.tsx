@@ -76,6 +76,8 @@ type ApiResult = {
   };
   nextAction?: { label: string; href: string; reason?: string };
   generated?: { path: boolean; studyPlan: boolean };
+  planningDeferred?: boolean;
+  planningDeferredReason?: string;
   personalizationImpact?: {
     profileInputs: {
       foundationLevel?: string;
@@ -126,6 +128,8 @@ type ProfileInterviewResult = {
   nextQuestion?: string;
   interviewComplete?: boolean;
   profileCommitted?: boolean;
+  planningDeferred?: boolean;
+  planningDeferredReason?: string;
   interviewSession?: ProfileInterviewSession;
   generated?: {
     path?: unknown;
@@ -145,6 +149,8 @@ type ProfileInterviewSession = {
   nextQuestion?: string;
   interviewComplete?: boolean;
   profileCommitted?: boolean;
+  planningDeferred?: boolean;
+  planningDeferredReason?: string;
   generated?: ProfileInterviewResult['generated'];
   confirmedAt?: string;
   messages?: Array<{ role?: string; content?: string; createdAt?: string }>;
@@ -932,9 +938,9 @@ export function ProfileSetupPage() {
       if (restoredMessages.length > 0) {
         setInterviewMessages(restoredMessages);
       }
-      const missing = session.missingDimensions?.map((item) => item.label || item.field).filter(Boolean) ?? [];
+      const missing = session.missingDimensions?.map((item) => item.label).filter(Boolean) ?? [];
       setMissingInterviewDimensions(missing);
-      if ((session.turnCount ?? 0) > 0) {
+      if ((session.turnCount ?? 0) > 0 || session.profileCommitted || session.planningDeferred) {
         setInterviewResult({
           success: true,
           traceId: session.latestTraceId,
@@ -949,6 +955,9 @@ export function ProfileSetupPage() {
           askStrategy: session.askStrategy,
           nextQuestion: session.nextQuestion,
           interviewComplete: session.interviewComplete,
+          profileCommitted: session.profileCommitted,
+          planningDeferred: session.planningDeferred,
+          planningDeferredReason: session.planningDeferredReason,
           interviewSession: session,
           generated: session.generated,
         });
@@ -970,7 +979,7 @@ export function ProfileSetupPage() {
   async function runProfileInterview() {
     const messageText = interviewText.trim();
     if (!messageText) {
-      setMessage('请先输入你的学习背景、目标、时间和偏好。');
+      setMessage('请先回答当前问题。');
       return;
     }
     const nextMessages: ProfileInterviewMessage[] = [...interviewMessages, { role: 'user', content: messageText }];
@@ -982,7 +991,7 @@ export function ProfileSetupPage() {
     setInterviewLoading(false);
     setInterviewResult(result);
     if (!result.success) {
-      setMessage(result.error ?? '学习情况整理失败，请稍后重试或展开手动填写。');
+      setMessage(result.error ?? '暂时无法整理这次回答，请稍后重试。');
       return;
     }
     const extracted = result.profile;
@@ -991,7 +1000,7 @@ export function ProfileSetupPage() {
       setProfile((current) => mergeInterviewProfile(current, extracted, loadedOptions ?? options));
     }
     const backendMissing = result.missingDimensions ?? result.profileReadiness?.missingDimensions;
-    const missing = backendMissing?.length ? backendMissing.map((item) => item.label || item.field) : getMissingProfileDimensions(result.profile);
+    const missing = backendMissing?.length ? backendMissing.map((item) => item.label).filter(Boolean) : getMissingProfileDimensions(result.profile);
     setMissingInterviewDimensions(missing);
     const nextPrompt = result.nextQuestion || buildProfileInterviewFollowUp(missing);
     const sessionMessages = normalizeProfileInterviewMessages(result.interviewSession);
@@ -1029,8 +1038,8 @@ export function ProfileSetupPage() {
     }
     if (!interviewReadyToConfirm) {
       const missing = interviewResult.missingDimensions ?? interviewResult.profileReadiness?.missingDimensions ?? interviewResult.interviewSession?.missingDimensions ?? [];
-      setMissingInterviewDimensions(missing.map((item) => item.label || item.field).filter(Boolean));
-      setMessage('画像访谈还未完整，请先回答本轮追问后再确认。');
+      setMissingInterviewDimensions(missing.map((item) => item.label).filter(Boolean));
+      setMessage('还需要补充一项信息，请先回答上方问题。');
       return;
     }
     setSubmitting(true);
@@ -1039,12 +1048,12 @@ export function ProfileSetupPage() {
     const result = await a3PostJson<ProfileInterviewResult>('/api/profile/interview/', { action: 'confirm' });
     setSubmitting(false);
     setInterviewResult(result);
-    if (!result.success) {
+    if (!result.success || !result.profileCommitted) {
       const missing = result.missingDimensions ?? result.profileReadiness?.missingDimensions ?? result.interviewSession?.missingDimensions ?? [];
-      setMissingInterviewDimensions(missing.map((item) => item.label || item.field).filter(Boolean));
+      setMissingInterviewDimensions(missing.map((item) => item.label).filter(Boolean));
       const sessionMessages = normalizeProfileInterviewMessages(result.interviewSession);
       if (sessionMessages.length) setInterviewMessages(sessionMessages);
-      setMessage(result.error ?? '画像访谈还未完整，请先回答追问后再确认。');
+      setMessage(result.error ?? '还需要补充一项信息，请先回答上方问题。');
       return;
     }
     if (result.user) syncA3User(result.user);
@@ -1058,10 +1067,12 @@ export function ProfileSetupPage() {
         status: result.profileReadiness?.status === 'partial' || result.profileReadiness?.status === 'incomplete' ? result.profileReadiness.status : 'ready',
         score: 100,
         missingFields: [],
-        summary: '对话画像已确认，路径和学习计划已刷新。',
+        summary: '学习情况已保存，接下来通过几道题确认你的学习起点。',
       },
       generated: { path: Boolean(result.generated?.path), studyPlan: Boolean(result.generated?.studyPlan) },
-      nextAction: { label: '开始入学诊断', href: '/a3/admission-diagnostic', reason: '画像已确认，诊断会继续校准路径和计划。' },
+      planningDeferred: result.planningDeferred,
+      planningDeferredReason: result.planningDeferredReason,
+      nextAction: { label: '开始入学诊断', href: '/a3/admission-diagnostic', reason: '入学诊断会确认基础和薄弱点，并据此生成后续学习路径和计划。' },
     });
     void loadDynamicProfile();
   }
@@ -1358,9 +1369,16 @@ export function ProfileSetupPage() {
                 </span>
               </div>
               <div className="mt-3 grid gap-2 text-xs text-emerald-800">
-                <div>学习路径：{saveResult.generated?.path ? '已刷新' : '待生成'}</div>
-                <div>14 天学习计划：{saveResult.generated?.studyPlan ? '已生成' : '待生成'}</div>
-                {saveResult.generationError && <div className="text-orange-700">生成提示：{saveResult.generationError}</div>}
+                {saveResult.planningDeferred ? (
+                  <div>学习路径和 14 天计划将在入学诊断后生成</div>
+                ) : (
+                  <>
+                    <div>学习路径：{saveResult.generated?.path ? '已刷新' : '待生成'}</div>
+                    <div>14 天学习计划：{saveResult.generated?.studyPlan ? '已生成' : '待生成'}</div>
+                  </>
+                )}
+                {saveResult.planningDeferredReason && <div>安排说明：{saveResult.planningDeferredReason}</div>}
+                {!saveResult.planningDeferred && saveResult.generationError && <div className="text-orange-700">生成提示：{saveResult.generationError}</div>}
                 {saveResult.nextAction?.reason && <div>下一步依据：{saveResult.nextAction.reason}</div>}
               </div>
               {saveResult.personalizationImpact && (
@@ -1563,7 +1581,11 @@ function ProfilePlanningImpactPreview({
           </div>
         ))}
       </div>
-      {saveResult?.personalizationImpact?.explanation ? (
+      {saveResult?.planningDeferred ? (
+        <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
+          完成入学诊断后，系统会据此生成学习路径和 14 天计划。
+        </div>
+      ) : saveResult?.personalizationImpact?.explanation ? (
         <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-800">
           {saveResult.personalizationImpact.explanation}
         </div>
