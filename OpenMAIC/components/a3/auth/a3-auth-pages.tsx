@@ -1105,7 +1105,7 @@ export function ProfileSetupPage() {
     ['每日时间', profile.dailyStudyTime ? `${profile.dailyStudyTime} 分钟` : ''],
     ['薄弱知识点', profile.weakPoints.join('、')],
     ['资源类型', profile.expectedResources.join('、')],
-    ['学习节奏', profile.pace],
+    ['学习节奏', profile.pace ? planModeLabel(profile.pace) : ''],
   ];
   const interviewReadyToConfirm = Boolean(interviewResult?.success && (interviewResult.interviewComplete || interviewResult.interviewSession?.interviewComplete));
   const filledProfileRows = previewRows.filter(([, value]) => value && value !== '待完善').length;

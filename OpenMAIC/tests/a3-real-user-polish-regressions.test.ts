@@ -35,6 +35,7 @@ describe('A3 real-user polish regressions', () => {
     expect(profileSetupSource).toContain('查看示例');
     expect(profileSetupSource).toContain('确认并开始入学诊断');
     expect(profileSetupSource).toContain('想自己修改？展开手动填写');
+    expect(profileSetupSource).toContain("['学习节奏', profile.pace ? planModeLabel(profile.pace) : '']");
 
     expect(profileSetupSource).not.toContain('画像与规划输入');
     expect(profileSetupSource).not.toContain('先用一句话完成画像');

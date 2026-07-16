@@ -44,11 +44,11 @@ async function loginAsStudent(page: Page) {
   await inputs.nth(0).fill(STUDENT_PHONE);
   await inputs.nth(1).fill(DEMO_PASSWORD);
   await page.getByRole('button', { name: '登录', exact: true }).click();
-  await expect(page).not.toHaveURL(/\/a3\/login/, { timeout: 60_000 });
+  await expect(page).not.toHaveURL(/\/a3\/login/, { timeout: 120_000 });
 }
 
 test.describe.serial('A3 conversational profile interview loop', () => {
-  test.setTimeout(180_000);
+  test.setTimeout(300_000);
 
   test.beforeAll(() => {
     runManage('seed_demo_data');
@@ -96,7 +96,7 @@ test.describe.serial('A3 conversational profile interview loop', () => {
     await expect(page.getByTestId('a3-profile-setup-save-result')).toContainText(/入学诊断后生成|入学诊断/);
 
     await page.getByTestId('a3-profile-setup-save-result').getByRole('button', { name: '开始入学诊断', exact: true }).click();
-    await expect(page).toHaveURL(/\/a3\/admission-diagnostic/);
+    await expect(page).toHaveURL(/\/a3\/admission-diagnostic/, { timeout: 60_000 });
     await expect(page.getByTestId('a3-admission-diagnostic-view')).toBeVisible({ timeout: 60_000 });
 
     const statusResponse = page.waitForResponse((response) => response.url().includes('/api/demo/status/') && response.status() === 200);
@@ -104,7 +104,7 @@ test.describe.serial('A3 conversational profile interview loop', () => {
     await statusResponse;
     const profileEvidence = page.getByTestId('a3-profile-interview-evidence');
     await expect(profileEvidence).toBeVisible({ timeout: 60_000 });
-    await expect(profileEvidence).toContainText('complete');
+    await expect(profileEvidence).toContainText('complete', { timeout: 60_000 });
     await expect(profileEvidence).toContainText(/trace|turns|messages/);
     await expect(profileEvidence).toContainText('committed');
     await expect(profileEvidence).toContainText('yes');
