@@ -26,7 +26,11 @@ type WorkflowDocument = {
 };
 
 type ComposeDocument = {
-  services?: Record<string, { image?: unknown; command?: unknown; environment?: unknown }>;
+  services?: Record<
+    string,
+    { image?: unknown; command?: unknown; environment?: unknown; volumes?: unknown }
+  >;
+  volumes?: Record<string, unknown>;
 };
 
 const resetSequenceType = new yaml.Type('!reset', {
@@ -38,6 +42,7 @@ const composeSchema = yaml.DEFAULT_SCHEMA.extend([resetSequenceType]);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const workflowPath = path.join(root, '.github/workflows/build-frontend-image.yml');
 const composePath = path.join(root, 'docker-compose.prod.yml');
+const dockerfilePath = path.join(root, 'OpenMAIC/Dockerfile');
 const envTemplatePath = path.join(root, '.env.production.template');
 const runbookPath = path.join(root, 'docs/A3_GHCR前端镜像部署.md');
 const designPath = path.join(
@@ -163,6 +168,18 @@ describe('A3 private GHCR frontend deployment', () => {
     expect(envTemplate).toContain('full DEPLOY_SHA tag');
     expect(envTemplate).toContain('verified RepoDigest');
     expect(envTemplate).not.toMatch(/^A3_FRONTEND_IMAGE=.*:latest$/m);
+  });
+
+  it('keeps OpenMAIC classroom job storage writable and persistent in production', () => {
+    const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
+      schema: composeSchema,
+    }) as ComposeDocument;
+    const dockerfile = fs.readFileSync(dockerfilePath, 'utf8');
+
+    expect(compose.services?.frontend?.volumes).toContain('a3-frontend-data:/app/data');
+    expect(compose.volumes).toHaveProperty('a3-frontend-data');
+    expect(dockerfile).toMatch(/mkdir -p \/app\/data/);
+    expect(dockerfile).toMatch(/chown -R nextjs:nodejs \/app\/data/);
   });
 
   it('ties deployment source and image identity to the full deployment SHA', () => {

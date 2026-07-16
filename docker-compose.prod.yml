@@ -129,6 +129,8 @@ services:
       QWEN_API_KEY: ${QWEN_API_KEY:-}
       ASR_QWEN_API_KEY: ${ASR_QWEN_API_KEY:-}
       A3_REALTIME_WS_PROXY_URL: ${A3_REALTIME_WS_PROXY_URL:-wss://a3.zhuce.work/a3/realtime/ws}
+    volumes:
+      - a3-frontend-data:/app/data
 
   realtime-proxy:
     image: ${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}
@@ -168,3 +170,4 @@ services:
 volumes:
   a3-caddy-data:
   a3-caddy-config:
+  a3-frontend-data:
