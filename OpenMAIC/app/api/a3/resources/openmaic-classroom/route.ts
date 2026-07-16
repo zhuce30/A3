@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
-import { fetchA3DjangoJson, postA3DjangoJson } from '@/lib/server/a3-django-api';
+import { fetchA3DjangoJson, postA3DjangoJson, resolveA3InternalFrontendEndpoint } from '@/lib/server/a3-django-api';
 import { getServerTTSProviders } from '@/lib/server/provider-config';
 import {
   buildA3OpenMAICArtifactPayload,
@@ -80,7 +80,7 @@ async function startOpenMAICJob(
     learnerProfileSnapshot: body.learnerProfileSnapshot,
     citations: body.citations,
   });
-  const generateResponse = await fetch(new URL('/api/generate-classroom', request.nextUrl.origin), {
+  const generateResponse = await fetch(resolveA3InternalFrontendEndpoint('/api/generate-classroom', request.nextUrl.origin), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
