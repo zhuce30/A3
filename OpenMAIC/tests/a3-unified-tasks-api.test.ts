@@ -55,7 +55,8 @@ describe('A3 unified task APIs', () => {
     expect(source).toContain("'/api/resources/jobs/'");
     expect(source).toContain("`/api/resources/jobs/${encodeURIComponent(jobId)}/`");
     expect(source).toContain('persistResourceGenerationJob');
-    expect(source).toContain('patchResourceGenerationJob');
+    expect(source).not.toContain('patchResourceGenerationJob');
+    expect(source).not.toContain('void runResourceGenerationJob');
     expect(source).not.toContain('const resourceGenerationJobs = new Map');
   });
 

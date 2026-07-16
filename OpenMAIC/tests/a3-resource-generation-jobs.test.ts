@@ -12,14 +12,11 @@ describe('A3 generic resource generation jobs', () => {
 
     expect(source).toContain('export async function POST');
     expect(source).toContain('export async function GET');
-    expect(source).toContain('runResourceGenerationJob');
+    expect(source).not.toContain('runResourceGenerationJob');
     expect(source).toContain('persistResourceGenerationJob');
-    expect(source).toContain('patchResourceGenerationJob');
     expect(source).toContain("'/api/resources/jobs/'");
     expect(source).toContain("workflow: 'resource_generate'");
-    expect(source).toContain("stage: 'retrieval'");
-    expect(source).toContain("stage: 'synthesis'");
-    expect(source).toContain("stage: 'writeback'");
+    expect(source).not.toContain('void runResourceGenerationJob');
     expect(source).toContain('pollUrl');
     expect(source).toContain('pollIntervalMs');
     expect(source).toContain('progress');

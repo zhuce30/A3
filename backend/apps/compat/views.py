@@ -6,9 +6,11 @@ from io import StringIO
 from pathlib import Path
 from time import perf_counter
 
+from celery import current_app
 from django.conf import settings
 from django.core.cache import cache
 from django.core.management import call_command
+from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -125,16 +127,54 @@ def resource_generate(request):
 STALE_RESOURCE_GENERATION_JOB_MESSAGE = "资源生成任务在服务重启或网络中断后停止，请重新发起生成。"
 
 
+def dispatch_resource_generation_job(job: ResourceGenerationJob) -> ResourceGenerationJob:
+    try:
+        async_result = current_app.send_task(
+            "compat.run_resource_generation_job",
+            args=[job.job_id],
+        )
+        metadata = dict(job.metadata or {})
+        metadata["celeryTaskId"] = async_result.id or ""
+        metadata["executionBackend"] = "celery"
+        job.metadata = metadata
+        job.save(update_fields=["metadata", "updated_at"])
+    except Exception as exc:
+        message = f"资源生成任务队列不可用：{exc}"
+        job.status = "failed"
+        job.progress = 100
+        job.stage = "failed"
+        job.message = message[:255]
+        job.error_message = message[:4000]
+        job.finished_at = timezone.now()
+        job.save(
+            update_fields=[
+                "status",
+                "progress",
+                "stage",
+                "message",
+                "error_message",
+                "finished_at",
+                "updated_at",
+            ]
+        )
+    return job
+
+
 def fail_stale_resource_generation_jobs(user=None, *, stale_after: timedelta | None = None) -> int:
     minutes = int(getattr(settings, "RESOURCE_GENERATION_JOB_STALE_MINUTES", 15) or 15)
-    cutoff = timezone.now() - (stale_after or timedelta(minutes=max(minutes, 1)))
+    celery_minutes = int(getattr(settings, "RESOURCE_GENERATION_CELERY_STALE_MINUTES", 240) or 240)
+    now = timezone.now()
+    cutoff = now - (stale_after or timedelta(minutes=max(minutes, 1)))
+    celery_cutoff = now - timedelta(minutes=max(celery_minutes, minutes, 1))
     queryset = ResourceGenerationJob.objects.filter(
         status__in=["queued", "running"],
-        updated_at__lt=cutoff,
+    ).filter(
+        Q(updated_at__lt=cutoff)
+        & (Q(metadata__executionBackend__isnull=True) | ~Q(metadata__executionBackend="celery"))
+        | Q(updated_at__lt=celery_cutoff, metadata__executionBackend="celery")
     )
     if user is not None:
         queryset = queryset.filter(user=user)
-    now = timezone.now()
     return queryset.update(
         status="failed",
         progress=100,
@@ -188,7 +228,7 @@ def resource_generation_jobs(request):
         job_id = str(payload.get("jobId") or "").strip()
         if not job_id:
             return JsonResponse({"success": False, "error": "缺少 jobId"}, status=400)
-        job, _ = ResourceGenerationJob.objects.update_or_create(
+        job, created = ResourceGenerationJob.objects.update_or_create(
             job_id=job_id,
             user=request.user,
             defaults={
@@ -203,6 +243,8 @@ def resource_generation_jobs(request):
                 "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
             },
         )
+        if created:
+            dispatch_resource_generation_job(job)
         return JsonResponse({"success": True, "job": serialize_resource_generation_job(job)}, status=201)
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)

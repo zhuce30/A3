@@ -6,7 +6,36 @@ from .common import *
 
 
 class A3RequirementsDeepFillTests(CompatApiTestCase):
-    def test_resource_generation_job_create_api_persists_job(self):
+    @patch("celery.current_app.send_task")
+    def test_resource_generation_job_create_api_dispatches_celery_task(self, send_task):
+        send_task.return_value.id = "celery-resource-generation-001"
+
+        response = self.client.post(
+            "/api/resources/jobs/",
+            data=json.dumps(
+                {
+                    "jobId": "job-resource-generation-celery-001",
+                    "workflow": "resource_generate",
+                    "goal": "生成操作系统思维导图",
+                    "topK": 3,
+                    "resourceType": "mind_map",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        send_task.assert_called_once_with(
+            "compat.run_resource_generation_job",
+            args=["job-resource-generation-celery-001"],
+        )
+        job = ResourceGenerationJob.objects.get(job_id="job-resource-generation-celery-001")
+        self.assertEqual(job.metadata["celeryTaskId"], "celery-resource-generation-001")
+        self.assertEqual(job.metadata["executionBackend"], "celery")
+
+    @patch("celery.current_app.send_task")
+    def test_resource_generation_job_create_api_persists_job(self, send_task):
+        send_task.return_value.id = "celery-resource-generation-persist-001"
         long_goal = (
             "给我生成一套操作系统死锁学习资源，要求讲解清楚易懂；"
             "表格使用标准 Markdown 表格，公式和矩阵排版完整；"
@@ -56,8 +85,18 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
             stage="synthesis",
             message="正在生成资源内容",
         )
+        celery_job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-generation-celery-active-001",
+            user=self.user,
+            status="queued",
+            progress=0,
+            stage="queued",
+            message="等待 Celery 执行",
+            metadata={"executionBackend": "celery", "celeryTaskId": "celery-active-001"},
+        )
         stale_at = timezone.now() - timedelta(minutes=30)
         ResourceGenerationJob.objects.filter(id=stale_job.id).update(updated_at=stale_at)
+        ResourceGenerationJob.objects.filter(id=celery_job.id).update(updated_at=stale_at)
 
         response = self.client.get("/api/resources/jobs/")
 
@@ -69,6 +108,7 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertTrue(jobs[stale_job.job_id]["done"])
         self.assertIn("网络中断", jobs[stale_job.job_id]["error"])
         self.assertEqual(jobs[active_job.job_id]["status"], "running")
+        self.assertEqual(jobs[celery_job.job_id]["status"], "queued")
         stale_job.refresh_from_db()
         self.assertIsNotNone(stale_job.finished_at)
 
