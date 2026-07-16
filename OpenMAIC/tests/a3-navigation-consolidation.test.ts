@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { a3Messages } from '@/lib/a3/i18n';
 import { a3GetActiveNavHref, a3NavItems } from '@/lib/a3/navigation';
 
 const root = process.cwd();
@@ -9,6 +10,7 @@ const studyPlanView = readFileSync(join(root, 'components/a3/features/study-plan
 const assessmentView = readFileSync(join(root, 'components/a3/features/assessment-view.tsx'), 'utf8');
 const classroomView = readFileSync(join(root, 'components/a3/features/classroom-view.tsx'), 'utf8');
 const knowledgeBaseView = readFileSync(join(root, 'components/a3/features/knowledge-base-view.tsx'), 'utf8');
+const shellSource = readFileSync(join(root, 'components/a3/layout/a3-shell.tsx'), 'utf8');
 
 describe('A3 student navigation consolidation', () => {
   it('keeps the student sidebar focused on six primary learning jobs', () => {
@@ -30,19 +32,23 @@ describe('A3 student navigation consolidation', () => {
     );
 
     expect(studentGroups['/a3/today']).toEqual([
+      ['/a3/today', '今日任务'],
       ['/a3/dashboard', '首页'],
       ['/a3/notifications', '通知消息'],
     ]);
     expect(studentGroups['/a3/study-plan']).toEqual([
+      ['/a3/study-plan', '计划总览'],
       ['/a3/admission-diagnostic', '入学诊断'],
       ['/a3/profile-setup', '学习画像'],
       ['/a3/learning-path', '学习路径'],
       ['/a3/courses', '课程学习'],
     ]);
     expect(studentGroups['/a3/assessment']).toEqual([
+      ['/a3/assessment', '练习中心'],
       ['/a3/wrong-notebook', '错题本'],
     ]);
     expect(studentGroups['/a3/classroom']).toEqual([
+      ['/a3/classroom', 'AI 课堂'],
       ['/a3/coaching', '面对面辅导'],
       ['/a3/recommendations', '资源包生成'],
       ['/a3/library', '系统资料'],
@@ -50,9 +56,30 @@ describe('A3 student navigation consolidation', () => {
       ['/a3/favorites', '我的收藏'],
     ]);
     expect(studentGroups['/a3/knowledge-base']).toEqual([
+      ['/a3/knowledge-base', '知识库首页'],
       ['/a3/knowledge-graph', '知识图谱'],
     ]);
     expect(studentGroups['/a3/report']).toEqual([]);
+  });
+
+  it('uses localized page names for group owner routes', () => {
+    expect(a3Messages['zh-CN'].navTodayTasks).toBe('今日任务');
+    expect(a3Messages['zh-CN'].navPlanOverview).toBe('计划总览');
+    expect(a3Messages['zh-CN'].navPracticeCenter).toBe('练习中心');
+    expect(a3Messages['zh-CN'].navAiClassroom).toBe('AI 课堂');
+    expect(a3Messages['zh-CN'].navKnowledgeBaseHome).toBe('知识库首页');
+    expect(a3Messages['en-US'].navTodayTasks).toBe('Today Tasks');
+    expect(a3Messages['en-US'].navPlanOverview).toBe('Plan Overview');
+    expect(a3Messages['en-US'].navPracticeCenter).toBe('Practice Center');
+    expect(a3Messages['en-US'].navAiClassroom).toBe('AI Classroom');
+    expect(a3Messages['en-US'].navKnowledgeBaseHome).toBe('Knowledge Base Home');
+  });
+
+  it('renders grouped owners as disclosure buttons and standalone pages as links', () => {
+    expect(shellSource).toContain('data-testid={`a3-sidebar-group-${item.href.replaceAll');
+    expect(shellSource).toContain('aria-expanded={expanded}');
+    expect(shellSource).toContain('onClick={() => toggleNavGroup(item.href)}');
+    expect(shellSource).toContain('data-testid={`a3-sidebar-page-${item.href.replaceAll');
   });
 
   it('removes secondary, demo, and personal utility pages from the student sidebar', () => {

@@ -20,6 +20,19 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
   const user = useA3CurrentUser();
   const { messages } = useA3Locale();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const activeNavHref = a3GetActiveNavHref(pathname);
+  const [navDisclosure, setNavDisclosure] = useState<{ activeHref: string; expanded: Set<string> }>(() => {
+    const activeItem = a3NavItems.find((item) => item.href === activeNavHref);
+    return {
+      activeHref: activeNavHref,
+      expanded: activeItem?.children?.length ? new Set([activeNavHref]) : new Set(),
+    };
+  });
+  const activeItem = a3NavItems.find((item) => item.href === activeNavHref);
+  const expandedNavGroups = navDisclosure.activeHref === activeNavHref || !activeItem?.children?.length
+    ? navDisclosure.expanded
+    : new Set([...navDisclosure.expanded, activeNavHref]);
+
   if (A3_SHELL_BYPASS_PATHS.has(pathname)) return <>{children}</>;
 
   const displayName = user?.displayName?.trim() || messages.unnamedUser;
@@ -29,7 +42,6 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
   const pageTitle = pathname === '/a3/report' ? messages.reportTitle : pathname === '/a3/help' ? messages.helpCenter : '';
   const compactHeader = pathname === '/a3/dashboard' || Boolean(pageTitle);
   const visibleNavItems = a3NavItems.filter((item) => !item.roles || (user?.role && item.roles.includes(user.role)));
-  const activeNavHref = a3GetActiveNavHref(pathname);
   const navLabels: Record<string, string> = {
     '/a3/dashboard': messages.navDashboard,
     '/a3/today': messages.navToday,
@@ -55,6 +67,20 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     '/a3/knowledge-base': messages.navKnowledgeBase,
     '/a3/settings': messages.navSettings,
   };
+  const ownerPageLabels: Record<string, string> = {
+    '/a3/today': messages.navTodayTasks,
+    '/a3/study-plan': messages.navPlanOverview,
+    '/a3/assessment': messages.navPracticeCenter,
+    '/a3/classroom': messages.navAiClassroom,
+    '/a3/knowledge-base': messages.navKnowledgeBaseHome,
+  };
+
+  function toggleNavGroup(href: string) {
+    const next = new Set(expandedNavGroups);
+    if (next.has(href)) next.delete(href);
+    else next.add(href);
+    setNavDisclosure({ activeHref: activeNavHref, expanded: next });
+  }
 
   async function logout() {
     await a3PostJson('/api/auth/logout/', {});
@@ -89,36 +115,61 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
           {visibleNavItems.map((item) => {
             const active = activeNavHref === item.href;
             const Icon = item.icon;
+            const itemChildren = item.children ?? [];
+            const grouped = itemChildren.length > 0;
+            const expanded = grouped && expandedNavGroups.has(item.href);
+            const childrenId = `a3-sidebar-children-${item.href.replaceAll('/', '-')}`;
             return (
               <div key={item.href} className="space-y-1">
-                <Link
-                  href={item.href}
-                  className={cn(
-                    'flex h-11 items-center gap-3 rounded-[10px] px-4 text-[15px] font-medium text-[var(--a3-text-muted)] transition-colors',
-                    active
-                      ? 'bg-gradient-to-r from-blue-600 to-violet-600 text-white shadow-[0_10px_22px_rgba(37,99,235,0.24)]'
-                      : 'hover:bg-[var(--a3-surface-muted)] hover:text-[var(--a3-text)]',
-                  )}
-                >
-                  <Icon className="size-4" />
-                  {navLabels[item.href] ?? item.label}
-                </Link>
-                {item.children?.length ? (
-                  <div className="space-y-1 pl-7" data-testid={`a3-sidebar-children-${item.href.replaceAll('/', '-')}`}>
-                    {item.children.map((child) => {
+                {grouped ? (
+                  <button
+                    type="button"
+                    data-testid={`a3-sidebar-group-${item.href.replaceAll('/', '-')}`}
+                    aria-expanded={expanded}
+                    aria-controls={childrenId}
+                    onClick={() => toggleNavGroup(item.href)}
+                    className={cn(
+                      'flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-[14px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
+                      active
+                        ? 'bg-blue-50 text-blue-800 dark:bg-blue-950/50 dark:text-blue-200'
+                        : 'text-[var(--a3-text-muted)] hover:bg-[var(--a3-surface-muted)] hover:text-[var(--a3-text)]',
+                    )}
+                  >
+                    <Icon className={cn('size-4 shrink-0', active && 'text-blue-600 dark:text-blue-300')} />
+                    <span className="min-w-0 flex-1 truncate">{navLabels[item.href] ?? item.label}</span>
+                    <ChevronDown className={cn('size-4 shrink-0 transition-transform duration-200', expanded && 'rotate-180')} />
+                  </button>
+                ) : (
+                  <Link
+                    href={item.href}
+                    data-testid={`a3-sidebar-page-${item.href.replaceAll('/', '-')}`}
+                    className={cn(
+                      'flex h-11 items-center gap-3 rounded-lg px-3 text-[14px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
+                      active
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-[var(--a3-text-muted)] hover:bg-[var(--a3-surface-muted)] hover:text-[var(--a3-text)]',
+                    )}
+                  >
+                    <Icon className="size-4 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{navLabels[item.href] ?? item.label}</span>
+                  </Link>
+                )}
+                {grouped && expanded ? (
+                  <div id={childrenId} className="space-y-1 pl-6" data-testid={childrenId}>
+                    {itemChildren.map((child) => {
                       const childActive = pathname === child.href || pathname.startsWith(`${child.href}/`);
                       return (
                         <Link
                           key={child.href}
                           href={child.href}
                           className={cn(
-                            'block rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors',
+                            'flex h-10 items-center rounded-lg px-3 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
                             childActive
-                              ? 'bg-blue-50 text-blue-700'
+                              ? 'bg-blue-600 text-white shadow-sm'
                               : 'text-[var(--a3-text-muted)] hover:bg-[var(--a3-surface-muted)] hover:text-[var(--a3-text)]',
                           )}
                         >
-                          {navLabels[child.href] ?? child.label}
+                          <span className="truncate">{ownerPageLabels[child.href] ?? navLabels[child.href] ?? child.label}</span>
                         </Link>
                       );
                     })}

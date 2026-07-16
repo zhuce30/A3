@@ -15,6 +15,7 @@ export const a3NavItems: A3NavItem[] = [
     label: '今日学习',
     icon: PlayCircle,
     children: [
+      { href: '/a3/today', label: '今日任务' },
       { href: '/a3/dashboard', label: '首页' },
       { href: '/a3/notifications', label: '通知消息' },
     ],
@@ -24,6 +25,7 @@ export const a3NavItems: A3NavItem[] = [
     label: '学习规划',
     icon: CalendarDays,
     children: [
+      { href: '/a3/study-plan', label: '计划总览' },
       { href: '/a3/admission-diagnostic', label: '入学诊断' },
       { href: '/a3/profile-setup', label: '学习画像' },
       { href: '/a3/learning-path', label: '学习路径' },
@@ -34,13 +36,17 @@ export const a3NavItems: A3NavItem[] = [
     href: '/a3/assessment',
     label: '练习复盘',
     icon: ClipboardCheck,
-    children: [{ href: '/a3/wrong-notebook', label: '错题本' }],
+    children: [
+      { href: '/a3/assessment', label: '练习中心' },
+      { href: '/a3/wrong-notebook', label: '错题本' },
+    ],
   },
   {
     href: '/a3/classroom',
     label: 'AI 学习',
     icon: BrainCircuit,
     children: [
+      { href: '/a3/classroom', label: 'AI 课堂' },
       { href: '/a3/coaching', label: '面对面辅导' },
       { href: '/a3/recommendations', label: '资源包生成' },
       { href: '/a3/library', label: '系统资料' },
@@ -52,7 +58,10 @@ export const a3NavItems: A3NavItem[] = [
     href: '/a3/knowledge-base',
     label: '知识库',
     icon: Database,
-    children: [{ href: '/a3/knowledge-graph', label: '知识图谱' }],
+    children: [
+      { href: '/a3/knowledge-base', label: '知识库首页' },
+      { href: '/a3/knowledge-graph', label: '知识图谱' },
+    ],
   },
   { href: '/a3/report', label: '学习报告', icon: LineChart },
   { href: '/a3/teacher', label: '教师工作台', icon: Users, roles: ['teacher', 'admin'] },
