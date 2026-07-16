@@ -1,6 +1,15 @@
 import type { Page } from '@playwright/test';
 import { expect, test } from '../fixtures/base';
 
+const longLessonContent = [
+  '## 第 3 章 进程调度与死锁',
+  '先理解处理机调度，再比较常见调度算法，最后掌握死锁的预防与避免。',
+  '| 学习内容 | 重点 |\n| --- | --- |\n| 调度算法 | 周转时间与响应时间 |\n| 死锁 | 四个必要条件 |',
+  ...Array.from({ length: 18 }, (_, index) => (
+    `### 课件要点 ${index + 1}\n银行家算法会在资源分配前检查系统是否仍处于安全状态，避免进入死锁。`
+  )),
+].join('\n\n');
+
 async function mockClassroomLayoutDependencies(page: Page) {
   await page.route('**/api/access-code/status', (route) => route.fulfill({
     status: 200,
@@ -49,7 +58,7 @@ async function mockClassroomLayoutDependencies(page: Page) {
       messages: [{
         id: 'layout-answer',
         role: 'assistant',
-        content: '## 第 3 章 进程调度与死锁\n\n先理解处理机调度，再比较常见调度算法，最后掌握死锁的预防与避免。\n\n| 学习内容 | 重点 |\n| --- | --- |\n| 调度算法 | 周转时间与响应时间 |\n| 死锁 | 四个必要条件 |',
+        content: longLessonContent,
         verified: true,
         citations: [{ id: 'source-1', title: '操作系统课程课件', location: '第 3 章' }],
         claims: [],
@@ -109,6 +118,12 @@ test.describe('A3 classroom viewport layout', () => {
       await expect(workspace).toBeVisible();
       await expect(dialogue).toBeVisible();
       await expect(input).toBeVisible();
+      await expect(page.getByTestId('a3-classroom-message-assistant')).toBeVisible();
+      await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+      await expect.poll(() => page.evaluate(() => ({
+        html: document.documentElement.style.overflowY,
+        body: document.body.style.overflowY,
+      }))).toEqual({ html: 'hidden', body: 'hidden' });
 
       await page.getByRole('button', { name: '收起历史侧栏' }).click();
       await workspace.getByRole('button', { name: '侧面板', exact: true }).click();
@@ -135,5 +150,11 @@ test.describe('A3 classroom viewport layout', () => {
         fullPage: true,
       });
     }
+
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await expect.poll(() => page.evaluate(() => ({
+      html: document.documentElement.style.overflowY,
+      body: document.body.style.overflowY,
+    }))).toEqual({ html: '', body: '' });
   });
 });

@@ -562,6 +562,38 @@ export function ClassroomViewRedesign() {
   }, [classroomSessions, historyQuery]);
 
   useEffect(() => {
+    const desktopViewport = window.matchMedia('(min-width: 1280px)');
+    const previousHtmlOverflowY = document.documentElement.style.overflowY;
+    const previousBodyOverflowY = document.body.style.overflowY;
+    let locked = false;
+
+    const restorePageScroll = () => {
+      if (!locked) return;
+      document.documentElement.style.overflowY = previousHtmlOverflowY;
+      document.body.style.overflowY = previousBodyOverflowY;
+      locked = false;
+    };
+    const syncPageScroll = () => {
+      if (!desktopViewport.matches) {
+        restorePageScroll();
+        return;
+      }
+      if (locked) return;
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      document.documentElement.style.overflowY = 'hidden';
+      document.body.style.overflowY = 'hidden';
+      locked = true;
+    };
+
+    syncPageScroll();
+    desktopViewport.addEventListener('change', syncPageScroll);
+    return () => {
+      desktopViewport.removeEventListener('change', syncPageScroll);
+      restorePageScroll();
+    };
+  }, []);
+
+  useEffect(() => {
     chatRef.current = chat;
     dialogueEndRef.current?.scrollIntoView({ block: 'end' });
   }, [chat, asking]);

@@ -62,5 +62,10 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source).toContain('grid h-[calc(100dvh-104px)] min-h-[640px]');
     expect(source).toContain('flex min-h-0 min-w-0 flex-col overflow-hidden');
     expect(source).toContain('grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]');
+    expect(source).toContain("window.matchMedia('(min-width: 1280px)')");
+    expect(source).toContain("document.documentElement.style.overflowY = 'hidden'");
+    expect(source).toContain("document.body.style.overflowY = 'hidden'");
+    expect(source).toContain('document.documentElement.style.overflowY = previousHtmlOverflowY');
+    expect(source).toContain('document.body.style.overflowY = previousBodyOverflowY');
   });
 });
