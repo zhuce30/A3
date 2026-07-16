@@ -862,6 +862,22 @@ class LearningPathTests(TestCase):
         active_path = LearningPath.objects.get(user=self.user, status=LearningPathStatus.ACTIVE)
         self.assertEqual(str(active_path.id), payload["path"]["id"])
 
+    def test_admission_diagnostic_rejects_invalid_pace_without_overwriting_profile(self):
+        profile = self.user.learner_profile
+        profile.pace = "intensive"
+        profile.save(update_fields=["pace", "updated_at"])
+
+        response = self.client.post(
+            "/api/learning/admission-diagnostic/",
+            data=json.dumps({"pace": "turbo", "answers": []}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["success"])
+        profile.refresh_from_db()
+        self.assertEqual(profile.pace, "intensive")
+
     def test_admission_diagnostic_blueprint_uses_profile_to_order_questions(self):
         profile = self.user.learner_profile
         profile.foundation_level = "薄弱"

@@ -23,7 +23,7 @@ from backend.apps.engagement.models import UserNotification
 from backend.apps.knowledge_base.models import KnowledgeAsset, KnowledgeBlock, KnowledgeGraphClaim, KnowledgeGraphEntity, KnowledgeGraphRelation, KnowledgeIndexEntry, KnowledgeResource, ResourceStatus
 from backend.apps.knowledge_base.display import format_source_display_location, format_source_type_label, safe_source_filename, source_origin_label
 from backend.apps.knowledge_base.services import indexed_resource_scope_by_path
-from backend.apps.learning.services import classroom_context, execute_teacher_task, generate_learning_path, generate_study_plan, serialize_path, submit_admission_diagnostic, teacher_workbench
+from backend.apps.learning.services import classroom_context, execute_teacher_task, generate_learning_path, generate_study_plan, serialize_path, submit_admission_diagnostic, teacher_workbench, validate_admission_diagnostic_payload
 from backend.apps.profiles.models import LearnerProfile
 from backend.apps.profiles.profile_aggregator import aggregate_profile_snapshot
 from backend.apps.profiles.profile_signals import append_profile_signal
@@ -2199,6 +2199,7 @@ def run_teacher_task_workflow(user, payload: dict, *, kernel: AgentKernel | None
 
 
 def run_admission_diagnostic_workflow(user, payload: dict, *, kernel: AgentKernel | None = None) -> KernelRunResult:
+    validate_admission_diagnostic_payload(payload)
     kernel = kernel or build_admission_diagnostic_kernel()
     if kernel._circuit_breaker is None:
         kernel._circuit_breaker = build_recent_run_circuit_breaker(user)

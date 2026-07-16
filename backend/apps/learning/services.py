@@ -739,6 +739,7 @@ def _diagnostic_question_reason(question: dict, matched_signals: list[str], scor
 
 
 def submit_admission_diagnostic(user, payload: dict) -> dict:
+    validate_admission_diagnostic_payload(payload)
     profile, _ = LearnerProfile.objects.get_or_create(user=user)
     answers = payload.get("answers") if isinstance(payload.get("answers"), list) else []
     answer_map = {str(item.get("questionId")): item for item in answers if isinstance(item, dict)}
@@ -771,8 +772,10 @@ def submit_admission_diagnostic(user, payload: dict) -> dict:
     duration_days = max(7, min(_safe_int(payload.get("durationDays"), 14), 30))
     daily_minutes = max(20, min(_safe_int(payload.get("dailyMinutes"), profile.daily_study_time or 60), 180))
     foundation_level = str(payload.get("foundationLevel") or level["foundationLevel"]).strip()[:64]
-    requested_pace = str(payload.get("pace") or profile.pace or LearningPace.STANDARD).strip()
-    pace = requested_pace if requested_pace in LearningPace.values else LearningPace.STANDARD
+    requested_pace = str(payload.get("pace") or "").strip()
+    pace = requested_pace or profile.pace
+    if pace not in LearningPace.values:
+        pace = _diagnostic_pace_from_schedule(duration_days, daily_minutes)
 
     merged_weak_points = _merge_unique(weak_points + (profile.weak_points if isinstance(profile.weak_points, list) else []), limit=8)
     try:
@@ -872,6 +875,22 @@ def _diagnostic_level_from_score(score: int) -> dict:
     if score >= 40:
         return {"code": "L2", "label": "概念可理解", "foundationLevel": "基础", "description": "建议先补关键概念，再进入小题组练习。"}
     return {"code": "L1", "label": "基础薄弱", "foundationLevel": "薄弱", "description": "需要降低负荷，从先修概念、例题讲解和错因复述开始。"}
+
+
+def _diagnostic_pace_from_schedule(duration_days: int, daily_minutes: int) -> str:
+    if daily_minutes >= 90 or (duration_days <= 7 and daily_minutes >= 60):
+        return LearningPace.INTENSIVE
+    if daily_minutes <= 30 or duration_days >= 30:
+        return LearningPace.RELAXED
+    return LearningPace.STANDARD
+
+
+def validate_admission_diagnostic_payload(payload: dict) -> None:
+    requested_pace = str(payload.get("pace") or "").strip()
+    if requested_pace and requested_pace not in LearningPace.values:
+        raise ValueError("学习节奏选项无效")
+
+
 def _safe_int(value, default: int) -> int:
     try:
         return int(value)
