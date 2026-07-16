@@ -370,7 +370,7 @@ class ResourceFeedbackAgent(BaseAgent):
             "goal": pack.get("goal") or "",
             "action": action,
             "resourceType": str(context.payload.get("resourceType") or ""),
-            "score": _safe_int(context.payload.get("score"), 0),
+            "score": _resource_feedback_score(context.payload.get("score")),
             "createdAt": timezone.now().isoformat(),
         }
         profile, _ = LearnerProfile.objects.get_or_create(user=context.user)
@@ -793,6 +793,7 @@ def record_resource_feedback(user, pack_id: str, payload: dict) -> dict:
     if action not in {"opened", "completed", "skipped", "favorited"}:
         raise ValueError("action 必须是 opened/completed/skipped/favorited")
 
+    score = _resource_feedback_score(payload.get("score"))
     workflow_result = run_resource_feedback_workflow(
         user,
         {
@@ -800,7 +801,7 @@ def record_resource_feedback(user, pack_id: str, payload: dict) -> dict:
             "pack": pack,
             "action": action,
             "resourceType": str(payload.get("resourceType") or ""),
-            "score": _safe_int(payload.get("score"), 0),
+            "score": score,
         },
     )
     if not workflow_result.success:
@@ -811,7 +812,7 @@ def record_resource_feedback(user, pack_id: str, payload: dict) -> dict:
             pack_id=pack_id,
             action=action,
             resource_type=str(payload.get("resourceType") or ""),
-            score=_safe_int(payload.get("score"), 0),
+            score=score,
             reason=error,
         )
     effect_report = workflow_result.output.get("effectReport") if isinstance(workflow_result.output.get("effectReport"), dict) else {}
@@ -850,7 +851,7 @@ def _degraded_resource_feedback_result(
     pack_id: str,
     action: str,
     resource_type: str,
-    score: int,
+    score: int | None,
     reason: str,
 ) -> dict:
     profile, _ = LearnerProfile.objects.get_or_create(user=user)
@@ -898,6 +899,12 @@ def _degraded_resource_feedback_result(
         },
         "traceId": "",
     }
+
+
+def _resource_feedback_score(value) -> int | None:
+    if value is None or value == "":
+        return None
+    return max(0, min(100, _safe_int(value, 0)))
 
 
 class OpenMAICClassroomBridgeAgent(BaseAgent):
@@ -1661,22 +1668,34 @@ def _resource_content(resource_type: str, goal: str, sources: list[dict], profil
     llm_content, llm_meta = _try_llm_resource_content(resource_type, goal, sources, profile, allow_llm=allow_llm)
     if llm_content:
         llm_content = _repair_llm_resource_content(resource_type, llm_content, goal, sources, profile)
-    if llm_content and _is_rich_resource_content(resource_type, llm_content):
+    llm_quality = _resource_content_quality(resource_type, llm_content) if llm_content else None
+    if llm_content and llm_quality and llm_quality["passed"]:
         content = _attach_content_defaults(llm_content, resource_type, sources, mode="llm")
-        return content, {**llm_meta, "mode": "llm", "degraded": False}
+        return content, {**llm_meta, "mode": "llm", "degraded": False, "quality": llm_quality}
 
     content = _fallback_resource_content(resource_type, goal, sources, profile)
+    fallback_quality = _resource_content_quality(resource_type, content)
     synthesis = {
         **llm_meta,
         "mode": "rules",
         "degraded": bool(llm_meta.get("attempted")),
-        "degradationReason": llm_meta.get("error") or ("LLM disabled" if not llm_meta.get("attempted") else "LLM output did not pass resource schema"),
+        "degradationReason": llm_meta.get("error") or ("LLM disabled" if not llm_meta.get("attempted") else "LLM output did not pass specialist quality checks"),
+        "quality": fallback_quality,
+        **({"rejectedLlmQuality": llm_quality} if llm_quality else {}),
     }
     return content, synthesis
 
 
 def _repair_llm_resource_content(resource_type: str, content: dict, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
-    if resource_type != "mind_map" or not isinstance(content, dict):
+    if not isinstance(content, dict):
+        return content
+    if resource_type == "practice_set":
+        return _repair_practice_set_content(content, goal, sources, profile)
+    if resource_type == "case_study":
+        return _repair_case_study_content(content, goal, sources, profile)
+    if resource_type == "code_lab":
+        return _repair_code_lab_content(content, goal, sources, profile)
+    if resource_type != "mind_map":
         return content
     repaired = dict(content)
     nodes = repaired.get("nodes")
@@ -1711,6 +1730,72 @@ def _repair_llm_resource_content(resource_type: str, content: dict, goal: str, s
     return repaired
 
 
+def _repair_practice_set_content(content: dict, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
+    fallback = _fallback_resource_content("practice_set", goal, sources, profile)
+    fallback_questions = list(fallback.get("questions") or [])
+    provided = content.get("questions") if isinstance(content.get("questions"), list) else []
+    questions = []
+    for index in range(max(8, len(provided))):
+        base = dict(fallback_questions[index % len(fallback_questions)])
+        candidate = provided[index] if index < len(provided) and isinstance(provided[index], dict) else {}
+        base.update({key: value for key, value in candidate.items() if value not in (None, "", [])})
+        base["id"] = str(base.get("id") or f"q{index + 1}")
+        base["type"] = str(base.get("type") or "analysis")
+        base["knowledgePoint"] = str(base.get("knowledgePoint") or goal)
+        base["difficulty"] = str(base.get("difficulty") or "中等")
+        base["stem"] = str(base.get("stem") or fallback_questions[index % len(fallback_questions)]["stem"])
+        base["answer"] = str(base.get("answer") or "请依据资料证据完成作答。")
+        base["explanation"] = str(base.get("explanation") or fallback_questions[index % len(fallback_questions)]["explanation"])
+        base["distractorAnalysis"] = _list_or_fallback(base.get("distractorAnalysis"), fallback_questions[index % len(fallback_questions)].get("distractorAnalysis"))
+        base["commonMistake"] = str(base.get("commonMistake") or "只记结论，没有检查题目条件和证据。")
+        base["evaluationRubric"] = _list_or_fallback(base.get("evaluationRubric"), ["结论正确", "说明判断条件", "引用资料证据"])
+        base["sourceIds"] = _list_or_fallback(base.get("sourceIds"), fallback.get("sourceIds"))[:4]
+        questions.append(base)
+    return {**fallback, **content, "questions": questions, "sourceIds": _list_or_fallback(content.get("sourceIds"), fallback.get("sourceIds"))}
+
+
+def _repair_case_study_content(content: dict, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
+    fallback = _fallback_resource_content("case_study", goal, sources, profile)
+    repaired = {**fallback, **{key: value for key, value in content.items() if value not in (None, "", [])}}
+    repaired["role"] = str(repaired.get("role") or fallback["role"])
+    repaired["constraints"] = _list_or_fallback(repaired.get("constraints"), fallback["constraints"])
+    repaired["materials"] = _list_or_fallback(repaired.get("materials"), fallback["materials"])
+    repaired["decisionPoints"] = _list_or_fallback(repaired.get("decisionPoints"), fallback["decisionPoints"])
+    repaired["studentPrompt"] = str(repaired.get("studentPrompt") or repaired.get("task") or fallback["studentPrompt"])
+    repaired["analysisSteps"] = _list_or_fallback(repaired.get("analysisSteps"), repaired.get("steps") if isinstance(repaired.get("steps"), list) else fallback["analysisSteps"])
+    repaired["expertAnalysis"] = str(repaired.get("expertAnalysis") or repaired.get("analysis") or fallback["expertAnalysis"])
+    repaired["rubric"] = _list_or_fallback(repaired.get("rubric"), fallback["rubric"])
+    repaired["reflection"] = str(repaired.get("reflection") or fallback["reflection"])
+    repaired["sourceIds"] = _list_or_fallback(repaired.get("sourceIds"), fallback["sourceIds"])
+    repaired.setdefault("steps", repaired["analysisSteps"])
+    repaired.setdefault("analysis", repaired["expertAnalysis"])
+    return repaired
+
+
+def _repair_code_lab_content(content: dict, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
+    fallback = _fallback_resource_content("code_lab", goal, sources, profile)
+    has_runner_contract = bool(content.get("starterCode") and content.get("testCases"))
+    repaired = {**fallback, **{key: value for key, value in content.items() if value not in (None, "", [])}}
+    if not has_runner_contract:
+        repaired["starterCode"] = fallback["starterCode"]
+        repaired["testCases"] = fallback["testCases"]
+        repaired["expectedOutput"] = fallback["expectedOutput"]
+    repaired["language"] = "Python"
+    repaired["environment"] = str(repaired.get("environment") or fallback["environment"])
+    for field in ("concepts", "steps", "testCases", "hints", "commonFailures", "checkpoints"):
+        repaired[field] = _list_or_fallback(repaired.get(field), fallback[field])
+    repaired["objective"] = str(repaired.get("objective") or fallback["objective"])
+    repaired["extension"] = str(repaired.get("extension") or fallback["extension"])
+    repaired["sourceIds"] = _list_or_fallback(repaired.get("sourceIds"), fallback["sourceIds"])
+    return repaired
+
+
+def _list_or_fallback(value, fallback=None) -> list:
+    if isinstance(value, list):
+        return list(value)
+    return list(fallback) if isinstance(fallback, list) else []
+
+
 def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
     evidence = _evidence_units(sources, goal)
     source_ids = [item["sourceId"] for item in evidence]
@@ -1740,11 +1825,17 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
             "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
             "questions": [
                 {
+                    "id": f"q{index + 1}",
                     "type": kind,
+                    "knowledgePoint": goal,
                     "stem": _practice_stem(kind, goal, evidence, index),
+                    **({"options": _practice_choice_options(goal)} if kind == "choice" else {}),
                     "answer": _practice_answer(kind, goal, evidence, index),
                     "explanation": _practice_explanation(kind, goal, evidence, index),
                     "difficulty": ["基础", "基础", "基础", "中等", "中等", "中等", "提高", "复盘"][index],
+                    "distractorAnalysis": _practice_distractor_analysis(goal) if kind == "choice" else [],
+                    "commonMistake": _practice_common_mistake(kind, goal),
+                    "evaluationRubric": ["结论正确", "说明适用条件", "引用至少一条资料证据"],
                     "sourceIds": source_ids[: min(len(source_ids), 2 + (index % 3))],
                 }
                 for index, kind in enumerate(question_types)
@@ -1752,14 +1843,23 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
             "sourceIds": source_ids,
         }
     if resource_type == "case_study":
+        analysis_steps = ["识别场景中的对象、目标和限制", "从材料中提取可验证事实", "定位需要做出的关键决策", "比较候选方案及其代价", "给出结论并标注证据", "复盘一个可能导致误判的条件"]
+        expert_analysis = _step_explanation(goal, evidence)
         return {
             "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
             "scenario": f"{goal} 课程资料驱动案例",
+            "role": f"你是负责分析该问题的{getattr(profile, 'major_direction', '') or '课程学习者'}",
+            "constraints": ["只能使用给定材料和已验证课程知识", "结论必须说明适用条件", "关键判断必须标注来源"],
             "background": f"案例从本地知识库抽取 {len(evidence)} 条证据，面向{getattr(profile, 'major_direction', '') or '当前课程'}学生，用于把知识点转成可分析任务。",
             "task": f"根据资料证据分析“{goal}”在真实题目或课程场景中的作用，并写出判断依据。",
+            "studentPrompt": f"先不要查看专家结论。请写出你对“{goal}”的判断、两个依据和一个仍不确定的条件。",
             "materials": [{"title": item["title"], "snippet": item["snippet"], "sourceId": item["sourceId"]} for item in evidence[:4]],
-            "steps": ["圈出场景中的对象和条件", "匹配资料中的定义或流程", "写出中间推理步骤", "给出结论并标注引用", "反思一个可能误判的条件"],
-            "analysis": _step_explanation(goal, evidence),
+            "decisionPoints": ["当前场景是否满足知识点的适用条件", "哪条材料能够直接支持关键判断", "方案收益与潜在风险如何权衡"],
+            "analysisSteps": analysis_steps,
+            "steps": analysis_steps,
+            "expertAnalysis": expert_analysis,
+            "analysis": expert_analysis,
+            "rubric": ["识别对象和限制", "引用材料证据", "推理过程完整", "结论与条件一致", "指出风险或例外"],
             "reflection": "完成后把不会的条件写入错题本，下一轮推荐会优先补同类资料。",
             "sourceIds": source_ids,
         }
@@ -1771,6 +1871,7 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
             "language": "Python",
             "objective": f"用一段可运行脚本把“{goal}”转成可观察、可修改、可复盘的实验结果。",
             "environment": "Python 3.10+，只依赖标准库；如需绘图可自行扩展 matplotlib。",
+            "concepts": keywords or [goal],
             "starterCode": "\n".join([
                 "from dataclasses import dataclass",
                 "",
@@ -1806,6 +1907,16 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
                     "stdin": "",
                     "expectedStdout": f"{expected_score}\n",
                 }
+            ],
+            "hints": [
+                "先运行原始代码，记录默认输出，再开始修改。",
+                "如果输出不符合预期，先检查输入、循环边界和返回值。",
+                "一次只改一个变量，并比较修改前后的输出。",
+            ],
+            "commonFailures": [
+                "把关键词匹配写成完全相等，导致近义术语无法命中。",
+                "修改输入后没有同步更新预期输出。",
+                "只看最终数字，没有解释数字对应的课程含义。",
             ],
             "checkpoints": [
                 "能说明每条 Evidence 来自哪份资料。",
@@ -2118,7 +2229,8 @@ def _try_llm_resource_content(resource_type: str, goal: str, sources: list[dict]
                     "content": (
                         "你是 A3 智学引擎的 ResourceSynthesisAgent。"
                         "只能基于给定本地知识库证据和学生画像生成学习资源。"
-                        "必须输出 JSON object，不要 Markdown 代码围栏，不要编造教材页码。"
+                        "必须输出 JSON object，不要 Markdown 代码围栏，不要编造教材页码、来源或系统不具备的执行能力。"
+                        f"当前资源使用以下专业生成契约：{_resource_specialist_instructions(resource_type)}"
                     ),
                 },
                 {
@@ -2130,6 +2242,7 @@ def _try_llm_resource_content(resource_type: str, goal: str, sources: list[dict]
                             "learnerProfile": _profile_snapshot(profile),
                             "evidence": evidence,
                             "requirements": _resource_llm_requirements(resource_type),
+                            "qualityChecklist": _resource_specialist_instructions(resource_type),
                             "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
                         },
                         ensure_ascii=False,
@@ -2173,11 +2286,80 @@ def _resource_llm_requirements(resource_type: str) -> dict:
         "lecture_doc": {"sections": "至少 6 节，每节含 heading/body/sourceIds，覆盖目标、先修、概念、步骤、例题、误区、复盘"},
         "knowledge_card": {"cards": "至少 4 张 front/back/sourceIds 卡片"},
         "mind_map": {"nodes": "至少 7 个一级节点，每个 3-5 个 children，并标 sourceIds；同时输出 markdown 和 mermaid。结构必须像真实思维导图：中心主题、概念边界、核心机制、证据来源、题型路径、易错点、复习动作。操作系统死锁主题必须覆盖四个必要条件、资源分配图、银行家算法、检测与解除"},
-        "practice_set": {"questions": "至少 8 题，覆盖概念、选择、填空、应用、分析、纠错、迁移、反思，含 answer/explanation/sourceIds"},
-        "case_study": {"case": "包含 scenario/background/task/materials/steps/analysis/reflection/sourceIds"},
-        "code_lab": {"lab": "包含 language/objective/environment/starterCode/steps/expectedOutput/testCases/checkpoints/extension/sourceIds，testCases 必须能用于真实 runner 判题"},
+        "practice_set": {
+            "questions": "至少 8 题；每题包含 id/type/knowledgePoint/difficulty/stem/answer/explanation/distractorAnalysis/commonMistake/evaluationRubric/sourceIds；选择题还需 options，覆盖概念、条件判断、应用、分析、纠错和迁移，并形成难度梯度",
+        },
+        "case_study": {
+            "case": "包含 scenario/role/constraints/background/task/studentPrompt/materials/decisionPoints/analysisSteps/expertAnalysis/rubric/reflection/sourceIds；材料必须足以让学生先判断，专家分析不能提前写进学生任务",
+        },
+        "code_lab": {
+            "lab": "language 必须是 Python；包含 objective/environment/concepts/starterCode/steps/expectedOutput/testCases/hints/commonFailures/checkpoints/extension/sourceIds；代码只依赖标准库，testCases 必须能用于真实 runner 判题",
+        },
         "micro_video_script": {"shots": "至少 7 个镜头，每个含 scene/durationSeconds/visual/narration/sourceIds；visual 只能描述无文字画面，所有中文概念放到 narration，不要要求视频模型生成板书、字幕、标题或屏幕文字"},
     }[resource_type]
+
+
+def _resource_specialist_instructions(resource_type: str) -> str:
+    specialists = {
+        "practice_set": (
+            "你是 PracticeSetSpecialist。围绕学生薄弱点设计逐题反馈练习；题型和难度必须有梯度；"
+            "选择题干扰项要对应真实误区；解析必须说明条件、推理和证据；不得在题干中泄露答案。"
+        ),
+        "case_study": (
+            "你是 CaseStudySpecialist。设计可供学生先判断、再查看专家拆解的案例；"
+            "场景必须包含角色、约束、材料和信息差；决策点可比较；专家分析必须独立于学生任务。"
+        ),
+        "code_lab": (
+            "你是 CodeLabSpecialist。生成可由真实 runner 执行的 Python 标准库实验；"
+            "代码、预期输出和测试用例必须一致；提供分层提示、常见失败、检查点和扩展挑战；不得虚构运行结果。"
+        ),
+    }
+    return specialists.get(resource_type, "生成结构完整、证据可追溯、适合当前画像的学习资源。")
+
+
+def _resource_content_quality(resource_type: str, content: dict | None) -> dict:
+    if not isinstance(content, dict):
+        return _quality_report([("valid_json", False, "内容不是 JSON object")])
+    if resource_type == "practice_set":
+        questions = [item for item in content.get("questions") or [] if isinstance(item, dict)]
+        question_types = {str(item.get("type") or "") for item in questions}
+        checks = [
+            ("question_count", len(questions) >= 8, f"题目数 {len(questions)}/8"),
+            ("question_variety", len(question_types) >= 6, f"题型数 {len(question_types)}/6"),
+            ("learning_metadata", all(item.get("id") and item.get("knowledgePoint") and item.get("difficulty") for item in questions), "每题包含 ID、知识点和难度"),
+            ("feedback_quality", all(item.get("answer") and item.get("explanation") and item.get("commonMistake") and item.get("evaluationRubric") for item in questions), "每题包含答案、解析、错因和量规"),
+            ("grounding", bool(questions) and all(item.get("sourceIds") for item in questions), "每题包含来源"),
+        ]
+        return _quality_report(checks, required={"grounding"})
+    if resource_type == "case_study":
+        checks = [
+            ("scenario", bool(content.get("scenario") and content.get("role") and content.get("constraints")), "场景、角色和约束完整"),
+            ("materials", len(content.get("materials") or []) >= 2, "至少两条案例材料"),
+            ("decision_task", bool(content.get("task") and content.get("studentPrompt") and len(content.get("decisionPoints") or []) >= 2), "学生任务和决策点完整"),
+            ("expert_analysis", len(content.get("analysisSteps") or []) >= 4 and bool(content.get("expertAnalysis")), "专家拆解完整"),
+            ("rubric_grounding", len(content.get("rubric") or []) >= 3 and bool(content.get("sourceIds")), "评价量规和来源完整"),
+        ]
+        return _quality_report(checks, required={"rubric_grounding"})
+    if resource_type == "code_lab":
+        test_cases = [item for item in content.get("testCases") or [] if isinstance(item, dict)]
+        checks = [
+            ("runner_language", str(content.get("language") or "").lower() == "python", "使用 Python runner"),
+            ("runnable_contract", bool(content.get("objective") and content.get("environment") and content.get("starterCode")), "目标、环境和代码完整"),
+            ("learning_steps", len(content.get("concepts") or []) >= 1 and len(content.get("steps") or []) >= 5, "概念和实验步骤完整"),
+            ("test_contract", bool(test_cases) and all("expectedStdout" in item for item in test_cases), "测试用例包含预期输出"),
+            ("debug_support", len(content.get("checkpoints") or []) >= 4 and len(content.get("hints") or []) >= 2 and len(content.get("commonFailures") or []) >= 2 and bool(content.get("extension") and content.get("sourceIds")), "检查点、提示、失败诊断和来源完整"),
+        ]
+        return _quality_report(checks, required={"test_contract"})
+    passed = _is_rich_resource_content(resource_type, content)
+    return _quality_report([("legacy_rich_content", passed, "满足现有资源完整性规则")])
+
+
+def _quality_report(checks: list[tuple[str, bool, str]], *, required: set[str] | None = None) -> dict:
+    normalized = [{"name": name, "passed": bool(passed), "detail": detail} for name, passed, detail in checks]
+    score = round(sum(1 for item in normalized if item["passed"]) / max(1, len(normalized)) * 100)
+    required = required or set()
+    required_passed = all(item["passed"] for item in normalized if item["name"] in required)
+    return {"passed": score >= 80 and required_passed, "score": score, "checks": normalized}
 
 
 def _is_rich_resource_content(resource_type: str, content: dict) -> bool:
@@ -2259,10 +2441,35 @@ def _practice_answer(kind: str, goal: str, evidence: list[dict], index: int) -> 
     if kind == "fill_blank":
         return "适用条件；资料证据"
     if kind == "choice":
-        return f"优先选择题干中对象、条件和资料证据都明确指向“{goal}”的情况。"
+        return "B"
     if kind == "debug":
         return "风险在于跳过条件检查，可能把相似概念或不适用场景误判为同一类问题。"
     return f"答案应围绕“{goal}”并引用资料证据：{_short_snippet(evidence, index)}"
+
+
+def _practice_choice_options(goal: str) -> list[str]:
+    return [
+        f"A. 只要题目出现“{goal}”就直接套用结论",
+        f"B. 先确认对象、适用条件和资料证据，再使用“{goal}”判断",
+        "C. 忽略题目条件，只比较最终数值",
+        "D. 只凭记忆选择最熟悉的术语",
+    ]
+
+
+def _practice_distractor_analysis(goal: str) -> list[str]:
+    return [
+        f"A 错在把术语出现当成适用条件，缺少对“{goal}”边界的检查。",
+        "C 错在跳过过程和约束，最终数值相同也可能来自不同机制。",
+        "D 错在没有使用题目材料和可验证证据。",
+    ]
+
+
+def _practice_common_mistake(kind: str, goal: str) -> str:
+    if kind == "choice":
+        return f"看到“{goal}”相关术语就立即选答案，没有核对条件。"
+    if kind in {"application", "analysis", "debug", "transfer"}:
+        return "只写结论，没有展开对象、条件、过程和证据之间的关系。"
+    return "只背定义，没有用自己的话说明边界、例外和证据。"
 
 
 def _practice_explanation(kind: str, goal: str, evidence: list[dict], index: int) -> str:

@@ -5,11 +5,8 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   BookOpenText,
-  CheckSquare2,
   CheckCircle2,
   Code2,
-  Copy,
-  Download,
   ExternalLink,
   FileText,
   GitBranch,
@@ -17,8 +14,6 @@ import {
   Loader2,
   MonitorPlay,
   ShieldCheck,
-  Square,
-  TerminalSquare,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
@@ -33,6 +28,9 @@ import type {
 } from '@/lib/a3/recommendation-types';
 import { A3Markdown } from '../ui/a3-markdown';
 import { A3Card, A3Pill } from '../ui/a3-card';
+import { CaseStudyWorkbench } from './resource-workbench/case-study-workbench';
+import { CodeLabWorkbench } from './resource-workbench/code-lab-workbench';
+import { PracticeSetWorkbench } from './resource-workbench/practice-set-workbench';
 
 type ResourcePackDetailResponse = {
   success: boolean;
@@ -44,45 +42,6 @@ type ResourcePackListResponse = {
   success: boolean;
   error?: string;
   resourcePacks?: A3ResourcePackV2[];
-};
-
-type CodeLabTestCase = {
-  name: string;
-  stdin: string;
-  expectedStdout: string;
-};
-
-type CodeLabRunResult = {
-  status: 'passed' | 'failed' | 'timeout' | string;
-  mode: 'run' | 'judge' | string;
-  provider?: string;
-  language?: string;
-  stdout?: string;
-  stderr?: string;
-  exitCode?: number | null;
-  durationMs?: number;
-  error?: string;
-  truncated?: boolean;
-  passedCount?: number;
-  totalCount?: number;
-  testResults?: Array<{
-    name: string;
-    passed: boolean;
-    status: string;
-    stdin: string;
-    expectedStdout: string;
-    actualStdout: string;
-    stderr?: string;
-    exitCode?: number | null;
-    durationMs?: number;
-    error?: string;
-  }>;
-};
-
-type CodeLabRunResponse = {
-  success: boolean;
-  error?: string;
-  result?: CodeLabRunResult;
 };
 
 type ResourcePageConfig = {
@@ -195,12 +154,15 @@ export function ResourceStandaloneView({ packId, resourceType }: { packId: strin
     void recordResourceLearningEvent(pack, resource, config, 'opened');
   }, [config, openedPackId, openedResourceType, pack, resource]);
 
-  async function handleFeedback(action: 'completed' | 'skipped' | 'favorited') {
+  async function handleFeedback(action: 'completed' | 'skipped' | 'favorited', score?: number | null) {
     if (!pack || !resource) return;
     setFeedbackSaving(action);
     setFeedbackMessage('');
-    const result = await recordResourceFeedback(pack.resourcePackId, resource.type, action, action === 'completed' ? 90 : 0);
-    void recordResourceLearningEvent(pack, resource, config, action);
+    const feedbackScore = action === 'completed'
+      ? score === null ? null : Math.max(0, Math.min(100, score ?? 90))
+      : 0;
+    const result = await recordResourceFeedback(pack.resourcePackId, resource.type, action, feedbackScore);
+    void recordResourceLearningEvent(pack, resource, config, action, feedbackScore);
     setFeedbackSaving('');
     setFeedbackMessage(result.success ? feedbackSuccessText(action) : result.error ?? '资源反馈回流失败');
   }
@@ -288,17 +250,23 @@ function ResourceBody({
   config: ResourcePageConfig;
   feedbackMessage: string;
   feedbackSaving: string;
-  onFeedback: (action: 'completed' | 'skipped' | 'favorited') => void;
+  onFeedback: (action: 'completed' | 'skipped' | 'favorited', score?: number | null) => void;
 }) {
+  if (resource.type === 'practice_set') {
+    return <PracticeSetWorkbench resource={resource} feedbackMessage={feedbackMessage} feedbackSaving={feedbackSaving} onFeedback={onFeedback} />;
+  }
+  if (resource.type === 'case_study') {
+    return <CaseStudyWorkbench resource={resource} feedbackMessage={feedbackMessage} feedbackSaving={feedbackSaving} onFeedback={onFeedback} />;
+  }
+  if (resource.type === 'code_lab') {
+    return <CodeLabWorkbench key={`${pack.resourcePackId}:${resource.title}`} resource={resource} packId={pack.resourcePackId} feedbackMessage={feedbackMessage} feedbackSaving={feedbackSaving} onFeedback={onFeedback} />;
+  }
   return (
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
       <A3Card title={resource.title} subtitle={resource.personalizationReason}>
         {resource.type === 'lecture_doc' && <LectureDocument resource={resource} pack={pack} />}
         {resource.type === 'knowledge_card' && <KnowledgeCards resource={resource} />}
         {resource.type === 'mind_map' && <MindMap resource={resource} />}
-        {resource.type === 'practice_set' && <PracticeSet resource={resource} />}
-        {resource.type === 'case_study' && <CaseStudy resource={resource} />}
-        {resource.type === 'code_lab' && <CodeLab key={`${pack.resourcePackId}:${resource.title}`} resource={resource} packId={pack.resourcePackId} />}
       </A3Card>
       <EvidencePanel pack={pack} resource={resource} config={config} feedbackMessage={feedbackMessage} feedbackSaving={feedbackSaving} onFeedback={onFeedback} />
     </div>
@@ -673,380 +641,6 @@ function summarizeMindMapLeaf(value: string) {
   return `${firstClause.slice(0, 14)}…`;
 }
 
-function PracticeSet({ resource }: { resource: A3ResourcePackV2Resource }) {
-  const questions = arrayOfRecords(resource.content.questions);
-  return (
-    <div className="space-y-4">
-      {questions.map((question, index) => (
-        <div key={`${safeText(question.stem, '题目')}-${index}`} className="rounded-2xl border border-slate-200 bg-white p-5">
-          <div className="text-sm font-semibold text-blue-700">题目 {index + 1}</div>
-          <h2 className="mt-2 text-base font-semibold text-slate-950">{safeText(question.stem, '暂无题干')}</h2>
-          {Array.isArray(question.options) && (
-            <div className="mt-3 grid gap-2">
-              {question.options.map((option, optionIndex) => (
-                <div key={`${safeText(option, '选项')}-${optionIndex}`} className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-700">
-                  {safeText(option, '选项')}
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm leading-6 text-emerald-900">
-            <div className="font-semibold">参考答案：{safeText(question.answer, '暂无答案')}</div>
-            <p className="mt-1">{safeText(question.explanation, '暂无解析')}</p>
-          </div>
-        </div>
-      ))}
-      {!questions.length && <GenericContent content={resource.content} />}
-    </div>
-  );
-}
-
-function CaseStudy({ resource }: { resource: A3ResourcePackV2Resource }) {
-  const steps = toTextArray(resource.content.steps);
-  return (
-    <div className="space-y-5" data-testid="a3-resource-code-lab-workbench">
-      <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-        <div className="text-sm font-semibold text-blue-700">案例场景</div>
-        <h2 className="mt-2 text-lg font-semibold text-slate-950">{safeText(resource.content.scenario, resource.title)}</h2>
-        <A3Markdown className="mt-3 text-slate-700">{safeText(resource.content.task, safeText(resource.content.analysis, '暂无任务说明'))}</A3Markdown>
-      </section>
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
-        <div className="text-sm font-semibold text-blue-700">分析步骤</div>
-        <div className="mt-4 space-y-3">
-          {steps.map((step, index) => (
-            <div key={`${step}-${index}`} className="flex gap-3">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-blue-50 text-sm font-semibold text-blue-700">{index + 1}</span>
-              <p className="text-sm leading-6 text-slate-700">{step}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-      {safeText(resource.content.reflection, '') && (
-        <section className="rounded-2xl border border-orange-200 bg-orange-50 p-5 text-sm leading-6 text-orange-950">
-          <div className="font-semibold">复盘建议</div>
-          <p className="mt-2">{safeText(resource.content.reflection, '')}</p>
-        </section>
-      )}
-    </div>
-  );
-}
-
-function CodeLab({ resource, packId }: { resource: A3ResourcePackV2Resource; packId: string }) {
-  const steps = toTextArray(resource.content.steps);
-  const checkpoints = toTextArray(resource.content.checkpoints);
-  const [checked, setChecked] = useState<Set<number>>(() => new Set());
-  const [copyMessage, setCopyMessage] = useState('');
-  const language = safeText(resource.content.language, 'Python');
-  const starterCode = safeText(resource.content.starterCode, '# 暂无起始代码');
-  const [code, setCode] = useState(starterCode);
-  const [stdin, setStdin] = useState('');
-  const [runningMode, setRunningMode] = useState<'run' | 'judge' | ''>('');
-  const [runResult, setRunResult] = useState<CodeLabRunResult | null>(null);
-  const [runError, setRunError] = useState('');
-  const testCases = buildCodeLabTestCases(resource.content);
-  const fileName = codeLabFileName(resource.title, language);
-  const runCommand = codeLabRunCommand(fileName, language);
-  const completion = checkpoints.length ? Math.round((checked.size / checkpoints.length) * 100) : 0;
-  const inputCount = countPythonInputCalls(code);
-
-  async function copyCode() {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopyMessage('已复制当前代码');
-    } catch {
-      setCopyMessage('复制失败，请手动选中代码复制');
-    }
-    window.setTimeout(() => setCopyMessage(''), 1800);
-  }
-
-  function downloadCode() {
-    const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = fileName;
-    anchor.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function toggleCheckpoint(index: number) {
-    setChecked((current) => {
-      const next = new Set(current);
-      if (next.has(index)) next.delete(index);
-      else next.add(index);
-      return next;
-    });
-  }
-
-  async function runOnline(mode: 'run' | 'judge') {
-    setRunningMode(mode);
-    setRunError('');
-    setRunResult(null);
-    const result = await a3PostJson<CodeLabRunResponse>(`/api/resources/packs/${packId}/code-lab/run/`, {
-      language,
-      code: stripMarkdownCodeFence(code),
-      stdin,
-      mode,
-      testCases: mode === 'judge' ? testCases : undefined,
-    });
-    setRunningMode('');
-    if (!result.success || !result.result) {
-      setRunError(result.error ?? '代码执行失败');
-      return;
-    }
-    setRunResult(result.result);
-  }
-
-  return (
-    <div className="space-y-5" data-testid="a3-resource-code-lab-workbench">
-      <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-        <div className="text-sm font-semibold text-blue-700">实验目标</div>
-        <A3Markdown className="mt-3 text-slate-700">{safeText(resource.content.objective, resource.title)}</A3Markdown>
-      </section>
-      <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 text-xs md:grid-cols-4">
-        <MiniLabMetric label="语言" value={language} />
-        <MiniLabMetric label="检查点" value={`${checked.size}/${checkpoints.length || 0}`} />
-        <MiniLabMetric label="文件" value={fileName} />
-        <MiniLabMetric label="完成度" value={`${completion}%`} />
-      </section>
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
-        <div className="text-sm font-semibold text-blue-700">操作步骤</div>
-        <div className="mt-4 space-y-3">
-          {steps.map((step, index) => (
-            <div key={`${step}-${index}`} className="flex gap-3">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-700">{index + 1}</span>
-              <p className="text-sm leading-6 text-slate-700">{step}</p>
-            </div>
-          ))}
-          {!steps.length && <div className="text-sm leading-6 text-slate-500">暂无操作步骤。</div>}
-        </div>
-      </section>
-      <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/70 px-4 py-3">
-          <div>
-            <div className="text-sm font-semibold text-slate-100">代码工作区</div>
-            <div className="mt-1 font-mono text-xs text-slate-400">{fileName}</div>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" size="sm" variant="outline" className="border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800" onClick={() => setCode(starterCode)}>
-              恢复起始代码
-            </Button>
-            <Button type="button" size="sm" variant="outline" className="border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800" onClick={() => void copyCode()}>
-              <Copy className="size-4" />
-              复制
-            </Button>
-            <Button type="button" size="sm" variant="outline" className="border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800" onClick={downloadCode}>
-              <Download className="size-4" />
-              下载
-            </Button>
-          </div>
-        </div>
-        <div className="border-b border-slate-800 px-4 py-3 text-sm font-semibold text-slate-200">
-          {safeText(resource.content.language, '代码')} 起始代码
-        </div>
-        <textarea
-          value={code}
-          onChange={(event) => setCode(event.target.value)}
-          spellCheck={false}
-          className="min-h-[360px] w-full resize-y bg-slate-950 p-5 font-mono text-sm leading-6 text-slate-100 outline-none"
-          aria-label="代码编辑器"
-        />
-      </section>
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="text-sm font-semibold text-blue-700">在线运行</div>
-            <p className="mt-1 text-xs leading-5 text-slate-500">后端使用受限本地 Python runner，带超时和输出截断；不是前端假运行。</p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" className="bg-blue-600 text-white hover:bg-blue-700" disabled={Boolean(runningMode)} onClick={() => void runOnline('run')}>
-              {runningMode === 'run' ? <Loader2 className="size-4 animate-spin" /> : <TerminalSquare className="size-4" />}
-              运行代码
-            </Button>
-            <Button type="button" variant="outline" className="bg-white" disabled={Boolean(runningMode) || !testCases.length} onClick={() => void runOnline('judge')}>
-              {runningMode === 'judge' ? <Loader2 className="size-4 animate-spin" /> : <CheckSquare2 className="size-4" />}
-              提交判题
-            </Button>
-          </div>
-        </div>
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-          <label className="block text-xs font-semibold text-slate-600" htmlFor="a3-code-lab-stdin">标准输入 stdin</label>
-          <span className="text-xs text-slate-500">
-            {inputCount > 0 ? `检测到 ${inputCount} 处 input()，请按顺序逐行输入。` : '当前代码没有 input()，这里可以留空。'}
-          </span>
-        </div>
-        <textarea
-          id="a3-code-lab-stdin"
-          value={stdin}
-          onChange={(event) => setStdin(event.target.value)}
-          placeholder={inputCount > 0 ? '每行对应一次 input()，例如第一行给第一个 input。' : '当前代码无需输入，可以留空。'}
-          className="mt-2 min-h-20 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm leading-6 text-slate-800 outline-none focus:border-blue-400 focus:bg-white"
-        />
-        {!testCases.length && <div className="mt-2 text-xs text-slate-500">当前资源没有测试用例，暂不能判题；可以先运行代码查看输出。</div>}
-        {runError && <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{runError}</div>}
-        {runResult && <CodeLabRunResultPanel result={runResult} />}
-      </section>
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
-        <div className="flex flex-wrap items-center gap-2 text-sm text-slate-700">
-          <TerminalSquare className="size-4 text-emerald-600" />
-          <span className="font-semibold text-slate-950">本地运行</span>
-          <code className="rounded-lg bg-slate-100 px-2 py-1 font-mono text-xs text-slate-800">{runCommand}</code>
-        </div>
-        {copyMessage && <div className="mt-2 text-xs text-emerald-700">{copyMessage}</div>}
-      </section>
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-sm font-semibold text-blue-700">实验检查</div>
-          <A3Pill tone={completion === 100 && checkpoints.length ? 'green' : 'slate'}>{completion}%</A3Pill>
-        </div>
-        <div className="mt-3 space-y-2">
-          {checkpoints.map((item, index) => {
-            const isChecked = checked.has(index);
-            return (
-              <button
-                key={`${item}-${index}`}
-                type="button"
-                className="flex w-full items-start gap-2 rounded-xl px-2 py-2 text-left text-sm leading-6 text-slate-700 transition hover:bg-slate-50"
-                onClick={() => toggleCheckpoint(index)}
-              >
-                {isChecked ? <CheckSquare2 className="mt-1 size-4 shrink-0 text-emerald-600" /> : <Square className="mt-1 size-4 shrink-0 text-slate-400" />}
-                <span className={isChecked ? 'text-slate-500 line-through decoration-slate-300' : ''}>{item}</span>
-              </button>
-            );
-          })}
-          {!checkpoints.length && <div className="text-sm leading-6 text-slate-500">暂无检查点。</div>}
-        </div>
-      </section>
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
-        <TextPanel title="扩展任务" items={[safeText(resource.content.extension, '完成基础实验后，尝试修改参数并解释输出差异。')]} />
-      </section>
-    </div>
-  );
-}
-
-function MiniLabMetric({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
-  return (
-    <div className={wide ? 'col-span-2 md:col-span-1' : ''}>
-      <div className="text-[11px] text-slate-500">{label}</div>
-      <div className="mt-1 truncate font-semibold text-slate-900" title={value}>{value}</div>
-    </div>
-  );
-}
-
-function CodeLabRunResultPanel({ result }: { result: CodeLabRunResult }) {
-  const isPassed = result.status === 'passed';
-  const isTimeout = result.status === 'timeout';
-  return (
-    <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3">
-        <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-          <A3Pill tone={isPassed ? 'green' : isTimeout ? 'orange' : 'red'}>{result.status}</A3Pill>
-          <span>{result.mode === 'judge' ? '判题结果' : '运行结果'}</span>
-        </div>
-        <div className="text-xs text-slate-500">
-          {result.provider ?? 'local_subprocess'} · {result.durationMs ?? 0}ms
-        </div>
-      </div>
-      {result.mode === 'judge' ? (
-        <div className="divide-y divide-slate-100">
-          <div className="px-4 py-3 text-sm text-slate-700">
-            通过 {result.passedCount ?? 0}/{result.totalCount ?? 0} 个测试用例
-          </div>
-          {(result.testResults ?? []).map((item, index) => (
-            <div key={`${item.name}-${index}`} className="px-4 py-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-sm font-semibold text-slate-900">{item.name}</div>
-                <A3Pill tone={item.passed ? 'green' : item.status === 'timeout' ? 'orange' : 'red'}>{item.passed ? '通过' : item.status}</A3Pill>
-              </div>
-              <div className="mt-3 grid gap-3 text-xs md:grid-cols-2">
-                <CodeOutputBlock title="期望输出" value={item.expectedStdout || '(空输出)'} />
-                <CodeOutputBlock title="实际输出" value={item.actualStdout || '(空输出)'} />
-              </div>
-              {item.stderr && <CodeOutputBlock className="mt-3" title="stderr" value={item.stderr} />}
-              {item.error && <div className="mt-2 text-xs text-red-600">{item.error}</div>}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="grid gap-3 p-4 text-xs md:grid-cols-2">
-          <CodeOutputBlock title="stdout" value={result.stdout || '(空输出)'} />
-          <CodeOutputBlock title="stderr" value={result.stderr || '(无错误输出)'} />
-          {result.error && <div className="md:col-span-2 text-red-600">{result.error}</div>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CodeOutputBlock({ title, value, className = '' }: { title: string; value: string; className?: string }) {
-  return (
-    <div className={className}>
-      <div className="mb-1 font-semibold text-slate-500">{title}</div>
-      <pre className="max-h-56 overflow-auto rounded-xl bg-slate-950 p-3 font-mono text-xs leading-5 text-slate-100">{value}</pre>
-    </div>
-  );
-}
-
-function codeLabFileName(title: string, language: string) {
-  const ext = codeLabExtension(language);
-  const slug = title
-    .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 36) || 'code-lab';
-  return `${slug}.${ext}`;
-}
-
-function codeLabExtension(language: string) {
-  const normalized = language.toLowerCase();
-  if (normalized.includes('python') || normalized.includes('py')) return 'py';
-  if (normalized.includes('java') && !normalized.includes('javascript')) return 'java';
-  if (normalized.includes('c++') || normalized.includes('cpp')) return 'cpp';
-  if (normalized === 'c' || normalized.includes(' c ')) return 'c';
-  if (normalized.includes('typescript')) return 'ts';
-  if (normalized.includes('javascript')) return 'js';
-  return 'txt';
-}
-
-function codeLabRunCommand(fileName: string, language: string) {
-  const normalized = language.toLowerCase();
-  if (normalized.includes('python') || fileName.endsWith('.py')) return `python ${fileName}`;
-  if (fileName.endsWith('.java')) return `javac ${fileName} && java ${fileName.replace(/\.java$/, '')}`;
-  if (fileName.endsWith('.cpp')) return `g++ ${fileName} -o lab && ./lab`;
-  if (fileName.endsWith('.c')) return `gcc ${fileName} -o lab && ./lab`;
-  if (fileName.endsWith('.js')) return `node ${fileName}`;
-  return `打开 ${fileName} 查看`;
-}
-
-function buildCodeLabTestCases(content: Record<string, unknown>): CodeLabTestCase[] {
-  const explicitCases = arrayOfRecords(content.testCases)
-    .map((item, index) => ({
-      name: safeText(item.name, `用例 ${index + 1}`),
-      stdin: safeText(item.stdin ?? item.input, ''),
-      expectedStdout: safeText(item.expectedStdout ?? item.expectedOutput ?? item.output, ''),
-    }))
-    .filter((item) => item.expectedStdout);
-  if (explicitCases.length) return explicitCases.slice(0, 12);
-  return [];
-}
-
-function countPythonInputCalls(code: string) {
-  const matches = stripMarkdownCodeFence(code).match(/\binput\s*\(/g);
-  return matches?.length ?? 0;
-}
-
-function stripMarkdownCodeFence(code: string) {
-  const text = code.trim();
-  const lines = text.split(/\r?\n/);
-  if (lines.length >= 2 && lines[0].trim().startsWith('```') && lines[lines.length - 1].trim() === '```') {
-    return `${lines.slice(1, -1).join('\n').trim()}\n`;
-  }
-  if (lines[0]?.trim().startsWith('```')) {
-    return `${lines.slice(1).join('\n').trim()}\n`;
-  }
-  return code;
-}
-
 function KnowledgeCards({ resource }: { resource: A3ResourcePackV2Resource }) {
   const cards = arrayOfRecords(resource.content.cards).length ? arrayOfRecords(resource.content.cards) : [resource.content];
   return (
@@ -1215,22 +809,6 @@ function MissingResource({ pack, config }: { pack: A3ResourcePackV2; config: Res
   );
 }
 
-function TextPanel({ title, items }: { title: string; items: string[] }) {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-5">
-      <div className="text-sm font-semibold text-blue-700">{title}</div>
-      <div className="mt-3 space-y-2">
-        {items.map((item, index) => (
-          <div key={`${item}-${index}`} className="flex items-start gap-2 text-sm leading-6 text-slate-700">
-            <span className="mt-2 size-1.5 shrink-0 rounded-full bg-blue-500" />
-            <span>{item}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function GenericContent({ content }: { content: Record<string, unknown> }) {
   return (
     <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap rounded-2xl bg-slate-950 p-5 text-sm leading-6 text-slate-100">
@@ -1309,7 +887,7 @@ async function recordResourceFeedback(
   packId: string,
   resourceType: A3ResourcePackV2ResourceType,
   action: 'opened' | 'completed' | 'skipped' | 'favorited',
-  score = 0,
+  score: number | null = 0,
 ) {
   return a3PostJson<A3ResourceFeedbackResponse>(`/api/resources/packs/${packId}/feedback/`, {
     action,
@@ -1323,6 +901,7 @@ function recordResourceLearningEvent(
   resource: A3ResourcePackV2Resource | null,
   config: ResourcePageConfig,
   action: 'opened' | 'completed' | 'skipped' | 'favorited',
+  feedbackScore: number | null = 0,
 ) {
   if (!pack || !resource) return Promise.resolve({ success: false, error: 'missing resource' });
   const eventInput = {
@@ -1332,7 +911,7 @@ function recordResourceLearningEvent(
     targetId: pack.resourcePackId,
     resourceType: resource.type,
     durationSec: action === 'completed' ? resource.estimatedMinutes * 60 : 0,
-    score: action === 'completed' ? 90 : null,
+    score: action === 'completed' && typeof feedbackScore === 'number' && feedbackScore > 0 ? feedbackScore : null,
     quality: action === 'completed' ? { completionRate: 1 } : {},
     metadata: {
       action,
@@ -1410,11 +989,6 @@ function sanitizeValue(value: unknown): unknown {
 function arrayOfRecords(value: unknown): Record<string, unknown>[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => (item && typeof item === 'object' ? item as Record<string, unknown> : {}));
-}
-
-function toTextArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.map((item) => safeText(item, '')).filter(Boolean);
 }
 
 function safeText(value: unknown, fallback: string) {

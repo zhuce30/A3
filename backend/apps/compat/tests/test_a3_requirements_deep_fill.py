@@ -1024,6 +1024,198 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertIn("安全序列", all_text)
         self.assertIn("sourceIds", mind_map["nodes"][0])
 
+    def test_resource_specialist_prompts_define_professional_contracts(self):
+        from backend.apps.compat.resource_generation import (
+            _resource_llm_requirements,
+            _resource_specialist_instructions,
+        )
+
+        practice = json.dumps(_resource_llm_requirements("practice_set"), ensure_ascii=False)
+        case = json.dumps(_resource_llm_requirements("case_study"), ensure_ascii=False)
+        code = json.dumps(_resource_llm_requirements("code_lab"), ensure_ascii=False)
+
+        for field in ("knowledgePoint", "difficulty", "distractorAnalysis", "commonMistake", "evaluationRubric", "sourceIds"):
+            self.assertIn(field, practice)
+        for field in ("role", "constraints", "materials", "decisionPoints", "analysisSteps", "expertAnalysis", "rubric", "sourceIds"):
+            self.assertIn(field, case)
+        for field in ("Python", "concepts", "hints", "commonFailures", "testCases", "checkpoints", "sourceIds"):
+            self.assertIn(field, code)
+
+        self.assertIn("逐题反馈", _resource_specialist_instructions("practice_set"))
+        self.assertIn("先判断", _resource_specialist_instructions("case_study"))
+        self.assertIn("真实 runner", _resource_specialist_instructions("code_lab"))
+
+    def test_specialist_repair_completes_partial_resource_content(self):
+        from backend.apps.compat.resource_generation import _repair_llm_resource_content
+
+        sources = [
+            {"id": "S1", "sourceId": "S1", "title": "进程调度课件", "snippet": "时间片轮转按固定时间片切换进程。"},
+            {"id": "S2", "sourceId": "S2", "title": "调度算法实验", "snippet": "等待时间和周转时间用于比较调度效果。"},
+        ]
+
+        practice = _repair_llm_resource_content(
+            "practice_set",
+            {"questions": [{"type": "choice", "stem": "RR 的核心参数是什么？", "answer": "时间片"}]},
+            "进程调度",
+            sources,
+            None,
+        )
+        case = _repair_llm_resource_content(
+            "case_study",
+            {"scenario": "服务器任务排队", "task": "选择调度策略"},
+            "进程调度",
+            sources,
+            None,
+        )
+        code = _repair_llm_resource_content(
+            "code_lab",
+            {"starterCode": "print('ready')"},
+            "进程调度",
+            sources,
+            None,
+        )
+
+        self.assertGreaterEqual(len(practice["questions"]), 8)
+        self.assertTrue(all(question.get("knowledgePoint") for question in practice["questions"]))
+        self.assertTrue(all(question.get("commonMistake") for question in practice["questions"]))
+        self.assertTrue(all("sourceIds" in question for question in practice["questions"]))
+        for field in ("role", "constraints", "materials", "decisionPoints", "analysisSteps", "expertAnalysis", "rubric"):
+            self.assertTrue(case.get(field), field)
+        self.assertEqual(code["language"], "Python")
+        for field in ("objective", "environment", "concepts", "steps", "testCases", "hints", "commonFailures", "checkpoints", "extension"):
+            self.assertTrue(code.get(field), field)
+
+    def test_specialist_repair_rejects_malformed_collection_fields(self):
+        from backend.apps.compat.resource_generation import _repair_llm_resource_content
+
+        sources = [
+            {"id": "S1", "sourceId": "S1", "title": "进程调度课件", "snippet": "时间片轮转按固定时间片切换进程。"},
+            {"id": "S2", "sourceId": "S2", "title": "调度算法实验", "snippet": "等待时间和周转时间用于比较调度效果。"},
+        ]
+
+        practice = _repair_llm_resource_content(
+            "practice_set",
+            {
+                "questions": [{
+                    "type": "choice",
+                    "stem": "RR 的核心参数是什么？",
+                    "answer": "B",
+                    "distractorAnalysis": "A 错在忽略时间片",
+                    "evaluationRubric": 3,
+                    "sourceIds": {"sourceId": "S1"},
+                }],
+                "sourceIds": "S1",
+            },
+            "进程调度",
+            sources,
+            None,
+        )
+        case = _repair_llm_resource_content(
+            "case_study",
+            {"constraints": "不能忽略约束", "materials": 2, "decisionPoints": {"first": "比较策略"}},
+            "进程调度",
+            sources,
+            None,
+        )
+        code = _repair_llm_resource_content(
+            "code_lab",
+            {"concepts": "队列", "steps": 5, "hints": {"hint": "先运行"}, "sourceIds": "S1"},
+            "进程调度",
+            sources,
+            None,
+        )
+
+        for field in ("distractorAnalysis", "evaluationRubric", "sourceIds"):
+            self.assertIsInstance(practice["questions"][0][field], list)
+        self.assertIsInstance(practice["sourceIds"], list)
+        for field in ("constraints", "materials", "decisionPoints"):
+            self.assertIsInstance(case[field], list)
+        for field in ("concepts", "steps", "hints", "sourceIds"):
+            self.assertIsInstance(code[field], list)
+
+    def test_fallback_choice_answer_matches_option_letter_contract(self):
+        from backend.apps.compat.resource_generation import _fallback_resource_content
+
+        sources = [{"id": "S1", "sourceId": "S1", "title": "调度算法", "snippet": "先检查对象、条件和证据。"}]
+        content = _fallback_resource_content("practice_set", "进程调度", sources, None)
+        choice = next(question for question in content["questions"] if question["type"] == "choice")
+
+        self.assertEqual(choice["answer"], "B")
+        self.assertTrue(choice["options"][1].startswith("B."))
+
+    def test_unscored_resource_completion_preserves_null_score(self):
+        pack_response = self.client.post(
+            "/api/resources/generate/",
+            data=json.dumps({"goal": "分析进程调度案例", "topK": 2, "resourceType": "case_study"}),
+            content_type="application/json",
+        )
+        self.assertEqual(pack_response.status_code, 201, pack_response.content)
+        pack_id = pack_response.json()["resourcePack"]["resourcePackId"]
+
+        feedback_response = self.client.post(
+            f"/api/resources/packs/{pack_id}/feedback/",
+            data=json.dumps({"action": "completed", "resourceType": "case_study", "score": None}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(feedback_response.status_code, 200, feedback_response.content)
+        self.assertIsNone(feedback_response.json()["feedback"]["score"])
+        profile = LearnerProfile.objects.get(user=self.user)
+        self.assertIsNone(profile.extra_profile["resourceFeedback"][0]["score"])
+
+    def test_specialist_quality_rejects_shallow_resource_content(self):
+        from backend.apps.compat.resource_generation import _fallback_resource_content, _resource_content_quality
+
+        sources = [
+            {"id": "S1", "sourceId": "S1", "title": "进程调度课件", "snippet": "时间片轮转按固定时间片切换进程。"},
+            {"id": "S2", "sourceId": "S2", "title": "调度算法实验", "snippet": "等待时间和周转时间用于比较调度效果。"},
+        ]
+        shallow = {
+            "practice_set": {"questions": [{"stem": "什么是调度？", "answer": "调度"}]},
+            "case_study": {"scenario": "一个案例", "steps": ["分析"], "analysis": "结论"},
+            "code_lab": {"starterCode": "print(1)", "steps": ["运行"], "checkpoints": ["完成"]},
+        }
+
+        for resource_type, content in shallow.items():
+            report = _resource_content_quality(resource_type, content)
+            self.assertFalse(report["passed"], resource_type)
+            self.assertLess(report["score"], 80)
+            self.assertTrue(report["checks"])
+
+            fallback = _fallback_resource_content(resource_type, "进程调度", sources, None)
+            fallback_report = _resource_content_quality(resource_type, fallback)
+            self.assertTrue(fallback_report["passed"], (resource_type, fallback_report))
+            self.assertGreaterEqual(fallback_report["score"], 80)
+
+    def test_specialist_quality_requires_grounding_and_runner_contracts(self):
+        from backend.apps.compat.resource_generation import _fallback_resource_content, _resource_content_quality
+
+        sources = [
+            {"id": "S1", "sourceId": "S1", "title": "进程调度课件", "snippet": "时间片轮转按固定时间片切换进程。"},
+            {"id": "S2", "sourceId": "S2", "title": "调度算法实验", "snippet": "等待时间和周转时间用于比较调度效果。"},
+        ]
+        required_fields = {
+            "practice_set": "grounding",
+            "case_study": "rubric_grounding",
+            "code_lab": "test_contract",
+        }
+
+        for resource_type, required_check in required_fields.items():
+            content = _fallback_resource_content(resource_type, "进程调度", sources, None)
+            if resource_type == "practice_set":
+                for question in content["questions"]:
+                    question["sourceIds"] = []
+            elif resource_type == "case_study":
+                content["sourceIds"] = []
+            else:
+                content["testCases"] = []
+
+            report = _resource_content_quality(resource_type, content)
+            self.assertGreaterEqual(report["score"], 80)
+            self.assertFalse(report["passed"], (resource_type, report))
+            failed_names = {item["name"] for item in report["checks"] if not item["passed"]}
+            self.assertIn(required_check, failed_names)
+
     @patch.dict("os.environ", {"A3_RESOURCE_LLM_ENABLED": "1", "A3_LLM_API_KEY": "test-key"})
     def test_mind_map_llm_generation_has_explicit_schema_requirements(self):
         with patch("backend.apps.compat.resource_generation.chat_completion") as chat:
