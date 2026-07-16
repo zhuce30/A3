@@ -1248,13 +1248,6 @@ export function ProfileSetupPage() {
                   ))}
                 </div>
               )}
-              {showInterviewInsights && (
-                <InterviewInsightStrip
-                  interviewResult={interviewResult}
-                  dynamicProfile={dynamicProfile}
-                  missingCount={missingInterviewDimensions.length}
-                />
-              )}
               <div className="mt-4 flex flex-wrap gap-3">
                 <Button data-testid="a3-profile-interview-generate" type="button" disabled={interviewLoading || submitting || loadingOptions} onClick={runProfileInterview} className="h-11 bg-blue-600 px-5 text-white hover:bg-blue-700">
                   {interviewLoading ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
@@ -1274,6 +1267,13 @@ export function ProfileSetupPage() {
                   </div>
                 )}
               </div>
+              {showInterviewInsights && (
+                <InterviewInsightStrip
+                  interviewResult={interviewResult}
+                  dynamicProfile={dynamicProfile}
+                  missingCount={missingInterviewDimensions.length}
+                />
+              )}
             </div>
             <div className="space-y-4 xl:sticky xl:top-6">
               {!showProfileSetupPanels ? (
