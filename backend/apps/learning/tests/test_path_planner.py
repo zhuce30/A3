@@ -855,8 +855,10 @@ class LearningPathTests(TestCase):
         profile.refresh_from_db()
         self.assertEqual(profile.foundation_level, "基础")
         self.assertEqual(profile.daily_study_time, 45)
+        self.assertEqual(profile.pace, "standard")
         self.assertEqual(profile.learning_goals[0], "期末复习")
         self.assertEqual(profile.weak_points, ["进程与 PCB", "同步互斥与信号量"])
+        self.assertEqual(profile.extra_profile["studyPlan"], payload["plan"])
         active_path = LearningPath.objects.get(user=self.user, status=LearningPathStatus.ACTIVE)
         self.assertEqual(str(active_path.id), payload["path"]["id"])
 

@@ -24,7 +24,7 @@ from backend.domains.knowledge_base.lexical_retriever import search_lexical_know
 from backend.domains.knowledge_base.retriever import search_knowledge_base
 from backend.apps.learning.effect_events import record_learning_event
 from backend.apps.learning.models import CoachingMessage, CoachingMessageRole, CoachingSession, CoachingSessionStatus, Course, CourseEnrollment, CourseTeachingAssignment, Chapter, KnowledgePoint, KnowledgePrerequisite, LearningPath, LearningPathItem, LearningPathStatus, PathItemStatus, ResourcePackLog
-from backend.apps.profiles.models import LearnerProfile
+from backend.apps.profiles.models import LearnerProfile, LearningPace
 
 
 DEFAULT_COURSE_CODE = "OS-001"
@@ -771,6 +771,8 @@ def submit_admission_diagnostic(user, payload: dict) -> dict:
     duration_days = max(7, min(_safe_int(payload.get("durationDays"), 14), 30))
     daily_minutes = max(20, min(_safe_int(payload.get("dailyMinutes"), profile.daily_study_time or 60), 180))
     foundation_level = str(payload.get("foundationLevel") or level["foundationLevel"]).strip()[:64]
+    requested_pace = str(payload.get("pace") or profile.pace or LearningPace.STANDARD).strip()
+    pace = requested_pace if requested_pace in LearningPace.values else LearningPace.STANDARD
 
     merged_weak_points = _merge_unique(weak_points + (profile.weak_points if isinstance(profile.weak_points, list) else []), limit=8)
     try:
@@ -789,6 +791,7 @@ def submit_admission_diagnostic(user, payload: dict) -> dict:
         pass
     profile.foundation_level = foundation_level
     profile.daily_study_time = daily_minutes
+    profile.pace = pace
     profile.learning_goals = _merge_unique([goal] + (profile.learning_goals if isinstance(profile.learning_goals, list) else []), limit=6)
     profile.weak_points = merged_weak_points
     extra_profile = profile.extra_profile if isinstance(profile.extra_profile, dict) else {}
@@ -813,6 +816,7 @@ def submit_admission_diagnostic(user, payload: dict) -> dict:
         update_fields=[
             "foundation_level",
             "daily_study_time",
+            "pace",
             "learning_goals",
             "weak_points",
             "extra_profile",
@@ -842,6 +846,7 @@ def submit_admission_diagnostic(user, payload: dict) -> dict:
     plan = generate_study_plan(user, duration_days=duration_days, force=True)
     path_payload = serialize_path(path)
     diagnostic["loopEvidence"] = _admission_diagnostic_loop_evidence(diagnostic, path_payload, plan)
+    profile.refresh_from_db(fields=["extra_profile"])
     extra_profile = profile.extra_profile if isinstance(profile.extra_profile, dict) else {}
     extra_profile["admissionDiagnostic"] = diagnostic
     profile.extra_profile = extra_profile
