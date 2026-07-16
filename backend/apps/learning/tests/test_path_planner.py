@@ -11,7 +11,7 @@ from backend.apps.assessments.models import Question, WrongQuestion
 from backend.apps.compat.models import AgentRun, OpenMAICArtifact
 from backend.apps.engagement.models import UserNotification
 from backend.apps.knowledge_base.models import KnowledgeAsset, KnowledgeBlock, KnowledgePage, KnowledgeResource, ResourceStatus
-from backend.apps.learning.models import Course, CourseTeachingAssignment, LearningPathStatus, PathItemStatus, ResourcePackLog
+from backend.apps.learning.models import Course, CourseTeachingAssignment, LearningPath, LearningPathStatus, PathItemStatus, ResourcePackLog
 from backend.apps.learning.services import _repair_default_course_catalog, generate_learning_path, generate_study_plan
 from backend.apps.profiles.models import LearnerProfile
 from backend.domains.knowledge_base.retriever import KnowledgeBaseSearchResult
@@ -788,6 +788,12 @@ class LearningPathTests(TestCase):
         self.assertIsNotNone(wrong.review_after)
 
     def test_admission_diagnostic_updates_profile_and_generates_plan(self):
+        profile = self.user.learner_profile
+        profile.foundation_level = ""
+        profile.weak_points = []
+        profile.pace = ""
+        profile.save(update_fields=["foundation_level", "weak_points", "pace", "updated_at"])
+
         response = self.client.post(
             "/api/learning/admission-diagnostic/",
             data=json.dumps(
@@ -811,8 +817,9 @@ class LearningPathTests(TestCase):
         payload = response.json()
         self.assertTrue(payload["success"])
         self.assertEqual(payload["diagnostic"]["score"], 60)
+        self.assertTrue(payload["plan"]["planId"])
         self.assertEqual(payload["plan"]["durationDays"], 7)
-        self.assertGreaterEqual(len(payload["plan"]["days"]), 7)
+        self.assertEqual(len(payload["plan"]["days"]), 7)
         self.assertGreaterEqual(len(payload["path"]["items"]), 1)
         evidence = payload["diagnostic"]["loopEvidence"]
         self.assertEqual(evidence["schemaVersion"], "a3.learning-loop-evidence.v1")
@@ -845,9 +852,13 @@ class LearningPathTests(TestCase):
         self.assertGreaterEqual(planner_metadata["evidence"]["pathItemCount"], 1)
         self.assertEqual(plan_metadata["evidence"]["plannerInput"], "diagnostic_path_and_profile")
         self.assertEqual(plan_metadata["evidence"]["dayCount"], 7)
-        self.user.learner_profile.refresh_from_db()
-        self.assertEqual(self.user.learner_profile.daily_study_time, 45)
-        self.assertIn("同步互斥与信号量", self.user.learner_profile.weak_points)
+        profile.refresh_from_db()
+        self.assertEqual(profile.foundation_level, "基础")
+        self.assertEqual(profile.daily_study_time, 45)
+        self.assertEqual(profile.learning_goals[0], "期末复习")
+        self.assertEqual(profile.weak_points, ["进程与 PCB", "同步互斥与信号量"])
+        active_path = LearningPath.objects.get(user=self.user, status=LearningPathStatus.ACTIVE)
+        self.assertEqual(str(active_path.id), payload["path"]["id"])
 
     def test_admission_diagnostic_blueprint_uses_profile_to_order_questions(self):
         profile = self.user.learner_profile
