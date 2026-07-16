@@ -981,7 +981,7 @@ export function ClassroomViewRedesign() {
   return (
     <div
       className={cn(
-        'grid min-h-[calc(100dvh-104px)] gap-4 overflow-hidden',
+        'grid h-[calc(100dvh-104px)] min-h-[640px] gap-4 overflow-hidden',
         historyOpen && drawerOpen
           ? 'xl:grid-cols-[280px_minmax(0,1fr)_360px]'
           : historyOpen
@@ -1006,7 +1006,7 @@ export function ClassroomViewRedesign() {
         />
       )}
 
-      <section className="min-w-0 rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm" data-testid="a3-classroom-workspace">
+      <section className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm" data-testid="a3-classroom-workspace">
         <WorkspaceHeader
           copy={copy}
           classroom={classroom}
@@ -1021,7 +1021,7 @@ export function ClassroomViewRedesign() {
         />
         <OpenMAICInlineBar copy={copy} artifact={openmaicClassroomArtifact} />
 
-        <div className="grid h-[calc(100dvh-310px)] min-h-[460px] grid-rows-[minmax(0,1fr)_auto]">
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]">
           <div className="min-h-0 overflow-y-auto px-4 py-5 md:px-7" data-testid="a3-classroom-dialogue">
             <div className={cn('mx-auto flex w-full flex-col gap-5 transition-[max-width] duration-200 ease-out', contentWidthClass)}>
               {showLessonRunway && (

@@ -54,4 +54,13 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source).toContain('widthClassName={bubbleWidthClass}');
     expect(source).toContain("cn('mx-auto w-full transition-[max-width] duration-200 ease-out', contentWidthClass)");
   });
+
+  it('uses the available viewport height for courseware instead of a locked dialogue height', () => {
+    const source = fs.readFileSync(redesignPath, 'utf8');
+
+    expect(source).not.toContain('h-[calc(100dvh-310px)]');
+    expect(source).toContain('grid h-[calc(100dvh-104px)] min-h-[640px]');
+    expect(source).toContain('flex min-h-0 min-w-0 flex-col overflow-hidden');
+    expect(source).toContain('grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]');
+  });
 });
