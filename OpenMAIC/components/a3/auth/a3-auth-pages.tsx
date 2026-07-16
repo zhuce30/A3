@@ -34,8 +34,6 @@ import { A3ReviewLoginPanel } from '@/components/a3/auth/a3-review-login-panel';
 import { A3TopActions } from '@/components/a3/layout/a3-top-actions';
 import { useVerificationCode } from '@/components/a3/auth/use-verification-code';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
-import { DynamicProfileInsightPanel } from '@/components/a3/profile/dynamic-profile-insight-panel';
-import type { DynamicProfileInsight } from '@/components/a3/profile/dynamic-profile-insight-panel';
 import { a3GetJson, a3PatchJson, a3PostJson } from '@/lib/a3/api-client';
 import { getA3NextPathForUser, resolveA3LoginDestination } from '@/lib/a3/auth-navigation';
 import {
@@ -57,7 +55,6 @@ import {
 } from '@/lib/a3/profile-timeline';
 import type {
   A3LearningProfile,
-  A3ProfileSnapshot,
   A3PublicUser,
   A3UserRole,
   LearningProfileOptions,
@@ -860,8 +857,6 @@ export function ProfileSetupPage() {
   ]);
   const [missingInterviewDimensions, setMissingInterviewDimensions] = useState<string[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [dynamicProfile, setDynamicProfile] = useState<DynamicProfileInsight | null>(null);
-  const [profileSnapshot, setProfileSnapshot] = useState<A3ProfileSnapshot | null>(null);
   const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
   const [profileUpdateBusyId, setProfileUpdateBusyId] = useState('');
   const interviewThreadRef = useRef<HTMLDivElement>(null);
@@ -871,14 +866,11 @@ export function ProfileSetupPage() {
     const result = await a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/');
     if (result.success) {
       setProfileFeed(result);
-      setDynamicProfile(result.dynamicProfile ?? null);
-      setProfileSnapshot(result.profileSnapshot ?? null);
     }
   }, []);
 
   useEffect(() => {
     let active = true;
-    setLoadingOptions(true);
     const optionsRequest = a3GetJson<LearningProfileOptionsResponse>('/api/profiles/options/');
     optionsLoadRef.current = optionsRequest.then((result) => (result.success ? result.options : null));
     async function loadOptions() {
@@ -913,8 +905,6 @@ export function ProfileSetupPage() {
     a3GetJson<DynamicProfileFeedResponse>('/api/profiles/dynamic-profile/').then((result) => {
       if (!active || !result.success) return;
       setProfileFeed(result);
-      setDynamicProfile(result.dynamicProfile ?? null);
-      setProfileSnapshot(result.profileSnapshot ?? null);
     });
     return () => {
       active = false;
@@ -1034,12 +1024,8 @@ export function ProfileSetupPage() {
   }
 
   async function confirmProfileInterview() {
-    if (!interviewResult?.interviewSession?.turnCount) {
-      await submit();
-      return;
-    }
-    if (!interviewReadyToConfirm) {
-      const missing = interviewResult.missingDimensions ?? interviewResult.profileReadiness?.missingDimensions ?? interviewResult.interviewSession?.missingDimensions ?? [];
+    if (!interviewResult || !interviewReadyToConfirm) {
+      const missing = interviewResult?.missingDimensions ?? interviewResult?.profileReadiness?.missingDimensions ?? interviewResult?.interviewSession?.missingDimensions ?? [];
       setMissingInterviewDimensions(missing.map((item) => item.label).filter(Boolean));
       setMessage('还需要补充一项信息，请先回答上方问题。');
       return;
@@ -1126,21 +1112,8 @@ export function ProfileSetupPage() {
   const profileCompleteness = Math.round((filledProfileRows * 100) / previewRows.length);
   const hasInterviewHistory = interviewMessages.some((item) => item.role === 'user') || Boolean(interviewResult?.success);
   const hasProfileInputData = previewRows.slice(1).some(([, value]) => Boolean(value));
-  const hasProfileSnapshotData = Boolean(
-    (profileSnapshot?.signalSummary?.total ?? 0) > 0
-    || Object.values(profileSnapshot?.dimensions ?? {}).some((dimension) => !dimension.missing),
-  );
-  const hasDynamicProfileData = hasProfileSnapshotData || Boolean(
-    dynamicProfile && (
-      (dynamicProfile.learningEventsSummary?.total ?? 0) > 0
-      || (dynamicProfile.mistakePatterns?.length ?? 0) > 0
-      || (dynamicProfile.resourcePreferenceEvidence?.length ?? 0) > 0
-      || Boolean(dynamicProfile.cognitiveStyle || dynamicProfile.learningHistory || dynamicProfile.motivationRisk)
-      || Object.values(dynamicProfile.dimensions ?? {}).some((dimension) => !dimension.missing)
-    ),
-  );
   const hasProfileUpdateData = Boolean(profileFeed?.timeline?.length || profileFeed?.confirmationQueue?.length);
-  const showInterviewInsights = hasInterviewHistory || Boolean(interviewResult) || Boolean(saveResult) || hasProfileInputData || hasDynamicProfileData;
+  const showInterviewInsights = hasInterviewHistory || Boolean(interviewResult) || Boolean(saveResult) || hasProfileInputData;
   const showProfileSetupPanels = showInterviewInsights || hasProfileUpdateData;
 
   function goBack() {
@@ -1267,13 +1240,6 @@ export function ProfileSetupPage() {
                   </div>
                 )}
               </div>
-              {showInterviewInsights && (
-                <InterviewInsightStrip
-                  interviewResult={interviewResult}
-                  dynamicProfile={dynamicProfile}
-                  missingCount={missingInterviewDimensions.length}
-                />
-              )}
             </div>
             <div className="space-y-4 xl:sticky xl:top-6">
               {!showProfileSetupPanels ? (
@@ -1289,15 +1255,6 @@ export function ProfileSetupPage() {
                       profile={profile}
                       completeness={profileCompleteness}
                       saveResult={saveResult}
-                    />
-                  )}
-                  {dynamicProfile && hasDynamicProfileData && (
-                    <DynamicProfileInsightPanel
-                      dynamicProfile={dynamicProfile}
-                      profileSnapshot={profileSnapshot}
-                      compact
-                      title="系统已了解"
-                      subtitle="根据你的回答和学习记录持续整理。"
                     />
                   )}
                   {hasProfileUpdateData && (
@@ -1532,8 +1489,8 @@ function ProfilePreviewStrip({ previewRows }: { previewRows: string[][] }) {
   return (
     <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
       <div className="flex items-center justify-between gap-3">
-        <div className="text-sm font-semibold text-slate-900">画像预览</div>
-        <span className="text-xs text-slate-500">来自访谈抽取与手动校准</span>
+        <div className="text-sm font-semibold text-slate-900">已填写的学习信息</div>
+        <span className="text-xs text-slate-500">来自上方对话和手动填写</span>
       </div>
       <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {featured.map(([label, value]) => (
@@ -1582,7 +1539,7 @@ function ProfilePlanningImpactPreview({
     <div data-testid="a3-profile-planning-preview" className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-slate-950">系统将这样使用你的画像</div>
+          <div className="text-sm font-semibold text-slate-950">系统会这样安排学习</div>
           <div className="mt-1 text-xs leading-5 text-slate-500">{courseTitle} · 目标：{goals}</div>
         </div>
         <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">{completeness}%</span>
@@ -1611,40 +1568,6 @@ function ProfilePlanningImpactPreview({
           保存后，学习路径、周期计划和今日任务会根据这些信息自动更新。
         </div>
       )}
-    </div>
-  );
-}
-
-function InterviewInsightStrip({
-  interviewResult,
-  dynamicProfile,
-  missingCount,
-}: {
-  interviewResult: ProfileInterviewResult | null;
-  dynamicProfile: DynamicProfileInsight | null;
-  missingCount: number;
-}) {
-  const eventCount = dynamicProfile?.learningEventsSummary?.total ?? 0;
-  const dimensionCount = interviewResult?.profileReadiness?.dimensionCount ?? 0;
-  const statusText = interviewResult?.interviewComplete ? '可确认' : missingCount > 0 ? `还需补 ${missingCount} 项` : '等待生成';
-  return (
-    <div className="mt-4 grid gap-3 md:grid-cols-3">
-      <InsightTile label="画像维度" value={dimensionCount ? `${dimensionCount}` : '--'} detail={statusText} tone="blue" />
-      <InsightTile label="事件记忆" value={`${eventCount}`} detail="访谈/诊断/测评/课堂" tone="green" />
-      <InsightTile label="错因模式" value={`${dynamicProfile?.mistakePatterns?.length ?? 0}`} detail={dynamicProfile?.mistakePatterns?.[0] || '等待错题沉淀'} tone="orange" />
-    </div>
-  );
-}
-
-function InsightTile({ label, value, detail, tone }: { label: string; value: string; detail: string; tone: 'blue' | 'green' | 'orange' }) {
-  const toneClass = tone === 'green' ? 'bg-emerald-50 text-emerald-800' : tone === 'orange' ? 'bg-orange-50 text-orange-800' : 'bg-blue-50 text-blue-800';
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4">
-      <div className="text-xs font-medium text-slate-500">{label}</div>
-      <div className="mt-2 flex items-end justify-between gap-3">
-        <div className="text-2xl font-semibold text-slate-950">{value}</div>
-        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${toneClass}`}>{detail}</span>
-      </div>
     </div>
   );
 }

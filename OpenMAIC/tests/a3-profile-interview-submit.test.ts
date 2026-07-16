@@ -25,6 +25,8 @@ describe('A3 profile interview submit payload', () => {
     const confirmSource = sourceBetween(source, 'async function confirmProfileInterview()', '\n  async function resolveProfileUpdate(');
 
     expect(confirmSource).toContain("const result = await a3PostJson<ProfileInterviewResult>('/api/profile/interview/', { action: 'confirm' });");
+    expect(confirmSource).not.toContain('await submit()');
+    expect(confirmSource).not.toContain('interviewSession?.turnCount');
     expect(confirmSource).not.toMatch(/interviewComplete:\s*true/);
     expect(confirmSource).not.toMatch(/profileCommitted:\s*true/);
     expect(confirmSource).not.toMatch(/generated:\s*\{\s*path:\s*true/);
@@ -81,7 +83,7 @@ describe('A3 profile interview submit payload', () => {
 
   it('shows deferred planning as a diagnosis outcome instead of a generation failure', () => {
     const profileSetupSource = sourceBetween(source, 'export function ProfileSetupPage() {', '\nfunction ProfileUpdateTimelinePanel({');
-    const previewSource = sourceBetween(source, 'function ProfilePlanningImpactPreview({', '\nfunction InterviewInsightStrip({');
+    const previewSource = sourceBetween(source, 'function ProfilePlanningImpactPreview({', '\nfunction planModeLabel(');
 
     expect(profileSetupSource).toContain('学习路径和 14 天计划将在入学诊断后生成。');
     expect(profileSetupSource).toContain('saveResult.planningDeferred ? (');

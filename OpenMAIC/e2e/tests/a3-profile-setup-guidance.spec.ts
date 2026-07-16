@@ -144,6 +144,8 @@ test.describe.serial('A3 profile setup guidance and responsive behavior', () => 
     await expect(manualDisclosure).toBeVisible();
     await expect(page.getByText('Agent 决策证据', { exact: true })).toHaveCount(0);
     await expect(page.locator('body')).not.toContainText('逐项确认');
+    await expect(page.locator('body')).not.toContainText('画像信号证据');
+    await expect(page.locator('body')).not.toContainText('抽取 dashscope/qwen-plus');
 
     await manualDisclosure.click();
     for (const title of [
@@ -176,18 +178,22 @@ test.describe.serial('A3 profile setup guidance and responsive behavior', () => 
     const interviewPayload = await interviewResponse.json() as {
       success?: boolean;
       traceId?: string;
-      interviewSession?: { turnCount?: number };
+      nextQuestion?: string;
+      interviewSession?: { turnCount?: number; nextQuestion?: string };
     };
     expect(interviewPayload.success).toBeTruthy();
     expect(interviewPayload.traceId).toBeTruthy();
     expect(interviewPayload.interviewSession?.turnCount).toBeGreaterThan(0);
+    const nextQuestion = interviewPayload.nextQuestion || interviewPayload.interviewSession?.nextQuestion;
+    expect(nextQuestion).toBeTruthy();
     await expect(page.getByTestId('a3-profile-interview-thread')).toContainText(PROFILE_MESSAGE, { timeout: 60_000 });
+    await expect(page.getByTestId('a3-profile-interview-thread')).toContainText(nextQuestion!, { timeout: 60_000 });
 
     await page.reload();
     await expect(page.getByTestId('a3-profile-setup-view')).toBeVisible({ timeout: 60_000 });
     const restoredThread = page.getByTestId('a3-profile-interview-thread');
     await expect(restoredThread).toContainText(PROFILE_MESSAGE, { timeout: 60_000 });
-    await expect(restoredThread).toContainText('画像助手');
+    await expect(restoredThread).toContainText(nextQuestion!);
   });
 
   test('profile setup keeps its primary conversation controls usable across supported viewports', async ({ page }, testInfo: TestInfo) => {

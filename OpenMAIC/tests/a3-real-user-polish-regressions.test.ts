@@ -41,6 +41,8 @@ describe('A3 real-user polish regressions', () => {
     expect(profileSetupSource).not.toContain('对话生成画像');
     expect(profileSetupSource).not.toContain('确认画像并生成诊断任务');
     expect(profileSetupSource).not.toContain('Agent 决策证据');
+    expect(profileSetupSource).not.toContain('<InterviewInsightStrip');
+    expect(profileSetupSource).not.toContain('<DynamicProfileInsightPanel');
     expect(profileSetupSource).not.toContain('逐项确认');
     expect(profileSetupSource).not.toContain('ProfileSetupWizard');
   });
@@ -49,7 +51,7 @@ describe('A3 real-user polish regressions', () => {
     expect(profileSetupStart).toBeGreaterThanOrEqual(0);
     expect(profileSetupEnd).toBeGreaterThan(profileSetupStart);
     expect(profileSetupSource).toContain('const [loadingOptions, setLoadingOptions] = useState(true)');
-    expect(profileSetupSource).toContain('setLoadingOptions(true)');
+    expect(profileSetupSource).not.toContain('setLoadingOptions(true)');
     expect(profileSetupSource).toContain('setLoadingOptions(false)');
     expect(profileSetupSource).toContain("loadingOptions ? '正在加载课程信息' : optionsCourse");
     expect(profileSetupSource).toContain('const interviewThreadRef = useRef<HTMLDivElement>(null)');
