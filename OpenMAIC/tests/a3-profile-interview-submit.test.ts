@@ -18,7 +18,18 @@ describe('A3 profile interview submit payload', () => {
     const interviewSource = sourceBetween(source, 'async function runProfileInterview()', '\n  async function submit()');
 
     expect(interviewSource).toContain("const result = await a3PostJson<ProfileInterviewResult>('/api/profile/interview/', { message: messageText });");
+    expect(interviewSource).toContain("Object.prototype.hasOwnProperty.call(result, 'missingDimensions')");
+    expect(interviewSource).toContain('backendMissingDimensions ?? []');
     expect(interviewSource).not.toContain('{ message: dialogue }');
+  });
+
+  it('uses learner-facing labels for legacy missing-dimension fallback', () => {
+    const fallbackSource = sourceBetween(source, 'function getMissingProfileDimensions(', '\nfunction normalizeProfileInterviewMessages(');
+
+    expect(fallbackSource).toContain('更容易理解的讲解方式');
+    expect(fallbackSource).toContain('坚持学习时遇到的困难');
+    expect(fallbackSource).not.toContain("['认知风格'");
+    expect(fallbackSource).not.toContain("['动机风险'");
   });
 
   it('posts the exact confirm action without client-side completion flags', () => {

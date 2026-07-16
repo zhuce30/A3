@@ -991,8 +991,13 @@ export function ProfileSetupPage() {
       const loadedOptions = await optionsLoadRef.current;
       setProfile((current) => mergeInterviewProfile(current, extracted, loadedOptions ?? options));
     }
-    const backendMissing = result.missingDimensions ?? result.profileReadiness?.missingDimensions;
-    const missing = backendMissing?.length ? backendMissing.map((item) => item.label).filter(Boolean) : getMissingProfileDimensions(result.profile);
+    const hasBackendMissingDimensions = Object.prototype.hasOwnProperty.call(result, 'missingDimensions')
+      || Boolean(result.profileReadiness && Object.prototype.hasOwnProperty.call(result.profileReadiness, 'missingDimensions'))
+      || Boolean(result.interviewSession && Object.prototype.hasOwnProperty.call(result.interviewSession, 'missingDimensions'));
+    const backendMissingDimensions = result.missingDimensions ?? result.profileReadiness?.missingDimensions ?? result.interviewSession?.missingDimensions;
+    const missing = hasBackendMissingDimensions
+      ? (backendMissingDimensions ?? []).map((item) => item.label).filter(Boolean)
+      : getMissingProfileDimensions(result.profile);
     setMissingInterviewDimensions(missing);
     const nextPrompt = result.nextQuestion || buildProfileInterviewFollowUp(missing);
     const sessionMessages = normalizeProfileInterviewMessages(result.interviewSession);
@@ -1586,13 +1591,13 @@ function getMissingProfileDimensions(profile?: ProfileInterviewResult['profile']
     ['年级', profile?.grade],
     ['专业方向', profile?.majorDirection],
     ['基础水平', profile?.foundationLevel],
-    ['每日时间', profile?.dailyMinutes],
+    ['每天可以学习多久', profile?.dailyMinutes],
     ['学习目标', profile?.learningGoals?.length],
-    ['薄弱点', profile?.weakPoints?.length],
-    ['资源偏好', profile?.resourcePreferences?.length],
-    ['认知风格', profile?.cognitiveStyle],
-    ['学习历史', profile?.learningHistory],
-    ['动机风险', profile?.motivationRisk],
+    ['薄弱知识点', profile?.weakPoints?.length],
+    ['喜欢的资源类型', profile?.resourcePreferences?.length],
+    ['更容易理解的讲解方式', profile?.cognitiveStyle],
+    ['以前学过的内容', profile?.learningHistory],
+    ['坚持学习时遇到的困难', profile?.motivationRisk],
   ];
   return checks.filter(([, value]) => !value).map(([label]) => label);
 }
