@@ -269,6 +269,10 @@ class ProfileInterviewPlannerAgent(BaseAgent):
             success = True
             error = ""
             next_question = session["nextQuestion"]
+        planning_state = _restore_interview_planning_state(session)
+        generated = planning_state["generated"]
+        planning_deferred = planning_state["planningDeferred"]
+        planning_deferred_reason = planning_state["planningDeferredReason"]
         readiness = {
             "dimensionCount": _dimension_count(profile),
             "status": "ready" if not missing_dimensions else "partial",
@@ -289,22 +293,26 @@ class ProfileInterviewPlannerAgent(BaseAgent):
                 "profileCommitted": profile_committed,
                 "interviewSession": session,
                 "generated": generated,
-                "planningDeferred": True,
-                "planningDeferredReason": PLANNING_DEFERRED_REASON,
+                "planningDeferred": planning_deferred,
+                "planningDeferredReason": planning_deferred_reason,
             },
             state_patch={
                 "interviewSession": session,
                 "generated": generated,
-                "planningDeferred": True,
-                "planningDeferredReason": PLANNING_DEFERRED_REASON,
+                "planningDeferred": planning_deferred,
+                "planningDeferredReason": planning_deferred_reason,
             },
-            output_summary={"pathGenerated": False, "planGenerated": False, "success": success},
+            output_summary={
+                "pathGenerated": bool(generated.get("path")),
+                "planGenerated": bool(generated.get("studyPlan")),
+                "success": success,
+            },
             state_diff={"profileInterviewSession": "updated"},
             evidence={
-                "pathGenerated": False,
-                "planGenerated": False,
-                "planningDeferred": True,
-                "planningDeferredReason": PLANNING_DEFERRED_REASON,
+                "pathGenerated": bool(generated.get("path")),
+                "planGenerated": bool(generated.get("studyPlan")),
+                "planningDeferred": planning_deferred,
+                "planningDeferredReason": planning_deferred_reason,
             },
             quality={
                 "profileComplete": not missing_dimensions,
@@ -687,12 +695,16 @@ def _commit_interview_session(
     extra = dict(profile.extra_profile or {})
     previous_session = extra.get("profileInterviewSession")
     session = dict(previous_session) if isinstance(previous_session, dict) else {}
+    planning_source = session if session else {"generated": generated or {}}
+    planning_state = _restore_interview_planning_state(planning_source)
     messages = _valid_messages(session.get("messages"))
     now = timezone.now().isoformat()
     messages.append({"role": "user", "content": str(raw_text or "")[:500], "createdAt": now})
     if next_question:
         messages.append({"role": "agent", "content": str(next_question)[:500], "createdAt": now})
     interview_session = {
+        **EMPTY_PROFILE_INTERVIEW_SESSION,
+        **session,
         "schemaVersion": SESSION_SCHEMA_VERSION,
         "turnCount": int(session.get("turnCount") or 0) + 1,
         "latestTraceId": trace_id,
@@ -708,9 +720,7 @@ def _commit_interview_session(
         "askStrategy": ask_strategy,
         "nextQuestion": next_question,
         "interviewComplete": bool(interview_complete),
-        "generated": generated or {},
-        "planningDeferred": True,
-        "planningDeferredReason": PLANNING_DEFERRED_REASON,
+        **planning_state,
         "messages": messages[-12:],
         "updatedAt": now,
     }
@@ -734,6 +744,8 @@ def _update_interview_session_commit_state(
     extra = dict(profile.extra_profile or {})
     previous_session = extra.get("profileInterviewSession")
     session = dict(previous_session) if isinstance(previous_session, dict) else {}
+    planning_source = session if session else {"generated": generated or {}}
+    planning_state = _restore_interview_planning_state(planning_source)
     messages = _valid_messages(session.get("messages"))
     now = timezone.now().isoformat()
     if next_question:
@@ -756,9 +768,7 @@ def _update_interview_session_commit_state(
         "interviewComplete": not missing_dimensions,
         "profileCommitted": bool(committed),
         "confirmedAt": now if committed else str(session.get("confirmedAt") or ""),
-        "generated": generated if generated is not None else session.get("generated", {}),
-        "planningDeferred": True,
-        "planningDeferredReason": PLANNING_DEFERRED_REASON,
+        **planning_state,
         "messages": messages[-12:],
         "updatedAt": now,
     }

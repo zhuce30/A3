@@ -585,6 +585,92 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertFalse(session["planningDeferred"])
         self.assertEqual(session["planningDeferredReason"], "")
 
+    def test_profile_interview_message_preserves_legacy_generated_evidence(self):
+        profile, _ = LearnerProfile.objects.get_or_create(user=self.user)
+        historical_generated = {
+            "path": {"id": "legacy-path-001", "title": "Legacy learning path"},
+            "studyPlan": {"durationDays": 14, "status": "active"},
+        }
+        profile.extra_profile = {
+            "profileInterviewSession": {
+                "schemaVersion": "a3.profile-interview-session.v1",
+                "turnCount": 2,
+                "profileCommitted": True,
+                "generated": historical_generated,
+                "planningDeferred": False,
+                "planningDeferredReason": "",
+                "legacyMarker": "preserved",
+                "messages": [],
+            }
+        }
+        profile.save(update_fields=["extra_profile", "updated_at"])
+
+        with patch(
+            "backend.apps.compat.profile_interview._llm_extract_profile_dimensions",
+            side_effect=RuntimeError("force deterministic rule fallback"),
+        ):
+            response = self.client.post(
+                "/api/profile/interview/",
+                data=json.dumps({"message": "I prefer examples and can study 40 minutes daily"}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        session = payload["interviewSession"]
+        self.assertEqual(payload["generated"], historical_generated)
+        self.assertEqual(session["generated"], historical_generated)
+        self.assertFalse(session["planningDeferred"])
+        self.assertEqual(session["planningDeferredReason"], "")
+        self.assertTrue(session["profileCommitted"])
+        self.assertEqual(session["legacyMarker"], "preserved")
+
+    def test_profile_interview_confirm_preserves_legacy_generated_evidence(self):
+        profile, _ = LearnerProfile.objects.get_or_create(user=self.user)
+        historical_generated = {
+            "path": {"id": "legacy-path-001", "title": "Legacy learning path"},
+            "studyPlan": {"durationDays": 14, "status": "active"},
+        }
+        profile.grade = "sophomore"
+        profile.major_direction = "automation"
+        profile.foundation_level = "average"
+        profile.daily_study_time = 40
+        profile.learning_goals = ["prepare for graduate study"]
+        profile.weak_points = ["root locus"]
+        profile.expected_resources = ["worked examples"]
+        profile.learning_preferences = {"cognitiveStyle": "examples first"}
+        profile.extra_profile = {
+            "learningHistory": "studied introductory control theory",
+            "motivationRisk": "limited time on weekdays",
+            "profileInterviewSession": {
+                "schemaVersion": "a3.profile-interview-session.v1",
+                "turnCount": 2,
+                "profileCommitted": True,
+                "generated": historical_generated,
+                "planningDeferred": False,
+                "planningDeferredReason": "",
+                "legacyMarker": "preserved",
+                "messages": [],
+            },
+        }
+        profile.save()
+
+        response = self.client.post(
+            "/api/profile/interview/",
+            data=json.dumps({"action": "confirm"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        session = payload["interviewSession"]
+        self.assertEqual(payload["generated"], historical_generated)
+        self.assertEqual(session["generated"], historical_generated)
+        self.assertFalse(session["planningDeferred"])
+        self.assertEqual(session["planningDeferredReason"], "")
+        self.assertTrue(session["profileCommitted"])
+        self.assertEqual(session["legacyMarker"], "preserved")
+
     def test_profile_interview_session_api_preserves_explicit_legacy_planning_state(self):
         profile, _ = LearnerProfile.objects.get_or_create(user=self.user)
         profile.extra_profile = {
