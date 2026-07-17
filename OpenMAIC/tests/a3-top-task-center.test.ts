@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { subscribeToA3TaskStream } from '@/components/a3/layout/a3-top-actions';
+import { startA3TaskStream } from '@/lib/a3/task-stream-client';
 
 const topActionsPath = path.resolve(process.cwd(), 'components/a3/layout/a3-top-actions.tsx');
 
@@ -10,8 +10,6 @@ describe('A3 top task center panel', () => {
     const source = fs.readFileSync(topActionsPath, 'utf8');
 
     expect(source).toContain("type Panel = 'tasks' | 'notifications' | 'help' | 'language' | null");
-    expect(source).toContain("fetch('/api/a3/tasks'");
-    expect(source).toContain("new EventSource('/api/a3/tasks/stream'");
     expect(source).toContain('data-testid="a3-top-tasks-trigger"');
     expect(source).toContain('data-testid="a3-top-tasks-panel"');
     expect(source).toContain('data-testid="a3-top-task-item"');
@@ -53,33 +51,108 @@ describe('A3 top task center panel', () => {
     vi.useFakeTimers();
     vi.stubGlobal('window', { setInterval, clearInterval });
     vi.stubGlobal('EventSource', FakeEventSource);
-    const fallbackFetch = vi.fn();
-    const stop = subscribeToA3TaskStream({
-      loadTasks: fallbackFetch,
-      onTasks: vi.fn(),
+    const fallbackLoad = vi.fn().mockResolvedValue({ success: true, source: 'fallback' });
+    const onTasks = vi.fn();
+    const stop = startA3TaskStream({
+      loadTasks: fallbackLoad,
+      parseTasksEvent,
+      onTasks,
       onStateChange: vi.fn(),
     });
     const eventSource = FakeEventSource.latest!;
 
-    await vi.advanceTimersByTimeAsync(15_000);
-    expect(fallbackFetch).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fallbackLoad).toHaveBeenCalledTimes(1);
 
-    eventSource.emit('tasks', JSON.stringify({ success: true, tasks: [], summary: { total: 0, running: 0, failed: 0, succeeded: 0 } }));
+    eventSource.emit('tasks', JSON.stringify({ success: true, source: 'sse' }));
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(fallbackFetch).toHaveBeenCalledTimes(1);
+    expect(fallbackLoad).toHaveBeenCalledTimes(1);
 
     eventSource.emitError();
     await vi.advanceTimersByTimeAsync(15_000);
-    expect(fallbackFetch).toHaveBeenCalledTimes(2);
+    expect(fallbackLoad).toHaveBeenCalledTimes(2);
 
     eventSource.emit('open');
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(fallbackFetch).toHaveBeenCalledTimes(2);
+    expect(fallbackLoad).toHaveBeenCalledTimes(2);
 
     stop();
     expect(eventSource.close).toHaveBeenCalledOnce();
   });
+
+  it('serializes fallback loads and aborts the outstanding load on cleanup', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setInterval, clearInterval });
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const firstLoad = deferred<{ success: boolean }>();
+    const secondLoad = deferred<{ success: boolean }>();
+    const signals: AbortSignal[] = [];
+    const loadTasks = vi.fn((signal: AbortSignal) => {
+      signals.push(signal);
+      return signals.length === 1 ? firstLoad.promise : secondLoad.promise;
+    });
+    const stop = startA3TaskStream({ loadTasks, parseTasksEvent, onTasks: vi.fn(), onStateChange: vi.fn() });
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(loadTasks).toHaveBeenCalledTimes(1);
+
+    firstLoad.resolve({ success: true });
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(loadTasks).toHaveBeenCalledTimes(2);
+    expect(signals[1]?.aborted).toBe(false);
+
+    stop();
+    expect(signals[1]?.aborted).toBe(true);
+  });
+
+  it('aborts and ignores a stale fallback response after SSE recovery', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setInterval, clearInterval });
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const fallbackLoad = deferred<{ success: boolean; source: string }>();
+    let fallbackSignal: AbortSignal | undefined;
+    const onTasks = vi.fn();
+    const stop = startA3TaskStream({
+      loadTasks(signal: AbortSignal) {
+        fallbackSignal = signal;
+        return fallbackLoad.promise;
+      },
+      parseTasksEvent,
+      onTasks,
+      onStateChange: vi.fn(),
+    });
+    const eventSource = FakeEventSource.latest!;
+    await vi.advanceTimersByTimeAsync(0);
+
+    eventSource.emitError();
+    eventSource.emit('tasks', JSON.stringify({ success: true, source: 'sse' }));
+    expect(fallbackSignal?.aborted).toBe(true);
+    expect(onTasks).toHaveBeenCalledTimes(1);
+    expect(onTasks).toHaveBeenLastCalledWith({ success: true, source: 'sse' }, 'sse');
+
+    fallbackLoad.resolve({ success: true, source: 'stale-fallback' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onTasks).toHaveBeenCalledTimes(1);
+
+    stop();
+  });
 });
+
+function parseTasksEvent(data: string) {
+  try {
+    return JSON.parse(data) as { success: boolean; source?: string };
+  } catch {
+    return null;
+  }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 class FakeEventSource {
   static latest: FakeEventSource | null = null;

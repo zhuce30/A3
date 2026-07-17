@@ -8,11 +8,11 @@ import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import type { A3Notification, A3NotificationsResponse } from '@/lib/a3/engagement-types';
 import { searchA3HelpArticles } from '@/lib/a3/help-content';
 import { getA3LocaleLabel, useA3Locale, type A3Locale } from '@/lib/a3/i18n';
+import { startA3TaskStream } from '@/lib/a3/task-stream-client';
 import { cn } from '@/lib/utils';
 
 type ThemeMode = 'light' | 'dark';
 type Panel = 'tasks' | 'notifications' | 'help' | 'language' | null;
-type A3TaskStreamState = 'live' | 'fallback';
 
 type A3TaskProgressCounter = {
   current?: number;
@@ -108,26 +108,31 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
     if (!currentUser) return;
     let cancelled = false;
 
-    async function loadTasks() {
+    async function loadTasks(signal: AbortSignal): Promise<A3TasksResponse | null> {
       try {
-        const response = await fetch('/api/a3/tasks', { credentials: 'include', cache: 'no-store' });
+        const response = await fetch('/api/a3/tasks', { credentials: 'include', cache: 'no-store', signal });
         const result = (await response.json().catch(() => ({ success: false, error: '任务数据解析失败' }))) as A3TasksResponse;
-        if (cancelled) return;
+        if (cancelled || signal.aborted) return null;
         if (!response.ok || !result.success) {
-          setTaskError(result.error || `任务中心加载失败：${response.status}`);
-          return;
+          return {
+            ...result,
+            success: false,
+            error: result.error || `任务中心加载失败：${response.status}`,
+          };
         }
-        setTaskError('');
-        setTasks(result.tasks ?? []);
-        setTaskSummary(result.summary ?? null);
+        return result;
       } catch (error) {
-        if (!cancelled) setTaskError(error instanceof Error ? error.message : '任务中心暂时不可用');
+        if (cancelled || signal.aborted) return null;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : '任务中心暂时不可用',
+        };
       }
     }
 
-    void loadTasks();
-    const stopTaskStream = subscribeToA3TaskStream({
+    const stopTaskStream = startA3TaskStream({
       loadTasks,
+      parseTasksEvent: safeParseTasksEvent,
       onTasks(result) {
         if (cancelled) return;
         if (!result.success) {
@@ -137,7 +142,6 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
         setTaskError('');
         setTasks(result.tasks ?? []);
         setTaskSummary(result.summary ?? null);
-        setTaskStreamState('live');
       },
       onStateChange: setTaskStreamState,
     });
@@ -500,45 +504,6 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
       )}
     </div>
   );
-}
-
-export function subscribeToA3TaskStream({
-  loadTasks,
-  onTasks,
-  onStateChange,
-}: {
-  loadTasks: () => void | Promise<void>;
-  onTasks: (result: A3TasksResponse) => void;
-  onStateChange: (state: A3TaskStreamState) => void;
-}) {
-  let closed = false;
-  let streamLive = false;
-  const eventSource = new EventSource('/api/a3/tasks/stream', { withCredentials: true });
-  eventSource.addEventListener('open', () => {
-    if (closed) return;
-    streamLive = true;
-    onStateChange('live');
-  });
-  eventSource.addEventListener('tasks', (event) => {
-    const result = safeParseTasksEvent((event as MessageEvent).data);
-    if (!result || closed) return;
-    streamLive = true;
-    onTasks(result);
-  });
-  eventSource.onerror = () => {
-    if (closed) return;
-    streamLive = false;
-    onStateChange('fallback');
-  };
-  const fallbackTimer = window.setInterval(() => {
-    if (!streamLive) void loadTasks();
-  }, 15000);
-
-  return () => {
-    closed = true;
-    eventSource.close();
-    window.clearInterval(fallbackTimer);
-  };
 }
 
 function safeParseTasksEvent(data: string): A3TasksResponse | null {

@@ -49,18 +49,6 @@ describe('A3 unified task APIs', () => {
     expect(source).toContain('clearTaskStreamTimers');
   });
 
-  it('serializes task snapshots and backs off instead of creating overlapping backend polls', () => {
-    const source = fs.readFileSync(tasksStreamRoutePath, 'utf8');
-
-    expect(source).toContain('let snapshotInFlight = false');
-    expect(source).toContain('if (closed || snapshotInFlight) return TASK_SNAPSHOT_RETRY_MS;');
-    expect(source).toContain('snapshot = windowlessSetTimeout');
-    expect(source).toContain('ACTIVE_TASK_SNAPSHOT_INTERVAL_MS = 5_000');
-    expect(source).toContain('IDLE_TASK_SNAPSHOT_INTERVAL_MS = 60_000');
-    expect(source).toContain('TASK_SNAPSHOT_RETRY_MS = 30_000');
-    expect(source).not.toContain('windowlessSetInterval(() => void pushTasks(), 2500)');
-  });
-
   it('persists resource generation jobs through Django instead of only storing them in memory', () => {
     const source = fs.readFileSync(resourceJobsRoutePath, 'utf8');
 
@@ -240,8 +228,11 @@ describe('A3 task stream polling cadence', () => {
     await GET(taskStreamRequest(abortController.signal));
     await vi.advanceTimersByTimeAsync(5_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const upstreamSignal = (fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.signal;
+    expect(upstreamSignal?.aborted).toBe(false);
 
     abortController.abort();
+    expect(upstreamSignal?.aborted).toBe(true);
     resolveSecondSnapshot(taskSnapshotResponse(1));
     await vi.advanceTimersByTimeAsync(120_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -264,8 +255,11 @@ describe('A3 task stream polling cadence', () => {
     await reader.read();
     await vi.advanceTimersByTimeAsync(5_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const upstreamSignal = (fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.signal;
+    expect(upstreamSignal?.aborted).toBe(false);
 
     await reader.cancel();
+    expect(upstreamSignal?.aborted).toBe(true);
     resolveSecondSnapshot(taskSnapshotResponse(1));
     await vi.advanceTimersByTimeAsync(120_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);

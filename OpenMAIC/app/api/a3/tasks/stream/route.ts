@@ -13,6 +13,7 @@ export async function GET(request: NextRequest) {
   let snapshotInFlight = false;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let snapshot: ReturnType<typeof setTimeout> | null = null;
+  const upstreamAbortController = new AbortController();
 
   const clearTaskStreamTimers = () => {
     if (heartbeat) clearInterval(heartbeat);
@@ -25,6 +26,7 @@ export async function GET(request: NextRequest) {
     async start(controller) {
       request.signal.addEventListener('abort', () => {
         closed = true;
+        upstreamAbortController.abort();
         clearTaskStreamTimers();
         try {
           controller.close();
@@ -46,6 +48,7 @@ export async function GET(request: NextRequest) {
           const response = await fetch(resolveA3InternalFrontendEndpoint('/api/a3/tasks', request.nextUrl.origin), {
             headers: request.headers.get('cookie') ? { cookie: request.headers.get('cookie') || '' } : {},
             cache: 'no-store',
+            signal: upstreamAbortController.signal,
           });
           const payload = await response.json().catch(() => ({ success: false, error: '任务快照解析失败' }));
           send('tasks', payload);
@@ -80,6 +83,7 @@ export async function GET(request: NextRequest) {
     },
     cancel() {
       closed = true;
+      upstreamAbortController.abort();
       clearTaskStreamTimers();
     },
   });
