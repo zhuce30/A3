@@ -1558,10 +1558,11 @@ def _wrong_retry_feedback_payload(wrong: WrongQuestion, active_wrong: int) -> di
 def build_learning_report(user, period: str = "term") -> dict:
     now = timezone.now()
     today = timezone.localdate(now)
+    report_end_at = timezone.make_aware(datetime.combine(today + timedelta(days=1), time.min))
     period_key, period_start = _report_period_start(period, today)
     period_start_at = timezone.make_aware(datetime.combine(period_start, time.min)) if period_start else None
     all_answers = AssessmentAnswer.objects.filter(session__user=user)
-    answers = all_answers
+    answers = all_answers.filter(answered_at__lt=report_end_at)
     if period_start_at:
         answers = answers.filter(answered_at__gte=period_start_at)
     answer_stats = _report_answer_stats(
@@ -1570,6 +1571,7 @@ def build_learning_report(user, period: str = "term") -> dict:
         period_start_at=period_start_at,
         period_start=period_start,
         today=today,
+        report_end_at=report_end_at,
     )
     total_answers = answer_stats["period_total"]
     correct_answers = answer_stats["period_correct"]
@@ -1580,10 +1582,17 @@ def build_learning_report(user, period: str = "term") -> dict:
     completed_items = [
         item
         for item in path_items
-        if item.status == PathItemStatus.COMPLETED and (not period_start_at or (item.completed_at and item.completed_at >= period_start_at))
+        if item.status == PathItemStatus.COMPLETED
+        and item.completed_at
+        and item.completed_at < report_end_at
+        and (not period_start_at or item.completed_at >= period_start_at)
     ]
     study_minutes = sum(item.estimated_minutes for item in completed_items)
-    wrong_items = list(WrongQuestion.objects.filter(user=user).select_related("question__knowledge_point"))
+    wrong_items = list(
+        WrongQuestion.objects.filter(user=user, last_wrong_at__lt=report_end_at).select_related(
+            "question__knowledge_point"
+        )
+    )
     wrong_active = [wrong for wrong in wrong_items if not wrong.mastered]
     mastered_wrong = sum(1 for wrong in wrong_items if wrong.mastered)
     daily_answers = _report_daily_answers(answers, now)
@@ -1640,7 +1649,7 @@ def build_learning_report(user, period: str = "term") -> dict:
         end=today,
         answer_stats=answer_stats,
     )
-    knowledge_point_insights = _knowledge_point_insights(user, start=period_start_at)
+    knowledge_point_insights = _knowledge_point_insights(user, start=period_start_at, end=report_end_at)
     updated_at = now.isoformat()
     return {
         "period": period_payload,
@@ -1674,23 +1683,33 @@ def build_learning_report(user, period: str = "term") -> dict:
     }
 
 
-def _report_answer_stats(all_answers, *, period_key: str, period_start_at, period_start, today) -> dict:
-    period_filter = models.Q()
+def _report_answer_stats(
+    all_answers,
+    *,
+    period_key: str,
+    period_start_at,
+    period_start,
+    today,
+    report_end_at,
+) -> dict:
+    period_filter = models.Q(answered_at__lt=report_end_at)
     if period_start_at:
         period_filter &= models.Q(answered_at__gte=period_start_at)
     aggregates = {
         "period_total": models.Count("id", filter=period_filter),
         "period_correct": models.Count("id", filter=period_filter & models.Q(is_correct=True)),
-        "first_answer_at": models.Min("answered_at"),
+        "first_answer_at": models.Min(
+            "answered_at",
+            filter=models.Q(answered_at__lt=report_end_at),
+        ),
     }
     if period_key != "term":
         current_start_at = timezone.make_aware(datetime.combine(period_start, time.min))
-        current_end_at = timezone.make_aware(datetime.combine(today + timedelta(days=1), time.min))
         window_days = (today - period_start).days + 1
         previous_end = period_start - timedelta(days=1)
         previous_start = previous_end - timedelta(days=window_days - 1)
         previous_start_at = timezone.make_aware(datetime.combine(previous_start, time.min))
-        current_filter = models.Q(answered_at__gte=current_start_at, answered_at__lt=current_end_at)
+        current_filter = models.Q(answered_at__gte=current_start_at, answered_at__lt=report_end_at)
         previous_filter = models.Q(answered_at__gte=previous_start_at, answered_at__lt=current_start_at)
         aggregates.update(
             {
@@ -1771,7 +1790,7 @@ def _report_comparisons(*, period_key: str, start, end, answer_stats: dict) -> d
     }
 
 
-def _knowledge_point_insights(user, *, start, limit: int = 3) -> list[dict]:
+def _knowledge_point_insights(user, *, start, end=None, limit: int = 3) -> list[dict]:
     if limit <= 0:
         return []
 
@@ -1779,6 +1798,8 @@ def _knowledge_point_insights(user, *, start, limit: int = 3) -> list[dict]:
     answers = AssessmentAnswer.objects.filter(session__user=user)
     if start:
         answers = answers.filter(answered_at__gte=start)
+    if end:
+        answers = answers.filter(answered_at__lt=end)
 
     latest_answers = AssessmentAnswer.objects.filter(
         session__user=user,
@@ -1786,6 +1807,8 @@ def _knowledge_point_insights(user, *, start, limit: int = 3) -> list[dict]:
     )
     if start:
         latest_answers = latest_answers.filter(answered_at__gte=start)
+    if end:
+        latest_answers = latest_answers.filter(answered_at__lt=end)
     latest_answers = latest_answers.order_by("-answered_at", "-pk")
 
     answer_rows = (
@@ -1812,8 +1835,11 @@ def _knowledge_point_insights(user, *, start, limit: int = 3) -> list[dict]:
             "activeWrongQuestions": 0,
         }
 
+    active_wrong = WrongQuestion.objects.filter(user=user, mastered=False)
+    if end:
+        active_wrong = active_wrong.filter(last_wrong_at__lt=end)
     active_wrong_rows = (
-        WrongQuestion.objects.filter(user=user, mastered=False)
+        active_wrong
         .values("question__knowledge_point_id", "question__knowledge_point__title")
         .annotate(active_wrong_count=models.Count("id"))
         .order_by("-active_wrong_count", "question__knowledge_point__title")[:candidate_limit]

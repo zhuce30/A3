@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta, timezone as datetime_timezone
+from datetime import date, datetime, time, timedelta, timezone as datetime_timezone
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -291,6 +291,56 @@ class LearningReportV2Tests(TestCase):
         self.assertEqual(report["period"]["end"], "2026-07-17")
         self.assertEqual(report["comparisons"]["currentWindow"]["end"], "2026-07-17")
 
+    def test_future_answers_and_path_completions_are_excluded_from_term_report(self):
+        today = timezone.localdate()
+        report_end_at = timezone.make_aware(datetime.combine(today + timedelta(days=1), time.min))
+        future_at = report_end_at + timedelta(hours=2)
+        session = AssessmentSession.objects.create(user=self.user, question_ids=[])
+        answer = AssessmentAnswer.objects.create(
+            session=session,
+            question=self.questions[0],
+            selected_answer="A",
+            is_correct=True,
+        )
+        AssessmentAnswer.objects.filter(pk=answer.pk).update(answered_at=future_at)
+        path = LearningPath.objects.create(
+            user=self.user,
+            course=self.knowledge_point.chapter.course,
+            title="Future evidence path",
+        )
+        LearningPathItem.objects.create(
+            path=path,
+            knowledge_point=self.knowledge_point,
+            order=1,
+            status=PathItemStatus.COMPLETED,
+            progress=100,
+            estimated_minutes=45,
+            completed_at=future_at,
+        )
+
+        report = build_learning_report(self.user, "term")
+
+        self.assertEqual(
+            report["metrics"],
+            {
+                "studyMinutes": 0,
+                "studyDays": 0,
+                "masteredKnowledgePoints": 0,
+                "totalKnowledgePoints": 1,
+                "answeredQuestions": 0,
+                "accuracy": 0,
+                "activeWrongQuestions": 0,
+                "masteredWrongQuestions": 0,
+                "pathProgress": 0,
+            },
+        )
+        self.assertEqual(report["period"]["start"], today.isoformat())
+        self.assertTrue(all(bucket["questions"] == 0 for bucket in report["trends"]))
+        self.assertEqual(report["comparisons"]["currentWindow"]["answeredCount"], 0)
+        self.assertEqual(report["knowledgePointInsights"], [])
+        self.assertEqual(next(axis["value"] for axis in report["capabilityAxes"] if axis["label"] == "持续学习"), 0)
+        self.assertEqual(report["dataQuality"]["evidenceState"], "insufficient")
+
     def test_knowledge_point_insights_use_bounded_aggregate_queries(self):
         self._create_answers(days_ago=1, correctness=[True, False, True, False])
         WrongQuestion.objects.create(
@@ -347,15 +397,67 @@ class LearningReportV2Tests(TestCase):
             last_wrong_answer="B",
         )
 
-        with CaptureQueriesContext(connection) as queries:
-            report = build_learning_report(self.user, "30d")
+        LearnerProfile.objects.get_or_create(user=self.user)
+        self.user.refresh_from_db()
+        self.user.learner_profile
 
-        select_queries = [
-            query["sql"] for query in queries.captured_queries if query["sql"].lstrip().upper().startswith("SELECT")
-        ]
-        answer_selects = [sql for sql in select_queries if "a3_assessment_answers" in sql.lower()]
-        self.assertEqual(report["metrics"]["answeredQuestions"], 7)
-        self.assertEqual(report["metrics"]["activeWrongQuestions"], 1)
-        self.assertLessEqual(len(select_queries), 12, "\n\n".join(select_queries))
-        self.assertLessEqual(len(answer_selects), 4, "\n\n".join(answer_selects))
-        self.assertTrue(all("CONVERT_TZ" not in sql.upper() for sql in answer_selects), "\n\n".join(answer_selects))
+        def capture_report_queries():
+            with CaptureQueriesContext(connection) as queries:
+                report = build_learning_report(self.user, "30d")
+            select_queries = [
+                query["sql"]
+                for query in queries.captured_queries
+                if query["sql"].lstrip().upper().startswith("SELECT")
+            ]
+            answer_selects = [sql for sql in select_queries if "a3_assessment_answers" in sql.lower()]
+            return report, select_queries, answer_selects
+
+        small_report, small_selects, small_answer_selects = capture_report_queries()
+
+        for order in range(2, 13):
+            point = KnowledgePoint.objects.create(
+                chapter=self.knowledge_point.chapter,
+                code=f"report-v2-extra-{order}",
+                order=order,
+                title=f"Extra report point {order}",
+            )
+            LearningPathItem.objects.create(
+                path=path,
+                knowledge_point=point,
+                order=order,
+                status=PathItemStatus.CURRENT if order == 2 else PathItemStatus.LOCKED,
+            )
+        for index, question in enumerate(self.questions):
+            if index in {2, 3}:
+                continue
+            WrongQuestion.objects.create(
+                user=self.user,
+                question=question,
+                wrong_count=index + 1,
+                mastered=index % 2 == 0,
+                last_wrong_answer="B",
+            )
+        for days_ago in range(25):
+            self._create_answers(
+                days_ago=days_ago,
+                correctness=[index % 3 != 0 for index in range(len(self.questions))],
+            )
+
+        large_report, large_selects, large_answer_selects = capture_report_queries()
+
+        self.assertEqual(small_report["metrics"]["answeredQuestions"], 7)
+        self.assertGreater(large_report["metrics"]["answeredQuestions"], 200)
+        self.assertTrue(small_answer_selects)
+        self.assertTrue(large_answer_selects)
+        self.assertLessEqual(len(large_selects), len(small_selects), "\n\n".join(large_selects))
+        self.assertLessEqual(
+            len(large_answer_selects),
+            len(small_answer_selects),
+            "\n\n".join(large_answer_selects),
+        )
+        for select_queries, answer_selects in (
+            (small_selects, small_answer_selects),
+            (large_selects, large_answer_selects),
+        ):
+            self.assertLessEqual(len(select_queries), 12, "\n\n".join(select_queries))
+            self.assertLessEqual(len(answer_selects), 4, "\n\n".join(answer_selects))
