@@ -14,6 +14,27 @@ type WorkflowDocument = {
   jobs?: Record<string, { if?: unknown; steps?: WorkflowStep[] }>;
 };
 
+type ComposeService = {
+  image?: unknown;
+  command?: unknown;
+  healthcheck?: {
+    test?: unknown;
+    interval?: unknown;
+    timeout?: unknown;
+    retries?: unknown;
+    start_period?: unknown;
+  };
+  depends_on?: Record<string, { condition?: unknown }>;
+  logging?: {
+    driver?: unknown;
+    options?: Record<string, unknown>;
+  };
+};
+
+type ComposeDocument = {
+  services?: Record<string, ComposeService>;
+};
+
 const resetSequenceType = new yaml.Type('!reset', {
   kind: 'sequence',
   construct: (data: unknown[]) => data ?? [],
@@ -82,5 +103,54 @@ describe('A3 private GHCR backend deployment', () => {
       '--max-tasks-per-child=5',
     ]);
     expect(compose.services?.['celery-beat']?.command).toBeUndefined();
+  });
+
+  it('gates backend consumers on the public readiness probe', () => {
+    const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
+      schema: composeSchema,
+    }) as ComposeDocument;
+    const backendHealthcheck = compose.services?.backend?.healthcheck;
+
+    expect(backendHealthcheck).toEqual({
+      test: [
+        'CMD',
+        'python',
+        '-c',
+        "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/ready/', timeout=3)",
+      ],
+      interval: '15s',
+      timeout: '5s',
+      retries: 6,
+      start_period: '45s',
+    });
+    expect(compose.services?.frontend?.depends_on?.backend?.condition).toBe(
+      'service_healthy',
+    );
+    expect(
+      compose.services?.['realtime-proxy']?.depends_on?.backend?.condition,
+    ).toBe('service_healthy');
+  });
+
+  it('rotates json-file logs for every production service', () => {
+    const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
+      schema: composeSchema,
+    }) as ComposeDocument;
+    const productionServices = [
+      'mysql',
+      'redis',
+      'backend',
+      'celery',
+      'celery-beat',
+      'frontend',
+      'realtime-proxy',
+      'caddy',
+    ];
+
+    for (const serviceName of productionServices) {
+      expect(compose.services?.[serviceName]?.logging, serviceName).toEqual({
+        driver: 'json-file',
+        options: { 'max-size': '10m', 'max-file': '3' },
+      });
+    }
   });
 });

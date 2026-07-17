@@ -1,6 +1,13 @@
+x-a3-logging: &a3-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   mysql:
     restart: unless-stopped
+    logging: *a3-logging
     ports: !reset []
     environment:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-a3_learning}
@@ -10,11 +17,13 @@ services:
 
   redis:
     restart: unless-stopped
+    logging: *a3-logging
     ports: !reset []
 
   backend:
     image: ${A3_BACKEND_IMAGE:-ghcr.io/zhuce30/a3-backend:latest}
     restart: unless-stopped
+    logging: *a3-logging
     env_file:
       - .env.production
     command:
@@ -47,10 +56,17 @@ services:
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "1"
       A3_SEED_DEMO_DATA: ${A3_SEED_DEMO_DATA:-1}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/ready/', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 45s
 
   celery:
     image: ${A3_BACKEND_IMAGE:-ghcr.io/zhuce30/a3-backend:latest}
     restart: unless-stopped
+    logging: *a3-logging
     command:
       - celery
       - -A
@@ -86,6 +102,7 @@ services:
   celery-beat:
     image: ${A3_BACKEND_IMAGE:-ghcr.io/zhuce30/a3-backend:latest}
     restart: unless-stopped
+    logging: *a3-logging
     env_file:
       - .env.production
     environment:
@@ -112,6 +129,7 @@ services:
   frontend:
     image: ${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}
     restart: unless-stopped
+    logging: *a3-logging
     build:
       args:
         NEXT_PUBLIC_A3_API_BASE_URL: ${NEXT_PUBLIC_A3_API_BASE_URL:-https://api.zhuce.work}
@@ -131,10 +149,14 @@ services:
       A3_REALTIME_WS_PROXY_URL: ${A3_REALTIME_WS_PROXY_URL:-wss://a3.zhuce.work/a3/realtime/ws}
     volumes:
       - a3-frontend-data:/app/data
+    depends_on:
+      backend:
+        condition: service_healthy
 
   realtime-proxy:
     image: ${A3_FRONTEND_IMAGE:-ghcr.io/zhuce30/a3-frontend:latest}
     restart: unless-stopped
+    logging: *a3-logging
     command: ["node", "scripts/a3-dashscope-realtime-proxy.mjs"]
     env_file:
       - .env.production
@@ -145,7 +167,8 @@ services:
       A3_REALTIME_WS_PROXY_HOST: 0.0.0.0
       A3_REALTIME_WS_PROXY_PORT: "3003"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3003/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
@@ -155,6 +178,7 @@ services:
   caddy:
     image: caddy:2.8-alpine
     restart: unless-stopped
+    logging: *a3-logging
     ports:
       - "80:80"
       - "443:443"
