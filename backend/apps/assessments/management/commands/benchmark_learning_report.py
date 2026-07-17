@@ -29,21 +29,26 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         period = str(options.get("period") or "30d").strip()
-        repeat = int(options.get("repeat") or 0)
+        try:
+            repeat = int(options.get("repeat") or 0)
+        except (TypeError, ValueError) as exc:
+            raise CommandError(f"Repeat must be between {MIN_REPEAT} and {MAX_REPEAT}") from exc
         if period not in SUPPORTED_PERIODS:
             raise CommandError("Period must be one of: 7d, 30d, term")
         if not MIN_REPEAT <= repeat <= MAX_REPEAT:
             raise CommandError(f"Repeat must be between {MIN_REPEAT} and {MAX_REPEAT}")
 
         user = self._load_user(str(options.get("user_id") or "").strip())
+        user_id = user.pk
         elapsed_values: list[float] = []
         query_counts: list[int] = []
 
         for _ in range(repeat):
-            started = perf_counter()
+            measured_user = User.objects.get(pk=user_id)
             with CaptureQueriesContext(connection) as captured:
-                build_learning_report(user, period=period)
-            elapsed_values.append((perf_counter() - started) * 1000)
+                started = perf_counter()
+                build_learning_report(measured_user, period=period)
+                elapsed_values.append((perf_counter() - started) * 1000)
             query_counts.append(len(captured))
 
         payload = {
