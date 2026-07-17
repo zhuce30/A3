@@ -757,6 +757,22 @@ export function CapabilitiesView() {
 
       {message && <div className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700">{message}</div>}
 
+      <details className="rounded-[14px] border border-slate-200 bg-white" data-testid="a3-learning-report-audit-evidence">
+        <summary className="cursor-pointer px-5 py-4 text-sm font-semibold text-slate-950">
+          学习报告计算与策略证据
+        </summary>
+        <div className="grid gap-3 border-t border-slate-200 p-5 md:grid-cols-2 xl:grid-cols-4">
+          <MetricInline label="event schema" value={learningEffectReport?.eventStream?.schemaVersion ?? 'not loaded'} />
+          <MetricInline label="v2 events" value={`${learningEffectReport?.eventStream?.v2EventCount ?? 0}`} />
+          <MetricInline label="strategy candidates" value={`${learningEffectReport?.optimizationPolicy?.candidates?.length ?? 0}`} />
+          <MetricInline label="decision history" value={`${optimizationPolicyResponse?.decisionHistory?.length ?? 0}/12`} />
+          <MetricInline label="policy version" value={learningEffectReport?.optimizationPolicy?.policyVersion ?? '--'} />
+          <MetricInline label="decision id" value={learningEffectReport?.optimizationPolicy?.decisionId ?? '--'} />
+          <MetricInline label="outcome" value={learningEffectReport?.optimizationPolicy?.outcomeStatus ?? 'pending'} />
+          <MetricInline label="independent API" value={optimizationPolicyResponse?.success ? 'ready' : 'not loaded'} />
+        </div>
+      </details>
+
       {data?.productReadiness && (
         <A3Card
           title="产品就绪度"

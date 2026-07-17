@@ -149,6 +149,68 @@ export type WrongRetryFeedback = {
   };
 };
 
+export type StudentReportEvidenceState = 'ready' | 'partial' | 'insufficient';
+export type StudentReportComparisonAvailability = 'available' | 'insufficient_sample' | 'unavailable';
+
+export type StudentReportAction = {
+  label: string;
+  href: string;
+  estimatedMinutes: number;
+  expectedOutcome: string;
+};
+
+export type StudentReportSummary = {
+  schemaVersion: string;
+  headline: string;
+  summary: string;
+  progressSignal: string;
+  primaryRisk: string;
+  primaryAction: StudentReportAction;
+  evidence: Array<{ label: string; value: string; source: 'assessment' | 'wrong_notebook' | 'study_plan' }>;
+};
+
+export type StudentReportComparisonWindow = {
+  start: string;
+  end: string;
+  answeredCount: number;
+  correctCount: number;
+  accuracy: number | null;
+};
+
+export type StudentReportComparisons = {
+  periodKey: '7d' | '30d' | 'term';
+  currentWindow: StudentReportComparisonWindow;
+  previousWindow: StudentReportComparisonWindow | null;
+  accuracy: {
+    availability: StudentReportComparisonAvailability;
+    comparable: boolean;
+    currentValue: number | null;
+    previousValue: number | null;
+    percentagePointChange: number | null;
+    reason: string;
+  };
+};
+
+export type KnowledgePointInsight = {
+  knowledgePoint: string;
+  answeredCount: number;
+  wrongCount: number;
+  latestResult: 'correct' | 'incorrect' | null;
+  activeWrongQuestions: number;
+  status: 'needs_review' | 'improving' | 'stable' | 'insufficient_evidence';
+  reason: string;
+  action: Omit<StudentReportAction, 'expectedOutcome'>;
+};
+
+export type StudentReportDataQuality = {
+  evidenceState: StudentReportEvidenceState;
+  answeredQuestions: number;
+  knowledgePointCount: number;
+  comparisonAvailable: boolean;
+  missingReasons: string[];
+  lastUpdatedAt: string;
+};
+
 export type LearningReport = {
   period: { key?: '7d' | '30d' | 'term'; label?: string; start: string; end: string };
   metrics: {
@@ -284,5 +346,9 @@ export type LearningReport = {
       type: 'review' | 'plan' | 'assessment' | 'today';
     }>;
   };
+  studentSummary?: StudentReportSummary;
+  comparisons?: StudentReportComparisons;
+  knowledgePointInsights?: KnowledgePointInsight[];
+  dataQuality?: StudentReportDataQuality;
   updatedAt: string;
 };

@@ -1556,7 +1556,8 @@ def _wrong_retry_feedback_payload(wrong: WrongQuestion, active_wrong: int) -> di
 
 def build_learning_report(user, period: str = "term") -> dict:
     now = timezone.now()
-    period_key, period_start = _report_period_start(period, now)
+    today = timezone.localdate(now)
+    period_key, period_start = _report_period_start(period, today)
     period_start_at = timezone.make_aware(datetime.combine(period_start, time.min)) if period_start else None
     all_answers = AssessmentAnswer.objects.filter(session__user=user)
     answers = all_answers
@@ -1579,7 +1580,7 @@ def build_learning_report(user, period: str = "term") -> dict:
     if path:
         study_dates.update(item.completed_at.date() for item in completed_items if item.completed_at)
 
-    trends = _report_trends(answers, now, period_key, period_start)
+    trends = _report_trends(answers, today, period_key, period_start)
 
     knowledge_score = accuracy
     progress_score = path and path.items.count() and round(len(completed_items) * 100 / path.items.count()) or 0
@@ -1601,9 +1602,9 @@ def build_learning_report(user, period: str = "term") -> dict:
 
     first_answer = all_answers.order_by("answered_at").first()
     first_period_answer = answers.order_by("answered_at").first()
-    report_start = period_start or (first_answer.answered_at.date() if first_answer else now.date())
+    report_start = period_start or (timezone.localdate(first_answer.answered_at) if first_answer else today)
     if first_period_answer and not period_start:
-        report_start = first_period_answer.answered_at.date()
+        report_start = timezone.localdate(first_period_answer.answered_at)
     weekly_summary = _weekly_learning_summary(user, now)
     metrics = {
         "studyMinutes": study_minutes,
@@ -1616,32 +1617,393 @@ def build_learning_report(user, period: str = "term") -> dict:
         "masteredWrongQuestions": mastered_wrong,
         "pathProgress": progress_score,
     }
+    period_payload = {
+        "key": period_key,
+        "label": _report_period_label(period_key),
+        "start": report_start.isoformat(),
+        "end": today.isoformat(),
+    }
+    weekly_prescription = _weekly_prescription(weekly_summary, metrics)
+    action_loop = _report_action_loop(weekly_summary, metrics)
+    wrong_review_insight = _wrong_review_insight(wrong_active, mastered_wrong)
+    comparisons = _report_comparisons(
+        user,
+        period_key=period_key,
+        start=period_start or report_start,
+        end=today,
+    )
+    knowledge_point_insights = _knowledge_point_insights(user, start=period_start_at)
+    updated_at = now.isoformat()
     return {
-        "period": {
-            "key": period_key,
-            "label": _report_period_label(period_key),
-            "start": report_start.isoformat(),
-            "end": now.date().isoformat(),
-        },
+        "period": period_payload,
         "metrics": metrics,
         "trends": trends,
         "capabilityAxes": capability_axes,
         "suggestions": suggestions,
         "weeklySummary": weekly_summary,
-        "weeklyPrescription": _weekly_prescription(weekly_summary, metrics),
-        "actionLoop": _report_action_loop(weekly_summary, metrics),
-        "wrongReviewInsight": _wrong_review_insight(wrong_active, mastered_wrong),
+        "weeklyPrescription": weekly_prescription,
+        "actionLoop": action_loop,
+        "wrongReviewInsight": wrong_review_insight,
         "resourcePackEffect": _resource_pack_effect(user),
-        "updatedAt": now.isoformat(),
+        "updatedAt": updated_at,
+        "studentSummary": _student_report_summary(
+            user=user,
+            period=period_payload,
+            metrics=metrics,
+            comparisons=comparisons,
+            knowledge_points=knowledge_point_insights,
+            weekly_prescription=weekly_prescription,
+            wrong_review_insight=wrong_review_insight,
+        ),
+        "comparisons": comparisons,
+        "knowledgePointInsights": knowledge_point_insights,
+        "dataQuality": _report_data_quality(
+            answered_questions=total_answers,
+            comparisons=comparisons,
+            knowledge_points=knowledge_point_insights,
+            updated_at=updated_at,
+        ),
     }
 
 
-def _report_period_start(period: str, now) -> tuple[str, object | None]:
+def _report_comparisons(user, *, period_key: str, start, end) -> dict:
+    answers = AssessmentAnswer.objects.filter(session__user=user)
+
+    def window_stats(window_start, window_end) -> dict:
+        window_start_at = timezone.make_aware(datetime.combine(window_start, time.min))
+        window_end_at = timezone.make_aware(datetime.combine(window_end + timedelta(days=1), time.min))
+        window_answers = answers.filter(answered_at__gte=window_start_at, answered_at__lt=window_end_at)
+        answered_count = window_answers.count()
+        correct_count = window_answers.filter(is_correct=True).count()
+        return {
+            "start": window_start.isoformat(),
+            "end": window_end.isoformat(),
+            "answeredCount": answered_count,
+            "correctCount": correct_count,
+            "accuracy": round(correct_count * 100 / answered_count, 1) if answered_count else None,
+        }
+
+    if period_key == "term":
+        current_count = answers.count()
+        current_correct = answers.filter(is_correct=True).count()
+        current_window = {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "answeredCount": current_count,
+            "correctCount": current_correct,
+            "accuracy": round(current_correct * 100 / current_count, 1) if current_count else None,
+        }
+        return {
+            "periodKey": period_key,
+            "currentWindow": current_window,
+            "previousWindow": None,
+            "accuracy": {
+                "availability": "unavailable",
+                "comparable": False,
+                "currentValue": current_window["accuracy"],
+                "previousValue": None,
+                "percentagePointChange": None,
+                "reason": "本学期暂无真实上一学期窗口，暂不进行趋势比较。",
+            },
+        }
+
+    window_days = (end - start).days + 1
+    previous_end = start - timedelta(days=1)
+    previous_start = previous_end - timedelta(days=window_days - 1)
+    current_window = window_stats(start, end)
+    previous_window = window_stats(previous_start, previous_end)
+    current_count = current_window["answeredCount"]
+    previous_count = previous_window["answeredCount"]
+    comparable = current_count >= 3 and previous_count >= 3
+    if comparable:
+        reason = "当前周期与上一等长周期均达到至少 3 次作答，可以比较正确率。"
+        percentage_point_change = round(current_window["accuracy"] - previous_window["accuracy"], 1)
+    elif previous_count == 0:
+        reason = "上一周期暂无作答，两个周期均至少 3 次作答后才能比较。"
+        percentage_point_change = None
+    else:
+        reason = "当前周期和上一周期都至少 3 次作答后才能比较。"
+        percentage_point_change = None
+    return {
+        "periodKey": period_key,
+        "currentWindow": current_window,
+        "previousWindow": previous_window,
+        "accuracy": {
+            "availability": "available" if comparable else "insufficient_sample",
+            "comparable": comparable,
+            "currentValue": current_window["accuracy"],
+            "previousValue": previous_window["accuracy"],
+            "percentagePointChange": percentage_point_change,
+            "reason": reason,
+        },
+    }
+
+
+def _knowledge_point_insights(user, *, start, limit: int = 3) -> list[dict]:
+    if limit <= 0:
+        return []
+
+    candidate_limit = max(12, limit * 4)
+    answers = AssessmentAnswer.objects.filter(session__user=user)
+    if start:
+        answers = answers.filter(answered_at__gte=start)
+
+    latest_answers = AssessmentAnswer.objects.filter(
+        session__user=user,
+        question__knowledge_point_id=models.OuterRef("question__knowledge_point_id"),
+    )
+    if start:
+        latest_answers = latest_answers.filter(answered_at__gte=start)
+    latest_answers = latest_answers.order_by("-answered_at", "-pk")
+
+    answer_rows = (
+        answers.values("question__knowledge_point_id", "question__knowledge_point__title")
+        .annotate(
+            answered_count=models.Count("id"),
+            wrong_count=models.Count("id", filter=models.Q(is_correct=False)),
+            latest_is_correct=models.Subquery(
+                latest_answers.values("is_correct")[:1],
+                output_field=models.BooleanField(),
+            ),
+        )
+        .order_by("-wrong_count", "-answered_count", "question__knowledge_point__title")[:candidate_limit]
+    )
+
+    points: dict[str, dict] = {}
+    for row in answer_rows:
+        key = str(row["question__knowledge_point_id"])
+        points[key] = {
+            "knowledgePoint": row["question__knowledge_point__title"],
+            "answeredCount": row["answered_count"],
+            "wrongCount": row["wrong_count"],
+            "latestResult": "correct" if row["latest_is_correct"] else "incorrect",
+            "activeWrongQuestions": 0,
+        }
+
+    active_wrong_rows = (
+        WrongQuestion.objects.filter(user=user, mastered=False)
+        .values("question__knowledge_point_id", "question__knowledge_point__title")
+        .annotate(active_wrong_count=models.Count("id"))
+        .order_by("-active_wrong_count", "question__knowledge_point__title")[:candidate_limit]
+    )
+    for row in active_wrong_rows:
+        key = str(row["question__knowledge_point_id"])
+        insight = points.setdefault(
+            key,
+            {
+                "knowledgePoint": row["question__knowledge_point__title"],
+                "answeredCount": 0,
+                "wrongCount": 0,
+                "latestResult": None,
+                "activeWrongQuestions": 0,
+            },
+        )
+        insight["activeWrongQuestions"] = row["active_wrong_count"]
+
+    results = []
+    for insight in points.values():
+        answered_count = insight["answeredCount"]
+        wrong_count = insight["wrongCount"]
+        active_count = insight["activeWrongQuestions"]
+        latest_result = insight["latestResult"]
+        if active_count or latest_result == "incorrect":
+            status = "needs_review"
+            reason = f"当前有 {active_count or wrong_count} 道相关错题待巩固。"
+            action = {
+                "label": "复习相关错题",
+                "href": "/a3/wrong-notebook",
+                "estimatedMinutes": 12,
+            }
+        elif wrong_count and latest_result == "correct":
+            status = "improving"
+            reason = "最近一次作答正确，但仍需通过新题确认掌握稳定性。"
+            action = {
+                "label": "进行专项练习",
+                "href": f"/a3/assessment?practice={quote(insight['knowledgePoint'])}",
+                "estimatedMinutes": 10,
+            }
+        elif answered_count >= 3:
+            status = "stable"
+            reason = f"本周期 {answered_count} 次作答均未形成待巩固错题。"
+            action = {"label": "继续今日任务", "href": "/a3/today", "estimatedMinutes": 10}
+        else:
+            status = "insufficient_evidence"
+            reason = "作答证据不足，至少完成 3 次相关作答后再判断趋势。"
+            action = {
+                "label": "完成一次专项测评",
+                "href": f"/a3/assessment?practice={quote(insight['knowledgePoint'])}",
+                "estimatedMinutes": 10,
+            }
+        results.append({**insight, "status": status, "reason": reason, "action": action})
+
+    results.sort(
+        key=lambda item: (
+            -item["activeWrongQuestions"],
+            -item["wrongCount"],
+            -item["answeredCount"],
+            item["knowledgePoint"],
+        )
+    )
+    return results[: max(0, limit)]
+
+
+def _student_report_summary(
+    *,
+    user,
+    period: dict,
+    metrics: dict,
+    comparisons: dict,
+    knowledge_points: list[dict],
+    weekly_prescription: dict,
+    wrong_review_insight: dict,
+) -> dict:
+    answered = int(metrics.get("answeredQuestions") or 0)
+    accuracy = float(metrics.get("accuracy") or 0)
+    active_wrong = int(metrics.get("activeWrongQuestions") or 0)
+    accuracy_comparison = comparisons.get("accuracy", {})
+    change = accuracy_comparison.get("percentagePointChange")
+    if answered == 0:
+        headline = "暂无足够作答数据，先完成一次测评"
+        progress_signal = "本周期暂无作答"
+    elif accuracy_comparison.get("comparable") and change is not None:
+        if change > 0:
+            headline = "答题表现正在改善"
+        elif change < 0:
+            headline = "答题表现有所回落，需要优先巩固薄弱点"
+        else:
+            headline = "答题表现保持稳定"
+        progress_signal = f"正确率较上一周期变化 {change:+.1f} 个百分点"
+    else:
+        headline = "已记录本周期表现，暂缺可靠趋势比较"
+        progress_signal = f"本周期完成 {answered} 次作答"
+
+    if active_wrong:
+        primary_risk = f"{active_wrong} 道错题尚未巩固"
+        primary_action = {
+            "label": f"复盘 {active_wrong} 道错题",
+            "href": "/a3/wrong-notebook",
+            "estimatedMinutes": min(20, max(8, active_wrong * 4)),
+            "expectedOutcome": "完成复盘后重新测评，报告会更新掌握状态。",
+        }
+    else:
+        plan_action = _current_study_plan_action(user)
+        if plan_action:
+            primary_action = plan_action
+        elif answered < 3 or any(item.get("status") != "stable" for item in knowledge_points):
+            primary_action = {
+                "label": "完成一次阶段测评",
+                "href": "/a3/assessment",
+                "estimatedMinutes": 10,
+                "expectedOutcome": "新增真实作答证据后更新薄弱点和趋势判断。",
+            }
+        else:
+            primary_action = {
+                "label": "继续今日任务",
+                "href": "/a3/today",
+                "estimatedMinutes": 10,
+                "expectedOutcome": "完成任务后更新学习进度和计划完成度。",
+            }
+        primary_risk = knowledge_points[0]["reason"] if knowledge_points else "当前缺少可定位的知识点证据"
+
+    summary = (
+        f"{period.get('label', '本周期')}完成 {answered} 次作答，正确率 {accuracy:.1f}%；"
+        f"当前有 {active_wrong} 道待巩固错题。"
+        if answered
+        else f"{period.get('label', '本周期')}暂无作答记录，暂时不能判断进步趋势。"
+    )
+    return {
+        "schemaVersion": "a3.student-report-summary.v1",
+        "headline": headline,
+        "summary": summary,
+        "progressSignal": progress_signal,
+        "primaryRisk": primary_risk,
+        "primaryAction": primary_action,
+        "evidence": [
+            {"label": "作答", "value": f"{answered} 次", "source": "assessment"},
+            {"label": "正确率", "value": f"{accuracy:.1f}%" if answered else "暂无", "source": "assessment"},
+            {"label": "待巩固", "value": f"{active_wrong} 道", "source": "wrong_notebook"},
+        ],
+    }
+
+
+def _current_study_plan_action(user) -> dict | None:
+    profile = getattr(user, "learner_profile", None)
+    if profile is None:
+        return None
+    extra_profile = profile.extra_profile if isinstance(profile.extra_profile, dict) else {}
+    plan = extra_profile.get("studyPlan")
+    if not isinstance(plan, dict):
+        return None
+
+    raw_days = plan.get("days")
+    days = [day for day in raw_days if isinstance(day, dict)] if isinstance(raw_days, list) else []
+    today = timezone.localdate().isoformat()
+
+    def day_sort_key(day: dict) -> tuple[bool, int]:
+        try:
+            day_index = int(day.get("dayIndex"))
+        except (TypeError, ValueError):
+            day_index = 10_000
+        return str(day.get("date") or "") != today, day_index
+
+    days.sort(key=day_sort_key)
+    for day in days:
+        tasks = day.get("tasks") if isinstance(day.get("tasks"), list) else []
+        for task in tasks:
+            if not isinstance(task, dict) or task.get("status") == "completed":
+                continue
+            label = str(task.get("label") or task.get("title") or "").strip()
+            href = str(task.get("href") or "").strip()
+            expected_outcome = str(task.get("expectedOutcome") or task.get("subtitle") or "").strip()
+            try:
+                estimated_minutes = int(task.get("estimatedMinutes"))
+            except (TypeError, ValueError):
+                continue
+            if label and href.startswith("/a3/") and estimated_minutes > 0 and expected_outcome:
+                return {
+                    "label": label,
+                    "href": href,
+                    "estimatedMinutes": estimated_minutes,
+                    "expectedOutcome": expected_outcome,
+                }
+    return None
+
+
+def _report_data_quality(
+    *, answered_questions: int, comparisons: dict, knowledge_points: list[dict], updated_at: str
+) -> dict:
+    missing_reasons = []
+    if answered_questions == 0:
+        missing_reasons.append("当前周期暂无作答数据。")
+    elif answered_questions < 3:
+        missing_reasons.append("当前周期少于 3 次作答，趋势证据不足。")
+    if not comparisons.get("accuracy", {}).get("comparable"):
+        missing_reasons.append(str(comparisons.get("accuracy", {}).get("reason") or "暂无可比周期。"))
+    if not knowledge_points:
+        missing_reasons.append("暂无知识点级作答或错题证据。")
+
+    if answered_questions >= 3 and comparisons.get("accuracy", {}).get("comparable") and knowledge_points:
+        evidence_state = "ready"
+    elif answered_questions or knowledge_points:
+        evidence_state = "partial"
+    else:
+        evidence_state = "insufficient"
+    return {
+        "evidenceState": evidence_state,
+        "answeredQuestions": answered_questions,
+        "knowledgePointCount": len(knowledge_points),
+        "comparisonAvailable": bool(comparisons.get("accuracy", {}).get("comparable")),
+        "missingReasons": missing_reasons,
+        "lastUpdatedAt": updated_at,
+    }
+
+
+def _report_period_start(period: str, today) -> tuple[str, object | None]:
     period_key = period if period in {"7d", "30d", "term"} else "term"
     if period_key == "7d":
-        return period_key, now.date() - timedelta(days=6)
+        return period_key, today - timedelta(days=6)
     if period_key == "30d":
-        return period_key, now.date() - timedelta(days=29)
+        return period_key, today - timedelta(days=29)
     return period_key, None
 
 
@@ -1653,11 +2015,11 @@ def _report_period_label(period: str) -> str:
     return "本学期"
 
 
-def _report_trends(answers, now, period: str, period_start) -> list[dict]:
+def _report_trends(answers, today, period: str, period_start) -> list[dict]:
     trends = []
     if period == "7d":
         for offset in range(6, -1, -1):
-            day = (now - timedelta(days=offset)).date()
+            day = today - timedelta(days=offset)
             day_answers = answers.filter(answered_at__date=day)
             count = day_answers.count()
             correct = day_answers.filter(is_correct=True).count()
@@ -1671,7 +2033,7 @@ def _report_trends(answers, now, period: str, period_start) -> list[dict]:
         return trends
 
     if period == "30d":
-        bucket_end = now.date()
+        bucket_end = today
         for offset in range(4, -1, -1):
             end = bucket_end - timedelta(days=offset * 6)
             start = max(end - timedelta(days=5), period_start or end - timedelta(days=5))
@@ -1688,7 +2050,7 @@ def _report_trends(answers, now, period: str, period_start) -> list[dict]:
         return trends
 
     for offset in range(4, -1, -1):
-        end = (now - timedelta(days=offset * 7)).date()
+        end = today - timedelta(days=offset * 7)
         start = end - timedelta(days=6)
         week_answers = answers.filter(answered_at__date__range=(start, end))
         count = week_answers.count()
