@@ -220,6 +220,7 @@ def test_report_models_define_production_access_path_indexes(self):
     wrong_indexes = {index.name: tuple(index.fields) for index in WrongQuestion._meta.indexes}
     self.assertEqual(answer_indexes["a3_ans_sess_time_ok_idx"], ("session", "answered_at", "is_correct"))
     self.assertEqual(wrong_indexes["a3_wrong_user_master_idx"], ("user", "mastered", "-last_wrong_at"))
+    self.assertEqual(wrong_indexes["a3_wrong_user_time_idx"], ("user", "-last_wrong_at"))
 ```
 
 Add equivalent assertions for `LearningPath(user, status, -created_at)` and
@@ -240,9 +241,12 @@ Add these `Meta.indexes` entries:
 ```python
 models.Index(fields=["session", "answered_at", "is_correct"], name="a3_ans_sess_time_ok_idx")
 models.Index(fields=["user", "mastered", "-last_wrong_at"], name="a3_wrong_user_master_idx")
+models.Index(fields=["user", "-last_wrong_at"], name="a3_wrong_user_time_idx")
 models.Index(fields=["user", "status", "-created_at"], name="a3_path_user_status_idx")
 models.Index(fields=["user", "-completed_at", "-created_at"], name="a3_pack_user_done_idx")
 ```
+
+Keep both wrong-question indexes. The mastered-leading index serves active review queues; the time-leading index serves the report query that must include both mastered and unmastered records.
 
 Generate deterministic migrations:
 
@@ -250,7 +254,7 @@ Generate deterministic migrations:
 backend\.venv\Scripts\python.exe backend\manage.py makemigrations assessments learning
 ```
 
-Confirm the generated filenames are exactly `0005_assessmentanswer_report_index.py` and `0013_learning_report_indexes.py`, and contain only the four `AddIndex` operations.
+Confirm the generated filenames are exactly `0005_assessmentanswer_report_index.py` and `0013_learning_report_indexes.py`, and contain only the five `AddIndex` operations.
 
 - [ ] **Step 4: Verify migrations**
 
@@ -260,7 +264,7 @@ backend\.venv\Scripts\python.exe backend\manage.py migrate --plan
 backend\.venv\Scripts\python.exe backend\manage.py test backend.apps.assessments.tests.test_learning_report_v2 backend.apps.learning.tests.test_resource_pack_log_model -v 2
 ```
 
-Expected: no ungenerated changes, migration plan contains four indexes, tests pass.
+Expected: no ungenerated changes, migration plan contains five indexes, tests pass.
 
 - [ ] **Step 5: Commit indexes**
 

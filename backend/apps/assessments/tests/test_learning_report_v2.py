@@ -28,6 +28,7 @@ class LearningReportV2Tests(TestCase):
             },
             WrongQuestion: {
                 "a3_wrong_user_master_idx": ("user", "mastered", "-last_wrong_at"),
+                "a3_wrong_user_time_idx": ("user", "-last_wrong_at"),
             },
             LearningPath: {
                 "a3_path_user_status_idx": ("user", "status", "-created_at"),

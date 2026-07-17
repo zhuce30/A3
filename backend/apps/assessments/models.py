@@ -282,6 +282,10 @@ class WrongQuestion(models.Model):
             models.Index(
                 fields=["user", "mastered", "-last_wrong_at"],
                 name="a3_wrong_user_master_idx",
-            )
+            ),
+            models.Index(
+                fields=["user", "-last_wrong_at"],
+                name="a3_wrong_user_time_idx",
+            ),
         ]
         constraints = [models.UniqueConstraint(fields=["user", "question"], name="unique_user_wrong_question")]

@@ -20,4 +20,8 @@ class Migration(migrations.Migration):
             model_name='wrongquestion',
             index=models.Index(fields=['user', 'mastered', '-last_wrong_at'], name='a3_wrong_user_master_idx'),
         ),
+        migrations.AddIndex(
+            model_name='wrongquestion',
+            index=models.Index(fields=['user', '-last_wrong_at'], name='a3_wrong_user_time_idx'),
+        ),
     ]

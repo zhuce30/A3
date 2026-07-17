@@ -70,9 +70,12 @@ A Django migration will add indexes for the dominant production access paths:
 ```text
 a3_ans_sess_time_ok_idx: AssessmentAnswer(session_id, answered_at, is_correct)
 a3_wrong_user_master_idx: WrongQuestion(user_id, mastered, -last_wrong_at)
+a3_wrong_user_time_idx: WrongQuestion(user_id, -last_wrong_at)
 a3_path_user_status_idx: LearningPath(user_id, status, -created_at)
 a3_pack_user_done_idx: ResourcePackLog(user_id, -completed_at, -created_at)
 ```
+
+The two wrong-question indexes serve different queries: the first narrows active/mastered review queues, while the second bounds the report's all-status time window without changing mastered-count semantics.
 
 Index names will be explicit and within MySQL's identifier limits. Migration verification must use Django's migration executor and production-compatible MySQL SQL generation where available.
 
