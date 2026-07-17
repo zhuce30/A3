@@ -363,11 +363,39 @@ class LearningReportV2Tests(TestCase):
             for query in queries.captured_queries
             if "a3_wrong_questions" in query["sql"].lower()
         ]
-        self.assertTrue(insights)
+        select_queries = [
+            query["sql"]
+            for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("SELECT")
+        ]
+        self.assertEqual(len(insights), 1)
+        self.assertEqual(
+            {
+                key: insights[0][key]
+                for key in (
+                    "knowledgePoint",
+                    "answeredCount",
+                    "wrongCount",
+                    "latestResult",
+                    "activeWrongQuestions",
+                    "status",
+                )
+            },
+            {
+                "knowledgePoint": "进程调度",
+                "answeredCount": 4,
+                "wrongCount": 2,
+                "latestResult": "incorrect",
+                "activeWrongQuestions": 1,
+                "status": "needs_review",
+            },
+        )
+        self.assertEqual(insights[0]["action"]["href"], "/a3/wrong-notebook")
         self.assertTrue(answer_queries)
         self.assertTrue(wrong_queries)
-        self.assertTrue(all("GROUP BY" in sql.upper() and "LIMIT" in sql.upper() for sql in answer_queries))
-        self.assertTrue(all("GROUP BY" in sql.upper() and "LIMIT" in sql.upper() for sql in wrong_queries))
+        self.assertLessEqual(len(select_queries), 2, "\n\n".join(select_queries))
+        self.assertLessEqual(len(answer_queries), 1, "\n\n".join(answer_queries))
+        self.assertLessEqual(len(wrong_queries), 1, "\n\n".join(wrong_queries))
 
     def test_populated_30d_report_has_bounded_select_queries(self):
         self._create_answers(days_ago=1, correctness=[True, True, False, False])
@@ -412,7 +440,7 @@ class LearningReportV2Tests(TestCase):
             answer_selects = [sql for sql in select_queries if "a3_assessment_answers" in sql.lower()]
             return report, select_queries, answer_selects
 
-        small_report, small_selects, small_answer_selects = capture_report_queries()
+        small_report, small_select_queries, small_answer_select_queries = capture_report_queries()
 
         for order in range(2, 13):
             point = KnowledgePoint.objects.create(
@@ -443,21 +471,19 @@ class LearningReportV2Tests(TestCase):
                 correctness=[index % 3 != 0 for index in range(len(self.questions))],
             )
 
-        large_report, large_selects, large_answer_selects = capture_report_queries()
+        large_report, large_select_queries, large_answer_select_queries = capture_report_queries()
+        small_total_selects = len(small_select_queries)
+        large_total_selects = len(large_select_queries)
+        small_answer_selects = len(small_answer_select_queries)
+        large_answer_selects = len(large_answer_select_queries)
 
         self.assertEqual(small_report["metrics"]["answeredQuestions"], 7)
         self.assertGreater(large_report["metrics"]["answeredQuestions"], 200)
-        self.assertTrue(small_answer_selects)
-        self.assertTrue(large_answer_selects)
-        self.assertLessEqual(len(large_selects), len(small_selects), "\n\n".join(large_selects))
-        self.assertLessEqual(
-            len(large_answer_selects),
-            len(small_answer_selects),
-            "\n\n".join(large_answer_selects),
-        )
-        for select_queries, answer_selects in (
-            (small_selects, small_answer_selects),
-            (large_selects, large_answer_selects),
-        ):
-            self.assertLessEqual(len(select_queries), 12, "\n\n".join(select_queries))
-            self.assertLessEqual(len(answer_selects), 4, "\n\n".join(answer_selects))
+        self.assertGreater(small_answer_selects, 0)
+        self.assertGreater(large_answer_selects, 0)
+        self.assertEqual(large_total_selects, small_total_selects, "\n\n".join(large_select_queries))
+        self.assertEqual(large_answer_selects, small_answer_selects, "\n\n".join(large_answer_select_queries))
+        self.assertLessEqual(small_total_selects, 12, "\n\n".join(small_select_queries))
+        self.assertLessEqual(large_total_selects, 12, "\n\n".join(large_select_queries))
+        self.assertLessEqual(small_answer_selects, 4, "\n\n".join(small_answer_select_queries))
+        self.assertLessEqual(large_answer_selects, 4, "\n\n".join(large_answer_select_queries))
