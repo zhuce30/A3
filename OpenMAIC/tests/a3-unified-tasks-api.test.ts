@@ -49,6 +49,16 @@ describe('A3 unified task APIs', () => {
     expect(source).toContain('clearTaskStreamTimers');
   });
 
+  it('serializes task snapshots and backs off instead of creating overlapping backend polls', () => {
+    const source = fs.readFileSync(tasksStreamRoutePath, 'utf8');
+
+    expect(source).toContain('let snapshotInFlight = false');
+    expect(source).toContain('if (closed || snapshotInFlight) return false;');
+    expect(source).toContain('snapshot = windowlessSetTimeout');
+    expect(source).toContain('TASK_SNAPSHOT_INTERVAL_MS');
+    expect(source).not.toContain('windowlessSetInterval(() => void pushTasks(), 2500)');
+  });
+
   it('persists resource generation jobs through Django instead of only storing them in memory', () => {
     const source = fs.readFileSync(resourceJobsRoutePath, 'utf8');
 

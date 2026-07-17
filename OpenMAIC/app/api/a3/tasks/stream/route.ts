@@ -3,16 +3,19 @@ import { resolveA3InternalFrontendEndpoint } from '@/lib/server/a3-django-api';
 
 const TASKS_EVENT = 'event: tasks';
 const HEARTBEAT_EVENT = 'event: heartbeat';
+const TASK_SNAPSHOT_INTERVAL_MS = 10_000;
+const TASK_SNAPSHOT_RETRY_MS = 30_000;
 
 export async function GET(request: NextRequest) {
   const encoder = new TextEncoder();
   let closed = false;
+  let snapshotInFlight = false;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
-  let snapshot: ReturnType<typeof setInterval> | null = null;
+  let snapshot: ReturnType<typeof setTimeout> | null = null;
 
   const clearTaskStreamTimers = () => {
     if (heartbeat) clearInterval(heartbeat);
-    if (snapshot) clearInterval(snapshot);
+    if (snapshot) clearTimeout(snapshot);
     heartbeat = null;
     snapshot = null;
   };
@@ -36,6 +39,8 @@ export async function GET(request: NextRequest) {
       };
 
       const pushTasks = async () => {
+        if (closed || snapshotInFlight) return false;
+        snapshotInFlight = true;
         try {
           const response = await fetch(resolveA3InternalFrontendEndpoint('/api/a3/tasks', request.nextUrl.origin), {
             headers: request.headers.get('cookie') ? { cookie: request.headers.get('cookie') || '' } : {},
@@ -43,18 +48,31 @@ export async function GET(request: NextRequest) {
           });
           const payload = await response.json().catch(() => ({ success: false, error: '任务快照解析失败' }));
           send('tasks', payload);
+          return response.ok;
         } catch (error) {
           send('tasks', {
             success: false,
             error: error instanceof Error ? error.message : '任务快照读取失败',
           });
+          return false;
+        } finally {
+          snapshotInFlight = false;
         }
+      };
+
+      const scheduleSnapshot = (delay: number) => {
+        if (closed) return;
+        snapshot = windowlessSetTimeout(async () => {
+          snapshot = null;
+          const succeeded = await pushTasks();
+          scheduleSnapshot(succeeded ? TASK_SNAPSHOT_INTERVAL_MS : TASK_SNAPSHOT_RETRY_MS);
+        }, delay);
       };
 
       await pushTasks();
       if (closed) return;
       heartbeat = windowlessSetInterval(() => send('heartbeat', { now: new Date().toISOString() }), 15000);
-      snapshot = windowlessSetInterval(() => void pushTasks(), 2500);
+      scheduleSnapshot(TASK_SNAPSHOT_INTERVAL_MS);
     },
     cancel() {
       closed = true;
@@ -73,4 +91,8 @@ export async function GET(request: NextRequest) {
 
 function windowlessSetInterval(callback: () => void, ms: number) {
   return setInterval(callback, ms);
+}
+
+function windowlessSetTimeout(callback: () => void, ms: number) {
+  return setTimeout(callback, ms);
 }
