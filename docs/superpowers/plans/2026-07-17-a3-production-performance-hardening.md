@@ -207,6 +207,7 @@ git commit -m "perf: bound student report queries"
 **Files:**
 - Modify: `backend/apps/assessments/models.py`
 - Create: `backend/apps/assessments/migrations/0005_assessmentanswer_report_index.py`
+- Create: `backend/apps/assessments/migrations/0006_wrongquestion_report_time_index.py`
 - Modify: `backend/apps/learning/models.py`
 - Create: `backend/apps/learning/migrations/0013_learning_report_indexes.py`
 
@@ -254,7 +255,7 @@ Generate deterministic migrations:
 backend\.venv\Scripts\python.exe backend\manage.py makemigrations assessments learning
 ```
 
-Confirm the generated filenames are exactly `0005_assessmentanswer_report_index.py` and `0013_learning_report_indexes.py`, and contain only the five `AddIndex` operations.
+Confirm the generated filenames are exactly `0005_assessmentanswer_report_index.py`, `0006_wrongquestion_report_time_index.py`, and `0013_learning_report_indexes.py`, and contain only the five `AddIndex` operations. Keep `0005` immutable once committed; the report-time index must remain in `0006` so databases that already applied `0005` receive it.
 
 - [ ] **Step 4: Verify migrations**
 
