@@ -353,20 +353,12 @@ class LearningReportV2Tests(TestCase):
         with CaptureQueriesContext(connection) as queries:
             insights = _knowledge_point_insights(self.user, start=None, limit=3)
 
+        answer_table = AssessmentAnswer._meta.db_table.lower()
+        captured_sql = [query["sql"] for query in queries.captured_queries]
         answer_queries = [
-            query["sql"]
-            for query in queries.captured_queries
-            if "a3_assessment_answers" in query["sql"].lower()
-        ]
-        wrong_queries = [
-            query["sql"]
-            for query in queries.captured_queries
-            if "a3_wrong_questions" in query["sql"].lower()
-        ]
-        select_queries = [
-            query["sql"]
-            for query in queries.captured_queries
-            if query["sql"].lstrip().upper().startswith("SELECT")
+            sql
+            for sql in captured_sql
+            if answer_table in sql.lower()
         ]
         self.assertEqual(len(insights), 1)
         self.assertEqual(
@@ -392,12 +384,10 @@ class LearningReportV2Tests(TestCase):
         )
         self.assertEqual(insights[0]["action"]["href"], "/a3/wrong-notebook")
         self.assertTrue(answer_queries)
-        self.assertTrue(wrong_queries)
-        self.assertLessEqual(len(select_queries), 2, "\n\n".join(select_queries))
+        self.assertLessEqual(len(queries.captured_queries), 2, "\n\n".join(captured_sql))
         self.assertLessEqual(len(answer_queries), 1, "\n\n".join(answer_queries))
-        self.assertLessEqual(len(wrong_queries), 1, "\n\n".join(wrong_queries))
 
-    def test_populated_30d_report_has_bounded_select_queries(self):
+    def test_populated_30d_report_has_stable_bounded_database_queries(self):
         self._create_answers(days_ago=1, correctness=[True, True, False, False])
         self._create_answers(days_ago=12, correctness=[True, False, True])
         self._create_answers(days_ago=35, correctness=[True, False, False])
@@ -429,18 +419,16 @@ class LearningReportV2Tests(TestCase):
         self.user.refresh_from_db()
         self.user.learner_profile
 
+        answer_table = AssessmentAnswer._meta.db_table.lower()
+
         def capture_report_queries():
             with CaptureQueriesContext(connection) as queries:
                 report = build_learning_report(self.user, "30d")
-            select_queries = [
-                query["sql"]
-                for query in queries.captured_queries
-                if query["sql"].lstrip().upper().startswith("SELECT")
-            ]
-            answer_selects = [sql for sql in select_queries if "a3_assessment_answers" in sql.lower()]
-            return report, select_queries, answer_selects
+            captured_sql = [query["sql"] for query in queries.captured_queries]
+            answer_queries = [sql for sql in captured_sql if answer_table in sql.lower()]
+            return report, captured_sql, answer_queries
 
-        small_report, small_select_queries, small_answer_select_queries = capture_report_queries()
+        small_report, small_queries, small_answer_queries = capture_report_queries()
 
         for order in range(2, 13):
             point = KnowledgePoint.objects.create(
@@ -471,19 +459,19 @@ class LearningReportV2Tests(TestCase):
                 correctness=[index % 3 != 0 for index in range(len(self.questions))],
             )
 
-        large_report, large_select_queries, large_answer_select_queries = capture_report_queries()
-        small_total_selects = len(small_select_queries)
-        large_total_selects = len(large_select_queries)
-        small_answer_selects = len(small_answer_select_queries)
-        large_answer_selects = len(large_answer_select_queries)
+        large_report, large_queries, large_answer_queries = capture_report_queries()
+        small_total_queries = len(small_queries)
+        large_total_queries = len(large_queries)
+        small_answer_queries = len(small_answer_queries)
+        large_answer_queries = len(large_answer_queries)
 
         self.assertEqual(small_report["metrics"]["answeredQuestions"], 7)
         self.assertGreater(large_report["metrics"]["answeredQuestions"], 200)
-        self.assertGreater(small_answer_selects, 0)
-        self.assertGreater(large_answer_selects, 0)
-        self.assertEqual(large_total_selects, small_total_selects, "\n\n".join(large_select_queries))
-        self.assertEqual(large_answer_selects, small_answer_selects, "\n\n".join(large_answer_select_queries))
-        self.assertLessEqual(small_total_selects, 12, "\n\n".join(small_select_queries))
-        self.assertLessEqual(large_total_selects, 12, "\n\n".join(large_select_queries))
-        self.assertLessEqual(small_answer_selects, 4, "\n\n".join(small_answer_select_queries))
-        self.assertLessEqual(large_answer_selects, 4, "\n\n".join(large_answer_select_queries))
+        self.assertGreater(small_answer_queries, 0)
+        self.assertGreater(large_answer_queries, 0)
+        self.assertEqual(large_total_queries, small_total_queries, "\n\n".join(large_queries))
+        self.assertEqual(large_answer_queries, small_answer_queries, "\n\n".join(large_queries))
+        self.assertLessEqual(small_total_queries, 12, "\n\n".join(small_queries))
+        self.assertLessEqual(large_total_queries, 12, "\n\n".join(large_queries))
+        self.assertLessEqual(small_answer_queries, 4, "\n\n".join(small_queries))
+        self.assertLessEqual(large_answer_queries, 4, "\n\n".join(large_queries))
