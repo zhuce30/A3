@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { subscribeToA3TaskStream } from '@/components/a3/layout/a3-top-actions';
 
 const topActionsPath = path.resolve(process.cwd(), 'components/a3/layout/a3-top-actions.tsx');
 
@@ -41,14 +42,65 @@ describe('A3 top task center panel', () => {
     expect(source).toContain('min-h-0 flex-1 overflow-y-auto overscroll-contain');
   });
 
-  it('polls the task fallback only while the SSE connection is not live', () => {
-    const source = fs.readFileSync(topActionsPath, 'utf8');
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    FakeEventSource.latest = null;
+  });
 
-    expect(source).toMatch(/useEffect\(\(\) => \{\s*if \(!currentUser\) return;\s*let cancelled = false;\s*let streamLive = false;\s*async function loadTasks/);
-    expect(source).toMatch(/addEventListener\('open',[\s\S]*?streamLive = true;/);
-    expect(source).toMatch(/safeParseTasksEvent[\s\S]*?if \(!result \|\| cancelled\) return;[\s\S]*?streamLive = true;/);
-    expect(source).toMatch(/eventSource\.onerror = \(\) => \{[\s\S]*?streamLive = false;/);
-    expect(source).toMatch(/window\.setInterval\(\(\) => \{[\s\S]*?if \(!streamLive\) void loadTasks\(\);[\s\S]*?\}, 15000\)/);
-    expect(source).not.toContain('window.setInterval(() => void loadTasks(), 15000)');
+  it('polls every 15 seconds only while the SSE connection is not live', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setInterval, clearInterval });
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const fallbackFetch = vi.fn();
+    const stop = subscribeToA3TaskStream({
+      loadTasks: fallbackFetch,
+      onTasks: vi.fn(),
+      onStateChange: vi.fn(),
+    });
+    const eventSource = FakeEventSource.latest!;
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(fallbackFetch).toHaveBeenCalledTimes(1);
+
+    eventSource.emit('open');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fallbackFetch).toHaveBeenCalledTimes(1);
+
+    eventSource.emit('tasks', JSON.stringify({ success: true, tasks: [], summary: { total: 0, running: 0, failed: 0, succeeded: 0 } }));
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(fallbackFetch).toHaveBeenCalledTimes(1);
+
+    eventSource.emitError();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(fallbackFetch).toHaveBeenCalledTimes(2);
+
+    stop();
+    expect(eventSource.close).toHaveBeenCalledOnce();
   });
 });
+
+class FakeEventSource {
+  static latest: FakeEventSource | null = null;
+
+  readonly close = vi.fn();
+  onerror: (() => void) | null = null;
+  private readonly listeners = new Map<string, (event: unknown) => void>();
+
+  constructor() {
+    FakeEventSource.latest = this;
+  }
+
+  addEventListener(type: string, listener: (event: unknown) => void) {
+    this.listeners.set(type, listener);
+  }
+
+  emit(type: string, data?: string) {
+    this.listeners.get(type)?.({ data });
+  }
+
+  emitError() {
+    this.onerror?.();
+  }
+}

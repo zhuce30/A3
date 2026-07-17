@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils';
 
 type ThemeMode = 'light' | 'dark';
 type Panel = 'tasks' | 'notifications' | 'help' | 'language' | null;
+type A3TaskStreamState = 'live' | 'fallback';
 
 type A3TaskProgressCounter = {
   current?: number;
@@ -106,7 +107,6 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
   useEffect(() => {
     if (!currentUser) return;
     let cancelled = false;
-    let streamLive = false;
 
     async function loadTasks() {
       try {
@@ -126,37 +126,24 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
     }
 
     void loadTasks();
-    const eventSource = new EventSource('/api/a3/tasks/stream', { withCredentials: true });
-    eventSource.addEventListener('open', () => {
-      if (cancelled) return;
-      streamLive = true;
-      setTaskStreamState('live');
+    const stopTaskStream = subscribeToA3TaskStream({
+      loadTasks,
+      onTasks(result) {
+        if (cancelled) return;
+        if (!result.success) {
+          setTaskError(result.error || '任务中心暂时不可用');
+          return;
+        }
+        setTaskError('');
+        setTasks(result.tasks ?? []);
+        setTaskSummary(result.summary ?? null);
+        setTaskStreamState('live');
+      },
+      onStateChange: setTaskStreamState,
     });
-    eventSource.addEventListener('tasks', (event) => {
-      const result = safeParseTasksEvent((event as MessageEvent).data);
-      if (!result || cancelled) return;
-      streamLive = true;
-      if (!result.success) {
-        setTaskError(result.error || '任务中心暂时不可用');
-        return;
-      }
-      setTaskError('');
-      setTasks(result.tasks ?? []);
-      setTaskSummary(result.summary ?? null);
-      setTaskStreamState('live');
-    });
-    eventSource.onerror = () => {
-      if (cancelled) return;
-      streamLive = false;
-      setTaskStreamState('fallback');
-    };
-    const fallbackTimer = window.setInterval(() => {
-      if (!streamLive) void loadTasks();
-    }, 15000);
     return () => {
       cancelled = true;
-      eventSource.close();
-      window.clearInterval(fallbackTimer);
+      stopTaskStream();
     };
   }, [currentUser]);
 
@@ -513,6 +500,45 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
       )}
     </div>
   );
+}
+
+export function subscribeToA3TaskStream({
+  loadTasks,
+  onTasks,
+  onStateChange,
+}: {
+  loadTasks: () => void | Promise<void>;
+  onTasks: (result: A3TasksResponse) => void;
+  onStateChange: (state: A3TaskStreamState) => void;
+}) {
+  let closed = false;
+  let streamLive = false;
+  const eventSource = new EventSource('/api/a3/tasks/stream', { withCredentials: true });
+  eventSource.addEventListener('open', () => {
+    if (closed) return;
+    streamLive = true;
+    onStateChange('live');
+  });
+  eventSource.addEventListener('tasks', (event) => {
+    const result = safeParseTasksEvent((event as MessageEvent).data);
+    if (!result || closed) return;
+    streamLive = true;
+    onTasks(result);
+  });
+  eventSource.onerror = () => {
+    if (closed) return;
+    streamLive = false;
+    onStateChange('fallback');
+  };
+  const fallbackTimer = window.setInterval(() => {
+    if (!streamLive) void loadTasks();
+  }, 15000);
+
+  return () => {
+    closed = true;
+    eventSource.close();
+    window.clearInterval(fallbackTimer);
+  };
 }
 
 function safeParseTasksEvent(data: string): A3TasksResponse | null {

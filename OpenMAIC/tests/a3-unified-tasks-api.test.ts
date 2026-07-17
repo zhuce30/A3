@@ -184,6 +184,23 @@ describe('A3 task stream polling cadence', () => {
     abortController.abort();
   });
 
+  it('uses the 30 second error cadence for an HTTP 200 logical failure', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(taskSnapshotResponse(0, false, 200))
+      .mockResolvedValueOnce(taskSnapshotResponse(0));
+    vi.stubGlobal('fetch', fetchMock);
+    const abortController = createTaskStreamAbortController(abortControllers);
+    const { GET } = await import('@/app/api/a3/tasks/stream/route');
+
+    await GET(taskStreamRequest(abortController.signal));
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    abortController.abort();
+  });
+
   it('keeps only one task snapshot in flight per connection', async () => {
     let resolveSecondSnapshot!: (response: Response) => void;
     const secondSnapshot = new Promise<Response>((resolve) => {
@@ -229,15 +246,54 @@ describe('A3 task stream polling cadence', () => {
     await vi.advanceTimersByTimeAsync(120_000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it('does not reschedule after the stream consumer cancels', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(taskSnapshotResponse(1));
+    vi.stubGlobal('fetch', fetchMock);
+    const abortController = createTaskStreamAbortController(abortControllers);
+    const { GET } = await import('@/app/api/a3/tasks/stream/route');
+
+    const response = await GET(taskStreamRequest(abortController.signal));
+    const reader = response.body!.getReader();
+    await reader.read();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await reader.cancel();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('emits the existing tasks event framing with the snapshot payload unchanged', async () => {
+    const payload = {
+      success: true,
+      tasks: [{ id: 'task-1', status: 'running' }],
+      summary: { total: 1, running: 1, failed: 0, succeeded: 0 },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })));
+    const abortController = createTaskStreamAbortController(abortControllers);
+    const { GET } = await import('@/app/api/a3/tasks/stream/route');
+
+    const response = await GET(taskStreamRequest(abortController.signal));
+    const reader = response.body!.getReader();
+    const firstEvent = await reader.read();
+
+    expect(firstEvent.done).toBe(false);
+    expect(new TextDecoder().decode(firstEvent.value)).toBe(`event: tasks\ndata: ${JSON.stringify(payload)}\n\n`);
+
+    await reader.cancel();
+  });
 });
 
-function taskSnapshotResponse(running: number, success = true) {
+function taskSnapshotResponse(running: number, success = true, status = success ? 200 : 503) {
   return new Response(JSON.stringify({
     success,
     tasks: [],
     summary: { total: running, running, failed: 0, succeeded: 0 },
   }), {
-    status: success ? 200 : 503,
+    status,
     headers: { 'Content-Type': 'application/json' },
   });
 }
