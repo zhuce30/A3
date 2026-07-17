@@ -34,7 +34,11 @@ services:
       - --port
       - "8000"
       - --workers
-      - "2"
+      - "1"
+      - --limit-max-requests
+      - "500"
+      - --limit-max-requests-jitter
+      - "50"
     ports: !reset []
     environment:
       DJANGO_DEBUG: "0"

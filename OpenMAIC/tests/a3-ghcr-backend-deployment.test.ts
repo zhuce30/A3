@@ -114,6 +114,27 @@ describe('A3 private GHCR backend deployment', () => {
     expect(compose.services?.['celery-beat']?.command).toBeUndefined();
   });
 
+  it('bounds the production web worker memory footprint on the 4 GB host', () => {
+    const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
+      schema: composeSchema,
+    }) as ComposeDocument;
+
+    expect(compose.services?.backend?.command).toEqual([
+      'uvicorn',
+      'backend.config.asgi:application',
+      '--host',
+      '0.0.0.0',
+      '--port',
+      '8000',
+      '--workers',
+      '1',
+      '--limit-max-requests',
+      '500',
+      '--limit-max-requests-jitter',
+      '50',
+    ]);
+  });
+
   it('validates the merged production Compose document in CI', () => {
     const workflow = yaml.load(fs.readFileSync(workflowPath, 'utf8')) as WorkflowDocument;
     const step = workflow.jobs?.['build-and-push']?.steps?.find(
