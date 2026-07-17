@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -234,8 +235,8 @@ function AuthFrame({ children, variant = 'learning' }: { children: React.ReactNo
     <div className="min-h-screen bg-[#f4f7ff] text-slate-950 [--a3-border:rgba(203,213,225,0.9)] [--a3-surface-solid:#ffffff] [--a3-surface-muted:#f8fafc] [--a3-text:#0f172a] [--a3-text-muted:#64748b]">
       <header className="flex h-[88px] items-center justify-between border-b border-slate-200/80 bg-white/75 px-5 backdrop-blur md:px-10">
         <Link href="/a3/login" className="flex items-center gap-3">
-          <div className="flex size-12 items-center justify-center rounded-[14px] bg-gradient-to-br from-blue-500 to-violet-600 text-xl font-bold text-white shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
-            A
+          <div className="size-12 overflow-hidden rounded-[14px] shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
+            <Image src="/a3-brand-icon.png" alt="" width={48} height={48} className="size-full object-cover" priority unoptimized />
           </div>
           <div>
             <div className="text-[22px] font-semibold leading-tight">智学引擎</div>
@@ -607,7 +608,9 @@ function SimpleFlowFrame({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen bg-[#f4f7ff] px-5 py-8 text-slate-950 [--a3-border:rgba(203,213,225,0.9)] [--a3-surface-solid:#ffffff] [--a3-surface-muted:#f8fafc] [--a3-text:#0f172a] [--a3-text-muted:#64748b] md:px-10">
       <header className="mx-auto flex max-w-[1500px] items-center justify-between">
         <Link href="/a3/dashboard" className="flex items-center gap-3">
-          <div className="flex size-12 items-center justify-center rounded-[14px] bg-gradient-to-br from-blue-500 to-violet-600 text-xl font-bold text-white">A</div>
+          <div className="size-12 overflow-hidden rounded-[14px]">
+            <Image src="/a3-brand-icon.png" alt="" width={48} height={48} className="size-full object-cover" priority unoptimized />
+          </div>
           <div>
             <div className="text-[22px] font-semibold leading-tight">智学引擎</div>
             <div className="text-xs font-medium uppercase tracking-wide text-slate-500">AI Learning</div>

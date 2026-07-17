@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { ChevronDown, LogOut, Repeat2, Settings, UserRound } from 'lucide-react';
@@ -100,8 +101,8 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen bg-[var(--a3-bg)] text-[var(--a3-text)]">
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[248px] border-r border-[var(--a3-border)] bg-[var(--a3-surface-solid)] md:block">
         <div className="flex h-20 items-center gap-3 px-5">
-          <div className="flex size-12 items-center justify-center rounded-[14px] bg-gradient-to-br from-blue-500 to-violet-600 text-xl font-bold text-white shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
-            A
+          <div className="size-12 overflow-hidden rounded-[14px] shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
+            <Image src="/a3-brand-icon.png" alt="" width={48} height={48} className="size-full object-cover" priority unoptimized />
           </div>
           <div>
             <div className="text-[22px] font-semibold leading-tight text-[var(--a3-text)]">{messages.appName}</div>
@@ -197,8 +198,8 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
         <header className="sticky top-0 z-40 flex h-[72px] min-w-0 items-center justify-between gap-2 border-b border-[var(--a3-border)] bg-[var(--a3-surface)] px-3 backdrop-blur sm:px-4 md:px-6">
           <div className="flex min-w-0 items-center gap-3">
             <div className="md:hidden">
-              <div className="flex size-10 items-center justify-center rounded-xl bg-blue-600 font-bold text-white shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
-                A
+              <div className="size-10 overflow-hidden rounded-xl shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
+                <Image src="/a3-brand-icon.png" alt="" width={40} height={40} className="size-full object-cover" priority unoptimized />
               </div>
             </div>
             {focusedHeader && (

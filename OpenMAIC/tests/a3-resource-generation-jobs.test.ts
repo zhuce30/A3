@@ -34,6 +34,17 @@ describe('A3 generic resource generation jobs', () => {
     expect(source).not.toContain("a3PostJson<A3ResourceGenerateResponse>('/api/resources/generate/'");
   });
 
+  it('retries transient polling failures instead of treating a Cloudflare 524 as a failed generation job', () => {
+    const routeSource = fs.readFileSync(routePath, 'utf8');
+    const recommendationsSource = fs.readFileSync(recommendationsPath, 'utf8');
+
+    expect(routeSource).toContain('RESOURCE_JOB_STATUS_TIMEOUT_MS');
+    expect(routeSource).toContain('AbortSignal.timeout(RESOURCE_JOB_STATUS_TIMEOUT_MS)');
+    expect(recommendationsSource).toContain('isRetryableResourcePollStatus(response.status)');
+    expect(recommendationsSource).toContain('consecutiveTransientFailures');
+    expect(recommendationsSource).toContain('资源生成仍在后台运行，正在重新连接进度服务');
+  });
+
   it('keeps lecture document generation loading separate from classroom ppt generation', () => {
     const source = fs.readFileSync(recommendationsPath, 'utf8');
 

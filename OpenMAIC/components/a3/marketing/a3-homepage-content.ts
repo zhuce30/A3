@@ -22,12 +22,12 @@ export const A3_HOMEPAGE_ACTIONS = {
 } as const;
 
 export const A3_HOMEPAGE_METADATA = {
-  title: '智学引擎 | 把每一次学习接到下一步',
+  title: '智学引擎',
   description:
     '面向大学生的个性化学习产品，把诊断、今日计划、本地资料、多模态资源、AI 辅导、测评复习和学习报告连成一条可验证的学习闭环。',
   alternates: { canonical: '/a3' },
   openGraph: {
-    title: '智学引擎 | 把每一次学习接到下一步',
+    title: '智学引擎',
     description: '从诊断到复习，让每天的学习任务有依据、有反馈、有下一步。',
     type: 'website',
     url: '/a3',
@@ -44,7 +44,7 @@ export const A3_HOMEPAGE_METADATA = {
   },
   twitter: {
     card: 'summary_large_image',
-    title: '智学引擎 | 把每一次学习接到下一步',
+    title: '智学引擎',
     description: '从诊断到复习，让每天的学习任务有依据、有反馈、有下一步。',
     images: ['/a3/assets/homepage/today-plan.webp'],
   },

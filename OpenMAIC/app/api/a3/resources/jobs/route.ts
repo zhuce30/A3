@@ -29,6 +29,8 @@ type ResourceGenerationJobResponse = {
   jobs?: PersistedResourceGenerationJob[];
 };
 
+const RESOURCE_JOB_STATUS_TIMEOUT_MS = 8_000;
+
 export async function POST(request: NextRequest) {
   const startedAt = Date.now();
   try {
@@ -90,7 +92,8 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   try {
     const cookieHeader = request.headers.get('cookie');
-    const auth = await fetchA3DjangoJson<AuthMeResponse>('/api/auth/me/', cookieHeader);
+    const signal = AbortSignal.timeout(RESOURCE_JOB_STATUS_TIMEOUT_MS);
+    const auth = await fetchA3DjangoJson<AuthMeResponse>('/api/auth/me/', cookieHeader, { signal });
     if (!auth.success || !auth.user) {
       return apiError('UNAUTHORIZED', 401, '请先登录后再查看资源生成进度');
     }
@@ -99,6 +102,7 @@ export async function GET(request: NextRequest) {
     const persisted = await fetchA3DjangoJson<ResourceGenerationJobResponse>(
       `/api/resources/jobs/${encodeURIComponent(jobId)}/`,
       cookieHeader,
+      { signal },
     );
     if (!persisted.success || !persisted.job) {
       return apiError('INVALID_REQUEST', 404, persisted.error || '资源生成任务不存在或已过期');

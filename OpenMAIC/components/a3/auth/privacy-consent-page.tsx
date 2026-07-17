@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
@@ -143,7 +144,9 @@ export function PrivacyConsentPage() {
     <div className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_10%_100%,rgba(37,99,235,0.10),transparent_32%),radial-gradient(circle_at_86%_92%,rgba(124,58,237,0.08),transparent_30%),linear-gradient(135deg,var(--a3-bg-soft)_0%,var(--a3-bg)_48%,var(--a3-bg-soft)_100%)] text-[var(--a3-text)]">
       <header className="flex h-[88px] items-center justify-between border-b border-[var(--a3-border)] bg-[var(--a3-surface)] px-4 backdrop-blur-xl md:px-8 xl:px-11">
         <Link href="/a3/login" className="flex items-center gap-3">
-          <div className="flex size-12 items-center justify-center rounded-[14px] bg-gradient-to-br from-blue-500 to-violet-600 text-xl font-bold text-white shadow-[0_14px_30px_rgba(37,99,235,0.24)]">A</div>
+          <div className="size-12 overflow-hidden rounded-[14px] shadow-[0_14px_30px_rgba(37,99,235,0.24)]">
+            <Image src="/a3-brand-icon.png" alt="" width={48} height={48} className="size-full object-cover" priority unoptimized />
+          </div>
           <div>
             <div className="text-[22px] font-semibold leading-tight">智学引擎</div>
             <div className="text-xs font-medium text-[var(--a3-text-muted)]">AI Learning</div>

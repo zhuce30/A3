@@ -526,7 +526,7 @@ describe('A3 product homepage hero and navigation', () => {
 
   it('publishes the approved page metadata', () => {
     expect(metadata).toMatchObject({
-      title: '智学引擎 | 把每一次学习接到下一步',
+      title: '智学引擎',
       alternates: { canonical: '/a3' },
       openGraph: { type: 'website', url: '/a3' },
       twitter: { card: 'summary_large_image' },

@@ -450,6 +450,10 @@ export function RecommendationsView() {
     if (!pollUrl) return { success: false, error: '资源生成任务缺少进度地址，请重新生成。' } as A3ResourceGenerateResponse;
     const intervalMs = Math.max(800, Math.min(jobStart.pollIntervalMs ?? 1500, 4000));
     const maxAttempts = Math.ceil((30 * 60 * 1000) / intervalMs);
+    const requestTimeoutMs = 12_000;
+    let consecutiveTransientFailures = 0;
+    const initialProgress = typeof jobStart.progress === 'number' ? jobStart.progress : 0;
+    let lastActiveStep = Math.max(0, Math.min(4, Math.floor(initialProgress / 20)));
     let latestJob: (A3ResourceGenerateResponse & {
       status?: string;
       progress?: number;
@@ -461,12 +465,18 @@ export function RecommendationsView() {
       await sleep(attempt === 0 ? 300 : intervalMs);
       let response: Response;
       try {
-        response = await fetch(pollUrl, { cache: 'no-store' });
-      } catch (error) {
-        return {
-          success: false,
-          error: `资源生成进度查询失败：${error instanceof Error ? error.message : '无法连接本地服务'}`,
-        } as A3ResourceGenerateResponse;
+        response = await fetch(pollUrl, {
+          cache: 'no-store',
+          signal: AbortSignal.timeout(requestTimeoutMs),
+        });
+      } catch {
+        consecutiveTransientFailures += 1;
+        setLongRunningProgress(buildProgress(
+          'resource',
+          lastActiveStep,
+          `资源生成仍在后台运行，正在重新连接进度服务（第 ${consecutiveTransientFailures} 次）`,
+        ));
+        continue;
       }
       const job = (await response.json().catch(() => ({}))) as A3ResourceGenerateResponse & {
         status?: string;
@@ -475,10 +485,23 @@ export function RecommendationsView() {
         message?: string;
         done?: boolean;
       };
-      if (!response.ok || !job.success) return { success: false, error: job.error || `资源生成进度查询失败：${response.status}` } as A3ResourceGenerateResponse;
+      if (!response.ok || !job.success) {
+        if (isRetryableResourcePollStatus(response.status)) {
+          consecutiveTransientFailures += 1;
+          setLongRunningProgress(buildProgress(
+            'resource',
+            lastActiveStep,
+            `资源生成仍在后台运行，正在重新连接进度服务（第 ${consecutiveTransientFailures} 次）`,
+          ));
+          continue;
+        }
+        return { success: false, error: job.error || `资源生成进度查询失败：${response.status}` } as A3ResourceGenerateResponse;
+      }
+      consecutiveTransientFailures = 0;
       latestJob = job;
       const progress = typeof job.progress === 'number' ? Math.max(0, Math.min(100, Math.round(job.progress))) : 0;
       const activeStep = progress >= 95 ? 5 : Math.max(0, Math.min(4, Math.floor(progress / 20)));
+      lastActiveStep = activeStep;
       setLongRunningProgress(buildProgress('resource', activeStep, job.message || `资源生成进度 ${progress}%`));
       if (job.done || ['succeeded', 'failed'].includes(String(job.status))) break;
     }
@@ -831,6 +854,10 @@ export function RecommendationsView() {
       </details>
     </div>
   );
+}
+
+function isRetryableResourcePollStatus(status: number) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
 function RecommendationEvidenceItem({ item, profileFeed }: { item: A3Recommendation; profileFeed: ProfileFeedResponse | null }) {

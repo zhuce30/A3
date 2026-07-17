@@ -32,9 +32,14 @@ const geistMono = localFont({
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || 'https://a3.zhuce.work'),
-  title: 'OpenMAIC',
+  title: '智学引擎',
   description:
     'The open-source AI interactive classroom. Upload a PDF to instantly generate an immersive, multi-agent learning experience.',
+  icons: {
+    icon: [{ url: '/a3-brand-icon.png', type: 'image/png' }],
+    shortcut: '/a3-brand-icon.png',
+    apple: '/a3-brand-icon.png',
+  },
 };
 
 export default function RootLayout({
