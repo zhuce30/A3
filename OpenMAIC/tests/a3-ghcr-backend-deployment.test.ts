@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest';
 
 type WorkflowStep = {
   uses?: string;
+  name?: string;
+  run?: string;
+  env?: Record<string, unknown>;
   with?: Record<string, unknown>;
 };
 
@@ -58,7 +61,12 @@ describe('A3 private GHCR backend deployment', () => {
 
     expect(workflow.on?.push).toEqual({
       branches: ['codex/a3-latest-integration'],
-      paths: ['backend/**', '.github/workflows/build-backend-image.yml'],
+      paths: [
+        'backend/**',
+        'docker-compose.yml',
+        'docker-compose.prod.yml',
+        '.github/workflows/build-backend-image.yml',
+      ],
     });
     expect(workflow.permissions).toEqual({ contents: 'read', packages: 'write' });
     expect(job?.if).toBe("${{ github.ref == 'refs/heads/codex/a3-latest-integration' }}");
@@ -103,6 +111,21 @@ describe('A3 private GHCR backend deployment', () => {
       '--max-tasks-per-child=5',
     ]);
     expect(compose.services?.['celery-beat']?.command).toBeUndefined();
+  });
+
+  it('validates the merged production Compose document in CI', () => {
+    const workflow = yaml.load(fs.readFileSync(workflowPath, 'utf8')) as WorkflowDocument;
+    const step = workflow.jobs?.['build-and-push']?.steps?.find(
+      (item) => item.name === 'Validate production Compose merge',
+    );
+
+    expect(step?.run).toContain('docker compose');
+    expect(step?.run).toContain('cp .env.production.template .env.production');
+    expect(step?.run).toContain('--env-file .env.production');
+    expect(step?.run).toContain('-f docker-compose.yml');
+    expect(step?.run).toContain('-f docker-compose.prod.yml');
+    expect(step?.run).toContain('config --quiet');
+    expect(step?.env).toBeUndefined();
   });
 
   it('gates backend consumers on the public readiness probe', () => {

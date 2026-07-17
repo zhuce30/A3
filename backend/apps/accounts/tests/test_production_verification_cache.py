@@ -18,6 +18,10 @@ class ProductionVerificationCacheTests(SimpleTestCase):
         )
         self.assertEqual(config["default"]["LOCATION"], "redis://redis:6379/2")
         self.assertEqual(config["default"]["KEY_PREFIX"], "a3")
+        self.assertEqual(
+            config["default"]["OPTIONS"],
+            {"socket_connect_timeout": 3.0, "socket_timeout": 3.0},
+        )
 
     def test_production_compose_supplies_shared_cache_url(self):
         compose_source = (PROJECT_ROOT / "docker-compose.prod.yml").read_text(

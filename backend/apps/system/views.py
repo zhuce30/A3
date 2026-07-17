@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from threading import Lock
+from time import monotonic
 from uuid import uuid4
 
 from django.core.cache import caches
@@ -8,6 +10,11 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from backend.apps.system.services import build_system_health
+
+
+READINESS_CACHE_SECONDS = 2.0
+_readiness_lock = Lock()
+_readiness_snapshot: tuple[float, dict[str, str]] | None = None
 
 
 @require_http_methods(["GET"])
@@ -37,10 +44,7 @@ def _cache_ready() -> bool:
 
 @require_http_methods(["GET"])
 def readiness(request):
-    dependencies = {
-        "database": "ok" if _database_ready() else "error",
-        "redis": "ok" if _cache_ready() else "error",
-    }
+    dependencies = _readiness_dependencies()
     is_ready = all(status == "ok" for status in dependencies.values())
     return JsonResponse(
         {
@@ -50,6 +54,25 @@ def readiness(request):
         },
         status=200 if is_ready else 503,
     )
+
+
+def _readiness_dependencies() -> dict[str, str]:
+    global _readiness_snapshot
+
+    now = monotonic()
+    if _readiness_snapshot and now - _readiness_snapshot[0] < READINESS_CACHE_SECONDS:
+        return dict(_readiness_snapshot[1])
+
+    with _readiness_lock:
+        now = monotonic()
+        if _readiness_snapshot and now - _readiness_snapshot[0] < READINESS_CACHE_SECONDS:
+            return dict(_readiness_snapshot[1])
+        dependencies = {
+            "database": "ok" if _database_ready() else "error",
+            "redis": "ok" if _cache_ready() else "error",
+        }
+        _readiness_snapshot = (monotonic(), dependencies)
+        return dict(dependencies)
 
 
 @require_http_methods(["GET"])

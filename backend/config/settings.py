@@ -91,6 +91,9 @@ DATABASES = {
         "OPTIONS": {
             "charset": "utf8mb4",
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+            "connect_timeout": int(os.getenv("MYSQL_CONNECT_TIMEOUT", "3")),
+            "read_timeout": int(os.getenv("MYSQL_READ_TIMEOUT", "3")),
+            "write_timeout": int(os.getenv("MYSQL_WRITE_TIMEOUT", "3")),
         },
     }
 }
@@ -101,7 +104,10 @@ if not DEBUG and not CACHE_REDIS_URL:
         "CACHE_REDIS_URL must be set when DJANGO_DEBUG=0 so verification codes "
         "are shared between web workers"
     )
-CACHES = build_cache_config(CACHE_REDIS_URL)
+CACHES = build_cache_config(
+    CACHE_REDIS_URL,
+    socket_timeout=float(os.getenv("CACHE_REDIS_SOCKET_TIMEOUT", "3")),
+)
 
 AUTH_USER_MODEL = "accounts.User"
 

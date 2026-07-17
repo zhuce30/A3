@@ -5,12 +5,17 @@ from unittest.mock import patch
 from django.test import Client, TestCase, override_settings
 
 from backend.apps.accounts.models import User
+from backend.apps.system import views
 
 
 class SystemHealthTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(phone="13800003001", password="Password123")
         self.client = Client()
+        views._readiness_snapshot = None
+
+    def tearDown(self):
+        views._readiness_snapshot = None
 
     def test_health_requires_login(self):
         response = self.client.get("/api/system/health/")
@@ -80,6 +85,19 @@ class SystemHealthTests(TestCase):
         )
         self.assertNotIn(secret_error, response.content.decode())
         self.assertNotIn("cache-password", response.content.decode())
+
+    def test_ready_coalesces_dependency_probes_for_a_short_window(self):
+        with (
+            patch("backend.apps.system.views._database_ready", return_value=True) as database,
+            patch("backend.apps.system.views._cache_ready", return_value=True) as redis,
+        ):
+            first = self.client.get("/api/system/ready/")
+            second = self.client.get("/api/system/ready/")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        database.assert_called_once_with()
+        redis.assert_called_once_with()
 
     @override_settings(
         SMS_WEBHOOK_URL="https://sms.example.test/send",

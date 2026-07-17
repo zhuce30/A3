@@ -7,6 +7,8 @@ on:
       - codex/a3-latest-integration
     paths:
       - backend/**
+      - docker-compose.yml
+      - docker-compose.prod.yml
       - .github/workflows/build-backend-image.yml
 
 permissions:
@@ -28,6 +30,13 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Validate production Compose merge
+        run: |
+          cp .env.production.template .env.production
+          docker compose --env-file .env.production \
+            -f docker-compose.yml -f docker-compose.prod.yml \
+            config --quiet
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
