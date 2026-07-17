@@ -9,7 +9,14 @@ from django.utils import timezone
 
 from backend.apps.assessments.models import AssessmentAnswer, AssessmentSession, Question, WrongQuestion
 from backend.apps.assessments.services import _knowledge_point_insights, build_learning_report
-from backend.apps.learning.models import Chapter, Course, KnowledgePoint
+from backend.apps.learning.models import (
+    Chapter,
+    Course,
+    KnowledgePoint,
+    LearningPath,
+    LearningPathItem,
+    PathItemStatus,
+)
 from backend.apps.profiles.models import LearnerProfile
 
 
@@ -311,3 +318,44 @@ class LearningReportV2Tests(TestCase):
         self.assertTrue(wrong_queries)
         self.assertTrue(all("GROUP BY" in sql.upper() and "LIMIT" in sql.upper() for sql in answer_queries))
         self.assertTrue(all("GROUP BY" in sql.upper() and "LIMIT" in sql.upper() for sql in wrong_queries))
+
+    def test_populated_30d_report_has_bounded_select_queries(self):
+        self._create_answers(days_ago=1, correctness=[True, True, False, False])
+        self._create_answers(days_ago=12, correctness=[True, False, True])
+        self._create_answers(days_ago=35, correctness=[True, False, False])
+        path = LearningPath.objects.create(user=self.user, course=self.knowledge_point.chapter.course, title="Report path")
+        LearningPathItem.objects.create(
+            path=path,
+            knowledge_point=self.knowledge_point,
+            order=1,
+            status=PathItemStatus.COMPLETED,
+            progress=100,
+            estimated_minutes=25,
+            completed_at=timezone.now() - timedelta(days=2),
+        )
+        WrongQuestion.objects.create(
+            user=self.user,
+            question=self.questions[2],
+            wrong_count=2,
+            last_wrong_answer="B",
+        )
+        WrongQuestion.objects.create(
+            user=self.user,
+            question=self.questions[3],
+            wrong_count=1,
+            mastered=True,
+            last_wrong_answer="B",
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            report = build_learning_report(self.user, "30d")
+
+        select_queries = [
+            query["sql"] for query in queries.captured_queries if query["sql"].lstrip().upper().startswith("SELECT")
+        ]
+        answer_selects = [sql for sql in select_queries if "a3_assessment_answers" in sql.lower()]
+        self.assertEqual(report["metrics"]["answeredQuestions"], 7)
+        self.assertEqual(report["metrics"]["activeWrongQuestions"], 1)
+        self.assertLessEqual(len(select_queries), 12, "\n\n".join(select_queries))
+        self.assertLessEqual(len(answer_selects), 4, "\n\n".join(answer_selects))
+        self.assertTrue(all("CONVERT_TZ" not in sql.upper() for sql in answer_selects), "\n\n".join(answer_selects))

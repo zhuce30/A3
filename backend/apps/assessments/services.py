@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone as datetime_timezone
 from urllib.parse import quote
 
 from django.db import models, transaction
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 from backend.apps.assessments.adaptive import select_adaptive_questions, update_question_mastery
@@ -1563,32 +1564,42 @@ def build_learning_report(user, period: str = "term") -> dict:
     answers = all_answers
     if period_start_at:
         answers = answers.filter(answered_at__gte=period_start_at)
-    total_answers = answers.count()
-    correct_answers = answers.filter(is_correct=True).count()
+    answer_stats = _report_answer_stats(
+        all_answers,
+        period_key=period_key,
+        period_start_at=period_start_at,
+        period_start=period_start,
+        today=today,
+    )
+    total_answers = answer_stats["period_total"]
+    correct_answers = answer_stats["period_correct"]
     accuracy = round(correct_answers * 100 / total_answers, 1) if total_answers else 0
     path = LearningPath.objects.filter(user=user, status=LearningPathStatus.ACTIVE).first()
-    path_items = path.items.all() if path else []
+    path_items = list(path.items.all()) if path else []
+    total_path_items = len(path_items)
     completed_items = [
         item
         for item in path_items
         if item.status == PathItemStatus.COMPLETED and (not period_start_at or (item.completed_at and item.completed_at >= period_start_at))
     ]
     study_minutes = sum(item.estimated_minutes for item in completed_items)
-    wrong_active = WrongQuestion.objects.filter(user=user, mastered=False).select_related("question__knowledge_point")
-    mastered_wrong = WrongQuestion.objects.filter(user=user, mastered=True).count()
-    study_dates = set(answers.values_list("answered_at__date", flat=True))
+    wrong_items = list(WrongQuestion.objects.filter(user=user).select_related("question__knowledge_point"))
+    wrong_active = [wrong for wrong in wrong_items if not wrong.mastered]
+    mastered_wrong = sum(1 for wrong in wrong_items if wrong.mastered)
+    daily_answers = _report_daily_answers(answers, now)
+    study_dates = {row["day"] for row in daily_answers}
     if path:
-        study_dates.update(item.completed_at.date() for item in completed_items if item.completed_at)
+        study_dates.update(timezone.localdate(item.completed_at) for item in completed_items if item.completed_at)
 
-    trends = _report_trends(answers, today, period_key, period_start)
+    trends = _report_trends(daily_answers, today, period_key, period_start)
 
     knowledge_score = accuracy
-    progress_score = path and path.items.count() and round(len(completed_items) * 100 / path.items.count()) or 0
+    progress_score = round(len(completed_items) * 100 / total_path_items) if total_path_items else 0
     focus_score = min(100, len(study_dates) * 12)
     capability_axes = [
         {"label": "知识掌握", "value": knowledge_score},
         {"label": "学习进度", "value": progress_score},
-        {"label": "答题稳定性", "value": max(0, accuracy - wrong_active.count() * 3)},
+        {"label": "答题稳定性", "value": max(0, accuracy - len(wrong_active) * 3)},
         {"label": "持续学习", "value": focus_score},
     ]
     suggestions = []
@@ -1600,20 +1611,17 @@ def build_learning_report(user, period: str = "term") -> dict:
     if not suggestions:
         suggestions.append({"title": "继续当前学习路径", "detail": "完成当前节点后再进行一次阶段测评。"})
 
-    first_answer = all_answers.order_by("answered_at").first()
-    first_period_answer = answers.order_by("answered_at").first()
-    report_start = period_start or (timezone.localdate(first_answer.answered_at) if first_answer else today)
-    if first_period_answer and not period_start:
-        report_start = timezone.localdate(first_period_answer.answered_at)
+    first_answer_at = answer_stats["first_answer_at"]
+    report_start = period_start or (timezone.localdate(first_answer_at) if first_answer_at else today)
     weekly_summary = _weekly_learning_summary(user, now)
     metrics = {
         "studyMinutes": study_minutes,
         "studyDays": len(study_dates),
         "masteredKnowledgePoints": len(completed_items),
-        "totalKnowledgePoints": path.items.count() if path else 0,
+        "totalKnowledgePoints": total_path_items,
         "answeredQuestions": total_answers,
         "accuracy": accuracy,
-        "activeWrongQuestions": wrong_active.count(),
+        "activeWrongQuestions": len(wrong_active),
         "masteredWrongQuestions": mastered_wrong,
         "pathProgress": progress_score,
     }
@@ -1627,10 +1635,10 @@ def build_learning_report(user, period: str = "term") -> dict:
     action_loop = _report_action_loop(weekly_summary, metrics)
     wrong_review_insight = _wrong_review_insight(wrong_active, mastered_wrong)
     comparisons = _report_comparisons(
-        user,
         period_key=period_key,
         start=period_start or report_start,
         end=today,
+        answer_stats=answer_stats,
     )
     knowledge_point_insights = _knowledge_point_insights(user, start=period_start_at)
     updated_at = now.isoformat()
@@ -1666,15 +1674,39 @@ def build_learning_report(user, period: str = "term") -> dict:
     }
 
 
-def _report_comparisons(user, *, period_key: str, start, end) -> dict:
-    answers = AssessmentAnswer.objects.filter(session__user=user)
+def _report_answer_stats(all_answers, *, period_key: str, period_start_at, period_start, today) -> dict:
+    period_filter = models.Q()
+    if period_start_at:
+        period_filter &= models.Q(answered_at__gte=period_start_at)
+    aggregates = {
+        "period_total": models.Count("id", filter=period_filter),
+        "period_correct": models.Count("id", filter=period_filter & models.Q(is_correct=True)),
+        "first_answer_at": models.Min("answered_at"),
+    }
+    if period_key != "term":
+        current_start_at = timezone.make_aware(datetime.combine(period_start, time.min))
+        current_end_at = timezone.make_aware(datetime.combine(today + timedelta(days=1), time.min))
+        window_days = (today - period_start).days + 1
+        previous_end = period_start - timedelta(days=1)
+        previous_start = previous_end - timedelta(days=window_days - 1)
+        previous_start_at = timezone.make_aware(datetime.combine(previous_start, time.min))
+        current_filter = models.Q(answered_at__gte=current_start_at, answered_at__lt=current_end_at)
+        previous_filter = models.Q(answered_at__gte=previous_start_at, answered_at__lt=current_start_at)
+        aggregates.update(
+            {
+                "current_total": models.Count("id", filter=current_filter),
+                "current_correct": models.Count("id", filter=current_filter & models.Q(is_correct=True)),
+                "previous_total": models.Count("id", filter=previous_filter),
+                "previous_correct": models.Count("id", filter=previous_filter & models.Q(is_correct=True)),
+            }
+        )
+    return all_answers.aggregate(**aggregates)
 
-    def window_stats(window_start, window_end) -> dict:
-        window_start_at = timezone.make_aware(datetime.combine(window_start, time.min))
-        window_end_at = timezone.make_aware(datetime.combine(window_end + timedelta(days=1), time.min))
-        window_answers = answers.filter(answered_at__gte=window_start_at, answered_at__lt=window_end_at)
-        answered_count = window_answers.count()
-        correct_count = window_answers.filter(is_correct=True).count()
+
+def _report_comparisons(*, period_key: str, start, end, answer_stats: dict) -> dict:
+    def window_stats(window_start, window_end, prefix: str) -> dict:
+        answered_count = answer_stats[f"{prefix}_total"]
+        correct_count = answer_stats[f"{prefix}_correct"]
         return {
             "start": window_start.isoformat(),
             "end": window_end.isoformat(),
@@ -1684,8 +1716,8 @@ def _report_comparisons(user, *, period_key: str, start, end) -> dict:
         }
 
     if period_key == "term":
-        current_count = answers.count()
-        current_correct = answers.filter(is_correct=True).count()
+        current_count = answer_stats["period_total"]
+        current_correct = answer_stats["period_correct"]
         current_window = {
             "start": start.isoformat(),
             "end": end.isoformat(),
@@ -1710,8 +1742,8 @@ def _report_comparisons(user, *, period_key: str, start, end) -> dict:
     window_days = (end - start).days + 1
     previous_end = start - timedelta(days=1)
     previous_start = previous_end - timedelta(days=window_days - 1)
-    current_window = window_stats(start, end)
-    previous_window = window_stats(previous_start, previous_end)
+    current_window = window_stats(start, end, "current")
+    previous_window = window_stats(previous_start, previous_end, "previous")
     current_count = current_window["answeredCount"]
     previous_count = previous_window["answeredCount"]
     comparable = current_count >= 3 and previous_count >= 3
@@ -2015,58 +2047,72 @@ def _report_period_label(period: str) -> str:
     return "本学期"
 
 
-def _report_trends(answers, today, period: str, period_start) -> list[dict]:
-    trends = []
+def _report_daily_answers(answers, now) -> list[dict]:
+    local_offset = timezone.localtime(now).utcoffset() or timedelta(0)
+    shifted_answered_at = models.ExpressionWrapper(
+        models.F("answered_at") + local_offset,
+        output_field=models.DateTimeField(),
+    )
+    return list(
+        answers.annotate(day=TruncDate(shifted_answered_at, tzinfo=datetime_timezone.utc))
+        .values("day")
+        .annotate(
+            questions=models.Count("id"),
+            correct=models.Count("id", filter=models.Q(is_correct=True)),
+        )
+        .order_by("day")
+    )
+
+
+def _report_trends(daily_answers, today, period: str, period_start) -> list[dict]:
+    counts_by_day = {
+        row["day"]: (row["questions"], row["correct"])
+        for row in daily_answers
+        if row["day"] is not None
+    }
+
+    def bucket(start, end, label) -> dict:
+        questions = 0
+        correct = 0
+        day = start
+        while day <= end:
+            day_questions, day_correct = counts_by_day.get(day, (0, 0))
+            questions += day_questions
+            correct += day_correct
+            day += timedelta(days=1)
+        return {
+            "label": label,
+            "questions": questions,
+            "accuracy": round(correct * 100 / questions, 1) if questions else 0,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        }
+
     if period == "7d":
-        for offset in range(6, -1, -1):
-            day = today - timedelta(days=offset)
-            day_answers = answers.filter(answered_at__date=day)
-            count = day_answers.count()
-            correct = day_answers.filter(is_correct=True).count()
-            trends.append({
-                "label": day.strftime("%m.%d"),
-                "questions": count,
-                "accuracy": round(correct * 100 / count, 1) if count else 0,
-                "start": day.isoformat(),
-                "end": day.isoformat(),
-            })
-        return trends
+        return [
+            bucket(day, day, day.strftime("%m.%d"))
+            for offset in range(6, -1, -1)
+            for day in [today - timedelta(days=offset)]
+        ]
 
     if period == "30d":
-        bucket_end = today
+        trends = []
         for offset in range(4, -1, -1):
-            end = bucket_end - timedelta(days=offset * 6)
+            end = today - timedelta(days=offset * 6)
             start = max(end - timedelta(days=5), period_start or end - timedelta(days=5))
-            bucket_answers = answers.filter(answered_at__date__range=(start, end))
-            count = bucket_answers.count()
-            correct = bucket_answers.filter(is_correct=True).count()
-            trends.append({
-                "label": f"{start.strftime('%m.%d')}-{end.strftime('%m.%d')}",
-                "questions": count,
-                "accuracy": round(correct * 100 / count, 1) if count else 0,
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-            })
+            trends.append(bucket(start, end, f"{start.strftime('%m.%d')}-{end.strftime('%m.%d')}"))
         return trends
 
+    trends = []
     for offset in range(4, -1, -1):
         end = today - timedelta(days=offset * 7)
         start = end - timedelta(days=6)
-        week_answers = answers.filter(answered_at__date__range=(start, end))
-        count = week_answers.count()
-        correct = week_answers.filter(is_correct=True).count()
-        trends.append({
-            "label": f"{start.strftime('%m.%d')}-{end.strftime('%m.%d')}",
-            "questions": count,
-            "accuracy": round(correct * 100 / count, 1) if count else 0,
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-        })
+        trends.append(bucket(start, end, f"{start.strftime('%m.%d')}-{end.strftime('%m.%d')}"))
     return trends
 
 
 def _wrong_review_insight(wrong_active, mastered_wrong: int) -> dict:
-    active_count = wrong_active.count()
+    active_count = len(wrong_active)
     recent_points = []
     for wrong in wrong_active[:3]:
         title = wrong.question.knowledge_point.title
