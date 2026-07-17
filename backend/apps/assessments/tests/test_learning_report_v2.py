@@ -21,6 +21,25 @@ from backend.apps.profiles.models import LearnerProfile
 
 
 class LearningReportV2Tests(TestCase):
+    def test_report_models_define_report_access_path_indexes(self):
+        expected_indexes = {
+            AssessmentAnswer: {
+                "a3_ans_sess_time_ok_idx": ("session", "answered_at", "is_correct"),
+            },
+            WrongQuestion: {
+                "a3_wrong_user_master_idx": ("user", "mastered", "last_wrong_at"),
+            },
+            LearningPath: {
+                "a3_path_user_status_idx": ("user", "status"),
+            },
+        }
+
+        for model, expected in expected_indexes.items():
+            actual = {index.name: tuple(index.fields) for index in model._meta.indexes}
+            for name, fields in expected.items():
+                with self.subTest(model=model.__name__, index=name):
+                    self.assertEqual(actual.get(name), fields)
+
     def setUp(self):
         self.user = get_user_model().objects.create_user(phone="13800006661", password="TestPassword123")
         course = Course.objects.create(code="report-v2", title="操作系统")

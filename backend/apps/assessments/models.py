@@ -255,6 +255,12 @@ class AssessmentAnswer(models.Model):
 
     class Meta:
         db_table = "a3_assessment_answers"
+        indexes = [
+            models.Index(
+                fields=["session", "answered_at", "is_correct"],
+                name="a3_ans_sess_time_ok_idx",
+            )
+        ]
         constraints = [models.UniqueConstraint(fields=["session", "question"], name="unique_session_question_answer")]
 
 
@@ -272,4 +278,10 @@ class WrongQuestion(models.Model):
     class Meta:
         db_table = "a3_wrong_questions"
         ordering = ["mastered", "-last_wrong_at"]
+        indexes = [
+            models.Index(
+                fields=["user", "mastered", "last_wrong_at"],
+                name="a3_wrong_user_master_idx",
+            )
+        ]
         constraints = [models.UniqueConstraint(fields=["user", "question"], name="unique_user_wrong_question")]
