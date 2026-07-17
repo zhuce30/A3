@@ -248,7 +248,13 @@ describe('A3 task stream polling cadence', () => {
   });
 
   it('does not reschedule after the stream consumer cancels', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(taskSnapshotResponse(1));
+    let resolveSecondSnapshot!: (response: Response) => void;
+    const secondSnapshot = new Promise<Response>((resolve) => {
+      resolveSecondSnapshot = resolve;
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(taskSnapshotResponse(1))
+      .mockReturnValueOnce(secondSnapshot);
     vi.stubGlobal('fetch', fetchMock);
     const abortController = createTaskStreamAbortController(abortControllers);
     const { GET } = await import('@/app/api/a3/tasks/stream/route');
@@ -256,11 +262,13 @@ describe('A3 task stream polling cadence', () => {
     const response = await GET(taskStreamRequest(abortController.signal));
     const reader = response.body!.getReader();
     await reader.read();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
 
     await reader.cancel();
+    resolveSecondSnapshot(taskSnapshotResponse(1));
     await vi.advanceTimersByTimeAsync(120_000);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('emits the existing tasks event framing with the snapshot payload unchanged', async () => {

@@ -64,16 +64,16 @@ describe('A3 top task center panel', () => {
     await vi.advanceTimersByTimeAsync(15_000);
     expect(fallbackFetch).toHaveBeenCalledTimes(1);
 
-    eventSource.emit('open');
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(fallbackFetch).toHaveBeenCalledTimes(1);
-
     eventSource.emit('tasks', JSON.stringify({ success: true, tasks: [], summary: { total: 0, running: 0, failed: 0, succeeded: 0 } }));
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fallbackFetch).toHaveBeenCalledTimes(1);
 
     eventSource.emitError();
     await vi.advanceTimersByTimeAsync(15_000);
+    expect(fallbackFetch).toHaveBeenCalledTimes(2);
+
+    eventSource.emit('open');
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fallbackFetch).toHaveBeenCalledTimes(2);
 
     stop();
