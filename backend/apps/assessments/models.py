@@ -280,7 +280,7 @@ class WrongQuestion(models.Model):
         ordering = ["mastered", "-last_wrong_at"]
         indexes = [
             models.Index(
-                fields=["user", "mastered", "last_wrong_at"],
+                fields=["user", "mastered", "-last_wrong_at"],
                 name="a3_wrong_user_master_idx",
             )
         ]

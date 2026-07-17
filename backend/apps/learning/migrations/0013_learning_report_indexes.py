@@ -14,10 +14,10 @@ class Migration(migrations.Migration):
     operations = [
         migrations.AddIndex(
             model_name='learningpath',
-            index=models.Index(fields=['user', 'status'], name='a3_path_user_status_idx'),
+            index=models.Index(fields=['user', 'status', '-created_at'], name='a3_path_user_status_idx'),
         ),
         migrations.AddIndex(
             model_name='resourcepacklog',
-            index=models.Index(fields=['user', 'completed_at'], name='a3_pack_user_done_idx'),
+            index=models.Index(fields=['user', '-completed_at', '-created_at'], name='a3_pack_user_done_idx'),
         ),
     ]

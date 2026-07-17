@@ -27,10 +27,10 @@ class LearningReportV2Tests(TestCase):
                 "a3_ans_sess_time_ok_idx": ("session", "answered_at", "is_correct"),
             },
             WrongQuestion: {
-                "a3_wrong_user_master_idx": ("user", "mastered", "last_wrong_at"),
+                "a3_wrong_user_master_idx": ("user", "mastered", "-last_wrong_at"),
             },
             LearningPath: {
-                "a3_path_user_status_idx": ("user", "status"),
+                "a3_path_user_status_idx": ("user", "status", "-created_at"),
             },
         }
 

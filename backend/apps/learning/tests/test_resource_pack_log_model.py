@@ -9,7 +9,10 @@ class ResourcePackLogModelTests(TestCase):
     def test_defines_user_completion_report_index(self):
         indexes = {index.name: tuple(index.fields) for index in ResourcePackLog._meta.indexes}
 
-        self.assertEqual(indexes.get("a3_pack_user_done_idx"), ("user", "completed_at"))
+        self.assertEqual(
+            indexes.get("a3_pack_user_done_idx"),
+            ("user", "-completed_at", "-created_at"),
+        )
 
     def test_practice_href_accepts_long_generated_links(self):
         user = User.objects.create_user(phone="13800009991", password="TestPassword123")

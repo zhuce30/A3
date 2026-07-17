@@ -68,10 +68,10 @@ The implementation must preserve the existing JSON schema and current behavior f
 A Django migration will add indexes for the dominant production access paths:
 
 ```text
-AssessmentAnswer(session_id, answered_at, is_correct)
-WrongQuestion(user_id, mastered, last_wrong_at)
-LearningPath(user_id, status)
-ResourcePackLog(user_id, completed_at)
+a3_ans_sess_time_ok_idx: AssessmentAnswer(session_id, answered_at, is_correct)
+a3_wrong_user_master_idx: WrongQuestion(user_id, mastered, -last_wrong_at)
+a3_path_user_status_idx: LearningPath(user_id, status, -created_at)
+a3_pack_user_done_idx: ResourcePackLog(user_id, -completed_at, -created_at)
 ```
 
 Index names will be explicit and within MySQL's identifier limits. Migration verification must use Django's migration executor and production-compatible MySQL SQL generation where available.

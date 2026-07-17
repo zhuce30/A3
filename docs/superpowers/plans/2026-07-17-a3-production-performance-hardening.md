@@ -219,10 +219,11 @@ def test_report_models_define_production_access_path_indexes(self):
     answer_indexes = {index.name: tuple(index.fields) for index in AssessmentAnswer._meta.indexes}
     wrong_indexes = {index.name: tuple(index.fields) for index in WrongQuestion._meta.indexes}
     self.assertEqual(answer_indexes["a3_ans_sess_time_ok_idx"], ("session", "answered_at", "is_correct"))
-    self.assertEqual(wrong_indexes["a3_wrong_user_master_idx"], ("user", "mastered", "last_wrong_at"))
+    self.assertEqual(wrong_indexes["a3_wrong_user_master_idx"], ("user", "mastered", "-last_wrong_at"))
 ```
 
-Add equivalent assertions for `LearningPath` and `ResourcePackLog` in `backend/apps/learning/tests/test_resource_pack_log_model.py`.
+Add equivalent assertions for `LearningPath(user, status, -created_at)` and
+`ResourcePackLog(user, -completed_at, -created_at)` in the owned model metadata tests.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -238,9 +239,9 @@ Add these `Meta.indexes` entries:
 
 ```python
 models.Index(fields=["session", "answered_at", "is_correct"], name="a3_ans_sess_time_ok_idx")
-models.Index(fields=["user", "mastered", "last_wrong_at"], name="a3_wrong_user_master_idx")
-models.Index(fields=["user", "status"], name="a3_path_user_status_idx")
-models.Index(fields=["user", "completed_at"], name="a3_pack_user_done_idx")
+models.Index(fields=["user", "mastered", "-last_wrong_at"], name="a3_wrong_user_master_idx")
+models.Index(fields=["user", "status", "-created_at"], name="a3_path_user_status_idx")
+models.Index(fields=["user", "-completed_at", "-created_at"], name="a3_pack_user_done_idx")
 ```
 
 Generate deterministic migrations:
@@ -264,8 +265,8 @@ Expected: no ungenerated changes, migration plan contains four indexes, tests pa
 - [ ] **Step 5: Commit indexes**
 
 ```powershell
-git add backend/apps/assessments/models.py backend/apps/assessments/migrations/0005_assessmentanswer_report_index.py backend/apps/learning/models.py backend/apps/learning/migrations/0013_learning_report_indexes.py backend/apps/assessments/tests/test_learning_report_v2.py backend/apps/learning/tests/test_resource_pack_log_model.py
-git commit -m "perf: index learning report access paths"
+git add backend/apps/assessments/models.py backend/apps/assessments/migrations/0005_assessmentanswer_report_index.py backend/apps/learning/models.py backend/apps/learning/migrations/0013_learning_report_indexes.py backend/apps/assessments/tests/test_learning_report_v2.py backend/apps/learning/tests/test_resource_pack_log_model.py docs/superpowers/specs/2026-07-17-a3-production-performance-architecture-design.md docs/superpowers/plans/2026-07-17-a3-production-performance-hardening.md
+git commit -m "perf: cover report index ordering"
 ```
 
 ### Task 4: Add Public Liveness and Readiness Probes

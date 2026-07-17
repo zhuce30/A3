@@ -102,7 +102,7 @@ class LearningPath(models.Model):
     class Meta:
         db_table = "a3_learning_paths"
         ordering = ["-created_at"]
-        indexes = [models.Index(fields=["user", "status"], name="a3_path_user_status_idx")]
+        indexes = [models.Index(fields=["user", "status", "-created_at"], name="a3_path_user_status_idx")]
         constraints = [models.UniqueConstraint(fields=["user", "course", "version"], name="unique_learning_path_version")]
 
 
@@ -150,7 +150,12 @@ class ResourcePackLog(models.Model):
     class Meta:
         db_table = "a3_resource_pack_logs"
         ordering = ["-completed_at", "-created_at"]
-        indexes = [models.Index(fields=["user", "completed_at"], name="a3_pack_user_done_idx")]
+        indexes = [
+            models.Index(
+                fields=["user", "-completed_at", "-created_at"],
+                name="a3_pack_user_done_idx",
+            )
+        ]
         constraints = [models.UniqueConstraint(fields=["user", "task_id"], name="unique_user_resource_pack_task")]
 
 

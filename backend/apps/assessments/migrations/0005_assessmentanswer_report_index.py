@@ -18,6 +18,6 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name='wrongquestion',
-            index=models.Index(fields=['user', 'mastered', 'last_wrong_at'], name='a3_wrong_user_master_idx'),
+            index=models.Index(fields=['user', 'mastered', '-last_wrong_at'], name='a3_wrong_user_master_idx'),
         ),
     ]
