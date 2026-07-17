@@ -3,7 +3,8 @@ import { resolveA3InternalFrontendEndpoint } from '@/lib/server/a3-django-api';
 
 const TASKS_EVENT = 'event: tasks';
 const HEARTBEAT_EVENT = 'event: heartbeat';
-const TASK_SNAPSHOT_INTERVAL_MS = 10_000;
+const ACTIVE_TASK_SNAPSHOT_INTERVAL_MS = 5_000;
+const IDLE_TASK_SNAPSHOT_INTERVAL_MS = 60_000;
 const TASK_SNAPSHOT_RETRY_MS = 30_000;
 
 export async function GET(request: NextRequest) {
@@ -39,7 +40,7 @@ export async function GET(request: NextRequest) {
       };
 
       const pushTasks = async () => {
-        if (closed || snapshotInFlight) return false;
+        if (closed || snapshotInFlight) return TASK_SNAPSHOT_RETRY_MS;
         snapshotInFlight = true;
         try {
           const response = await fetch(resolveA3InternalFrontendEndpoint('/api/a3/tasks', request.nextUrl.origin), {
@@ -48,13 +49,16 @@ export async function GET(request: NextRequest) {
           });
           const payload = await response.json().catch(() => ({ success: false, error: '任务快照解析失败' }));
           send('tasks', payload);
-          return response.ok;
+          if (!response.ok || payload.success !== true) return TASK_SNAPSHOT_RETRY_MS;
+          return Number(payload.summary?.running) > 0
+            ? ACTIVE_TASK_SNAPSHOT_INTERVAL_MS
+            : IDLE_TASK_SNAPSHOT_INTERVAL_MS;
         } catch (error) {
           send('tasks', {
             success: false,
             error: error instanceof Error ? error.message : '任务快照读取失败',
           });
-          return false;
+          return TASK_SNAPSHOT_RETRY_MS;
         } finally {
           snapshotInFlight = false;
         }
@@ -64,15 +68,15 @@ export async function GET(request: NextRequest) {
         if (closed) return;
         snapshot = windowlessSetTimeout(async () => {
           snapshot = null;
-          const succeeded = await pushTasks();
-          scheduleSnapshot(succeeded ? TASK_SNAPSHOT_INTERVAL_MS : TASK_SNAPSHOT_RETRY_MS);
+          const nextDelay = await pushTasks();
+          scheduleSnapshot(nextDelay);
         }, delay);
       };
 
-      await pushTasks();
+      const nextDelay = await pushTasks();
       if (closed) return;
       heartbeat = windowlessSetInterval(() => send('heartbeat', { now: new Date().toISOString() }), 15000);
-      scheduleSnapshot(TASK_SNAPSHOT_INTERVAL_MS);
+      scheduleSnapshot(nextDelay);
     },
     cancel() {
       closed = true;

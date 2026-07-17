@@ -53,9 +53,11 @@ describe('A3 unified task APIs', () => {
     const source = fs.readFileSync(tasksStreamRoutePath, 'utf8');
 
     expect(source).toContain('let snapshotInFlight = false');
-    expect(source).toContain('if (closed || snapshotInFlight) return false;');
+    expect(source).toContain('if (closed || snapshotInFlight) return TASK_SNAPSHOT_RETRY_MS;');
     expect(source).toContain('snapshot = windowlessSetTimeout');
-    expect(source).toContain('TASK_SNAPSHOT_INTERVAL_MS');
+    expect(source).toContain('ACTIVE_TASK_SNAPSHOT_INTERVAL_MS = 5_000');
+    expect(source).toContain('IDLE_TASK_SNAPSHOT_INTERVAL_MS = 60_000');
+    expect(source).toContain('TASK_SNAPSHOT_RETRY_MS = 30_000');
     expect(source).not.toContain('windowlessSetInterval(() => void pushTasks(), 2500)');
   });
 
@@ -124,3 +126,132 @@ describe('A3 unified task API production routing', () => {
     expect(payload.tasks).toEqual([]);
   });
 });
+
+describe('A3 task stream polling cadence', () => {
+  const abortControllers: AbortController[] = [];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    abortControllers.splice(0).forEach((controller) => controller.abort());
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('refreshes active tasks after 5 seconds and idle tasks after 60 seconds', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(taskSnapshotResponse(1))
+      .mockResolvedValueOnce(taskSnapshotResponse(0))
+      .mockResolvedValueOnce(taskSnapshotResponse(0));
+    vi.stubGlobal('fetch', fetchMock);
+    const abortController = createTaskStreamAbortController(abortControllers);
+    const { GET } = await import('@/app/api/a3/tasks/stream/route');
+
+    await GET(taskStreamRequest(abortController.signal));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    abortController.abort();
+  });
+
+  it('retries unsuccessful task snapshots after 30 seconds', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(taskSnapshotResponse(0, false))
+      .mockResolvedValueOnce(taskSnapshotResponse(0));
+    vi.stubGlobal('fetch', fetchMock);
+    const abortController = createTaskStreamAbortController(abortControllers);
+    const { GET } = await import('@/app/api/a3/tasks/stream/route');
+
+    await GET(taskStreamRequest(abortController.signal));
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    abortController.abort();
+  });
+
+  it('keeps only one task snapshot in flight per connection', async () => {
+    let resolveSecondSnapshot!: (response: Response) => void;
+    const secondSnapshot = new Promise<Response>((resolve) => {
+      resolveSecondSnapshot = resolve;
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(taskSnapshotResponse(1))
+      .mockReturnValueOnce(secondSnapshot);
+    vi.stubGlobal('fetch', fetchMock);
+    const abortController = createTaskStreamAbortController(abortControllers);
+    const { GET } = await import('@/app/api/a3/tasks/stream/route');
+
+    await GET(taskStreamRequest(abortController.signal));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    resolveSecondSnapshot(taskSnapshotResponse(1));
+    await vi.advanceTimersByTimeAsync(0);
+    abortController.abort();
+  });
+
+  it('does not reschedule after aborting while a snapshot is in flight', async () => {
+    let resolveSecondSnapshot!: (response: Response) => void;
+    const secondSnapshot = new Promise<Response>((resolve) => {
+      resolveSecondSnapshot = resolve;
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(taskSnapshotResponse(1))
+      .mockReturnValueOnce(secondSnapshot);
+    vi.stubGlobal('fetch', fetchMock);
+    const abortController = createTaskStreamAbortController(abortControllers);
+    const { GET } = await import('@/app/api/a3/tasks/stream/route');
+
+    await GET(taskStreamRequest(abortController.signal));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    abortController.abort();
+    resolveSecondSnapshot(taskSnapshotResponse(1));
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+function taskSnapshotResponse(running: number, success = true) {
+  return new Response(JSON.stringify({
+    success,
+    tasks: [],
+    summary: { total: running, running, failed: 0, succeeded: 0 },
+  }), {
+    status: success ? 200 : 503,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function taskStreamRequest(signal: AbortSignal) {
+  return {
+    signal,
+    headers: new Headers(),
+    nextUrl: new URL('https://a3.zhuce.work/api/a3/tasks/stream'),
+  } as never;
+}
+
+function createTaskStreamAbortController(abortControllers: AbortController[]) {
+  const abortController = new AbortController();
+  abortControllers.push(abortController);
+  return abortController;
+}

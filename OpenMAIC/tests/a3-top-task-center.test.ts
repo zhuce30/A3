@@ -40,4 +40,15 @@ describe('A3 top task center panel', () => {
     expect(source).toContain('aria-label="任务列表"');
     expect(source).toContain('min-h-0 flex-1 overflow-y-auto overscroll-contain');
   });
+
+  it('polls the task fallback only while the SSE connection is not live', () => {
+    const source = fs.readFileSync(topActionsPath, 'utf8');
+
+    expect(source).toMatch(/useEffect\(\(\) => \{\s*if \(!currentUser\) return;\s*let cancelled = false;\s*let streamLive = false;\s*async function loadTasks/);
+    expect(source).toMatch(/addEventListener\('open',[\s\S]*?streamLive = true;/);
+    expect(source).toMatch(/safeParseTasksEvent[\s\S]*?if \(!result \|\| cancelled\) return;[\s\S]*?streamLive = true;/);
+    expect(source).toMatch(/eventSource\.onerror = \(\) => \{[\s\S]*?streamLive = false;/);
+    expect(source).toMatch(/window\.setInterval\(\(\) => \{[\s\S]*?if \(!streamLive\) void loadTasks\(\);[\s\S]*?\}, 15000\)/);
+    expect(source).not.toContain('window.setInterval(() => void loadTasks(), 15000)');
+  });
 });

@@ -106,6 +106,7 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
   useEffect(() => {
     if (!currentUser) return;
     let cancelled = false;
+    let streamLive = false;
 
     async function loadTasks() {
       try {
@@ -127,11 +128,14 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
     void loadTasks();
     const eventSource = new EventSource('/api/a3/tasks/stream', { withCredentials: true });
     eventSource.addEventListener('open', () => {
-      if (!cancelled) setTaskStreamState('live');
+      if (cancelled) return;
+      streamLive = true;
+      setTaskStreamState('live');
     });
     eventSource.addEventListener('tasks', (event) => {
       const result = safeParseTasksEvent((event as MessageEvent).data);
       if (!result || cancelled) return;
+      streamLive = true;
       if (!result.success) {
         setTaskError(result.error || '任务中心暂时不可用');
         return;
@@ -142,9 +146,13 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
       setTaskStreamState('live');
     });
     eventSource.onerror = () => {
-      if (!cancelled) setTaskStreamState('fallback');
+      if (cancelled) return;
+      streamLive = false;
+      setTaskStreamState('fallback');
     };
-    const fallbackTimer = window.setInterval(() => void loadTasks(), 15000);
+    const fallbackTimer = window.setInterval(() => {
+      if (!streamLive) void loadTasks();
+    }, 15000);
     return () => {
       cancelled = true;
       eventSource.close();
