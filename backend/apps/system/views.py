@@ -2,17 +2,18 @@ from __future__ import annotations
 
 from threading import Lock
 from time import monotonic
-from uuid import uuid4
 
-from django.core.cache import caches
-from django.db import connection
+import pymysql
+from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
+from redis import Redis
 
 from backend.apps.system.services import build_system_health
 
 
 READINESS_CACHE_SECONDS = 2.0
+READINESS_DEPENDENCY_TIMEOUT_SECONDS = 1
 _readiness_lock = Lock()
 _readiness_snapshot: tuple[float, dict[str, str]] | None = None
 
@@ -23,23 +24,47 @@ def liveness(request):
 
 
 def _database_ready() -> bool:
+    database = None
     try:
-        with connection.cursor() as cursor:
+        config = settings.DATABASES["default"]
+        database = pymysql.connect(
+            host=str(config.get("HOST") or "127.0.0.1"),
+            port=int(config.get("PORT") or 3306),
+            user=str(config.get("USER") or ""),
+            password=str(config.get("PASSWORD") or ""),
+            database=str(config.get("NAME") or ""),
+            charset="utf8mb4",
+            connect_timeout=READINESS_DEPENDENCY_TIMEOUT_SECONDS,
+            read_timeout=READINESS_DEPENDENCY_TIMEOUT_SECONDS,
+            write_timeout=READINESS_DEPENDENCY_TIMEOUT_SECONDS,
+        )
+        with database.cursor() as cursor:
             cursor.execute("SELECT 1")
             return cursor.fetchone() == (1,)
     except Exception:
         return False
+    finally:
+        if database is not None:
+            database.close()
 
 
 def _cache_ready() -> bool:
-    token = uuid4().hex
-    key = f"a3:readiness:{token}"
+    redis = None
     try:
-        cache = caches["default"]
-        cache.set(key, token, timeout=5)
-        return cache.get(key) == token
+        redis_url = str(getattr(settings, "CACHE_REDIS_URL", "")).strip()
+        if not redis_url:
+            return False
+        redis = Redis.from_url(
+            redis_url,
+            socket_connect_timeout=READINESS_DEPENDENCY_TIMEOUT_SECONDS,
+            socket_timeout=READINESS_DEPENDENCY_TIMEOUT_SECONDS,
+        )
+        return bool(redis.ping())
     except Exception:
         return False
+    finally:
+        if redis is not None:
+            redis.close()
 
 
 @require_http_methods(["GET"])

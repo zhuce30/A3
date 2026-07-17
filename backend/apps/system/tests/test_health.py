@@ -23,18 +23,22 @@ class SystemHealthTests(TestCase):
 
     def test_live_is_public_and_does_not_probe_dependencies(self):
         with (
-            patch("backend.apps.system.views.connection.cursor") as database_cursor,
-            patch("backend.apps.system.views.caches") as cache_handler,
+            patch("backend.apps.system.views.pymysql.connect") as database_connect,
+            patch("backend.apps.system.views.Redis.from_url") as redis_connect,
         ):
             response = self.client.get("/api/system/live/")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"success": True, "status": "alive"})
-        database_cursor.assert_not_called()
-        cache_handler.assert_not_called()
+        database_connect.assert_not_called()
+        redis_connect.assert_not_called()
 
     def test_ready_is_public_and_reports_database_and_redis_ready(self):
-        response = self.client.get("/api/system/ready/")
+        with (
+            patch("backend.apps.system.views._database_ready", return_value=True),
+            patch("backend.apps.system.views._cache_ready", return_value=True),
+        ):
+            response = self.client.get("/api/system/ready/")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -48,9 +52,12 @@ class SystemHealthTests(TestCase):
 
     def test_ready_returns_503_when_database_probe_fails_without_leaking_details(self):
         secret_error = "mysql://a3:database-password@mysql:3306/a3_learning"
-        with patch(
-            "backend.apps.system.views.connection.cursor",
-            side_effect=RuntimeError(secret_error),
+        with (
+            patch(
+                "backend.apps.system.views.pymysql.connect",
+                side_effect=RuntimeError(secret_error),
+            ),
+            patch("backend.apps.system.views._cache_ready", return_value=True),
         ):
             response = self.client.get("/api/system/ready/")
 
@@ -66,10 +73,11 @@ class SystemHealthTests(TestCase):
         self.assertNotIn(secret_error, response.content.decode())
         self.assertNotIn("database-password", response.content.decode())
 
+    @override_settings(CACHE_REDIS_URL="redis://redis:6379/2")
     def test_ready_returns_503_when_redis_probe_fails_without_leaking_details(self):
         secret_error = "redis://a3:cache-password@redis:6379/2"
-        with patch("backend.apps.system.views.caches") as cache_handler:
-            cache_handler.__getitem__.return_value.set.side_effect = RuntimeError(
+        with patch("backend.apps.system.views.Redis.from_url") as redis_factory:
+            redis_factory.side_effect = RuntimeError(
                 secret_error
             )
             response = self.client.get("/api/system/ready/")
@@ -85,6 +93,23 @@ class SystemHealthTests(TestCase):
         )
         self.assertNotIn(secret_error, response.content.decode())
         self.assertNotIn("cache-password", response.content.decode())
+
+    @override_settings(CACHE_REDIS_URL="redis://redis:6379/2")
+    def test_ready_uses_probe_local_one_second_driver_timeouts(self):
+        with (
+            patch("backend.apps.system.views.pymysql.connect") as mysql_connect,
+            patch("backend.apps.system.views.Redis.from_url") as redis_factory,
+        ):
+            mysql_connect.return_value.cursor.return_value.__enter__.return_value.fetchone.return_value = (1,)
+            redis_factory.return_value.ping.return_value = True
+            response = self.client.get("/api/system/ready/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mysql_connect.call_args.kwargs["connect_timeout"], 1)
+        self.assertEqual(mysql_connect.call_args.kwargs["read_timeout"], 1)
+        self.assertEqual(mysql_connect.call_args.kwargs["write_timeout"], 1)
+        self.assertEqual(redis_factory.call_args.kwargs["socket_connect_timeout"], 1)
+        self.assertEqual(redis_factory.call_args.kwargs["socket_timeout"], 1)
 
     def test_ready_coalesces_dependency_probes_for_a_short_window(self):
         with (

@@ -65,6 +65,7 @@ describe('A3 private GHCR backend deployment', () => {
         'backend/**',
         'docker-compose.yml',
         'docker-compose.prod.yml',
+        '.env.production.template',
         '.github/workflows/build-backend-image.yml',
       ],
     });
