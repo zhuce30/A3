@@ -48,7 +48,12 @@ from backend.apps.compat.resource_generation import (
     record_resource_feedback,
 )
 from backend.apps.compat.verification import verify_answer
-from backend.apps.compat.video_jobs import create_video_job, retry_failed_video_segments, serialize_video_job
+from backend.apps.compat.video_jobs import (
+    create_legacy_video_retry_job,
+    create_video_job,
+    retry_failed_video_segments,
+    serialize_video_job,
+)
 from backend.apps.engagement.models import UserNotification
 from backend.apps.knowledge_base.models import KnowledgeGraphClaim, KnowledgeGraphEntity, KnowledgeGraphRelation, KnowledgeParseRun
 from backend.apps.knowledge_base.services import accessible_resources_for_user
@@ -301,6 +306,36 @@ def resource_pack_video_jobs(request, pack_id):
         job, created = create_video_job(request.user, str(pack_id), _body(request))
         job = VideoGenerationJob.objects.prefetch_related("segments").get(id=job.id)
         return JsonResponse({"success": True, "created": created, "job": serialize_video_job(job)}, status=201 if created else 200)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["POST"])
+def import_legacy_resource_pack_video_job(request, pack_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    pack = get_resource_pack(request.user, str(pack_id))
+    if not pack:
+        return JsonResponse({"success": False, "error": "资源包不存在"}, status=404)
+    try:
+        job, created, imported, queued = create_legacy_video_retry_job(
+            request.user,
+            str(pack_id),
+            pack,
+            _body(request),
+        )
+        refreshed = VideoGenerationJob.objects.prefetch_related("segments").get(id=job.id)
+        return JsonResponse(
+            {
+                "success": True,
+                "created": created,
+                "importedSucceeded": imported,
+                "queuedFailed": queued,
+                "job": serialize_video_job(refreshed),
+            },
+            status=201 if created else 200,
+        )
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
 

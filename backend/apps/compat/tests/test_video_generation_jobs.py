@@ -144,6 +144,78 @@ class VideoGenerationJobApiTests(TestCase):
             ],
         }
 
+    def _store_legacy_video_pack(self, *, pack=None):
+        profile = self.user.learner_profile
+        extra_profile = dict(profile.extra_profile or {})
+        extra_profile["resourcePacks"] = [pack or self._legacy_video_pack()]
+        profile.extra_profile = extra_profile
+        profile.save(update_fields=["extra_profile", "updated_at"])
+
+    @patch("backend.apps.compat.video_jobs.current_app.send_task")
+    def test_import_legacy_video_endpoint_creates_job_and_replay_is_idempotent(self, send_task):
+        send_task.return_value.id = "celery-legacy-api"
+        self._store_legacy_video_pack()
+        path = "/api/resources/packs/pack-api-001/video-jobs/import-legacy/"
+        payload = self._legacy_video_payload()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            created = self.client.post(path, data=payload, content_type="application/json")
+        with self.captureOnCommitCallbacks(execute=True):
+            replay = self.client.post(path, data=payload, content_type="application/json")
+
+        self.assertEqual(created.status_code, 201)
+        self.assertTrue(created.json()["success"])
+        self.assertTrue(created.json()["created"])
+        self.assertEqual(created.json()["importedSucceeded"], 1)
+        self.assertEqual(created.json()["queuedFailed"], 1)
+        job_id = created.json()["job"]["jobId"]
+        self.assertTrue(job_id.startswith("a3_legacy_video_"))
+        self.assertEqual(replay.status_code, 200)
+        self.assertFalse(replay.json()["created"])
+        self.assertEqual(replay.json()["job"]["jobId"], job_id)
+        send_task.assert_called_once_with("compat.advance_video_generation_job", args=[job_id])
+
+    def test_import_legacy_video_endpoint_rejects_unauthenticated_request(self):
+        self.client.logout()
+
+        response = self.client.post(
+            "/api/resources/packs/pack-api-001/video-jobs/import-legacy/",
+            data=self._legacy_video_payload(),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(response.json()["success"])
+
+    def test_import_legacy_video_endpoint_hides_another_users_pack(self):
+        self._store_legacy_video_pack()
+        self.client.force_login(self.other)
+
+        response = self.client.post(
+            "/api/resources/packs/pack-api-001/video-jobs/import-legacy/",
+            data=self._legacy_video_payload(),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {"success": False, "error": "资源包不存在"})
+
+    def test_import_legacy_video_endpoint_returns_readable_error_for_invalid_artifact(self):
+        self._store_legacy_video_pack(pack={
+            "resourcePackId": "pack-api-001",
+            "multimodalArtifacts": [],
+        })
+
+        response = self.client.post(
+            "/api/resources/packs/pack-api-001/video-jobs/import-legacy/",
+            data=self._legacy_video_payload(),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["success"])
+        self.assertEqual(response.json()["error"], "当前视频不需要旧任务迁移")
+
     @patch("backend.apps.compat.video_jobs.current_app.send_task")
     def test_import_legacy_video_preserves_success_and_queues_only_failures(self, send_task):
         send_task.return_value.id = "celery-legacy-001"

@@ -22,6 +22,11 @@ urlpatterns = [
     path("resources/packs/<str:pack_id>/openmaic-classroom/", views.resource_pack_openmaic_classroom, name="compat-resource-pack-openmaic-classroom"),
     path("resources/packs/<str:pack_id>/openmaic-video/", views.resource_pack_openmaic_video, name="compat-resource-pack-openmaic-video"),
     path("resources/packs/<str:pack_id>/video-jobs/", views.resource_pack_video_jobs, name="compat-resource-pack-video-jobs"),
+    path(
+        "resources/packs/<str:pack_id>/video-jobs/import-legacy/",
+        views.import_legacy_resource_pack_video_job,
+        name="compat-resource-pack-video-job-import-legacy",
+    ),
     path("resources/packs/<str:pack_id>/openmaic-pptx-export/", views.resource_pack_openmaic_pptx_export, name="compat-resource-pack-openmaic-pptx-export"),
     path("resources/packs/<str:pack_id>/openmaic-interaction/", views.resource_pack_openmaic_interaction, name="compat-resource-pack-openmaic-interaction"),
     path("resources/packs/<str:pack_id>/", views.resource_pack_detail, name="compat-resource-pack-detail"),
