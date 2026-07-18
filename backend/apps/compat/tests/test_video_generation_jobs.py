@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from django.db import IntegrityError
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest import skipUnless
 from unittest.mock import patch
 
-from django.test import Client, TestCase
+from django.db import IntegrityError, close_old_connections, connection
+from django.test import Client, TestCase, TransactionTestCase
 from django.utils import timezone
 
 from backend.apps.accounts.models import User
@@ -124,7 +127,7 @@ class VideoGenerationJobApiTests(TestCase):
                     "title": "Concept",
                     "status": "succeeded",
                     "videoUrl": "https://server.invalid/kept.mp4",
-                    "duration": 10,
+                    "duration": 12,
                     "width": 1920,
                     "height": 1080,
                 },
@@ -259,6 +262,7 @@ class VideoGenerationJobApiTests(TestCase):
         kept = job.segments.get(index=2)
         self.assertEqual(kept.status, "succeeded")
         self.assertEqual(kept.video_url, "https://server.invalid/kept.mp4")
+        self.assertEqual(kept.duration, 12)
         self.assertEqual((kept.width, kept.height), (1920, 1080))
         self.assertNotEqual(kept.video_url, payload["segments"][1]["videoUrl"])
         send_task.assert_called_once_with("compat.advance_video_generation_job", args=[job.job_id])
@@ -288,6 +292,27 @@ class VideoGenerationJobApiTests(TestCase):
         self.assertEqual(VideoGenerationJob.objects.filter(job_id=first.job_id).count(), 1)
         self.assertEqual(VideoGenerationSegment.objects.filter(job=first).count(), 2)
         send_task.assert_called_once_with("compat.advance_video_generation_job", args=[first.job_id])
+
+    @patch("backend.apps.compat.video_jobs.current_app.send_task")
+    def test_import_legacy_video_metadata_change_creates_new_fingerprint(self, send_task):
+        send_task.return_value.id = "celery-legacy-metadata"
+        original_pack = self._legacy_video_pack()
+        corrected_pack = self._legacy_video_pack()
+        corrected_pack["multimodalArtifacts"][0]["segments"][1]["width"] = 1280
+
+        with self.captureOnCommitCallbacks(execute=True):
+            original, original_created, _, _ = create_legacy_video_retry_job(
+                self.user, "pack-api-001", original_pack, self._legacy_video_payload()
+            )
+        with self.captureOnCommitCallbacks(execute=True):
+            corrected, corrected_created, _, _ = create_legacy_video_retry_job(
+                self.user, "pack-api-001", corrected_pack, self._legacy_video_payload()
+            )
+
+        self.assertTrue(original_created)
+        self.assertTrue(corrected_created)
+        self.assertNotEqual(original.job_id, corrected.job_id)
+        self.assertEqual(send_task.call_count, 2)
 
     def test_import_legacy_video_rejects_artifact_with_job_id(self):
         with self.assertRaises(ValueError):
@@ -557,3 +582,66 @@ class VideoGenerationJobApiTests(TestCase):
             self.client.post("/api/resources/video-jobs/video-job-private/retry-failed/", data={}, content_type="application/json").status_code,
             404,
         )
+
+
+@skipUnless(connection.vendor == "mysql", "requires MySQL transaction concurrency")
+class VideoGenerationJobConcurrencyTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.user = User.objects.create_user(phone="13800009931", password="Password123")
+
+    @patch("backend.apps.compat.video_jobs.current_app.send_task")
+    def test_concurrent_legacy_import_dispatches_one_paid_job(self, send_task):
+        send_task.return_value.id = "celery-legacy-concurrent"
+        pack = {
+            "resourcePackId": "pack-concurrent-001",
+            "multimodalArtifacts": [
+                {
+                    "type": "openmaic_video",
+                    "status": "partial",
+                    "createdAt": "2026-07-18T00:00:00Z",
+                    "segments": [
+                        {"index": 1, "title": "导入", "status": "failed", "videoUrl": "", "duration": 10},
+                        {
+                            "index": 2,
+                            "title": "概念",
+                            "status": "succeeded",
+                            "videoUrl": "https://server.invalid/concurrent-kept.mp4",
+                            "duration": 12,
+                            "width": 1920,
+                            "height": 1080,
+                        },
+                    ],
+                }
+            ],
+        }
+        payload = {
+            "provider": "seedance",
+            "segments": [
+                {"index": 1, "title": "导入", "prompt": "第一段 prompt", "duration": 10},
+                {"index": 2, "title": "概念", "prompt": "第二段 prompt", "duration": 10},
+            ],
+        }
+        barrier = threading.Barrier(2)
+
+        def import_in_separate_connection():
+            close_old_connections()
+            try:
+                user = User.objects.get(pk=self.user.pk)
+                barrier.wait(timeout=10)
+                job, created, _, _ = create_legacy_video_retry_job(
+                    user, "pack-concurrent-001", pack, payload
+                )
+                return job.job_id, created
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: import_in_separate_connection(), range(2)))
+
+        self.assertEqual(len({job_id for job_id, _ in results}), 1)
+        self.assertEqual(sorted(created for _, created in results), [False, True])
+        job = VideoGenerationJob.objects.get(job_id=results[0][0])
+        self.assertEqual(job.segments.count(), 2)
+        send_task.assert_called_once_with("compat.advance_video_generation_job", args=[job.job_id])

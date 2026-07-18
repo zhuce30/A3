@@ -118,12 +118,21 @@ def _legacy_video_job_id(user_id: int, pack_id: str, artifact: dict) -> str:
     canonical_segments = []
     for item in sorted(artifact.get("segments", []), key=lambda segment: int(segment.get("index") or 0)):
         video_url = str(item.get("videoUrl") or "")
+        try:
+            duration = int(item.get("duration") or 0)
+            width = int(item.get("width") or 0)
+            height = int(item.get("height") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("旧视频分段数据无效") from exc
         canonical_segments.append(
             {
                 "index": int(item.get("index") or 0),
                 "title": str(item.get("title") or ""),
                 "status": str(item.get("status") or ""),
                 "videoUrlHash": hashlib.sha256(video_url.encode("utf-8")).hexdigest(),
+                "duration": duration,
+                "width": width,
+                "height": height,
             }
         )
     canonical = json.dumps(
@@ -242,7 +251,13 @@ def create_legacy_video_retry_job(
                     str(old.get("videoUrl") or "").strip()
                 )
                 try:
-                    duration = max(1, min(int(old.get("duration") or request_item["duration"]), 10))
+                    duration = (
+                        int(old.get("duration") or request_item["duration"])
+                        if succeeded
+                        else request_item["duration"]
+                    )
+                    if duration < 1:
+                        raise ValueError("duration must be positive")
                     width = max(0, int(old.get("width") or 0)) if succeeded else 0
                     height = max(0, int(old.get("height") or 0)) if succeeded else 0
                 except (TypeError, ValueError) as exc:
