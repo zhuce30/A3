@@ -35,7 +35,6 @@ import type {
   A3ResourceGenerateResponse,
   A3ResourcePackV2,
   A3ResourcePackV2Citation,
-  A3ResourcePackV2Resource,
   A3ResourcePackV2ResourceType,
   RecommendationResponse,
 } from '@/lib/a3/recommendation-types';
