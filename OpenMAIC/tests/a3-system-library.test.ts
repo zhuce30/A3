@@ -56,11 +56,12 @@ describe('A3 platform-managed system resource library', () => {
     expect(view).not.toContain('stored_path');
   });
 
-  it('tracks open favorite skip and completion behaviors from the detail page', () => {
+  it('persists favorites while tracking open skip and completion behaviors from the detail page', () => {
     const detail = source('components/a3/features/system-resource-detail-view.tsx');
     expect(detail).toContain("targetType: 'curated_resource'");
     expect(detail).toContain("eventType: 'resource_opened'");
-    expect(detail).toContain("record('resource_favorited'");
+    expect(detail).toContain('saveResourceFavorite(buildSystemResourceFavorite(resource))');
+    expect(detail).toContain("eventType: 'resource_favorited'");
     expect(detail).toContain("record('resource_skipped'");
     expect(detail).toContain("record('resource_completed'");
     expect(detail).toContain('<A3Markdown');

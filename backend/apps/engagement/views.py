@@ -13,6 +13,7 @@ from backend.apps.engagement.services import (
     favorite_summary,
     notification_action_groups,
     notification_summary,
+    restore_resource_event_favorites,
     serialize_favorite,
     serialize_notification,
 )
@@ -36,6 +37,7 @@ def favorites(request):
     rejected = _require_login(request)
     if rejected:
         return rejected
+    restore_resource_event_favorites(request.user)
     queryset = UserFavorite.objects.filter(user=request.user)
     group = str(request.GET.get("group", "")).strip()
     resource_type = str(request.GET.get("type", "")).strip()

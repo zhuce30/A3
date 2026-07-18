@@ -18,6 +18,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import { trackLearningEvent, trackResourceComplete, trackResourceOpen } from '@/lib/a3/learning-event-client';
+import { buildGeneratedResourceFavorite, saveResourceFavorite } from '@/lib/a3/resource-favorites';
 import type {
   A3OpenMAICClassroomArtifact,
   A3OpenMAICPPTXExportArtifact,
@@ -117,6 +118,7 @@ export function ResourceStandaloneView({ packId, resourceType }: { packId: strin
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [feedbackMessage, setFeedbackMessage] = useState('');
+  const [feedbackError, setFeedbackError] = useState('');
   const [feedbackSaving, setFeedbackSaving] = useState('');
 
   const config = pageConfigs[resourceType] ?? pageConfigs.document;
@@ -158,13 +160,30 @@ export function ResourceStandaloneView({ packId, resourceType }: { packId: strin
     if (!pack || !resource) return;
     setFeedbackSaving(action);
     setFeedbackMessage('');
+    setFeedbackError('');
+    let favoriteCreated: boolean | undefined;
+    if (action === 'favorited') {
+      const favoriteResult = await saveResourceFavorite(buildGeneratedResourceFavorite(pack, resource, config.slug));
+      if (!favoriteResult.success) {
+        setFeedbackSaving('');
+        setFeedbackError(favoriteResult.error ?? '收藏保存失败，请重试。');
+        return;
+      }
+      favoriteCreated = favoriteResult.created;
+    }
     const feedbackScore = action === 'completed'
       ? score === null ? null : Math.max(0, Math.min(100, score ?? 90))
       : 0;
     const result = await recordResourceFeedback(pack.resourcePackId, resource.type, action, feedbackScore);
     void recordResourceLearningEvent(pack, resource, config, action, feedbackScore);
     setFeedbackSaving('');
-    setFeedbackMessage(result.success ? feedbackSuccessText(action) : result.error ?? '资源反馈回流失败');
+    if (action === 'favorited') {
+      setFeedbackMessage(favoriteCreated ? '已加入“我的收藏”，可随时回来继续学习。' : '该资源已在“我的收藏”中。');
+      if (!result.success) setFeedbackError('收藏已保存，但推荐偏好同步暂时失败，不影响收藏使用。');
+      return;
+    }
+    if (result.success) setFeedbackMessage(feedbackSuccessText(action));
+    else setFeedbackError(result.error ?? '资源反馈回流失败');
   }
 
   if (loading) {
@@ -199,6 +218,7 @@ export function ResourceStandaloneView({ packId, resourceType }: { packId: strin
   return (
     <div className="space-y-5" data-testid="a3-resource-standalone-page">
       <ResourceHeader pack={pack} config={config} resource={resource} />
+      {feedbackError ? <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{feedbackError}</div> : null}
       {resource ? <ResourceBody resource={resource} pack={pack} config={config} feedbackMessage={feedbackMessage} feedbackSaving={feedbackSaving} onFeedback={handleFeedback} /> : <MissingResource pack={pack} config={config} />}
     </div>
   );

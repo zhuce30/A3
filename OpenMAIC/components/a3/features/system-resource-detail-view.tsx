@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { a3GetJson, resolveA3Endpoint } from '@/lib/a3/api-client';
 import { normalizeA3SystemResource, type A3SystemResource, type A3SystemResourceDetailResponse } from '@/lib/a3/library-types';
 import { trackLearningEvent } from '@/lib/a3/learning-event-client';
+import { buildSystemResourceFavorite, saveResourceFavorite } from '@/lib/a3/resource-favorites';
 import { A3Markdown } from '../ui/a3-markdown';
 import { A3Pill } from '../ui/a3-card';
 
@@ -15,6 +16,8 @@ export function SystemResourceDetailView({ resourceCode }: { resourceCode: strin
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [messageIsError, setMessageIsError] = useState(false);
+  const [savingFavorite, setSavingFavorite] = useState(false);
   const [previewState, setPreviewState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [previewError, setPreviewError] = useState('');
   const [previewObjectUrl, setPreviewObjectUrl] = useState('');
@@ -48,8 +51,9 @@ export function SystemResourceDetailView({ resourceCode }: { resourceCode: strin
     };
   }, [previewObjectUrl]);
 
-  async function record(eventType: 'resource_favorited' | 'resource_skipped' | 'resource_completed', successMessage: string) {
+  async function record(eventType: 'resource_skipped' | 'resource_completed', successMessage: string) {
     if (!resource) return;
+    setMessageIsError(false);
     const result = await trackLearningEvent({
       eventType,
       targetType: 'curated_resource',
@@ -59,7 +63,32 @@ export function SystemResourceDetailView({ resourceCode }: { resourceCode: strin
       knowledgePointId: resource.knowledgePoints[0]?.id ?? '',
       metadata: { title: resource.title, courseCode: resource.course.code },
     });
+    setMessageIsError(!result.success);
     setMessage(result.success ? successMessage : result.error ?? '学习记录写入失败，请重试。');
+  }
+
+  async function favoriteResource() {
+    if (!resource) return;
+    setSavingFavorite(true);
+    setMessage('');
+    setMessageIsError(false);
+    const favoriteResult = await saveResourceFavorite(buildSystemResourceFavorite(resource));
+    setSavingFavorite(false);
+    if (!favoriteResult.success) {
+      setMessageIsError(true);
+      setMessage(favoriteResult.error ?? '收藏保存失败，请重试。');
+      return;
+    }
+    setMessage(favoriteResult.created ? '已加入“我的收藏”，可随时回来继续学习。' : '该资料已在“我的收藏”中。');
+    void trackLearningEvent({
+      eventType: 'resource_favorited',
+      targetType: 'curated_resource',
+      targetId: resource.resourceCode,
+      resourceType: resource.resourceType,
+      sourcePage: `/a3/library/${resource.resourceCode}`,
+      knowledgePointId: resource.knowledgePoints[0]?.id ?? '',
+      metadata: { title: resource.title, courseCode: resource.course.code, provider: resource.provider },
+    });
   }
 
   function recordDocumentAction(action: 'preview' | 'download') {
@@ -154,7 +183,7 @@ export function SystemResourceDetailView({ resourceCode }: { resourceCode: strin
         </div>
       </header>
 
-      {message ? <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{message}</div> : null}
+      {message ? <div className={messageIsError ? 'rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800' : 'rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800'}>{message}</div> : null}
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
         <main className="min-w-0 space-y-6">
@@ -216,7 +245,7 @@ export function SystemResourceDetailView({ resourceCode }: { resourceCode: strin
           </section>
           <section className="border-t border-[var(--a3-border)] pt-4">
             <div className="grid gap-2">
-              <Button type="button" variant="outline" onClick={() => void record('resource_favorited', '已记录收藏偏好，后续推荐会参考。')}><Bookmark className="size-4" />收藏</Button>
+              <Button type="button" variant="outline" disabled={savingFavorite} onClick={() => void favoriteResource()}>{savingFavorite ? <Loader2 className="size-4 animate-spin" /> : <Bookmark className="size-4" />}{savingFavorite ? '正在收藏' : '收藏'}</Button>
               <Button type="button" variant="outline" onClick={() => void record('resource_skipped', '已记录暂不推荐，系统会降低近期排序。')}><ThumbsDown className="size-4" />暂不推荐</Button>
               <Button type="button" onClick={() => void record('resource_completed', '已标记完成，学习报告和后续推荐会使用这条记录。')}><CheckCircle2 className="size-4" />标记完成</Button>
             </div>

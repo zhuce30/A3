@@ -10,7 +10,7 @@ from backend.apps.accounts.models import User
 from backend.apps.assessments.models import Question, WrongQuestion
 from backend.apps.engagement.models import NotificationType, UserFavorite, UserNotification
 from backend.apps.engagement.services import create_notification, ensure_learning_reminders, serialize_notification
-from backend.apps.learning.models import Course
+from backend.apps.learning.models import Course, LearningEvent
 from backend.apps.learning.services import assign_resource_pack_to_today, generate_learning_path, generate_study_plan
 from backend.apps.profiles.models import LearnerProfile
 
@@ -297,6 +297,91 @@ class EngagementApiTests(TestCase):
         response = self.client.delete(f"/api/engagement/favorites/{favorite_id}/")
         self.assertEqual(response.status_code, 200)
         self.assertFalse(UserFavorite.objects.filter(id=favorite_id).exists())
+
+    def test_favorites_restore_historical_curated_resource_events(self):
+        LearningEvent.objects.create(
+            user=self.user,
+            event_id="favorite-curated-os-video-01",
+            event_type="resource_favorited",
+            target_type="curated_resource",
+            target_id="os-video-01",
+            resource_type="video",
+            source_page="/a3/library/os-video-01",
+            metadata={"title": "操作系统进程基础", "courseCode": "OS"},
+        )
+
+        first = self.client.get("/api/engagement/favorites/")
+        second = self.client.get("/api/engagement/favorites/")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["summary"]["total"], 1)
+        self.assertEqual(second.json()["summary"]["total"], 1)
+        self.assertEqual(UserFavorite.objects.filter(user=self.user).count(), 1)
+        favorite = first.json()["favorites"][0]
+        self.assertEqual(favorite["title"], "操作系统进程基础")
+        self.assertEqual(favorite["type"], "video")
+        self.assertEqual(favorite["source"], "系统资料")
+        self.assertEqual(favorite["url"], "/a3/library/os-video-01")
+        self.assertEqual(favorite["group"], "系统资料")
+        favorite_id = favorite["id"]
+        self.client.delete(f"/api/engagement/favorites/{favorite_id}/")
+
+        after_delete = self.client.get("/api/engagement/favorites/")
+
+        self.assertEqual(after_delete.json()["summary"]["total"], 0)
+
+    def test_favorites_restore_historical_generated_resource_events(self):
+        LearningEvent.objects.create(
+            user=self.user,
+            event_id="favorite-pack-123-practice",
+            event_type="resource_favorited",
+            target_type="resource_pack",
+            target_id="pack-123",
+            resource_type="practice_set",
+            source_page="/a3/resources/pack-123/practice",
+            trace_id="trace-123",
+            metadata={"resourceTitle": "进程同步专项练习", "resourcePage": "practice"},
+        )
+
+        response = self.client.get("/api/engagement/favorites/")
+
+        self.assertEqual(response.status_code, 200)
+        favorite = response.json()["favorites"][0]
+        self.assertEqual(favorite["title"], "进程同步专项练习")
+        self.assertEqual(favorite["type"], "exercise")
+        self.assertEqual(favorite["source"], "个性资源包")
+        self.assertEqual(favorite["url"], "/a3/resources/pack-123/practice")
+        self.assertEqual(favorite["group"], "个性资源")
+
+    def test_favorite_restore_does_not_duplicate_a_directly_saved_resource(self):
+        UserFavorite.objects.create(
+            user=self.user,
+            title="操作系统进程基础",
+            resource_type="video",
+            source="系统资料 · 哔哩哔哩",
+            url="/a3/library/os-video-01",
+            group="系统资料",
+            metadata={
+                "targetType": "curated_resource",
+                "targetId": "os-video-01",
+                "resourceType": "video",
+            },
+        )
+        LearningEvent.objects.create(
+            user=self.user,
+            event_id="favorite-curated-os-video-01",
+            event_type="resource_favorited",
+            target_type="curated_resource",
+            target_id="os-video-01",
+            resource_type="video",
+            source_page="/a3/library/os-video-01",
+            metadata={"title": "操作系统进程基础", "courseCode": "OS"},
+        )
+
+        response = self.client.get("/api/engagement/favorites/")
+
+        self.assertEqual(response.json()["summary"]["total"], 1)
+        self.assertEqual(response.json()["favorites"][0]["source"], "系统资料 · 哔哩哔哩")
 
     def test_dashboard_generates_learning_reminders_once(self):
         LearnerProfile.objects.create(user=self.user, foundation_level="基础", daily_study_time=60)

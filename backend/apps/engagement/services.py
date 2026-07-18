@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from backend.apps.assessments.models import WrongQuestion
@@ -11,6 +13,26 @@ from backend.apps.engagement.models import FavoriteType, NotificationType, UserF
 
 TYPE_LABELS = dict(FavoriteType.choices)
 NOTIFICATION_LABELS = dict(NotificationType.choices)
+
+GENERATED_FAVORITE_TYPES = {
+    "lecture_doc": FavoriteType.COURSEWARE,
+    "knowledge_card": FavoriteType.KNOWLEDGE_CARD,
+    "mind_map": FavoriteType.KNOWLEDGE_CARD,
+    "practice_set": FavoriteType.EXERCISE,
+    "case_study": FavoriteType.COURSEWARE,
+    "code_lab": FavoriteType.EXERCISE,
+    "micro_video_script": FavoriteType.VIDEO,
+}
+
+GENERATED_RESOURCE_SLUGS = {
+    "lecture_doc": "document",
+    "knowledge_card": "cards",
+    "mind_map": "mind-map",
+    "practice_set": "practice",
+    "case_study": "case-study",
+    "code_lab": "code-lab",
+    "micro_video_script": "video",
+}
 
 
 def create_notification(
@@ -30,6 +52,99 @@ def create_notification(
         action_url=action_url,
         payload=payload or {},
     )
+
+
+def restore_resource_event_favorites(user, *, limit: int = 1000) -> int:
+    """Materialize legacy favorite events into the user's real favorites collection."""
+    from backend.apps.learning.models import LearningEvent
+
+    events = list(
+        LearningEvent.objects.filter(
+            user=user,
+            event_type="resource_favorited",
+            target_type__in=["curated_resource", "resource_pack"],
+        ).filter(
+            Q(metadata__favoriteMaterialized=False) | Q(metadata__favoriteMaterialized__isnull=True)
+        ).order_by("created_at", "id")[: max(1, min(limit, 5000))]
+    )
+    existing_favorites = list(UserFavorite.objects.filter(user=user))
+    existing_keys = {(item.title, item.resource_type, item.source) for item in existing_favorites}
+    existing_targets = {
+        (
+            str(item.metadata.get("targetType") or ""),
+            str(item.metadata.get("targetId") or ""),
+            str(item.metadata.get("resourceType") or ""),
+        )
+        for item in existing_favorites
+        if isinstance(item.metadata, dict) and item.metadata.get("targetId")
+    }
+    pending: dict[tuple[str, str, str], UserFavorite] = {}
+    processed_events = []
+    for event in events:
+        event_metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        if event_metadata.get("favoriteMaterialized") is True:
+            continue
+        favorite = _favorite_from_learning_event(user, event)
+        event.metadata = {**event_metadata, "favoriteMaterialized": True}
+        processed_events.append(event)
+        if favorite is None:
+            continue
+        key = (favorite.title, favorite.resource_type, favorite.source)
+        target_key = (event.target_type, event.target_id, event.resource_type)
+        if key not in existing_keys and target_key not in existing_targets:
+            pending[key] = favorite
+            existing_targets.add(target_key)
+    if not processed_events:
+        return 0
+    with transaction.atomic():
+        if pending:
+            UserFavorite.objects.bulk_create(pending.values(), ignore_conflicts=True)
+        LearningEvent.objects.bulk_update(processed_events, ["metadata"])
+    return len(pending)
+
+
+def _favorite_from_learning_event(user, event) -> UserFavorite | None:
+    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    title = str(metadata.get("resourceTitle") or metadata.get("title") or "").strip()[:160]
+    if not title or not event.target_id:
+        return None
+    if event.target_type == "curated_resource":
+        favorite_type = _system_resource_favorite_type(event.resource_type)
+        provider = str(metadata.get("provider") or "").strip()
+        source = f"系统资料 · {provider}" if provider else "系统资料"
+        group = "系统资料"
+        url = event.source_page if str(event.source_page).startswith("/a3/") else f"/a3/library/{event.target_id}"
+    elif event.target_type == "resource_pack":
+        favorite_type = GENERATED_FAVORITE_TYPES.get(event.resource_type, FavoriteType.COURSEWARE)
+        source = "个性资源包"
+        group = "个性资源"
+        slug = str(metadata.get("resourcePage") or GENERATED_RESOURCE_SLUGS.get(event.resource_type, "document")).strip()
+        url = event.source_page if str(event.source_page).startswith("/a3/") else f"/a3/resources/{event.target_id}/{slug}"
+    else:
+        return None
+    return UserFavorite(
+        user=user,
+        title=title,
+        resource_type=favorite_type,
+        source=source[:120],
+        url=str(url)[:500],
+        group=group,
+        metadata={
+            "targetType": event.target_type,
+            "targetId": event.target_id,
+            "resourceType": event.resource_type,
+            "traceId": event.trace_id,
+            "restoredFromLearningEvent": str(event.id),
+        },
+    )
+
+
+def _system_resource_favorite_type(resource_type: str) -> str:
+    if resource_type == "video":
+        return FavoriteType.VIDEO
+    if resource_type == "code_lab":
+        return FavoriteType.EXERCISE
+    return FavoriteType.COURSEWARE
 
 
 def ensure_learning_reminders(user, *, plan: dict | None = None, motivation: dict | None = None) -> list[UserNotification]:
