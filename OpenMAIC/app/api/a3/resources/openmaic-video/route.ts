@@ -36,6 +36,8 @@ type DjangoVideoJobResponse = {
   error?: string;
   created?: boolean;
   retried?: number;
+  importedSucceeded?: number;
+  queuedFailed?: number;
   job?: DjangoVideoJob;
   jobs?: DjangoVideoJob[];
 };
@@ -135,8 +137,60 @@ export async function PATCH(request: NextRequest) {
     const cookieHeader = request.headers.get('cookie');
     const unauthorized = await rejectUnauthenticated(cookieHeader);
     if (unauthorized) return unauthorized;
-    const body = (await request.json()) as { action?: string; jobId?: string };
+    const body = (await request.json()) as {
+      action?: string;
+      jobId?: string;
+      resourcePackId?: string;
+      prompt?: string;
+      provider?: string;
+      aspectRatio?: string;
+      resolution?: string;
+    };
     const action = String(body.action || '').trim();
+
+    if (action === 'import-legacy-failures') {
+      const resourcePackId = String(body.resourcePackId || '').trim();
+      const rawPrompt = String(body.prompt || '').trim();
+      if (!resourcePackId || !rawPrompt) {
+        return apiError('MISSING_REQUIRED_FIELD', 400, '缺少旧视频迁移参数');
+      }
+
+      const duration = 60;
+      const aspectRatio = String(body.aspectRatio || '16:9');
+      const resolution = String(body.resolution || '1080p');
+      const segmentRequests = buildSegmentedVideoRequests({
+        prompt: rawPrompt,
+        duration,
+        aspectRatio,
+        resolution,
+      });
+      const persisted = await postA3DjangoJson<DjangoVideoJobResponse>(
+        `/api/resources/packs/${resourcePackId}/video-jobs/import-legacy/`,
+        cookieHeader,
+        {
+          provider: String(body.provider || 'seedance').trim(),
+          resourceType: 'micro_video_script',
+          duration,
+          aspectRatio,
+          resolution,
+          segments: segmentRequests.map((segment, index) => ({
+            index: index + 1,
+            title: segment.title,
+            prompt: segment.prompt,
+            duration: segment.duration,
+          })),
+        },
+      );
+      if (!persisted.success || !persisted.job) {
+        return apiError('UPSTREAM_ERROR', 502, persisted.error || '旧视频迁移失败');
+      }
+      return apiSuccess({
+        ...toPublicVideoJob(persisted.job),
+        importedSucceeded: persisted.importedSucceeded ?? 0,
+        queuedFailed: persisted.queuedFailed ?? 0,
+      }, 202);
+    }
+
     const jobId = String(body.jobId || '').trim();
     if (action !== 'retry-failed') return apiError('INVALID_REQUEST', 400, '不支持的视频任务操作');
     if (!jobId) return apiError('MISSING_REQUIRED_FIELD', 400, '缺少 jobId');
