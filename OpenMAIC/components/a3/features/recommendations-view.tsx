@@ -25,6 +25,7 @@ import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import { buildProfileChangeInsight, buildRecommendationEffectInsight, buildRecommendationProfileRationale, type LearningFlowInsight } from '@/lib/a3/learning-flow-insights';
 import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
 import type { A3SystemLibraryResponse } from '@/lib/a3/library-types';
+import { buildA3VideoPrompt, estimateA3VideoDuration } from '@/lib/a3/video-prompt';
 import type {
   A3MultimodalArtifact,
   A3OpenMAICClassroomArtifact,
@@ -439,8 +440,8 @@ export function RecommendationsView() {
       resourcePackId: currentPack.resourcePackId,
       provider: 'seedance',
       resourceType: script.type,
-      prompt: buildVideoPrompt(currentPack.goal, script),
-      duration: estimateVideoDuration(script),
+      prompt: buildA3VideoPrompt(currentPack.goal, script),
+      duration: estimateA3VideoDuration(),
       aspectRatio: '16:9',
       resolution: '1080p',
     });
@@ -1379,55 +1380,6 @@ function normalizeResourceGenerationPollUrl(value: string | undefined): string {
     return '';
   }
   return '';
-}
-
-function buildVideoPrompt(goal: string, resource: A3ResourcePackV2Resource) {
-  const content = resource.content ?? {};
-  const shots = Array.isArray(content.shots) ? content.shots.map((shot) => (typeof shot === 'object' && shot ? shot as Record<string, unknown> : {})) : [];
-  const evidence = resource.citations
-    .slice(0, 3)
-    .map((citation, index) => `${index + 1}. ${sanitizeText(citation.title || citation.location, '本地知识库')}：${sanitizeText(citation.snippet, '')}`)
-    .filter((item) => item.trim().length > 3);
-
-  if (shots.length) {
-    const shotPlan = shots.slice(0, 8).map((shot, index) => {
-      const scene = sanitizeText(shot.scene, `镜头 ${index + 1}`);
-      const visual = sanitizeVideoVisualText(shot.visual);
-      const narration = sanitizeText(shot.narration, '用一句话解释当前步骤');
-      const duration = Number(shot.durationSeconds || 0);
-      return `${index + 1}. ${scene}${duration ? `，约 ${Math.min(Math.max(duration, 3), 10)} 秒` : ''}：无文字画面 ${visual}；旁白/字幕 ${narration}`;
-    });
-    return [
-      `生成一个 ${estimateVideoDuration(resource)} 秒、16:9、1080p 的中文课程讲解视频。系统会拆成多个 10 秒无文字动画片段连续播放。`,
-      `主题：${sanitizeText(goal, '当前学习目标')}。标题：${sanitizeText(resource.title, '教学视频')}。`,
-      '画风：干净的现代教育动画，使用人物动作、图标、颜色、流程箭头和抽象示意表达。画面中禁止出现任何可读文字、汉字、英文、公式、标题、板书、白板字、字幕或水印；中文内容只通过旁白/字幕层呈现。',
-      '按下面分镜生成，镜头之间自然过渡：',
-      ...shotPlan,
-      evidence.length ? `知识库证据参考：${evidence.join('；')}` : '证据不足时只表达资源包已有内容，不编造教材页码。',
-      '最终效果：学生看完能知道概念关系、步骤顺序和下一步练习动作。',
-    ].join('\n');
-  }
-
-  return [
-    `生成一个 ${estimateVideoDuration(resource)} 秒、16:9、1080p 的中文课程讲解视频。系统会拆成多个 10 秒无文字动画片段连续播放。`,
-    `主题：${sanitizeText(goal, '当前学习目标')}。资源标题：${sanitizeText(resource.title, '教学视频')}。`,
-    `个性化原因：${sanitizeText(resource.personalizationReason, '根据画像、路径节点和知识库证据生成。')}`,
-    '画面结构：人物困惑引入、核心概念的无文字图解、步骤或例题的动作演示、最后用图标提示练习动作。画面中禁止出现任何可读文字、汉字、英文、公式、标题、板书、白板字、字幕或水印；中文内容只通过旁白/字幕层呈现。',
-    evidence.length ? `知识库证据参考：${evidence.join('；')}` : '证据不足时只表达摘要内容，不编造来源。',
-  ].join('\n');
-}
-
-function sanitizeVideoVisualText(value: unknown) {
-  const visual = sanitizeText(value, '用人物动作、图标、颜色和箭头表达，不出现文字');
-  return visual
-    .replace(/标题|字幕|屏幕文字|板书|白板|文字|小字|公式|英文|汉字/g, '无文字图形')
-    .replace(/本地资料摘录|资料摘录|文案|题干/g, '资料图标')
-    .replace(/四栏|列表|表格/g, '分组图标')
-    .slice(0, 160);
-}
-
-function estimateVideoDuration(_resource: A3ResourcePackV2Resource): 60 {
-  return 60;
 }
 
 function sanitizeRecommendationResponse(result: RecommendationResponse): RecommendationResponse {
