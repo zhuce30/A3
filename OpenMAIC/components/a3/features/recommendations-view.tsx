@@ -394,13 +394,27 @@ export function RecommendationsView() {
       const segmentCount = synced.artifact.segments?.filter((segment) => segment.status === 'succeeded' && segment.videoUrl).length ?? 0;
       const totalSegments = synced.artifact.segments?.length ?? 0;
       const segmentText = totalSegments ? `，分段 ${segmentCount}/${totalSegments}` : '';
-      setLongRunningProgress(buildProgress('video', 7, `视频已写回资源包，成功片段 ${segmentCount}/${totalSegments || 6}`, synced.artifact.status === 'partial' ? 'running' : 'succeeded'));
+      setLongRunningProgress(buildVideoArtifactProgress(
+        synced.artifact,
+        synced.artifact.status === 'partial'
+          ? `视频部分片段生成成功并已写回资源包：${segmentCount}/${totalSegments || 6}`
+          : `视频已写回资源包，成功片段 ${segmentCount}/${totalSegments || 6}`,
+      ));
       setVideoSummary(`视频已生成：${synced.artifact.provider} / ${synced.artifact.duration || '--'} 秒${segmentText}。`);
       setMessage('视频成品已写回资源包，可以进入视频页播放。');
       return;
     }
-    setLongRunningProgress(buildProgress('video', 7, synced.artifact?.type === 'openmaic_video' ? synced.artifact.degradedReason || '视频生成未成功' : '未返回视频 artifact', 'failed'));
-    setVideoSummary(`视频任务未成功完成：${synced.artifact?.type === 'openmaic_video' ? synced.artifact.degradedReason || synced.artifact.status : '未返回 artifact'}`);
+    const failureReason = synced.artifact?.type === 'openmaic_video'
+      ? synced.artifact.degradedReason || synced.artifact.status
+      : '未返回视频 artifact';
+    if (synced.artifact?.type === 'openmaic_video') {
+      setLongRunningProgress(buildVideoArtifactProgress(synced.artifact, `视频生成未成功，但失败证据已写回资源包：${failureReason}`));
+    } else {
+      setLongRunningProgress(buildProgress('video', activeVideoStep, failureReason, 'failed'));
+    }
+    setMessage('');
+    setVideoSummary('');
+    setError(`视频生成未成功：${failureReason}`);
   }
 
   async function pollOpenMAICVideoJob(start: A3OpenMAICBridgeResponse) {
@@ -1188,6 +1202,27 @@ function buildProgress(kind: LongRunningProgress['kind'], activeIndex: number, m
       if (finalStatus === 'succeeded' && index <= activeIndex) status = 'succeeded';
       if (finalStatus === 'failed' && index === activeIndex) status = 'failed';
       return { label, status };
+    }),
+  };
+}
+
+function buildVideoArtifactProgress(artifact: A3OpenMAICVideoArtifact, message: string): LongRunningProgress {
+  const segments = artifact.segments ?? [];
+  return {
+    kind: 'video',
+    title: '视频生成进度',
+    message,
+    steps: videoProgressLabels.map((label, index) => {
+      const status: ProgressStepStatus = index === 0
+        ? 'succeeded'
+        : label === '写回 A3 资源包' ? 'succeeded'
+          : segments[index - 1]?.status === 'succeeded' ? 'succeeded' : 'failed';
+      const segment = index > 0 && index <= segments.length ? segments[index - 1] : undefined;
+      return {
+        label,
+        status,
+        detail: segment?.status === 'failed' ? segment.degradedReason : undefined,
+      };
     }),
   };
 }

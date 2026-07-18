@@ -1,6 +1,10 @@
 import { NextRequest } from 'next/server';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
-import { fetchA3DjangoJson, postA3DjangoJson } from '@/lib/server/a3-django-api';
+import {
+  fetchA3DjangoJson,
+  postA3DjangoJson,
+  resolveA3InternalFrontendEndpoint,
+} from '@/lib/server/a3-django-api';
 import { buildA3OpenMAICVideoPayload } from '@/lib/a3/openmaic-classroom-bridge';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
 import type { A3OpenMAICVideoArtifact, A3ResourcePackV2 } from '@/lib/a3/recommendation-types';
@@ -294,7 +298,7 @@ async function generateSingleVideoArtifact(input: {
   resolution: string;
   startedAt: number;
 }) {
-  const videoResponse = await fetch(new URL('/api/generate/video', input.origin), {
+  const videoResponse = await fetch(resolveA3InternalFrontendEndpoint('/api/generate/video', input.origin), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -352,7 +356,7 @@ async function generateSegmentedVideoArtifact(input: {
     const segmentRequest = input.requests[index];
     input.onProgress?.(index + 1, input.requests.length);
     try {
-      const response = await fetch(new URL('/api/generate/video', input.origin), {
+      const response = await fetch(resolveA3InternalFrontendEndpoint('/api/generate/video', input.origin), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -392,6 +396,11 @@ async function generateSegmentedVideoArtifact(input: {
   }
 
   const succeededSegments = segments.filter((segment) => segment.status === 'succeeded' && segment.videoUrl);
+  const failureReasons = Array.from(new Set(
+    segments
+      .filter((segment) => segment.status === 'failed' && segment.degradedReason)
+      .map((segment) => segment.degradedReason),
+  ));
   const firstSucceeded = succeededSegments[0];
   const status = succeededSegments.length === segments.length ? 'succeeded' : succeededSegments.length ? 'partial' : 'failed';
   return buildA3OpenMAICVideoPayload({
@@ -405,7 +414,9 @@ async function generateSegmentedVideoArtifact(input: {
       height: Number(firstSucceeded?.height ?? 0),
     },
     segments,
-    error: status === 'succeeded' ? '' : `1 分钟视频分段生成完成：${succeededSegments.length}/${segments.length} 段成功`,
+    error: status === 'succeeded'
+      ? ''
+      : `1 分钟视频分段生成完成：${succeededSegments.length}/${segments.length} 段成功${failureReasons.length ? `；原因：${failureReasons.slice(0, 2).join('；')}` : ''}`,
   }, Date.now() - input.startedAt);
 }
 

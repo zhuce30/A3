@@ -22,6 +22,14 @@ describe('A3 OpenMAIC video job polling contract', () => {
     expect(source).toContain('}, 202)');
   });
 
+  it('calls the video provider through the configured internal frontend endpoint', () => {
+    const source = fs.readFileSync(routePath, 'utf8');
+
+    expect(source).toContain('resolveA3InternalFrontendEndpoint');
+    expect(source).toContain("resolveA3InternalFrontendEndpoint('/api/generate/video', input.origin)");
+    expect(source).not.toContain("new URL('/api/generate/video', input.origin)");
+  });
+
   it('polls the video job from the recommendations page before showing success', () => {
     const source = fs.readFileSync(recommendationsPath, 'utf8');
 
@@ -31,5 +39,13 @@ describe('A3 OpenMAIC video job polling contract', () => {
     expect(source).toContain('normalizeOpenMAICVideoPollUrl');
     expect(source).toContain('job.progress');
     expect(source).toContain('job.stage');
+  });
+
+  it('shows provider segment failures without marking A3 writeback as failed', () => {
+    const source = fs.readFileSync(recommendationsPath, 'utf8');
+
+    expect(source).toContain('buildVideoArtifactProgress');
+    expect(source).toContain("setError(`视频生成未成功：");
+    expect(source).toContain("label === '写回 A3 资源包' ? 'succeeded'");
   });
 });
