@@ -140,6 +140,9 @@ importers:
       mitt:
         specifier: ^3.0.1
         version: 3.0.1
+      meshoptimizer:
+        specifier: 1.1.1
+        version: 1.1.1
       motion:
         specifier: ^12.27.5
         version: 12.35.2(react-dom@19.2.3(react@19.2.3))(react@19.2.3)

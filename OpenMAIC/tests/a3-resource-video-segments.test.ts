@@ -14,4 +14,15 @@ describe('A3 resource video segmented playback', () => {
     expect(source).toContain('从头播放');
     expect(source).toContain('新窗口打开当前片段');
   });
+
+  it('retries only failed segments while keeping successful segments playable', () => {
+    const source = fs.readFileSync(sourcePath, 'utf8');
+
+    expect(source).toContain('failedSegmentCount');
+    expect(source).toContain('retryFailedSegments');
+    expect(source).toContain("action: 'retry-failed'");
+    expect(source).toContain('只重试失败片段');
+    expect(source).toContain('已成功片段会保留');
+    expect(source).toContain('playableSegments');
+  });
 });

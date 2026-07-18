@@ -6,7 +6,10 @@ import { test } from '../fixtures/base';
 async function expectCanvasHasRenderedPixels(canvas: Locator) {
   await expect(canvas).toBeVisible();
   const image = await canvas.screenshot();
-  const { data, info } = await sharp(image).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { data, info } = await sharp(image)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
   let min = 255;
   let max = 0;
   for (let index = 0; index < data.length; index += info.channels) {
@@ -134,21 +137,47 @@ test.describe('A3 digital human coaching avatar', () => {
     await expect(call).toBeVisible({ timeout: 60_000 });
     await expect(call.getByTestId('a3-digital-human-avatar')).toBeVisible();
     await expect(call.getByTestId('a3-digital-human-three-stage')).toBeVisible();
-    await expect(call.getByTestId('a3-digital-human-three-stage')).toHaveAttribute('data-avatar-renderer', 'vrm_idle_animation', { timeout: 120_000 });
-    await expect(call.getByTestId('a3-digital-human-three-stage')).toHaveAttribute('data-avatar-asset', '/a3/assets/teacher-avatar/teacher.vrm');
-    await expect(call.getByTestId('a3-digital-human-three-stage')).toHaveAttribute('data-avatar-idle-animation', '/a3/assets/teacher-avatar/idle.vrma');
-    await expect(call.getByTestId('a3-digital-human-three-stage')).toHaveAttribute('data-avatar-idle-animation-state', 'loaded');
+    await expect(call.getByTestId('a3-digital-human-three-stage')).toHaveAttribute(
+      'data-avatar-renderer',
+      'vrm_idle_animation',
+      { timeout: 120_000 },
+    );
+    await expect(call.getByTestId('a3-digital-human-three-stage')).toHaveAttribute(
+      'data-avatar-asset',
+      '/a3/assets/teacher-avatar/teacher.optimized.vrm?v=20260718-v1',
+    );
+    await expect(call.getByTestId('a3-digital-human-three-stage')).toHaveAttribute(
+      'data-avatar-idle-animation',
+      '/a3/assets/teacher-avatar/idle.vrma',
+    );
+    await expect(call.getByTestId('a3-digital-human-three-stage')).toHaveAttribute(
+      'data-avatar-idle-animation-state',
+      'loaded',
+    );
     await expectCanvasHasRenderedPixels(call.getByTestId('a3-digital-human-three-canvas'));
     await expect(call).toContainText('数字助教');
 
     await call.getByTestId('a3-realtime-start').click();
-    await expect(call.getByTestId('a3-digital-human-avatar')).toHaveAttribute('data-state', 'degraded', { timeout: 20_000 });
+    await expect(call.getByTestId('a3-digital-human-avatar')).toHaveAttribute(
+      'data-state',
+      'degraded',
+      { timeout: 20_000 },
+    );
     await expect(call).toContainText('测试环境未配置实时 provider');
 
     await page.setViewportSize({ width: 390, height: 844 });
     const mobileCall = page.getByTestId('a3-realtime-coaching-call');
-    await expect(mobileCall.getByTestId('a3-digital-human-three-stage')).toBeVisible({ timeout: 60_000 });
-    await expect(mobileCall.getByTestId('a3-digital-human-three-stage')).toHaveAttribute('data-avatar-renderer', 'vrm_idle_animation', { timeout: 120_000 });
-    await expect(mobileCall.getByTestId('a3-digital-human-three-stage')).toHaveAttribute('data-avatar-idle-animation-state', 'loaded');
+    await expect(mobileCall.getByTestId('a3-digital-human-three-stage')).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(mobileCall.getByTestId('a3-digital-human-three-stage')).toHaveAttribute(
+      'data-avatar-renderer',
+      'vrm_idle_animation',
+      { timeout: 120_000 },
+    );
+    await expect(mobileCall.getByTestId('a3-digital-human-three-stage')).toHaveAttribute(
+      'data-avatar-idle-animation-state',
+      'loaded',
+    );
   });
 });

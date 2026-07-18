@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, ExternalLink, Loader2, Play, ShieldCheck, Video } from 'lucide-react';
+import { ArrowLeft, ExternalLink, Loader2, Play, RefreshCw, ShieldCheck, Video } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import { trackResourceComplete, trackResourceOpen } from '@/lib/a3/learning-event-client';
@@ -28,6 +28,8 @@ export function ResourceVideoView({ packId }: { packId: string }) {
   const [openedRecorded, setOpenedRecorded] = useState(false);
   const [completedRecorded, setCompletedRecorded] = useState(false);
   const [activeSegmentIndex, setActiveSegmentIndex] = useState(0);
+  const [retryingFailedSegments, setRetryingFailedSegments] = useState(false);
+  const [retryMessage, setRetryMessage] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -69,6 +71,7 @@ export function ResourceVideoView({ packId }: { packId: string }) {
   const activeSegment = playableSegments[activeSegmentIndex] ?? null;
   const playerUrl = activeSegment?.videoUrl || videoArtifact?.videoUrl || '';
   const totalSegmentCount = videoArtifact?.segments?.length ?? 0;
+  const failedSegmentCount = videoArtifact?.segments?.filter((segment) => segment.status === 'failed').length ?? 0;
   const playableDuration = playableSegments.length
     ? playableSegments.reduce((sum, segment) => sum + Number(segment.duration || 0), 0)
     : Number(videoArtifact?.duration || 0);
@@ -83,6 +86,35 @@ export function ResourceVideoView({ packId }: { packId: string }) {
     });
     if (result.success && action === 'opened') setOpenedRecorded(true);
     if (result.success && action === 'completed') setCompletedRecorded(true);
+  }
+
+  async function retryFailedSegments() {
+    if (!videoArtifact?.jobId || !failedSegmentCount || retryingFailedSegments) return;
+    setRetryingFailedSegments(true);
+    setRetryMessage(`正在只重试 ${failedSegmentCount} 个失败片段，已成功片段会保留。`);
+    try {
+      const response = await fetch('/api/a3/resources/openmaic-video', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'retry-failed', jobId: videoArtifact.jobId }),
+      });
+      let job = await response.json() as VideoJobResponse;
+      if (!response.ok || !job.success) throw new Error(job.error || '失败片段重试未能启动');
+      while (!job.done && !['succeeded', 'partial', 'failed'].includes(String(job.status))) {
+        await wait(5000);
+        const poll = await fetch(`/api/a3/resources/openmaic-video?jobId=${encodeURIComponent(videoArtifact.jobId)}`, { cache: 'no-store' });
+        job = await poll.json() as VideoJobResponse;
+        if (!poll.ok || !job.success) throw new Error(job.error || '重试进度查询失败');
+        setRetryMessage(job.message || `失败片段重试进度 ${job.progress ?? 0}%`);
+      }
+      const refreshed = await loadResourcePack(packId);
+      if (refreshed.success && refreshed.resourcePack) setPack(sanitizeResourcePack(refreshed.resourcePack));
+      setRetryMessage(job.status === 'succeeded' ? '失败片段已补齐。' : '重试已完成，请查看各片段状态。');
+    } catch (retryError) {
+      setRetryMessage(`重试失败：${retryError instanceof Error ? retryError.message : '请稍后再试'}`);
+    } finally {
+      setRetryingFailedSegments(false);
+    }
   }
 
   if (loading) {
@@ -139,6 +171,19 @@ export function ResourceVideoView({ packId }: { packId: string }) {
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
         <A3Card title="视频成品" subtitle="有成功 artifact 时直接在线播放；无 artifact 时展示失败或降级原因。">
+          {failedSegmentCount > 0 && videoArtifact?.jobId ? (
+            <div className="mb-4 flex flex-col gap-3 rounded-xl border border-orange-200 bg-orange-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-orange-950">有 {failedSegmentCount} 个片段生成失败</div>
+                <p className="mt-1 text-xs leading-5 text-orange-800">只重试失败片段，已成功片段会保留并继续可播放。</p>
+                {retryMessage ? <p className="mt-1 text-xs text-orange-700">{retryMessage}</p> : null}
+              </div>
+              <Button type="button" variant="outline" className="shrink-0 bg-white" disabled={retryingFailedSegments} onClick={() => void retryFailedSegments()}>
+                {retryingFailedSegments ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                只重试失败片段
+              </Button>
+            </div>
+          ) : null}
           {playerUrl ? (
             <div className="space-y-4">
               <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-950">
@@ -239,6 +284,19 @@ export function ResourceVideoView({ packId }: { packId: string }) {
       </div>
     </div>
   );
+}
+
+type VideoJobResponse = {
+  success: boolean;
+  error?: string;
+  status?: string;
+  progress?: number;
+  message?: string;
+  done?: boolean;
+};
+
+function wait(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function VideoScriptSummary({ resource }: { resource: A3ResourcePackV2Resource }) {

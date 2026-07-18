@@ -1,36 +1,10 @@
 import { NextRequest } from 'next/server';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
-import {
-  fetchA3DjangoJson,
-  postA3DjangoJson,
-  resolveA3InternalFrontendEndpoint,
-} from '@/lib/server/a3-django-api';
-import { buildA3OpenMAICVideoPayload } from '@/lib/a3/openmaic-classroom-bridge';
+import { fetchA3DjangoJson, postA3DjangoJson } from '@/lib/server/a3-django-api';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
 import type { A3OpenMAICVideoArtifact, A3ResourcePackV2 } from '@/lib/a3/recommendation-types';
 
-type AuthMeResponse = {
-  user?: A3PublicUser | null;
-};
-
-type GenerateVideoResponse = {
-  success?: boolean;
-  error?: string;
-  result?: {
-    url?: string;
-    duration?: number;
-    width?: number;
-    height?: number;
-  };
-};
-
-type DjangoVideoArtifactResponse = {
-  success?: boolean;
-  error?: string;
-  artifact?: A3OpenMAICVideoArtifact;
-  resourcePack?: A3ResourcePackV2;
-  traceId?: string;
-};
+type AuthMeResponse = { user?: A3PublicUser | null };
 
 type SegmentedVideoRequest = {
   prompt: string;
@@ -40,39 +14,39 @@ type SegmentedVideoRequest = {
   title: string;
 };
 
-type VideoJobStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed';
-
-type VideoJob = {
+type DjangoVideoJob = {
   jobId: string;
-  userId: string;
-  resourcePackId: string;
-  status: VideoJobStatus;
+  status: string;
   progress: number;
   stage: string;
   message: string;
-  pollIntervalMs: number;
-  createdAt: number;
-  updatedAt: number;
-  artifact?: A3OpenMAICVideoArtifact;
-  resourcePack?: A3ResourcePackV2;
+  done: boolean;
+  resourcePackId: string;
   traceId?: string;
-  degraded?: boolean;
+  artifact?: A3OpenMAICVideoArtifact & { resourcePack?: A3ResourcePackV2 };
+  segments?: A3OpenMAICVideoArtifact['segments'];
   error?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  actionUrl?: string;
 };
 
-const videoJobs = new Map<string, VideoJob>();
-const VIDEO_JOB_TTL_MS = 2 * 60 * 60 * 1000;
+type DjangoVideoJobResponse = {
+  success?: boolean;
+  error?: string;
+  created?: boolean;
+  retried?: number;
+  job?: DjangoVideoJob;
+  jobs?: DjangoVideoJob[];
+};
 
 export async function POST(request: NextRequest) {
-  const startedAt = Date.now();
   try {
     const cookieHeader = request.headers.get('cookie');
-    const auth = await fetchA3DjangoJson<AuthMeResponse>('/api/auth/me/', cookieHeader);
-    if (!auth.success || !auth.user) {
-      return apiError('UNAUTHORIZED', 401, '请先登录后生成视频任务');
-    }
-
+    const unauthorized = await rejectUnauthenticated(cookieHeader);
+    if (unauthorized) return unauthorized;
     const body = (await request.json()) as {
+      jobId?: string;
       resourcePackId?: string;
       prompt?: string;
       provider?: string;
@@ -82,342 +56,120 @@ export async function POST(request: NextRequest) {
       resolution?: string;
     };
     const resourcePackId = String(body.resourcePackId || '').trim();
-    const prompt = hardenVideoPromptForProvider(String(body.prompt || '').trim());
-    const provider = String(body.provider || 'seedance').trim();
-    const resourceType = String(body.resourceType || 'micro_video_script').trim();
+    const rawPrompt = String(body.prompt || '').trim();
     if (!resourcePackId) return apiError('MISSING_REQUIRED_FIELD', 400, '缺少 resourcePackId');
-    if (!prompt) return apiError('MISSING_REQUIRED_FIELD', 400, '缺少视频 prompt');
+    if (!rawPrompt) return apiError('MISSING_REQUIRED_FIELD', 400, '缺少视频 prompt');
 
-    const requestedDuration = Number(body.duration || 0);
-    const segmentRequests = buildSegmentedVideoRequests({
-      prompt: String(body.prompt || '').trim(),
-      duration: requestedDuration,
-      aspectRatio: body.aspectRatio || '16:9',
-      resolution: body.resolution || '1080p',
+    const duration = Math.max(1, Math.min(Number(body.duration || 60), 60));
+    const aspectRatio = String(body.aspectRatio || '16:9');
+    const resolution = String(body.resolution || '1080p');
+    const segmented = buildSegmentedVideoRequests({
+      prompt: rawPrompt,
+      duration,
+      aspectRatio,
+      resolution,
     });
+    const segmentRequests = segmented.length
+      ? segmented
+      : [{
+          prompt: hardenVideoPromptForProvider(rawPrompt),
+          duration: Math.min(duration, 10) as 10,
+          aspectRatio,
+          resolution,
+          title: '教学视频',
+        }];
 
-    cleanupExpiredVideoJobs();
-    const jobId = `a3_video_${Date.now()}_${crypto.randomUUID()}`;
-    const job: VideoJob = {
-      jobId,
-      userId: getA3UserId(auth.user),
-      resourcePackId,
-      status: 'queued',
-      progress: 0,
-      stage: 'queued',
-      message: '视频任务已排队',
-      pollIntervalMs: 2500,
-      createdAt: startedAt,
-      updatedAt: startedAt,
-    };
-    videoJobs.set(jobId, job);
-
-    void runOpenMAICVideoJob({
-      jobId,
+    const persisted = await postA3DjangoJson<DjangoVideoJobResponse>(
+      `/api/resources/packs/${resourcePackId}/video-jobs/`,
       cookieHeader,
-      origin: request.nextUrl.origin,
-      provider,
-      resourcePackId,
-      resourceType,
-      prompt,
-      requestedDuration,
-      aspectRatio: body.aspectRatio || '16:9',
-      resolution: body.resolution || '1080p',
-      segmentRequests,
-      startedAt,
-    });
-
-    return apiSuccess({
-      jobId,
-      status: 'queued',
-      progress: 0,
-      stage: 'queued',
-      message: '视频任务已创建，正在后台生成',
-      pollUrl: `/api/a3/resources/openmaic-video?jobId=${encodeURIComponent(jobId)}`,
-      pollIntervalMs: job.pollIntervalMs,
-      startedAt,
-    }, 202);
+      {
+        jobId: String(body.jobId || '').trim(),
+        provider: String(body.provider || 'seedance').trim(),
+        resourceType: String(body.resourceType || 'micro_video_script').trim(),
+        duration,
+        aspectRatio,
+        resolution,
+        segments: segmentRequests.map((segment, index) => ({
+          index: index + 1,
+          title: segment.title,
+          prompt: segment.prompt,
+          duration: segment.duration,
+        })),
+      },
+    );
+    if (!persisted.success || !persisted.job) {
+      return apiError('UPSTREAM_ERROR', 502, persisted.error || '视频任务创建失败');
+    }
+    return apiSuccess(toPublicVideoJob(persisted.job), 202);
   } catch (error) {
-    return apiError('INTERNAL_ERROR', 500, 'A3 视频生成桥接暂时不可用', error instanceof Error ? error.message : undefined);
+    return apiError('INTERNAL_ERROR', 500, 'A3 视频任务创建暂时不可用', error instanceof Error ? error.message : undefined);
   }
 }
 
 export async function GET(request: NextRequest) {
   try {
     const cookieHeader = request.headers.get('cookie');
-    const auth = await fetchA3DjangoJson<AuthMeResponse>('/api/auth/me/', cookieHeader);
-    if (!auth.success || !auth.user) {
-      return apiError('UNAUTHORIZED', 401, '请先登录后查看视频任务状态');
-    }
-    cleanupExpiredVideoJobs();
-    const jobId = request.nextUrl.searchParams.get('jobId') || '';
+    const unauthorized = await rejectUnauthenticated(cookieHeader);
+    if (unauthorized) return unauthorized;
+    const jobId = String(request.nextUrl.searchParams.get('jobId') || '').trim();
     if (!jobId) {
-      const userId = getA3UserId(auth.user);
-      return apiSuccess({
-        jobs: Array.from(videoJobs.values())
-          .filter((job) => !job.userId || job.userId === userId)
-          .map((job) => ({
-            jobId: job.jobId,
-            type: 'openmaic_video',
-            workflow: 'openmaic_video',
-            status: job.status,
-            progress: job.progress,
-            stage: job.stage,
-            message: job.message,
-            done: ['succeeded', 'partial', 'failed'].includes(job.status),
-            resourcePackId: job.resourcePackId,
-            traceId: job.traceId,
-            error: job.error,
-            updatedAt: job.updatedAt,
-            actionUrl: job.resourcePackId ? `/a3/resources/${job.resourcePackId}/video` : '/a3/recommendations',
-          })),
-      });
+      const persisted = await fetchA3DjangoJson<DjangoVideoJobResponse>('/api/resources/video-jobs/', cookieHeader);
+      if (!persisted.success) return apiError('UPSTREAM_ERROR', 502, persisted.error || '视频任务列表加载失败');
+      return apiSuccess({ jobs: (persisted.jobs ?? []).map(toPublicVideoJob) });
     }
-    const job = videoJobs.get(jobId);
-    if (!job) return apiError('INVALID_REQUEST', 404, '视频任务不存在或已过期');
-    if (job.userId && job.userId !== getA3UserId(auth.user)) {
-      return apiError('UNAUTHORIZED', 403, '无权查看该视频任务');
+    const persisted = await fetchA3DjangoJson<DjangoVideoJobResponse>(
+      `/api/resources/video-jobs/${encodeURIComponent(jobId)}/`,
+      cookieHeader,
+    );
+    if (!persisted.success || !persisted.job) {
+      return apiError('INVALID_REQUEST', 404, persisted.error || '视频任务不存在');
     }
-    return apiSuccess({
-      jobId: job.jobId,
-      status: job.status,
-      progress: job.progress,
-      stage: job.stage,
-      message: job.message,
-      done: ['succeeded', 'partial', 'failed'].includes(job.status),
-      pollIntervalMs: job.pollIntervalMs,
-      artifact: job.artifact,
-      resourcePack: job.resourcePack,
-      traceId: job.traceId,
-      degraded: job.degraded,
-      error: job.error,
-      updatedAt: job.updatedAt,
-    });
+    return apiSuccess(toPublicVideoJob(persisted.job));
   } catch (error) {
     return apiError('INTERNAL_ERROR', 500, 'A3 视频任务状态暂时不可用', error instanceof Error ? error.message : undefined);
   }
 }
 
-async function runOpenMAICVideoJob(input: {
-  jobId: string;
-  cookieHeader: string | null;
-  origin: string;
-  provider: string;
-  resourcePackId: string;
-  resourceType: string;
-  prompt: string;
-  requestedDuration: number;
-  aspectRatio: string;
-  resolution: string;
-  segmentRequests: SegmentedVideoRequest[];
-  startedAt: number;
-}) {
-  updateVideoJob(input.jobId, {
-    status: 'running',
-    progress: 5,
-    stage: 'generating',
-    message: input.segmentRequests.length > 1 ? '正在生成分段视频' : '正在生成视频',
-  });
+export async function PATCH(request: NextRequest) {
   try {
-    const artifactPayload = input.segmentRequests.length > 1
-      ? await generateSegmentedVideoArtifact({
-          origin: input.origin,
-          provider: input.provider,
-          resourceType: input.resourceType,
-          requests: input.segmentRequests,
-          startedAt: input.startedAt,
-          onProgress: (segmentIndex, totalSegments) => updateVideoJob(input.jobId, {
-            status: 'running',
-            progress: Math.min(85, Math.round((segmentIndex / totalSegments) * 80) + 5),
-            stage: 'generating',
-            message: `正在生成第 ${segmentIndex}/${totalSegments} 段视频`,
-          }),
-        })
-      : await generateSingleVideoArtifact({
-          origin: input.origin,
-          provider: input.provider,
-          resourceType: input.resourceType,
-          prompt: input.prompt,
-          duration: input.requestedDuration === 10 ? 10 : 5,
-          aspectRatio: input.aspectRatio,
-          resolution: input.resolution,
-          startedAt: input.startedAt,
-        });
+    const cookieHeader = request.headers.get('cookie');
+    const unauthorized = await rejectUnauthenticated(cookieHeader);
+    if (unauthorized) return unauthorized;
+    const body = (await request.json()) as { action?: string; jobId?: string };
+    const action = String(body.action || '').trim();
+    const jobId = String(body.jobId || '').trim();
+    if (action !== 'retry-failed') return apiError('INVALID_REQUEST', 400, '不支持的视频任务操作');
+    if (!jobId) return apiError('MISSING_REQUIRED_FIELD', 400, '缺少 jobId');
 
-    updateVideoJob(input.jobId, {
-      status: 'running',
-      progress: 90,
-      stage: 'writeback',
-      message: '视频已生成，正在写回 A3 资源包',
-    });
-    const persisted = await postA3DjangoJson<DjangoVideoArtifactResponse>(
-      `/api/resources/packs/${input.resourcePackId}/openmaic-video/`,
-      input.cookieHeader,
-      artifactPayload,
+    const persisted = await postA3DjangoJson<DjangoVideoJobResponse>(
+      `/api/resources/video-jobs/${encodeURIComponent(jobId)}/retry-failed/`,
+      cookieHeader,
+      {},
     );
-    if (!persisted.success) {
-      updateVideoJob(input.jobId, {
-        status: 'failed',
-        progress: 100,
-        stage: 'failed',
-        message: persisted.error || 'A3 视频产物回写失败',
-        error: persisted.error || 'A3 视频产物回写失败',
-      });
-      return;
+    if (!persisted.success || !persisted.job) {
+      return apiError('UPSTREAM_ERROR', 502, persisted.error || '失败片段重试失败');
     }
-    const finalStatus = artifactPayload.status === 'succeeded' ? 'succeeded' : artifactPayload.status === 'partial' ? 'partial' : 'failed';
-    updateVideoJob(input.jobId, {
-      status: finalStatus,
-      progress: 100,
-      stage: finalStatus === 'failed' ? 'failed' : 'completed',
-      message: finalStatus === 'succeeded' ? '视频已生成并写回资源包' : finalStatus === 'partial' ? '视频部分片段成功，已写回资源包' : '视频生成失败，降级证据已写回资源包',
-      artifact: persisted.artifact,
-      resourcePack: persisted.resourcePack,
-      traceId: persisted.traceId,
-      degraded: artifactPayload.status !== 'succeeded',
-      error: artifactPayload.status === 'succeeded' ? '' : artifactPayload.degradedReason,
-    });
+    return apiSuccess({ ...toPublicVideoJob(persisted.job), retried: persisted.retried ?? 0 }, 202);
   } catch (error) {
-    updateVideoJob(input.jobId, {
-      status: 'failed',
-      progress: 100,
-      stage: 'failed',
-      message: error instanceof Error ? error.message : '视频任务执行失败',
-      error: error instanceof Error ? error.message : '视频任务执行失败',
-    });
+    return apiError('INTERNAL_ERROR', 500, '失败片段重试暂时不可用', error instanceof Error ? error.message : undefined);
   }
 }
 
-async function generateSingleVideoArtifact(input: {
-  origin: string;
-  provider: string;
-  resourceType: string;
-  prompt: string;
-  duration: 5 | 10;
-  aspectRatio: string;
-  resolution: string;
-  startedAt: number;
-}) {
-  const videoResponse = await fetch(resolveA3InternalFrontendEndpoint('/api/generate/video', input.origin), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-video-provider': input.provider,
-    },
-    body: JSON.stringify({
-      prompt: input.prompt,
-      duration: input.duration,
-      aspectRatio: input.aspectRatio,
-      resolution: input.resolution,
-    }),
-  });
-  const video = (await videoResponse.json().catch(() => ({}))) as GenerateVideoResponse;
-  return buildA3OpenMAICVideoPayload({
-    provider: input.provider,
-    status: videoResponse.ok && video.success && video.result?.url ? 'succeeded' : 'failed',
-    resourceType: input.resourceType,
-    result: video.result,
-    error: video.error || (videoResponse.ok ? '' : `视频生成接口失败：${videoResponse.status}`),
-  }, Date.now() - input.startedAt);
-}
-
-function updateVideoJob(jobId: string, patch: Partial<VideoJob>) {
-  const job = videoJobs.get(jobId);
-  if (!job) return;
-  videoJobs.set(jobId, {
+function toPublicVideoJob(job: DjangoVideoJob) {
+  const artifact = job.artifact && Object.keys(job.artifact).length ? job.artifact : undefined;
+  return {
     ...job,
-    ...patch,
-    updatedAt: Date.now(),
-  });
+    artifact,
+    resourcePack: artifact?.resourcePack,
+    pollUrl: `/api/a3/resources/openmaic-video?jobId=${encodeURIComponent(job.jobId)}`,
+    pollIntervalMs: 5000,
+    degraded: Boolean(artifact && artifact.status !== 'succeeded'),
+  };
 }
 
-function cleanupExpiredVideoJobs() {
-  const now = Date.now();
-  for (const [jobId, job] of videoJobs.entries()) {
-    if (now - job.updatedAt > VIDEO_JOB_TTL_MS) videoJobs.delete(jobId);
-  }
-}
-
-function getA3UserId(user: A3PublicUser | null | undefined) {
-  const record = (user ?? {}) as Record<string, unknown>;
-  return String(record.id || record.userId || record.email || record.username || '');
-}
-
-async function generateSegmentedVideoArtifact(input: {
-  origin: string;
-  provider: string;
-  resourceType: string;
-  requests: SegmentedVideoRequest[];
-  startedAt: number;
-  onProgress?: (segmentIndex: number, totalSegments: number) => void;
-}) {
-  const segments = [];
-  for (let index = 0; index < input.requests.length; index += 1) {
-    const segmentRequest = input.requests[index];
-    input.onProgress?.(index + 1, input.requests.length);
-    try {
-      const response = await fetch(resolveA3InternalFrontendEndpoint('/api/generate/video', input.origin), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-video-provider': input.provider,
-        },
-        body: JSON.stringify({
-          prompt: segmentRequest.prompt,
-          duration: segmentRequest.duration,
-          aspectRatio: segmentRequest.aspectRatio,
-          resolution: segmentRequest.resolution,
-        }),
-      });
-      const video = (await response.json().catch(() => ({}))) as GenerateVideoResponse;
-      const succeeded = response.ok && video.success && Boolean(video.result?.url);
-      segments.push({
-        index: index + 1,
-        title: segmentRequest.title,
-        status: succeeded ? 'succeeded' : 'failed',
-        videoUrl: video.result?.url ?? '',
-        duration: Number(video.result?.duration ?? segmentRequest.duration),
-        width: Number(video.result?.width ?? 0),
-        height: Number(video.result?.height ?? 0),
-        degradedReason: succeeded ? '' : (video.error || (response.ok ? '视频片段未返回播放地址' : `视频生成接口失败：${response.status}`)),
-      });
-    } catch (error) {
-      segments.push({
-        index: index + 1,
-        title: segmentRequest.title,
-        status: 'failed',
-        videoUrl: '',
-        duration: segmentRequest.duration,
-        width: 0,
-        height: 0,
-        degradedReason: error instanceof Error ? error.message : '视频片段生成失败',
-      });
-    }
-  }
-
-  const succeededSegments = segments.filter((segment) => segment.status === 'succeeded' && segment.videoUrl);
-  const failureReasons = Array.from(new Set(
-    segments
-      .filter((segment) => segment.status === 'failed' && segment.degradedReason)
-      .map((segment) => segment.degradedReason),
-  ));
-  const firstSucceeded = succeededSegments[0];
-  const status = succeededSegments.length === segments.length ? 'succeeded' : succeededSegments.length ? 'partial' : 'failed';
-  return buildA3OpenMAICVideoPayload({
-    provider: input.provider,
-    status,
-    resourceType: input.resourceType,
-    result: {
-      url: firstSucceeded?.videoUrl ?? '',
-      duration: succeededSegments.reduce((sum, segment) => sum + Number(segment.duration || 0), 0),
-      width: Number(firstSucceeded?.width ?? 0),
-      height: Number(firstSucceeded?.height ?? 0),
-    },
-    segments,
-    error: status === 'succeeded'
-      ? ''
-      : `1 分钟视频分段生成完成：${succeededSegments.length}/${segments.length} 段成功${failureReasons.length ? `；原因：${failureReasons.slice(0, 2).join('；')}` : ''}`,
-  }, Date.now() - input.startedAt);
+async function rejectUnauthenticated(cookieHeader: string | null) {
+  const auth = await fetchA3DjangoJson<AuthMeResponse>('/api/auth/me/', cookieHeader);
+  return auth.success && auth.user ? null : apiError('UNAUTHORIZED', 401, '请先登录后操作视频任务');
 }
 
 export function buildSegmentedVideoRequests(input: {

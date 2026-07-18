@@ -5,6 +5,26 @@ export type AvatarFrameTiming = {
   elapsedSeconds: number;
 };
 
+export type AvatarDeviceCapability = {
+  devicePixelRatio: number;
+  hardwareConcurrency?: number;
+  deviceMemory?: number;
+  mobile: boolean;
+};
+
+export function resolveAvatarPixelRatio(capability: AvatarDeviceCapability) {
+  const dpr = Math.max(1, capability.devicePixelRatio || 1);
+  const constrained =
+    capability.mobile ||
+    (capability.hardwareConcurrency ?? 4) <= 4 ||
+    (capability.deviceMemory ?? 4) <= 4;
+  if (constrained) return Math.min(dpr, 1);
+
+  const highCapability =
+    (capability.hardwareConcurrency ?? 0) >= 12 && (capability.deviceMemory ?? 0) >= 12;
+  return Math.min(dpr, highCapability ? 2 : 1.5);
+}
+
 export function advanceAvatarFrame(
   elapsedSeconds: number,
   rawDeltaSeconds: number,

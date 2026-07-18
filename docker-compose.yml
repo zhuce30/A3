@@ -47,6 +47,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      A3_INTERNAL_FRONTEND_BASE_URL: http://frontend:3000
+      A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:-a3-docker-dev-video-worker-token}
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "1"
       A3_SEED_DEMO_DATA: "1"
@@ -79,6 +81,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      A3_INTERNAL_FRONTEND_BASE_URL: http://frontend:3000
+      A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:-a3-docker-dev-video-worker-token}
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "0"
       A3_SEED_DEMO_DATA: "0"
@@ -131,6 +135,7 @@ services:
       NODE_ENV: production
       NEXT_PUBLIC_A3_API_BASE_URL: http://localhost:8000
       A3_API_BASE_URL: http://backend:8000
+      A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:-a3-docker-dev-video-worker-token}
       A3_COACHING_BASE_URL: ${A3_COACHING_BASE_URL:-}
       A3_COACHING_API_KEY: ${A3_COACHING_API_KEY:-}
       A3_COACHING_MODEL: ${A3_COACHING_MODEL:-qwen-plus}

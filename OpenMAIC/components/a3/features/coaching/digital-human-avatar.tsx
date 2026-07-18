@@ -1,11 +1,17 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import Image from 'next/image';
 import { cn } from '@/lib/utils';
 import type { A3DigitalHumanAvatarProps } from '@/lib/a3/digital-human-types';
+import { markDigitalHumanPerformance } from '@/lib/a3/digital-human-preload';
 
 const DigitalHumanThreeStage = dynamic(
-  () => import('./digital-human-three-stage').then((module) => module.DigitalHumanThreeStage),
+  () =>
+    import('./digital-human-three-stage').then((module) => {
+      markDigitalHumanPerformance('a3-avatar-chunk-ready');
+      return module.DigitalHumanThreeStage;
+    }),
   {
     ssr: false,
     loading: DigitalHumanStageLoading,
@@ -17,12 +23,21 @@ function DigitalHumanStageLoading() {
     <div
       data-testid="a3-digital-human-three-stage"
       data-avatar-renderer="loading"
+      data-avatar-load-state="loading_chunk"
       role="status"
       aria-label="数字助教加载中"
       className="relative z-10 flex h-[420px] w-full max-w-[820px] items-center justify-center bg-transparent md:h-[500px] xl:h-[560px]"
     >
-      <span className="rounded-full border border-white/20 bg-slate-950/40 px-4 py-2 text-xs text-white backdrop-blur-lg">
-        数字助教加载中
+      <Image
+        src="/a3/assets/teacher-avatar/teacher-loading.webp"
+        alt="数字助教教师形象"
+        fill
+        priority
+        sizes="(min-width: 768px) 460px, 100vw"
+        className="object-contain object-bottom"
+      />
+      <span className="absolute bottom-4 rounded-full border border-white/20 bg-slate-950/55 px-4 py-2 text-xs text-white backdrop-blur-lg">
+        正在准备数字助教
       </span>
     </div>
   );

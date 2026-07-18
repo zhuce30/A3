@@ -171,6 +171,7 @@ export type A3OpenMAICClassroomArtifact = {
 export type A3OpenMAICVideoArtifact = {
   schemaVersion?: 'a3.openmaic-video-artifact.v1';
   type: 'openmaic_video';
+  jobId?: string;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | string;
   provider: string;
   resourceType: string;

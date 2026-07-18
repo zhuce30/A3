@@ -59,6 +59,105 @@ pnpm build
 
 检查仅验证文件元数据，不打印 `/root/.docker/config.json` 内容。令牌撤销或失效后，重复以上安全登录流程。
 
+## Cloudflare 数字人静态资源缓存
+
+数字教师模型和动作文件都使用带版本参数的 URL，例如：
+
+```text
+/a3/assets/teacher-avatar/teacher.optimized.vrm?v=20260718-v1
+/a3/assets/teacher-avatar/idle.vrma?v=20260710-arms-down
+```
+
+Next.js 仅对 `/a3/assets/teacher-avatar/:path*` 返回：
+
+```text
+Cache-Control: public, max-age=31536000, immutable
+```
+
+在 Cloudflare Dashboard 的 **Caching -> Cache Rules** 新建规则 `A3 teacher avatar immutable assets`，使用以下自定义表达式：
+
+```text
+(http.host eq "a3.zhuce.work" and starts_with(http.request.uri.path, "/a3/assets/teacher-avatar/") and (ends_with(http.request.uri.path, ".vrm") or ends_with(http.request.uri.path, ".vrma") or ends_with(http.request.uri.path, ".webp")))
+```
+
+规则设置：
+
+1. `Cache eligibility` 设为 `Eligible for cache`。
+2. `Edge TTL` 选择尊重源站 `Cache-Control`；若控制台必须填写固定值，则设为 `1 year`。
+3. `Browser TTL` 选择尊重源站；不要缩短 `immutable` 资源的浏览器缓存时间。
+4. 缓存键保留默认设置并包含全部 query string。不要启用 `Ignore query string`，版本参数变化必须得到新的缓存对象。
+5. 规则范围不得扩大到整个 `/a3/*`，更不能缓存 `/api/*`、登录页或带会话的 HTML 响应。
+
+发布新模型时必须先修改代码中的版本参数，再部署新镜像；不要用同一个版本 URL 覆盖不同内容。上线后验证两次请求，第二次通常应出现 `CF-Cache-Status: HIT`，同时必须保留一年期源站缓存头：
+
+```bash
+curl -sSI --connect-timeout 3 --max-time 10 'https://a3.zhuce.work/a3/assets/teacher-avatar/teacher.optimized.vrm?v=20260718-v1' |
+  grep -Ei '^(HTTP/|cache-control:|cf-cache-status:|content-length:)'
+```
+
+首次请求显示 `MISS` 属正常现象。若内容版本填写错误，使用 Cloudflare 按精确 URL 清除缓存，不要全站 Purge Everything。
+
+## 持久化视频任务首次上线
+
+这一节只在包含持久化视频 Job/Segment 数据表和内部 provider bridge 的前后端镜像都已通过 Actions、已按固定 SHA/digest 拉取并写入 `.env.production` 后执行。不要对只有一半新镜像的运行环境创建视频任务。
+
+backend、Celery worker 和 frontend 必须读取同一个 `A3_VIDEO_WORKER_TOKEN`。该值只用于 Docker 内网中的 provider bridge，不是 Seedance API key，也不能提交到 Git。首次上线时生成 32 字节随机值，并原子写入服务器环境文件：
+
+```bash
+(
+  set -euo pipefail
+  cd /opt/A3
+  ENV_FILE='/opt/A3/.env.production'
+  VIDEO_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+
+  sudo env VIDEO_TOKEN="$VIDEO_TOKEN" python3 - "$ENV_FILE" <<'PY'
+import os
+import pathlib
+import sys
+import tempfile
+
+env_path = pathlib.Path(sys.argv[1])
+token = os.environ["VIDEO_TOKEN"]
+lines = env_path.read_text(encoding="utf-8").splitlines()
+lines = [line for line in lines if not line.startswith("A3_VIDEO_WORKER_TOKEN=")]
+lines.append(f"A3_VIDEO_WORKER_TOKEN={token}")
+fd, temporary_name = tempfile.mkstemp(prefix=f"{env_path.name}.", dir=env_path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    os.chmod(temporary_name, 0o600)
+    os.replace(temporary_name, env_path)
+finally:
+    if os.path.exists(temporary_name):
+        os.unlink(temporary_name)
+PY
+  unset VIDEO_TOKEN
+  sudo chown root:root "$ENV_FILE"
+  sudo chmod 0600 "$ENV_FILE"
+)
+```
+
+使用已经验证过 digest 的新镜像执行迁移，再重建使用该 token 的服务。恢复命令只扫描超过 5 分钟没有推进的活动任务；已有 provider taskId 的片段只会继续轮询，不会再次向 Seedance 提交并产生重复费用。
+
+```bash
+(
+  set -euo pipefail
+  cd /opt/A3
+  COMPOSE_ARGS=(--env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml)
+
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    run --rm --no-deps backend python manage.py migrate
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    up -d --no-build --force-recreate backend celery celery-beat frontend
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    exec -T backend python manage.py recover_video_jobs --stale-minutes 5
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    ps backend celery celery-beat frontend
+)
+```
+
+正常输出应包含 `恢复派发 N 个视频任务`。该命令可以在 Celery/Redis 故障恢复后再次执行；刚刚仍在轮询的任务不会被重复入队。
+
 ## 自动化验证
 
 以下检查真实断言：

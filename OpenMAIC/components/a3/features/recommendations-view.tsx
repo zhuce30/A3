@@ -58,6 +58,8 @@ type A3OpenMAICBridgeResponse = {
   startedAt?: number;
   artifact?: A3MultimodalArtifact;
   resourcePack?: A3ResourcePackV2;
+  resourcePackId?: string;
+  jobs?: A3OpenMAICBridgeResponse[];
 };
 
 type OpenMAICJobPollResponse = {
@@ -251,6 +253,47 @@ export function RecommendationsView() {
     setContext(normalized);
   }
 
+  async function pollOpenMAICVideoJob(start: A3OpenMAICBridgeResponse) {
+    const pollUrl = normalizeOpenMAICVideoPollUrl(start.pollUrl);
+    if (!pollUrl) return { success: false, error: '视频任务缺少轮询地址，请重新生成。' } as A3OpenMAICBridgeResponse;
+    const intervalMs = Math.max(1000, Math.min(start.pollIntervalMs ?? 2500, 5000));
+    const maxAttempts = Math.ceil((60 * 60 * 1000) / intervalMs);
+    let latestJob: A3OpenMAICBridgeResponse | null = null;
+    let transientFailures = 0;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      await sleep(attempt === 0 ? 500 : intervalMs);
+      let response: Response;
+      try {
+        response = await fetch(pollUrl, { cache: 'no-store', signal: AbortSignal.timeout(12_000) });
+      } catch {
+        transientFailures += 1;
+        setVideoSummary(`视频仍在后台生成，正在重新连接进度服务（第 ${transientFailures} 次）`);
+        continue;
+      }
+      const job = (await response.json().catch(() => ({}))) as A3OpenMAICBridgeResponse;
+      if (!response.ok || !job.success) {
+        if ([502, 503, 504].includes(response.status)) {
+          transientFailures += 1;
+          setVideoSummary(`视频仍在后台生成，正在重新连接进度服务（第 ${transientFailures} 次）`);
+          continue;
+        }
+        return { success: false, error: job.error || `视频任务查询失败：${response.status}` } as A3OpenMAICBridgeResponse;
+      }
+      transientFailures = 0;
+      latestJob = job;
+      const progress = typeof job.progress === 'number' ? Math.max(0, Math.min(100, Math.round(job.progress))) : 0;
+      const activeStep = progress >= 90 ? 7 : Math.max(1, Math.min(6, Math.ceil((progress / 90) * 6)));
+      setLongRunningProgress(buildProgress('video', activeStep, `${job.stage || 'generating'}：${job.message || `任务进度 ${progress}%`}`));
+      setVideoSummary(`视频任务${job.stage ? ` ${job.stage}` : ''}：${progress}%`);
+      if (job.done || ['succeeded', 'partial', 'failed'].includes(String(job.status))) break;
+    }
+    if (!latestJob) return { success: false, error: '视频任务未返回状态。' } as A3OpenMAICBridgeResponse;
+    if (!latestJob.done && !['succeeded', 'partial', 'failed'].includes(String(latestJob.status))) {
+      return { success: false, error: '视频任务仍在运行，请稍后刷新资源包查看结果。' } as A3OpenMAICBridgeResponse;
+    }
+    return latestJob;
+  }
+
   async function loadLatestPack() {
     const result = await a3GetJson<ResourcePackListResponse>('/api/resources/packs/');
     if (!result.success || !result.resourcePacks?.length) return;
@@ -261,6 +304,24 @@ export function RecommendationsView() {
     const timer = window.setTimeout(() => {
       void loadInitialContext();
       void loadLatestPack();
+      void (async () => {
+        const result = await a3GetJson<A3OpenMAICBridgeResponse>('/api/a3/resources/openmaic-video');
+        if (!result.success) return;
+        const activeJob = (result.jobs ?? []).find((job) => ['queued', 'running'].includes(String(job.status)));
+        if (!activeJob?.jobId) return;
+        setGeneratingVideo(true);
+        setVideoSummary('视频仍在后台生成，已恢复进度显示。');
+        setLongRunningProgress(buildProgress('video', 1, activeJob.message || '视频仍在后台生成'));
+        const synced = await pollOpenMAICVideoJob({
+          ...activeJob,
+          success: true,
+          pollUrl: `/api/a3/resources/openmaic-video?jobId=${encodeURIComponent(activeJob.jobId)}`,
+          pollIntervalMs: 5000,
+        });
+        setGeneratingVideo(false);
+        if (synced.resourcePack) setPack(sanitizeResourcePackV2(synced.resourcePack));
+        if (!synced.success) setError(synced.error || '视频任务进度恢复失败。');
+      })();
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -366,6 +427,7 @@ export function RecommendationsView() {
     setError('');
     setMessage('');
     setVideoSummary('');
+    const videoJobId = getOrCreateVideoJobId(currentPack.resourcePackId);
     let activeVideoStep = 1;
     setLongRunningProgress(buildProgress('video', activeVideoStep, '正在生成 60 秒视频，系统会拆成 6 个 10 秒片段'));
     const videoProgressTimer = window.setInterval(() => {
@@ -373,6 +435,7 @@ export function RecommendationsView() {
       setLongRunningProgress(buildProgress('video', activeVideoStep, `正在生成第 ${activeVideoStep}/6 段，完成后会自动写回资源包`));
     }, 9000);
     const result = await postNextJson<A3OpenMAICBridgeResponse>('/api/a3/resources/openmaic-video', {
+      jobId: videoJobId,
       resourcePackId: currentPack.resourcePackId,
       provider: 'seedance',
       resourceType: script.type,
@@ -383,6 +446,7 @@ export function RecommendationsView() {
     });
     window.clearInterval(videoProgressTimer);
     const synced = result.success && result.jobId && result.pollUrl ? await pollOpenMAICVideoJob(result) : result;
+    if (isTerminalVideoJob(synced)) clearVideoJobId(currentPack.resourcePackId, videoJobId);
     setGeneratingVideo(false);
     if (!synced.success) {
       setLongRunningProgress(buildProgress('video', activeVideoStep, synced.error ?? '视频任务创建失败', 'failed'));
@@ -415,39 +479,6 @@ export function RecommendationsView() {
     setMessage('');
     setVideoSummary('');
     setError(`视频生成未成功：${failureReason}`);
-  }
-
-  async function pollOpenMAICVideoJob(start: A3OpenMAICBridgeResponse) {
-    const pollUrl = normalizeOpenMAICVideoPollUrl(start.pollUrl);
-    if (!pollUrl) return { success: false, error: '视频任务缺少轮询地址，请重新生成。' } as A3OpenMAICBridgeResponse;
-    const intervalMs = Math.max(1000, Math.min(start.pollIntervalMs ?? 2500, 5000));
-    const maxAttempts = Math.ceil((60 * 60 * 1000) / intervalMs);
-    let latestJob: A3OpenMAICBridgeResponse | null = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      await sleep(attempt === 0 ? 500 : intervalMs);
-      let response: Response;
-      try {
-        response = await fetch(pollUrl, { cache: 'no-store' });
-      } catch (error) {
-        return {
-          success: false,
-          error: `视频任务查询失败：${error instanceof Error ? error.message : '无法连接本地服务'}`,
-        } as A3OpenMAICBridgeResponse;
-      }
-      const job = (await response.json().catch(() => ({}))) as A3OpenMAICBridgeResponse;
-      if (!response.ok || !job.success) return { success: false, error: job.error || `视频任务查询失败：${response.status}` } as A3OpenMAICBridgeResponse;
-      latestJob = job;
-      const progress = typeof job.progress === 'number' ? Math.max(0, Math.min(100, Math.round(job.progress))) : 0;
-      const activeStep = progress >= 90 ? 7 : Math.max(1, Math.min(6, Math.ceil((progress / 90) * 6)));
-      setLongRunningProgress(buildProgress('video', activeStep, `${job.stage || 'generating'}：${job.message || `任务进度 ${progress}%`}`));
-      setVideoSummary(`视频任务${job.stage ? ` ${job.stage}` : ''}：${progress}%`);
-      if (job.done || ['succeeded', 'partial', 'failed'].includes(String(job.status))) break;
-    }
-    if (!latestJob) return { success: false, error: '视频任务未返回状态。' } as A3OpenMAICBridgeResponse;
-    if (!latestJob.done && !['succeeded', 'partial', 'failed'].includes(String(latestJob.status))) {
-      return { success: false, error: '视频任务仍在运行，请稍后刷新资源包查看结果。' } as A3OpenMAICBridgeResponse;
-    }
-    return latestJob;
   }
 
   async function pollResourceGenerationJob(start: A3ResourceGenerateResponse) {
@@ -1285,6 +1316,27 @@ async function postNextJson<T extends { success: boolean; error?: string }>(url:
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getOrCreateVideoJobId(resourcePackId: string) {
+  const storageKey = `a3:video-job:${resourcePackId}`;
+  const existing = window.sessionStorage.getItem(storageKey)?.trim();
+  if (existing) return existing;
+  const randomId = window.crypto.randomUUID().replaceAll('-', '');
+  const jobId = `a3_video_${randomId}`;
+  window.sessionStorage.setItem(storageKey, jobId);
+  return jobId;
+}
+
+function clearVideoJobId(resourcePackId: string, expectedJobId: string) {
+  const storageKey = `a3:video-job:${resourcePackId}`;
+  if (window.sessionStorage.getItem(storageKey) === expectedJobId) {
+    window.sessionStorage.removeItem(storageKey);
+  }
+}
+
+function isTerminalVideoJob(job: A3OpenMAICBridgeResponse) {
+  return Boolean(job.done) || ['succeeded', 'partial', 'failed'].includes(String(job.status));
 }
 
 function normalizeOpenMAICPollUrl(value: string | undefined): string {

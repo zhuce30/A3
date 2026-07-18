@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 1,
+  "inputBytes": 16496824,
+  "outputBytes": 2509104,
+  "maxOutputBytes": 5242880,
+  "compressedGeometryBytes": 1867169,
+  "extensionsPreserved": [
+    "VRMC_vrm",
+    "VRMC_springBone",
+    "VRMC_materials_mtoon"
+  ],
+  "extensionsAdded": [
+    "EXT_meshopt_compression",
+    "EXT_texture_webp"
+  ],
+  "textures": [
+    {
+      "index": 0,
+      "name": "_01",
+      "inputBytes": 48381,
+      "outputBytes": 1716,
+      "lossless": false
+    },
+    {
+      "index": 1,
+      "name": "Shader_NoneBlack",
+      "inputBytes": 69,
+      "outputBytes": 34,
+      "lossless": true
+    },
+    {
+      "index": 2,
+      "name": "Shader_NoneNormal",
+      "inputBytes": 79,
+      "outputBytes": 38,
+      "lossless": true
+    },
+    {
+      "index": 3,
+      "name": "_02",
+      "inputBytes": 178250,
+      "outputBytes": 24654,
+      "lossless": false
+    },
+    {
+      "index": 4,
+      "name": "_03",
+      "inputBytes": 40570,
+      "outputBytes": 10886,
+      "lossless": false
+    },
+    {
+      "index": 5,
+      "name": "_04",
+      "inputBytes": 207983,
+      "outputBytes": 6258,
+      "lossless": false
+    },
+    {
+      "index": 6,
+      "name": "_05",
+      "inputBytes": 15779,
+      "outputBytes": 1942,
+      "lossless": false
+    },
+    {
+      "index": 7,
+      "name": "_06",
+      "inputBytes": 264027,
+      "outputBytes": 3954,
+      "lossless": false
+    },
+    {
+      "index": 8,
+      "name": "_07",
+      "inputBytes": 32626,
+      "outputBytes": 12006,
+      "lossless": false
+    },
+    {
+      "index": 9,
+      "name": "_08",
+      "inputBytes": 33128,
+      "outputBytes": 5416,
+      "lossless": false
+    },
+    {
+      "index": 10,
+      "name": "_09",
+      "inputBytes": 73216,
+      "outputBytes": 25376,
+      "lossless": false
+    },
+    {
+      "index": 11,
+      "name": "_10",
+      "inputBytes": 752005,
+      "outputBytes": 32708,
+      "lossless": false
+    },
+    {
+      "index": 12,
+      "name": "_11",
+      "inputBytes": 2959176,
+      "outputBytes": 19786,
+      "lossless": false
+    },
+    {
+      "index": 13,
+      "name": "_12",
+      "inputBytes": 572080,
+      "outputBytes": 16624,
+      "lossless": false
+    },
+    {
+      "index": 14,
+      "name": "_13",
+      "inputBytes": 256441,
+      "outputBytes": 28750,
+      "lossless": false
+    },
+    {
+      "index": 15,
+      "name": "N00_000_00_HairBack_00_nml",
+      "inputBytes": 86157,
+      "outputBytes": 43898,
+      "lossless": true
+    },
+    {
+      "index": 16,
+      "name": "_14",
+      "inputBytes": 55639,
+      "outputBytes": 4344,
+      "lossless": false
+    },
+    {
+      "index": 17,
+      "name": "_15",
+      "inputBytes": 209023,
+      "outputBytes": 13306,
+      "lossless": false
+    },
+    {
+      "index": 18,
+      "name": "_16",
+      "inputBytes": 1413617,
+      "outputBytes": 177998,
+      "lossless": false
+    },
+    {
+      "index": 19,
+      "name": "_17",
+      "inputBytes": 162768,
+      "outputBytes": 8562,
+      "lossless": false
+    },
+    {
+      "index": 20,
+      "name": "_18",
+      "inputBytes": 147300,
+      "outputBytes": 2380,
+      "lossless": false
+    },
+    {
+      "index": 21,
+      "name": "_19",
+      "inputBytes": 54645,
+      "outputBytes": 2752,
+      "lossless": false
+    },
+    {
+      "index": 22,
+      "name": "N00_000_Hair_00_nml",
+      "inputBytes": 97368,
+      "outputBytes": 43276,
+      "lossless": true
+    },
+    {
+      "index": 23,
+      "name": "MatcapWarp",
+      "inputBytes": 69,
+      "outputBytes": 34,
+      "lossless": true
+    },
+    {
+      "index": 24,
+      "name": "N00_000_00_Face_00_out",
+      "inputBytes": 14079,
+      "outputBytes": 5774,
+      "lossless": true
+    }
+  ]
+}

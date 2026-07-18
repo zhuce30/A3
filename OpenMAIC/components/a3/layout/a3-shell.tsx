@@ -5,15 +5,13 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { ChevronDown, LogOut, Repeat2, Settings, UserRound } from 'lucide-react';
 import { useState } from 'react';
-import {
-  A3_SHELL_BYPASS_PATHS,
-  useA3CurrentUser,
-} from '@/components/a3/auth/a3-auth-gate';
+import { A3_SHELL_BYPASS_PATHS, useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { A3GlobalSearch } from '@/components/a3/layout/a3-global-search';
 import { A3TopActions } from '@/components/a3/layout/a3-top-actions';
 import { a3PostJson } from '@/lib/a3/api-client';
 import { useA3Locale } from '@/lib/a3/i18n';
 import { a3GetActiveNavHref, a3NavItems } from '@/lib/a3/navigation';
+import { preloadDigitalHumanAssets } from '@/lib/a3/digital-human-preload';
 import { cn } from '@/lib/utils';
 
 export function A3Shell({ children }: { children: React.ReactNode }) {
@@ -22,27 +20,39 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
   const { messages } = useA3Locale();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const activeNavHref = a3GetActiveNavHref(pathname);
-  const [navDisclosure, setNavDisclosure] = useState<{ activeHref: string; expanded: Set<string> }>(() => {
-    const activeItem = a3NavItems.find((item) => item.href === activeNavHref);
-    return {
-      activeHref: activeNavHref,
-      expanded: activeItem?.children?.length ? new Set([activeNavHref]) : new Set(),
-    };
-  });
+  const [navDisclosure, setNavDisclosure] = useState<{ activeHref: string; expanded: Set<string> }>(
+    () => {
+      const activeItem = a3NavItems.find((item) => item.href === activeNavHref);
+      return {
+        activeHref: activeNavHref,
+        expanded: activeItem?.children?.length ? new Set([activeNavHref]) : new Set(),
+      };
+    },
+  );
   const activeItem = a3NavItems.find((item) => item.href === activeNavHref);
-  const expandedNavGroups = navDisclosure.activeHref === activeNavHref || !activeItem?.children?.length
-    ? navDisclosure.expanded
-    : new Set([...navDisclosure.expanded, activeNavHref]);
+  const expandedNavGroups =
+    navDisclosure.activeHref === activeNavHref || !activeItem?.children?.length
+      ? navDisclosure.expanded
+      : new Set([...navDisclosure.expanded, activeNavHref]);
 
   if (A3_SHELL_BYPASS_PATHS.has(pathname)) return <>{children}</>;
 
   const displayName = user?.displayName?.trim() || messages.unnamedUser;
   const userInitial = displayName.slice(0, 1);
-  const studyGroup = user?.school ? `${user.school}${messages.studyGroupSuffix}` : messages.defaultStudyGroup;
+  const studyGroup = user?.school
+    ? `${user.school}${messages.studyGroupSuffix}`
+    : messages.defaultStudyGroup;
   const focusedHeader = pathname === '/a3/classroom' || pathname === '/a3/coaching';
-  const pageTitle = pathname === '/a3/report' ? messages.reportTitle : pathname === '/a3/help' ? messages.helpCenter : '';
+  const pageTitle =
+    pathname === '/a3/report'
+      ? messages.reportTitle
+      : pathname === '/a3/help'
+        ? messages.helpCenter
+        : '';
   const compactHeader = pathname === '/a3/dashboard' || Boolean(pageTitle);
-  const visibleNavItems = a3NavItems.filter((item) => !item.roles || (user?.role && item.roles.includes(user.role)));
+  const visibleNavItems = a3NavItems.filter(
+    (item) => !item.roles || (user?.role && item.roles.includes(user.role)),
+  );
   const navLabels: Record<string, string> = {
     '/a3/dashboard': messages.navDashboard,
     '/a3/today': messages.navToday,
@@ -81,6 +91,14 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     if (next.has(href)) next.delete(href);
     else next.add(href);
     setNavDisclosure({ activeHref: activeNavHref, expanded: next });
+    const group = a3NavItems.find((item) => item.href === href);
+    if (group?.children?.some((child) => child.href === '/a3/coaching')) {
+      preloadDigitalHumanAssets();
+    }
+  }
+
+  function preloadNavDestination(href: string) {
+    if (href === '/a3/coaching') preloadDigitalHumanAssets();
   }
 
   async function logout() {
@@ -102,10 +120,20 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[248px] border-r border-[var(--a3-border)] bg-[var(--a3-surface-solid)] md:block">
         <div className="flex h-20 items-center gap-3 px-5">
           <div className="size-12 overflow-hidden rounded-[14px] shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
-            <Image src="/a3-brand-icon.png" alt="" width={48} height={48} className="size-full object-cover" priority unoptimized />
+            <Image
+              src="/a3-brand-icon.png"
+              alt=""
+              width={48}
+              height={48}
+              className="size-full object-cover"
+              priority
+              unoptimized
+            />
           </div>
           <div>
-            <div className="text-[22px] font-semibold leading-tight text-[var(--a3-text)]">{messages.appName}</div>
+            <div className="text-[22px] font-semibold leading-tight text-[var(--a3-text)]">
+              {messages.appName}
+            </div>
             <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
               {messages.appNameEn}
             </div>
@@ -136,9 +164,21 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
                         : 'text-[var(--a3-text-muted)] hover:bg-[var(--a3-surface-muted)] hover:text-[var(--a3-text)]',
                     )}
                   >
-                    <Icon className={cn('size-4 shrink-0', active && 'text-blue-600 dark:text-blue-300')} />
-                    <span className="min-w-0 flex-1 truncate">{navLabels[item.href] ?? item.label}</span>
-                    <ChevronDown className={cn('size-4 shrink-0 transition-transform duration-200', expanded && 'rotate-180')} />
+                    <Icon
+                      className={cn(
+                        'size-4 shrink-0',
+                        active && 'text-blue-600 dark:text-blue-300',
+                      )}
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      {navLabels[item.href] ?? item.label}
+                    </span>
+                    <ChevronDown
+                      className={cn(
+                        'size-4 shrink-0 transition-transform duration-200',
+                        expanded && 'rotate-180',
+                      )}
+                    />
                   </button>
                 ) : (
                   <Link
@@ -152,17 +192,22 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
                     )}
                   >
                     <Icon className="size-4 shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">{navLabels[item.href] ?? item.label}</span>
+                    <span className="min-w-0 flex-1 truncate">
+                      {navLabels[item.href] ?? item.label}
+                    </span>
                   </Link>
                 )}
                 {grouped && expanded ? (
                   <div id={childrenId} className="space-y-1 pl-6" data-testid={childrenId}>
                     {itemChildren.map((child) => {
-                      const childActive = pathname === child.href || pathname.startsWith(`${child.href}/`);
+                      const childActive =
+                        pathname === child.href || pathname.startsWith(`${child.href}/`);
                       return (
                         <Link
                           key={child.href}
                           href={child.href}
+                          onMouseEnter={() => preloadNavDestination(child.href)}
+                          onFocus={() => preloadNavDestination(child.href)}
                           className={cn(
                             'flex h-10 items-center rounded-lg px-3 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
                             childActive
@@ -170,7 +215,9 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
                               : 'text-[var(--a3-text-muted)] hover:bg-[var(--a3-surface-muted)] hover:text-[var(--a3-text)]',
                           )}
                         >
-                          <span className="truncate">{ownerPageLabels[child.href] ?? navLabels[child.href] ?? child.label}</span>
+                          <span className="truncate">
+                            {ownerPageLabels[child.href] ?? navLabels[child.href] ?? child.label}
+                          </span>
                         </Link>
                       );
                     })}
@@ -199,7 +246,15 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
           <div className="flex min-w-0 items-center gap-3">
             <div className="md:hidden">
               <div className="size-10 overflow-hidden rounded-xl shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
-                <Image src="/a3-brand-icon.png" alt="" width={40} height={40} className="size-full object-cover" priority unoptimized />
+                <Image
+                  src="/a3-brand-icon.png"
+                  alt=""
+                  width={40}
+                  height={40}
+                  className="size-full object-cover"
+                  priority
+                  unoptimized
+                />
               </div>
             </div>
             {focusedHeader && (
@@ -217,7 +272,9 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
               </div>
             )}
             {pageTitle && (
-              <h1 className="hidden text-xl font-semibold text-[var(--a3-text)] md:block">{pageTitle}</h1>
+              <h1 className="hidden text-xl font-semibold text-[var(--a3-text)] md:block">
+                {pageTitle}
+              </h1>
             )}
             <A3GlobalSearch className={cn((focusedHeader || compactHeader) && 'md:hidden')} />
           </div>
@@ -235,8 +292,15 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
                 <div className="flex size-8 items-center justify-center rounded-full bg-blue-100 text-sm font-semibold text-blue-700">
                   {userInitial}
                 </div>
-                <span className="hidden text-sm font-medium text-[var(--a3-text)] sm:inline">{displayName}</span>
-                <ChevronDown className={cn('hidden size-4 transition-transform sm:block', userMenuOpen && 'rotate-180')} />
+                <span className="hidden text-sm font-medium text-[var(--a3-text)] sm:inline">
+                  {displayName}
+                </span>
+                <ChevronDown
+                  className={cn(
+                    'hidden size-4 transition-transform sm:block',
+                    userMenuOpen && 'rotate-180',
+                  )}
+                />
               </button>
               {userMenuOpen && (
                 <div className="absolute right-0 top-12 z-50 w-[260px] rounded-2xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-3 shadow-[var(--a3-shadow)]">
@@ -245,8 +309,12 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
                       {userInitial}
                     </div>
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold text-[var(--a3-text)]">{displayName}</div>
-                      <div className="truncate text-xs text-[var(--a3-text-muted)]">{studyGroup}</div>
+                      <div className="truncate text-sm font-semibold text-[var(--a3-text)]">
+                        {displayName}
+                      </div>
+                      <div className="truncate text-xs text-[var(--a3-text-muted)]">
+                        {studyGroup}
+                      </div>
                     </div>
                   </div>
                   <Link
@@ -287,7 +355,9 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className={cn('mx-auto max-w-[1720px] p-5 xl:p-6', focusedHeader && 'max-w-[1840px]')}>
+        <main
+          className={cn('mx-auto max-w-[1720px] p-5 xl:p-6', focusedHeader && 'max-w-[1840px]')}
+        >
           {children}
         </main>
       </div>

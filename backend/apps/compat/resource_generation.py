@@ -964,6 +964,7 @@ class OpenMAICVideoBridgeAgent(BaseAgent):
         artifact = {
             "schemaVersion": "a3.openmaic-video-artifact.v1",
             "type": "openmaic_video",
+            "jobId": str(payload.get("jobId") or "").strip(),
             "status": str(payload.get("status") or "").strip().lower(),
             "provider": str(payload.get("provider") or "").strip(),
             "resourceType": str(payload.get("resourceType") or "micro_video_script"),

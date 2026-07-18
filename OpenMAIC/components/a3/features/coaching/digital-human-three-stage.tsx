@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import Image from 'next/image';
 import * as THREE from 'three';
 import type { VRM } from '@pixiv/three-vrm';
 import type { VRMAnimation } from '@pixiv/three-vrm-animation';
@@ -9,8 +10,10 @@ import type {
   A3DigitalHumanSpeechCue,
 } from '@/lib/a3/digital-human-types';
 import { cn } from '@/lib/utils';
+import { A3_TEACHER_MODEL_URL, markDigitalHumanPerformance } from '@/lib/a3/digital-human-preload';
 import {
   advanceAvatarFrame,
+  resolveAvatarPixelRatio,
   resolveTeacherActionTransition,
   retainResourceUnlessDisposed,
   shouldStartAvatarAssetLoad,
@@ -18,7 +21,7 @@ import {
   type TeacherVrmActionKey,
 } from './digital-human-runtime';
 
-export const A3_DEFAULT_TEACHER_VRM_PATH = '/a3/assets/teacher-avatar/teacher.vrm';
+export const A3_DEFAULT_TEACHER_VRM_PATH = A3_TEACHER_MODEL_URL;
 export const A3_DEFAULT_TEACHER_IDLE_VRMA_PATH = '/a3/assets/teacher-avatar/idle.vrma';
 export const A3_DEFAULT_TEACHER_IDLE_VRMA_URL = `${A3_DEFAULT_TEACHER_IDLE_VRMA_PATH}?v=20260710-arms-down`;
 
@@ -75,16 +78,10 @@ type DigitalHumanThreeStageProps = {
   speechCues?: A3DigitalHumanSpeechCue[];
 };
 
-type ActiveAvatarRenderer = 'vrm' | 'vrm_idle_animation' | 'primitive' | 'static_fallback';
+type ActiveAvatarRenderer = 'vrm' | 'vrm_idle_animation' | 'static_fallback';
+type AvatarLoadState = 'loading_model' | 'vrm_ready' | 'actions_ready' | 'static_fallback';
 type IdleAnimationState = 'pending' | 'loaded' | 'missing' | 'unavailable';
 type TeacherActionState = 'pending' | 'loaded' | 'missing' | 'unavailable';
-
-type PrimitiveAvatar = {
-  root: THREE.Group;
-  head: THREE.Mesh;
-  mouth: THREE.Mesh;
-  halo: THREE.Mesh;
-};
 
 type AvatarSignal = {
   state: A3DigitalHumanAvatarState;
@@ -106,8 +103,7 @@ type AvatarMotionProfile = {
   lookPitch: number;
   blinkInterval: number;
   blinkDuration: number;
-  primitiveYaw: number;
-  primitiveBounce: number;
+  bodyYaw: number;
 };
 
 const A3_VRM_HEAD_BONE: VrmBoneName = 'head';
@@ -130,8 +126,7 @@ function resolveAvatarMotionProfile(signal: AvatarSignal): AvatarMotionProfile {
       lookPitch: 0,
       blinkInterval: 3.9,
       blinkDuration: 0.11,
-      primitiveYaw: 0.06,
-      primitiveBounce: 0.014,
+      bodyYaw: 0.06,
     },
     connecting: {
       expressionState: 'connecting',
@@ -143,8 +138,7 @@ function resolveAvatarMotionProfile(signal: AvatarSignal): AvatarMotionProfile {
       lookPitch: 0.6,
       blinkInterval: 3.4,
       blinkDuration: 0.1,
-      primitiveYaw: 0.045,
-      primitiveBounce: 0.012,
+      bodyYaw: 0.045,
     },
     listening: {
       expressionState: 'listening',
@@ -156,8 +150,7 @@ function resolveAvatarMotionProfile(signal: AvatarSignal): AvatarMotionProfile {
       lookPitch: -0.4,
       blinkInterval: 3.2,
       blinkDuration: 0.1,
-      primitiveYaw: 0.035,
-      primitiveBounce: 0.012,
+      bodyYaw: 0.035,
     },
     thinking: {
       expressionState: 'thinking',
@@ -169,8 +162,7 @@ function resolveAvatarMotionProfile(signal: AvatarSignal): AvatarMotionProfile {
       lookPitch: 2.4,
       blinkInterval: 4.8,
       blinkDuration: 0.13,
-      primitiveYaw: 0.025,
-      primitiveBounce: 0.008,
+      bodyYaw: 0.025,
     },
     speaking: {
       expressionState: 'speaking',
@@ -182,8 +174,7 @@ function resolveAvatarMotionProfile(signal: AvatarSignal): AvatarMotionProfile {
       lookPitch: -0.8,
       blinkInterval: 3.6,
       blinkDuration: 0.1,
-      primitiveYaw: 0.07,
-      primitiveBounce: 0.02,
+      bodyYaw: 0.07,
     },
     visual_focus: {
       expressionState: 'visual_focus',
@@ -195,8 +186,7 @@ function resolveAvatarMotionProfile(signal: AvatarSignal): AvatarMotionProfile {
       lookPitch: 2.8,
       blinkInterval: 3.8,
       blinkDuration: 0.1,
-      primitiveYaw: 0.035,
-      primitiveBounce: 0.01,
+      bodyYaw: 0.035,
     },
     degraded: {
       expressionState: 'degraded',
@@ -208,8 +198,7 @@ function resolveAvatarMotionProfile(signal: AvatarSignal): AvatarMotionProfile {
       lookPitch: 1.2,
       blinkInterval: 4.3,
       blinkDuration: 0.12,
-      primitiveYaw: 0.02,
-      primitiveBounce: 0.006,
+      bodyYaw: 0.02,
     },
     error: {
       expressionState: 'error',
@@ -221,8 +210,7 @@ function resolveAvatarMotionProfile(signal: AvatarSignal): AvatarMotionProfile {
       lookPitch: 1.8,
       blinkInterval: 4.6,
       blinkDuration: 0.12,
-      primitiveYaw: 0.012,
-      primitiveBounce: 0.004,
+      bodyYaw: 0.012,
     },
     ended: {
       expressionState: 'ended',
@@ -234,8 +222,7 @@ function resolveAvatarMotionProfile(signal: AvatarSignal): AvatarMotionProfile {
       lookPitch: 0,
       blinkInterval: 4.1,
       blinkDuration: 0.11,
-      primitiveYaw: 0.018,
-      primitiveBounce: 0.006,
+      bodyYaw: 0.018,
     },
   };
 
@@ -331,80 +318,6 @@ function resolveBlinkWeight(profile: AvatarMotionProfile, elapsedSeconds: number
   return Math.sin(phase * Math.PI);
 }
 
-function createPrimitiveAvatar(signal: AvatarSignal): PrimitiveAvatar {
-  const root = new THREE.Group();
-
-  const body = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.78, 1.25, 8, 24),
-    new THREE.MeshStandardMaterial({ color: 0x176b75, roughness: 0.62, metalness: 0.04 }),
-  );
-  body.position.y = -0.74;
-  root.add(body);
-
-  const neck = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.22, 0.25, 0.36, 24),
-    new THREE.MeshStandardMaterial({ color: 0xd79a76, roughness: 0.58 }),
-  );
-  neck.position.y = 0.24;
-  root.add(neck);
-
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.78, 40, 28),
-    new THREE.MeshStandardMaterial({ color: 0xe3ad89, roughness: 0.56 }),
-  );
-  head.scale.set(0.9, 1.06, 0.82);
-  head.position.y = 0.97;
-  root.add(head);
-
-  const hair = new THREE.Mesh(
-    new THREE.SphereGeometry(0.8, 40, 16, 0, Math.PI * 2, 0, Math.PI * 0.48),
-    new THREE.MeshStandardMaterial({ color: 0x172033, roughness: 0.72 }),
-  );
-  hair.scale.set(0.94, 0.52, 0.86);
-  hair.position.set(0, 1.32, 0.02);
-  root.add(hair);
-
-  const eyeMaterial = new THREE.MeshStandardMaterial({ color: 0x102033, roughness: 0.35 });
-  const leftEye = new THREE.Mesh(new THREE.SphereGeometry(0.055, 16, 12), eyeMaterial);
-  leftEye.position.set(-0.25, 1.02, 0.66);
-  const rightEye = leftEye.clone();
-  rightEye.position.x = 0.25;
-  root.add(leftEye, rightEye);
-
-  const normalizedLevel = clampAudioLevel(signal.audioLevel);
-  const mouthScale = signal.assistantSpeaking ? 1 + normalizedLevel : 0.35;
-  const mouth = new THREE.Mesh(
-    new THREE.BoxGeometry(0.34, 0.06, 0.035),
-    new THREE.MeshStandardMaterial({
-      color: signal.assistantSpeaking ? 0xf06d7a : 0x7b2630,
-      roughness: 0.5,
-    }),
-  );
-  mouth.position.set(0, 0.76, 0.68);
-  mouth.scale.y = mouthScale;
-  root.add(mouth);
-
-  const halo = new THREE.Mesh(
-    new THREE.TorusGeometry(1.22, 0.012, 8, 80),
-    new THREE.MeshBasicMaterial({
-      color: resolveHaloColor(signal.state),
-      transparent: true,
-      opacity: 0.45,
-    }),
-  );
-  halo.position.y = 0.42;
-  halo.rotation.x = Math.PI / 2;
-  root.add(halo);
-
-  return { root, head, mouth, halo };
-}
-
-function resolveHaloColor(state: A3DigitalHumanAvatarState) {
-  if (state === 'degraded') return 0xf6b73c;
-  if (state === 'error') return 0xfb7185;
-  return 0x5eead4;
-}
-
 function disposeObject(object: THREE.Object3D) {
   object.traverse((item) => {
     if (item instanceof THREE.Mesh) {
@@ -413,28 +326,6 @@ function disposeObject(object: THREE.Object3D) {
       materials.forEach((material) => material.dispose());
     }
   });
-}
-
-function updatePrimitiveAvatar(
-  avatar: PrimitiveAvatar,
-  signal: AvatarSignal,
-  elapsedSeconds: number,
-) {
-  const profile = resolveAvatarMotionProfile(signal);
-  const normalizedLevel = clampAudioLevel(signal.audioLevel);
-  avatar.root.rotation.y = Math.sin(elapsedSeconds * 0.9) * profile.primitiveYaw;
-  avatar.head.position.y = 0.97 + Math.sin(elapsedSeconds * 1.7) * profile.primitiveBounce;
-  avatar.head.rotation.z =
-    profile.headTilt + Math.sin(elapsedSeconds * 0.7) * profile.headTilt * 0.4;
-  avatar.head.rotation.x = profile.headPitch + Math.sin(elapsedSeconds * 1.1) * profile.headNod;
-  avatar.mouth.scale.y = signal.assistantSpeaking
-    ? 1 + Math.max(normalizedLevel, 0.18 + Math.sin(elapsedSeconds * 18) * 0.12)
-    : 0.35;
-  avatar.halo.rotation.z += 0.004;
-  const haloMaterial = avatar.halo.material;
-  if (haloMaterial instanceof THREE.MeshBasicMaterial) {
-    haloMaterial.color.setHex(resolveHaloColor(signal.state));
-  }
 }
 
 function applyVrmCameraProfile(camera: THREE.PerspectiveCamera) {
@@ -460,15 +351,40 @@ function applyVrmTeacherRestPose(vrm: VRM) {
   }
 }
 
-function warmUpVrmSpringBones(vrm: VRM) {
-  try {
-    vrm.springBoneManager?.reset();
-    for (let index = 0; index < 30; index += 1) {
-      vrm.update(1 / 60);
-    }
-  } catch {
-    // Some exported VRM files omit spring-bone data; the avatar should still render.
+function scheduleIdleWork(work: () => void) {
+  if (typeof window.requestIdleCallback === 'function') {
+    const id = window.requestIdleCallback(work, { timeout: 800 });
+    return () => window.cancelIdleCallback(id);
   }
+  const id = window.setTimeout(work, 16);
+  return () => window.clearTimeout(id);
+}
+
+function scheduleVrmSpringBoneWarmup(vrm: VRM, isDisposed: () => boolean) {
+  let cancelled = false;
+  let completedFrames = 0;
+  let cancelScheduledWork = () => {};
+
+  const runBatch = () => {
+    if (cancelled || isDisposed()) return;
+    try {
+      if (completedFrames === 0) vrm.springBoneManager?.reset();
+      const nextFrame = Math.min(30, completedFrames + 5);
+      while (completedFrames < nextFrame) {
+        vrm.update(1 / 60);
+        completedFrames += 1;
+      }
+      if (completedFrames < 30) cancelScheduledWork = scheduleIdleWork(runBatch);
+    } catch {
+      // Spring-bone data is optional; a rest-pose teacher remains usable without it.
+    }
+  };
+
+  cancelScheduledWork = scheduleIdleWork(runBatch);
+  return () => {
+    cancelled = true;
+    cancelScheduledWork();
+  };
 }
 
 function disposeTeacherAction(mixer: THREE.AnimationMixer, action: THREE.AnimationAction) {
@@ -593,7 +509,7 @@ function updateVrmAvatar(vrm: VRM, signal: AvatarSignal, elapsedSeconds: number)
   vrm.expressionManager?.setValue('blink', resolveBlinkWeight(profile, elapsedSeconds));
   applyVrmHeadMotion(vrm, signal, elapsedSeconds, signal.audioLevel);
   applyVrmLookAtMicroMotion(vrm, signal, elapsedSeconds);
-  vrm.scene.rotation.y = Math.sin(elapsedSeconds * 0.45) * profile.primitiveYaw * 0.5;
+  vrm.scene.rotation.y = Math.sin(elapsedSeconds * 0.45) * profile.bodyYaw * 0.5;
 }
 
 export function DigitalHumanThreeStage({
@@ -604,11 +520,12 @@ export function DigitalHumanThreeStage({
 }: DigitalHumanThreeStageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const signalRef = useRef<AvatarSignal>({ state, audioLevel, assistantSpeaking, speechCues });
-  const [activeRenderer, setActiveRenderer] = useState<ActiveAvatarRenderer>('primitive');
+  const [activeRenderer, setActiveRenderer] = useState<ActiveAvatarRenderer>('static_fallback');
+  const [loadState, setLoadState] = useState<AvatarLoadState>('loading_model');
   const [idleAnimationState, setIdleAnimationState] = useState<IdleAnimationState>('pending');
   const [activeAction, setActiveAction] = useState<TeacherVrmActionKey>('idle');
   const [activeActionState, setActiveActionState] = useState<TeacherActionState>('pending');
-  const [webglUnavailable, setWebglUnavailable] = useState(false);
+  const [fallbackReason, setFallbackReason] = useState('正在加载数字教师模型');
   const normalizedLevel = clampAudioLevel(audioLevel);
   const mouthScale = assistantSpeaking ? 1 + normalizedLevel : 0.35;
 
@@ -626,22 +543,36 @@ export function DigitalHumanThreeStage({
     let activeMixer: THREE.AnimationMixer | null = null;
     let activeTeacherActionKey: TeacherVrmActionKey | null = null;
     let avatarLoadStarted = false;
+    let firstVrmFrameRendered = false;
+    let deferredWorkStarted = false;
+    let cancelSpringWarmup = () => {};
+    let cancelActionLoading = () => {};
     const teacherActions = new Map<TeacherVrmActionKey, THREE.AnimationAction>();
     let vrmUtils: typeof import('@pixiv/three-vrm').VRMUtils | null = null;
     setIdleAnimationState('pending');
     setActiveActionState('pending');
+    setLoadState('loading_model');
 
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
     } catch {
       setActiveRenderer('static_fallback');
+      setLoadState('static_fallback');
       setIdleAnimationState('unavailable');
       setActiveActionState('unavailable');
-      setWebglUnavailable(true);
+      setFallbackReason('当前设备不支持 WebGL，已使用静态教师形象');
       return;
     }
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const navigatorWithMemory = navigator as Navigator & { deviceMemory?: number };
+    renderer.setPixelRatio(
+      resolveAvatarPixelRatio({
+        devicePixelRatio: window.devicePixelRatio || 1,
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        deviceMemory: navigatorWithMemory.deviceMemory,
+        mobile: window.matchMedia('(max-width: 767px)').matches,
+      }),
+    );
     renderer.setSize(canvas.clientWidth || 360, canvas.clientHeight || 280, false);
 
     const scene = new THREE.Scene();
@@ -653,54 +584,29 @@ export function DigitalHumanThreeStage({
     scene.add(keyLight);
     scene.add(new THREE.AmbientLight(0x8bb8c8, 1.2));
 
-    const primitiveAvatar = createPrimitiveAvatar(signalRef.current);
-    scene.add(primitiveAvatar.root);
-
-    async function loadVrmAvatar() {
-      const [{ GLTFLoader }, { VRMLoaderPlugin, VRMUtils }] = await Promise.all([
-        import('three/examples/jsm/loaders/GLTFLoader.js'),
-        import('@pixiv/three-vrm'),
-      ]);
-      if (disposed) return;
-      vrmUtils = VRMUtils;
-      const loader = new GLTFLoader();
-      loader.register((parser) => new VRMLoaderPlugin(parser));
-      loader.load(
-        A3_DEFAULT_TEACHER_VRM_PATH,
-        async (gltf) => {
-          const loadedVrm = gltf.userData.vrm as VRM | undefined;
-          if (!loadedVrm) {
-            if (disposed) disposeObject(gltf.scene);
-            return;
-          }
-          const vrm = retainResourceUnlessDisposed(loadedVrm, disposed, (lateVrm) =>
-            VRMUtils.deepDispose(lateVrm.scene),
-          );
-          if (!vrm) return;
-          VRMUtils.rotateVRM0(vrm);
-          VRMUtils.removeUnnecessaryVertices(vrm.scene);
-          applyVrmTeacherRestPose(vrm);
-          warmUpVrmSpringBones(vrm);
-          primitiveAvatar.root.removeFromParent();
-          disposeObject(primitiveAvatar.root);
-          vrm.scene.position.copy(A3_VRM_CAMERA_PROFILE.modelPosition);
-          vrm.scene.scale.setScalar(A3_VRM_CAMERA_PROFILE.modelScale);
-          scene.add(vrm.scene);
-          activeVrm = vrm;
-          activeMixer = new THREE.AnimationMixer(vrm.scene);
-          setActiveRenderer('vrm');
-          const idleAction = await loadTeacherVrmAction(
-            vrm,
-            activeMixer,
-            'idle',
-            () => disposed,
-          ).catch(() => null);
-          if (disposed) {
-            if (idleAction) disposeTeacherAction(activeMixer, idleAction);
-            return;
-          }
+    function startDeferredVrmWork(vrm: VRM, mixer: THREE.AnimationMixer) {
+      if (deferredWorkStarted) return;
+      deferredWorkStarted = true;
+      cancelSpringWarmup = scheduleVrmSpringBoneWarmup(vrm, () => disposed);
+      cancelActionLoading = scheduleIdleWork(() => {
+        void Promise.all(
+          (['idle', 'wait', 'explain', 'nod'] as TeacherVrmActionKey[]).map(async (actionKey) => {
+            const action = await loadTeacherVrmAction(vrm, mixer, actionKey, () => disposed).catch(
+              () => null,
+            );
+            if (!action) return { actionKey, action: null };
+            const retainedAction = retainResourceUnlessDisposed(action, disposed, (lateAction) =>
+              disposeTeacherAction(mixer, lateAction),
+            );
+            return { actionKey, action: retainedAction };
+          }),
+        ).then((results) => {
+          if (disposed) return;
+          results.forEach(({ actionKey, action }) => {
+            if (action) teacherActions.set(actionKey, action);
+          });
+          const idleAction = teacherActions.get('idle');
           if (idleAction) {
-            teacherActions.set('idle', idleAction);
             activeTeacherActionKey = crossFadeTeacherAction(
               teacherActions,
               activeTeacherActionKey,
@@ -714,31 +620,46 @@ export function DigitalHumanThreeStage({
             setActiveActionState('missing');
             setIdleAnimationState('missing');
           }
-          void Promise.all(
-            (['wait', 'explain', 'nod'] as TeacherVrmActionKey[]).map(async (actionKey) => {
-              const mixer = activeMixer as THREE.AnimationMixer;
-              const action = await loadTeacherVrmAction(
-                vrm,
-                mixer,
-                actionKey,
-                () => disposed,
-              ).catch(() => null);
-              if (!action) return;
-              const retainedAction = retainResourceUnlessDisposed(action, disposed, (lateAction) =>
-                disposeTeacherAction(mixer, lateAction),
-              );
-              if (retainedAction) teacherActions.set(actionKey, retainedAction);
-            }),
-          );
-        },
-        undefined,
-        () => {
-          if (!disposed) {
-            setActiveRenderer('primitive');
-            setIdleAnimationState('unavailable');
-          }
-        },
+          setLoadState('actions_ready');
+          markDigitalHumanPerformance('a3-avatar-actions-ready');
+        });
+      });
+    }
+
+    async function loadVrmAvatar() {
+      const [{ GLTFLoader }, { VRMLoaderPlugin, VRMUtils }, { MeshoptDecoder }] = await Promise.all(
+        [
+          import('three/examples/jsm/loaders/GLTFLoader.js'),
+          import('@pixiv/three-vrm'),
+          import('meshoptimizer'),
+        ],
       );
+      if (disposed) return;
+      vrmUtils = VRMUtils;
+      await MeshoptDecoder.ready;
+      if (disposed) return;
+      const loader = new GLTFLoader();
+      loader.setMeshoptDecoder(MeshoptDecoder);
+      loader.register((parser) => new VRMLoaderPlugin(parser));
+      const gltf = await loader.loadAsync(A3_DEFAULT_TEACHER_VRM_PATH);
+      const loadedVrm = gltf.userData.vrm as VRM | undefined;
+      if (!loadedVrm) throw new Error('VRM data is missing from the teacher model.');
+      const vrm = retainResourceUnlessDisposed(loadedVrm, disposed, (lateVrm) =>
+        VRMUtils.deepDispose(lateVrm.scene),
+      );
+      if (!vrm) return;
+      VRMUtils.rotateVRM0(vrm);
+      VRMUtils.removeUnnecessaryVertices(vrm.scene);
+      applyVrmTeacherRestPose(vrm);
+      vrm.scene.position.copy(A3_VRM_CAMERA_PROFILE.modelPosition);
+      vrm.scene.scale.setScalar(A3_VRM_CAMERA_PROFILE.modelScale);
+      scene.add(vrm.scene);
+      activeVrm = vrm;
+      activeMixer = new THREE.AnimationMixer(vrm.scene);
+      if (canAnimate() && !raf) {
+        timer.reset();
+        raf = window.requestAnimationFrame(animate);
+      }
     }
 
     const resize = () => {
@@ -770,24 +691,31 @@ export function DigitalHumanThreeStage({
       const delta = timing.deltaSeconds;
       const signal = signalRef.current;
       if (activeVrm) {
-        const nextTeacherAction = resolveTeacherVrmActionKey(signal);
-        const resolvedTeacherAction = crossFadeTeacherAction(
-          teacherActions,
-          activeTeacherActionKey,
-          nextTeacherAction,
-        );
-        if (resolvedTeacherAction !== activeTeacherActionKey) {
-          activeTeacherActionKey = resolvedTeacherAction;
-          setActiveAction(resolvedTeacherAction || 'wait');
-          setActiveActionState(teacherActions.has(nextTeacherAction) ? 'loaded' : 'missing');
+        if (firstVrmFrameRendered) {
+          const nextTeacherAction = resolveTeacherVrmActionKey(signal);
+          const resolvedTeacherAction = crossFadeTeacherAction(
+            teacherActions,
+            activeTeacherActionKey,
+            nextTeacherAction,
+          );
+          if (resolvedTeacherAction !== activeTeacherActionKey) {
+            activeTeacherActionKey = resolvedTeacherAction;
+            setActiveAction(resolvedTeacherAction || 'wait');
+            setActiveActionState(teacherActions.has(nextTeacherAction) ? 'loaded' : 'missing');
+          }
+          activeMixer?.update(delta);
+          updateVrmAvatar(activeVrm, signal, elapsedSeconds);
+          activeVrm.update(delta);
         }
-        activeMixer?.update(delta);
-        updateVrmAvatar(activeVrm, signal, elapsedSeconds);
-        activeVrm.update(delta);
-      } else {
-        updatePrimitiveAvatar(primitiveAvatar, signal, elapsedSeconds);
       }
       renderer.render(scene, camera);
+      if (activeVrm && !firstVrmFrameRendered) {
+        firstVrmFrameRendered = true;
+        setActiveRenderer('vrm');
+        setLoadState('vrm_ready');
+        markDigitalHumanPerformance('a3-avatar-vrm-first-frame');
+        if (activeMixer) startDeferredVrmWork(activeVrm, activeMixer);
+      }
       if (canAnimate()) raf = window.requestAnimationFrame(animate);
     };
     const syncAnimation = () => {
@@ -806,12 +734,15 @@ export function DigitalHumanThreeStage({
         avatarLoadStarted = true;
         void loadVrmAvatar().catch(() => {
           if (!disposed) {
-            setActiveRenderer('primitive');
+            setActiveRenderer('static_fallback');
+            setLoadState('static_fallback');
             setIdleAnimationState('unavailable');
+            setActiveActionState('unavailable');
+            setFallbackReason('数字教师模型加载失败，已保留静态教师形象');
           }
         });
       }
-      if (!raf) {
+      if (activeVrm && !raf) {
         timer.reset();
         raf = window.requestAnimationFrame(animate);
       }
@@ -838,6 +769,8 @@ export function DigitalHumanThreeStage({
     return () => {
       disposed = true;
       stopAnimation();
+      cancelSpringWarmup();
+      cancelActionLoading();
       intersectionObserver?.disconnect();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('resize', resize);
@@ -850,7 +783,6 @@ export function DigitalHumanThreeStage({
         mixer.uncacheRoot(mixer.getRoot());
       }
       if (activeVrm && vrmUtils) vrmUtils.deepDispose(activeVrm.scene);
-      disposeObject(primitiveAvatar.root);
       renderer.dispose();
     };
   }, []);
@@ -859,6 +791,7 @@ export function DigitalHumanThreeStage({
     <div
       data-testid="a3-digital-human-three-stage"
       data-avatar-renderer={activeRenderer}
+      data-avatar-load-state={loadState}
       data-avatar-asset={A3_DEFAULT_TEACHER_VRM_PATH}
       data-avatar-idle-animation={A3_DEFAULT_TEACHER_IDLE_VRMA_PATH}
       data-avatar-idle-animation-state={idleAnimationState}
@@ -866,28 +799,36 @@ export function DigitalHumanThreeStage({
       data-avatar-action-state={activeActionState}
       className="relative z-10 h-[420px] w-full max-w-[820px] overflow-hidden bg-transparent md:h-[500px] xl:h-[560px]"
     >
-      {webglUnavailable ? (
-        <div
+      <Image
+        data-testid="a3-digital-human-static-teacher"
+        src="/a3/assets/teacher-avatar/teacher-loading.webp"
+        alt="数字助教教师形象"
+        fill
+        priority
+        sizes="(min-width: 768px) 460px, 100vw"
+        className={cn(
+          'z-0 object-contain object-bottom transition-opacity duration-300',
+          loadState === 'vrm_ready' || loadState === 'actions_ready' ? 'opacity-0' : 'opacity-100',
+        )}
+      />
+      <canvas
+        ref={canvasRef}
+        data-testid="a3-digital-human-three-canvas"
+        className={cn(
+          'relative z-10 mx-auto block h-full w-full transition-opacity duration-300 md:w-[46%] md:min-w-[360px] md:max-w-[460px]',
+          loadState === 'vrm_ready' || loadState === 'actions_ready' ? 'opacity-100' : 'opacity-0',
+        )}
+        aria-label="3D 数字助教"
+      />
+      {loadState === 'static_fallback' ? (
+        <p
           data-testid="a3-digital-human-static-fallback"
-          role="img"
-          aria-label="静态数字助教"
-          className="flex h-full w-full flex-col items-center justify-center px-6 text-white"
+          role="status"
+          className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/20 bg-slate-950/60 px-4 py-2 text-xs text-white backdrop-blur-lg"
         >
-          <div className="flex size-32 items-center justify-center rounded-full border border-white/35 bg-slate-950/35 text-4xl font-semibold shadow-[0_20px_70px_rgba(15,23,42,0.3)] backdrop-blur-xl">
-            智
-          </div>
-          <p className="mt-4 rounded-full border border-white/20 bg-slate-950/40 px-4 py-2 text-xs backdrop-blur-lg">
-            当前设备暂以静态教师形象显示
-          </p>
-        </div>
-      ) : (
-        <canvas
-          ref={canvasRef}
-          data-testid="a3-digital-human-three-canvas"
-          className="mx-auto block h-full w-full md:w-[46%] md:min-w-[360px] md:max-w-[460px]"
-          aria-label="3D 数字助教"
-        />
-      )}
+          {fallbackReason}
+        </p>
+      ) : null}
       <div className="pointer-events-none absolute left-4 top-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-slate-950/55 px-3 py-1.5 text-xs text-slate-200 shadow-lg shadow-slate-950/20">
         <span
           className={cn(

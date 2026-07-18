@@ -118,3 +118,7 @@ def run_resource_generation_job(self, job_id: str) -> dict:
         return {"success": False, "error": error_message}
     finally:
         close_old_connections()
+
+
+# Celery autodiscovery imports tasks.py; importing registers the durable video state-machine tasks.
+from backend.apps.compat.video_tasks import advance_video_generation_job, poll_video_generation_segment  # noqa: E402,F401

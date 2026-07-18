@@ -24,6 +24,7 @@
     "realtime:dashscope-proxy": "node scripts/a3-dashscope-realtime-proxy.mjs",
     "capture:a3-homepage": "node scripts/capture-a3-homepage-assets.mjs",
     "smoke:a3-video": "node scripts/a3-real-video-smoke.mjs",
+    "a3:optimize-avatar": "node scripts/optimize-a3-teacher-vrm.mjs",
     "eval:whiteboard": "tsx eval/whiteboard-layout/runner.ts",
     "eval:outline-language": "tsx eval/outline-language/runner.ts"
   },
@@ -72,6 +73,7 @@
     "lucide-react": "^0.562.0",
     "mathml2omml": "workspace:*",
     "mitt": "^3.0.1",
+    "meshoptimizer": "1.1.1",
     "motion": "^12.27.5",
     "nanoid": "^5.1.6",
     "next": "16.1.2",

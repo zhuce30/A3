@@ -12,11 +12,14 @@ function seedDemoData() {
   const projectRoot = path.resolve(process.cwd(), '..');
   const worktreeBackendRoot = path.join(projectRoot, 'backend');
   const originalBackendRoot = path.resolve(projectRoot, '..', '..', 'A3', 'backend');
-  const backendRoot = fs.existsSync(
-    path.join(worktreeBackendRoot, '.venv', 'Scripts', 'python.exe'),
-  )
-    ? worktreeBackendRoot
-    : originalBackendRoot;
+  const configuredBackendRoot = process.env.A3_BACKEND_PROJECT_ROOT
+    ? path.join(process.env.A3_BACKEND_PROJECT_ROOT, 'backend')
+    : '';
+  const backendRoot = configuredBackendRoot && fs.existsSync(path.join(configuredBackendRoot, 'manage.py'))
+    ? configuredBackendRoot
+    : fs.existsSync(path.join(worktreeBackendRoot, '.venv', 'Scripts', 'python.exe'))
+      ? worktreeBackendRoot
+      : originalBackendRoot;
   const localPython = path.join(backendRoot, '.venv', 'Scripts', 'python.exe');
   const python =
     process.env.A3_BACKEND_PYTHON ??
@@ -69,7 +72,7 @@ test.describe('A3 digital teacher resilience', () => {
       await expect(stage).not.toHaveAttribute('data-avatar-renderer', 'loading', {
         timeout: 60_000,
       });
-      expect(['vrm', 'vrm_idle_animation', 'primitive', 'static_fallback']).toContain(
+      expect(['vrm', 'vrm_idle_animation', 'static_fallback']).toContain(
         await stage.getAttribute('data-avatar-renderer'),
       );
 
@@ -113,7 +116,8 @@ test.describe('A3 digital teacher resilience', () => {
     await expect(call.getByTestId('a3-digital-human-static-fallback')).toBeVisible({
       timeout: 60_000,
     });
-    await expect(call.getByTestId('a3-digital-human-three-canvas')).toHaveCount(0);
+    await expect(call.getByTestId('a3-digital-human-static-teacher')).toBeVisible();
+    await expect(call.getByTestId('a3-digital-human-three-canvas')).toHaveClass(/opacity-0/);
     await expect(call.getByTestId('a3-realtime-start')).toBeEnabled();
     await expect(call.getByRole('button', { name: '开启麦克风' })).toBeVisible();
   });

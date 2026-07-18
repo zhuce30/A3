@@ -170,6 +170,50 @@ describe('A3 private GHCR frontend deployment', () => {
     expect(envTemplate).not.toMatch(/^A3_FRONTEND_IMAGE=.*:latest$/m);
   });
 
+  it('shares the video worker token and internal frontend URL across production services', () => {
+    const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
+      schema: composeSchema,
+    }) as ComposeDocument;
+    const envTemplate = fs.readFileSync(envTemplatePath, 'utf8');
+
+    for (const serviceName of ['backend', 'celery', 'frontend']) {
+      expect(compose.services?.[serviceName]?.environment).toMatchObject({
+        A3_VIDEO_WORKER_TOKEN: '${A3_VIDEO_WORKER_TOKEN:?set A3_VIDEO_WORKER_TOKEN in .env.production}',
+      });
+    }
+    expect(compose.services?.celery?.environment).toMatchObject({
+      A3_INTERNAL_FRONTEND_BASE_URL: 'http://frontend:3000',
+    });
+    expect(compose.services?.backend?.environment).toMatchObject({
+      A3_INTERNAL_FRONTEND_BASE_URL: 'http://frontend:3000',
+    });
+    expect(envTemplate).toMatch(/^A3_VIDEO_WORKER_TOKEN=change-me-to-32-random-bytes$/m);
+    expect(envTemplate).toContain('python -c "import secrets; print(secrets.token_urlsafe(32))"');
+  });
+
+  it('documents the durable video worker rollout and stale-job recovery sequence', () => {
+    const runbook = fs.readFileSync(runbookPath, 'utf8');
+
+    expect(runbook).toContain('A3_VIDEO_WORKER_TOKEN');
+    expect(runbook).toContain("python3 -c 'import secrets; print(secrets.token_urlsafe(32))'");
+    expect(runbook).toMatch(/manage\.py migrate/);
+    expect(runbook).toContain('backend celery celery-beat frontend');
+    expect(runbook).toContain('manage.py recover_video_jobs --stale-minutes 5');
+    expect(runbook).toContain('已有 provider taskId 的片段只会继续轮询');
+  });
+
+  it('documents immutable Cloudflare caching for versioned digital-human assets', () => {
+    const runbook = fs.readFileSync(runbookPath, 'utf8');
+
+    expect(runbook).toContain('teacher.optimized.vrm?v=20260718-v1');
+    expect(runbook).toContain('Cache-Control: public, max-age=31536000, immutable');
+    expect(runbook).toContain('Caching -> Cache Rules');
+    expect(runbook).toContain('ends_with(http.request.uri.path, ".vrm")');
+    expect(runbook).toContain('ends_with(http.request.uri.path, ".vrma")');
+    expect(runbook).toContain('ends_with(http.request.uri.path, ".webp")');
+    expect(runbook).toMatch(/query string/i);
+  });
+
   it('keeps OpenMAIC classroom job storage writable and persistent in production', () => {
     const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
       schema: composeSchema,

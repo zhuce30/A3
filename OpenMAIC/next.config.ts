@@ -13,6 +13,15 @@ const nextConfig: NextConfig = {
 
     return [
       {
+        source: '/a3/assets/teacher-avatar/:path*',
+        headers: [
+          {
+            key: 'Cache-Control',
+            value: 'public, max-age=31536000, immutable',
+          },
+        ],
+      },
+      {
         source: '/(.*)',
         headers: [
           // X-Frame-Options only supports SAMEORIGIN (no allow-list),

@@ -126,9 +126,96 @@ describe('DigitalHumanAvatar', () => {
     );
 
     expect(html).toContain('data-testid="a3-digital-human-three-stage"');
-    expect(html).toContain('data-avatar-renderer="primitive"');
-    expect(html).toContain('data-avatar-asset="/a3/assets/teacher-avatar/teacher.vrm"');
+    expect(html).toContain('data-avatar-renderer="static_fallback"');
+    expect(html).toContain('data-avatar-load-state="loading_model"');
+    expect(html).toContain(
+      'data-avatar-asset="/a3/assets/teacher-avatar/teacher.optimized.vrm?v=20260718-v1"',
+    );
+    expect(html).toContain('data-testid="a3-digital-human-static-teacher"');
+    expect(html).toContain('teacher-avatar%2Fteacher-loading.webp');
   });
+
+  it('publishes an optimized, complete teacher VRM under the 5 MB acceptance limit', () => {
+    const optimizedPath = path.resolve(
+      process.cwd(),
+      'public/a3/assets/teacher-avatar/teacher.optimized.vrm',
+    );
+    const loadingImagePath = path.resolve(
+      process.cwd(),
+      'public/a3/assets/teacher-avatar/teacher-loading.webp',
+    );
+    const optimizerPath = path.resolve(process.cwd(), 'scripts/optimize-a3-teacher-vrm.mjs');
+    const packageJson = JSON.parse(
+      fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8'),
+    ) as { scripts?: Record<string, string> };
+
+    expect(fs.existsSync(optimizedPath)).toBe(true);
+    expect(fs.statSync(optimizedPath).size).toBeLessThanOrEqual(5 * 1024 * 1024);
+    expect(fs.existsSync(loadingImagePath)).toBe(true);
+    expect(fs.statSync(loadingImagePath).size).toBeGreaterThan(1_000);
+    expect(fs.existsSync(optimizerPath)).toBe(true);
+    expect(packageJson.scripts?.['a3:optimize-avatar']).toContain(
+      'scripts/optimize-a3-teacher-vrm.mjs',
+    );
+
+    const model = readGlbJson(optimizedPath);
+    expect(model.extensions).toHaveProperty('VRMC_vrm');
+    expect(model.extensions).toHaveProperty('VRMC_springBone');
+    expect(model.extensionsUsed).toContain('VRMC_materials_mtoon');
+    expect(model.extensionsRequired).toContain('EXT_meshopt_compression');
+    expect(model.meshes?.length).toBeGreaterThan(0);
+    expect(model.skins?.length).toBeGreaterThan(0);
+    expect(model.images?.length).toBeGreaterThan(0);
+    expect(
+      model.meshes?.some((mesh) =>
+        mesh.primitives?.some((primitive) => Boolean(primitive.targets?.length)),
+      ),
+    ).toBe(true);
+    expect(Object.keys(model.extensions?.VRMC_vrm?.expressions?.preset || {}).length).toBeGreaterThan(
+      0,
+    );
+    expect(model.bufferViews?.some((view) => Boolean(view.extensions?.EXT_meshopt_compression))).toBe(
+      true,
+    );
+  });
+
+  it('reproduces the optimized teacher VRM and report byte for byte', () => {
+    const avatarDirectory = path.resolve(process.cwd(), 'public/a3/assets/teacher-avatar');
+    const optimizerPath = path.resolve(process.cwd(), 'scripts/optimize-a3-teacher-vrm.mjs');
+    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'a3-optimized-vrm-'));
+    const outputPath = path.join(temporaryDirectory, 'teacher.optimized.vrm');
+    const reportPath = path.join(temporaryDirectory, 'teacher.optimized.report.json');
+    const loadingPath = path.join(temporaryDirectory, 'teacher-loading.webp');
+
+    try {
+      execFileSync(process.execPath, [
+        optimizerPath,
+        '--output',
+        outputPath,
+        '--report',
+        reportPath,
+        '--loading-output',
+        loadingPath,
+      ]);
+      expect(
+        Buffer.compare(
+          fs.readFileSync(outputPath),
+          fs.readFileSync(path.join(avatarDirectory, 'teacher.optimized.vrm')),
+        ),
+      ).toBe(0);
+      expect(fs.readFileSync(reportPath, 'utf8')).toBe(
+        fs.readFileSync(path.join(avatarDirectory, 'teacher.optimized.report.json'), 'utf8'),
+      );
+      expect(
+        Buffer.compare(
+          fs.readFileSync(loadingPath),
+          fs.readFileSync(path.join(avatarDirectory, 'teacher-loading.webp')),
+        ),
+      ).toBe(0);
+    } finally {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('declares Three.js as the browser 3D avatar renderer dependency', () => {
     const packageJson = JSON.parse(
@@ -154,7 +241,11 @@ describe('DigitalHumanAvatar', () => {
     expect(packageJson.dependencies).toHaveProperty('@pixiv/three-vrm');
     expect(packageJson.dependencies).toHaveProperty('@pixiv/three-vrm-animation');
     expect(stageSource).toContain('A3_DEFAULT_TEACHER_VRM_PATH');
-    expect(stageSource).toContain('/a3/assets/teacher-avatar/teacher.vrm');
+    expect(
+      fs.readFileSync(path.resolve(process.cwd(), 'lib/a3/digital-human-preload.ts'), 'utf8'),
+    ).toContain('/a3/assets/teacher-avatar/teacher.optimized.vrm');
+    expect(stageSource).toContain("import('meshoptimizer')");
+    expect(stageSource).toContain('loader.setMeshoptDecoder');
     expect(stageSource).toContain('VRMLoaderPlugin');
     expect(stageSource).toContain('data-avatar-renderer={activeRenderer}');
   });
@@ -202,7 +293,7 @@ describe('DigitalHumanAvatar', () => {
     const teacherBuffer = fs.readFileSync(teacherPath);
     const teacherJson = readGlbJson(teacherPath);
     const meta = teacherJson.extensions?.VRMC_vrm?.meta as Record<string, unknown>;
-    const model = teacherJson as typeof teacherJson & {
+    const model = teacherJson as {
       buffers: Array<{ byteLength: number }>;
       bufferViews: Array<{ byteOffset?: number; byteLength: number }>;
       images: Array<{ bufferView?: number }>;
@@ -293,9 +384,10 @@ describe('DigitalHumanAvatar', () => {
     expect(stageSource).toContain('applyVrmExpressionSet');
     expect(stageSource).toContain('speechPhase');
     expect(stageSource).toContain('applyVrmTeacherRestPose');
-    expect(stageSource).toContain('warmUpVrmSpringBones');
+    expect(stageSource).toContain('scheduleVrmSpringBoneWarmup');
     expect(stageSource).not.toContain("'leftUpperArm'");
     expect(stageSource).not.toContain("'rightUpperArm'");
+    expect(stageSource).toContain('requestIdleCallback');
     expect(stageSource).toContain('vrm.springBoneManager?.reset()');
     expect(stageSource).toContain('vrm.update(1 / 60)');
     expect(fs.readFileSync(readmePath, 'utf8')).toContain(
@@ -402,9 +494,63 @@ describe('DigitalHumanAvatar', () => {
     expect(callSource).toContain('backdrop-blur-xl');
     expect(callSource).not.toContain('2xl:grid-cols-[minmax(0,1fr)_210px]');
   });
+
+  it('hands off from a static teacher to a rest-pose VRM without a primitive avatar', () => {
+    const avatarSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'components/a3/features/coaching/digital-human-avatar.tsx'),
+      'utf8',
+    );
+    const stageSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'components/a3/features/coaching/digital-human-three-stage.tsx'),
+      'utf8',
+    );
+
+    for (const state of [
+      'loading_chunk',
+      'loading_model',
+      'vrm_ready',
+      'actions_ready',
+      'static_fallback',
+    ]) {
+      expect(`${avatarSource}\n${stageSource}`).toContain(state);
+    }
+    expect(`${avatarSource}\n${stageSource}`).toContain('teacher-loading.webp');
+    expect(stageSource).toContain('applyVrmTeacherRestPose(vrm)');
+    expect(stageSource).toContain("setLoadState('vrm_ready')");
+    expect(stageSource).toContain("setLoadState('actions_ready')");
+    expect(stageSource.indexOf("setLoadState('vrm_ready')")).toBeLessThan(
+      stageSource.indexOf('startDeferredVrmWork(activeVrm, activeMixer)'),
+    );
+    expect(stageSource).not.toContain('createPrimitiveAvatar');
+    expect(stageSource).not.toContain('updatePrimitiveAvatar');
+    expect(stageSource).not.toContain("'primitive'");
+  });
 });
 
-function readGlbJson(filePath: string) {
+type TeacherGlbJson = {
+  extensions?: {
+    VRMC_vrm?: {
+      meta?: Record<string, unknown>;
+      expressions?: { preset?: Record<string, unknown> };
+    };
+    VRMC_springBone?: unknown;
+  };
+  extensionsUsed?: string[];
+  extensionsRequired?: string[];
+  meshes?: Array<{ primitives?: Array<{ targets?: unknown[] }> }>;
+  skins?: unknown[];
+  buffers?: Array<{ byteLength: number }>;
+  images?: Array<{ bufferView?: number; mimeType?: string; name?: string }>;
+  textures?: Array<{ source?: number; sampler?: number }>;
+  samplers?: unknown[];
+  bufferViews?: Array<{
+    byteOffset?: number;
+    byteLength: number;
+    extensions?: { EXT_meshopt_compression?: unknown };
+  }>;
+};
+
+function readGlbJson(filePath: string): TeacherGlbJson {
   const buffer = fs.readFileSync(filePath);
   expect(buffer.subarray(0, 4).toString('utf8')).toBe('glTF');
   expect(buffer.readUInt32LE(4)).toBe(2);
@@ -419,9 +565,7 @@ function readGlbJson(filePath: string) {
           .subarray(offset + 8, offset + 8 + chunkLength)
           .toString('utf8')
           .trimEnd(),
-      ) as {
-        extensions?: { VRMC_vrm?: { meta?: Record<string, unknown> } };
-      };
+      ) as TeacherGlbJson;
     }
     offset += 8 + chunkLength;
   }

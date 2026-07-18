@@ -131,3 +131,78 @@ class ResourceGenerationJob(models.Model):
 
     def __str__(self) -> str:
         return f"{self.job_id}:{self.status}:{self.progress}"
+
+
+class VideoGenerationJob(models.Model):
+    job_id = models.CharField(max_length=120, unique=True, db_index=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="a3_video_generation_jobs")
+    resource_pack_id = models.CharField(max_length=64, db_index=True)
+    resource_type = models.CharField(max_length=40, default="micro_video_script")
+    provider = models.CharField(max_length=40, default="seedance")
+    status = models.CharField(max_length=32, default="queued")
+    stage = models.CharField(max_length=40, default="queued")
+    progress = models.PositiveSmallIntegerField(default=0)
+    message = models.CharField(max_length=255, blank=True)
+    requested_duration = models.PositiveSmallIntegerField(default=60)
+    aspect_ratio = models.CharField(max_length=16, default="16:9")
+    resolution = models.CharField(max_length=16, default="1080p")
+    celery_task_id = models.CharField(max_length=64, blank=True)
+    trace_id = models.CharField(max_length=64, blank=True, db_index=True)
+    retry_generation = models.PositiveSmallIntegerField(default=0)
+    artifact = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_video_generation_jobs"
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="a3_vidjob_user_created_idx"),
+            models.Index(fields=["status", "updated_at"], name="a3_vidjob_status_update_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.job_id}:{self.status}:{self.progress}"
+
+
+class VideoGenerationSegment(models.Model):
+    job = models.ForeignKey(VideoGenerationJob, on_delete=models.CASCADE, related_name="segments")
+    index = models.PositiveSmallIntegerField()
+    title = models.CharField(max_length=120)
+    prompt = models.TextField()
+    duration = models.PositiveSmallIntegerField(default=10)
+    aspect_ratio = models.CharField(max_length=16, default="16:9")
+    resolution = models.CharField(max_length=16, default="1080p")
+    status = models.CharField(max_length=32, default="pending")
+    provider_task_id = models.CharField(max_length=160, blank=True)
+    celery_task_id = models.CharField(max_length=64, blank=True)
+    submission_attempts = models.PositiveSmallIntegerField(default=0)
+    poll_attempts = models.PositiveIntegerField(default=0)
+    network_retry_count = models.PositiveSmallIntegerField(default=0)
+    video_url = models.TextField(blank=True)
+    width = models.PositiveIntegerField(default=0)
+    height = models.PositiveIntegerField(default=0)
+    error_code = models.CharField(max_length=80, blank=True)
+    error_message = models.TextField(blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    last_polled_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_video_generation_segments"
+        ordering = ["index", "id"]
+        indexes = [
+            models.Index(fields=["job", "index"], name="a3_vidseg_job_index_idx"),
+            models.Index(fields=["status", "last_polled_at"], name="a3_vidseg_status_poll_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["job", "index"], name="a3_vidseg_job_index_unique"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.job.job_id}:{self.index}:{self.status}"
