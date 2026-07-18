@@ -2,6 +2,7 @@ import importlib
 import importlib.util
 from unittest.mock import patch
 
+from django.db import InterfaceError
 from django.test import TransactionTestCase
 from django.utils import timezone
 
@@ -79,3 +80,41 @@ class ResourceGenerationTaskTests(TransactionTestCase):
         self.assertIn("模型服务暂时不可用", job.message)
         self.assertIn("模型服务暂时不可用", job.error_message)
         self.assertIsNotNone(job.finished_at)
+
+    @patch("backend.apps.compat.resource_generation.generate_resource_pack_v2")
+    def test_task_reconnects_before_persisting_failure_after_database_disconnect(self, generate):
+        generate.side_effect = InterfaceError(0, "")
+        job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-task-db-disconnect-001",
+            user=self.user,
+            goal="生成思维导图",
+            top_k=3,
+            resource_type="mind_map",
+        )
+        original_save = ResourceGenerationJob.save
+        failed_save_attempts = 0
+
+        def fail_first_failure_write(instance, *args, **kwargs):
+            nonlocal failed_save_attempts
+            if instance.pk == job.pk and instance.status == "failed" and failed_save_attempts == 0:
+                failed_save_attempts += 1
+                raise InterfaceError(0, "")
+            return original_save(instance, *args, **kwargs)
+
+        with patch.object(ResourceGenerationJob, "save", new=fail_first_failure_write):
+            result = self._load_task().run(job.job_id)
+
+        job.refresh_from_db()
+        self.assertEqual(result["success"], False)
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.stage, "failed")
+        self.assertEqual(job.progress, 100)
+        self.assertEqual(failed_save_attempts, 1)
+
+    def test_resource_task_has_bounded_execution_and_does_not_requeue_worker_loss(self):
+        task = self._load_task()
+
+        self.assertTrue(task.acks_late)
+        self.assertFalse(task.reject_on_worker_lost)
+        self.assertEqual(task.soft_time_limit, 1200)
+        self.assertEqual(task.time_limit, 1320)

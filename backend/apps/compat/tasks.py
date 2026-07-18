@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from celery import shared_task
-from django.db import close_old_connections
+from django.db import InterfaceError, OperationalError, close_old_connections
 from django.utils import timezone
 
 from backend.apps.compat.models import ResourceGenerationJob
@@ -11,14 +11,20 @@ def _save_job_state(job: ResourceGenerationJob, **changes) -> None:
     for field, value in changes.items():
         setattr(job, field, value)
     update_fields = [*changes.keys(), "updated_at"]
-    job.save(update_fields=update_fields)
+    try:
+        job.save(update_fields=update_fields)
+    except (InterfaceError, OperationalError):
+        close_old_connections()
+        job.save(update_fields=update_fields)
 
 
 @shared_task(
     bind=True,
     name="compat.run_resource_generation_job",
     acks_late=True,
-    reject_on_worker_lost=True,
+    reject_on_worker_lost=False,
+    soft_time_limit=1200,
+    time_limit=1320,
 )
 def run_resource_generation_job(self, job_id: str) -> dict:
     close_old_connections()

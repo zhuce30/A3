@@ -80,6 +80,9 @@ services:
       - info
       - --concurrency=1
       - --max-tasks-per-child=5
+      - --max-memory-per-child=900000
+    mem_limit: 1400m
+    memswap_limit: 1600m
     env_file:
       - .env.production
     environment:
