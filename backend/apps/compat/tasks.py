@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import logging
+
 from celery import shared_task
 from django.db import InterfaceError, OperationalError, close_old_connections
 from django.utils import timezone
 
 from backend.apps.compat.models import ResourceGenerationJob
+
+
+logger = logging.getLogger(__name__)
+
+
+def _user_facing_resource_generation_error(exc: Exception) -> str:
+    if isinstance(exc, (InterfaceError, OperationalError)):
+        return "数据库连接暂时中断，请重新生成资源。"
+    return str(exc).strip() or "资源生成任务执行失败"
 
 
 def _save_job_state(job: ResourceGenerationJob, **changes) -> None:
@@ -90,7 +101,11 @@ def run_resource_generation_job(self, job_id: str) -> dict:
         )
         return payload
     except Exception as exc:
-        error_message = str(exc).strip() or "资源生成任务执行失败"
+        logger.exception(
+            "Resource generation job failed",
+            extra={"resource_generation_job_id": job.job_id},
+        )
+        error_message = _user_facing_resource_generation_error(exc)
         _save_job_state(
             job,
             status="failed",

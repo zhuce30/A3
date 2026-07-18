@@ -5,7 +5,7 @@ from time import perf_counter
 from typing import Callable, TypeVar
 from uuid import uuid4
 
-from django.db import DatabaseError, transaction
+from django.db import DatabaseError, close_old_connections, transaction
 from django.utils import timezone
 
 from backend.apps.compat.models import AgentRun as AgentRunModel
@@ -366,6 +366,7 @@ class AgentRun:
                 )
         except DatabaseError:
             self.fallback_strategy = "legacy_profile_only"
+            close_old_connections()
 
     def _persist_legacy_profile(self):
         profile, _ = LearnerProfile.objects.get_or_create(user=self.user)

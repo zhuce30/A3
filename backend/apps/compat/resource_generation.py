@@ -19,7 +19,6 @@ from backend.apps.learning.models import ResourcePackLog
 from backend.apps.learning.plan_policy import apply_plan_adjustment_to_study_plan, build_plan_adjustment_from_analysis
 from backend.apps.learning.services import classroom_context, current_study_plan, generate_study_plan
 from backend.apps.profiles.models import LearnerProfile
-from backend.apps.profiles.services import public_profile
 from backend.domains.knowledge_base.retriever import search_knowledge_base
 
 
@@ -36,6 +35,20 @@ RESOURCE_TYPES = (
 OPENMAIC_ARTIFACT_TYPES = {"openmaic_classroom", "openmaic_video", "openmaic_pptx_export"}
 
 RESOURCE_CONTENT_SCHEMA_VERSION = "a3.resource-content.rich.v1"
+RESOURCE_PACK_PROFILE_SNAPSHOT_FIELDS = (
+    "id",
+    "grade",
+    "majorDirection",
+    "foundationLevel",
+    "dailyStudyTime",
+    "pace",
+    "learningGoals",
+    "weakPoints",
+    "learningPreferences",
+    "expectedResources",
+    "resourcePreferences",
+    "dimensionCount",
+)
 
 RESOURCE_GENERATE_WORKFLOW_SEQUENCE = [
     "RetrieverAgent",
@@ -2489,6 +2502,7 @@ def _keywords_for_goal(goal: str, evidence: list[dict]) -> list[str]:
 
 
 def _store_resource_pack(user, pack: dict) -> None:
+    pack = compact_resource_pack_payload(pack)
     profile, _ = LearnerProfile.objects.get_or_create(user=user)
     extra = dict(profile.extra_profile or {})
     packs = [item for item in extra.get("resourcePacks", []) if isinstance(item, dict)]
@@ -2866,9 +2880,31 @@ def _append_learning_event(extra: dict, event_type: str, summary: str, signals: 
 def _profile_snapshot(profile: LearnerProfile | None) -> dict:
     if not profile:
         return {}
-    payload = public_profile(profile)
-    payload["dimensionCount"] = _profile_dimension_count(profile)
-    return payload
+    return {
+        "id": str(profile.id),
+        "grade": profile.grade,
+        "majorDirection": profile.major_direction,
+        "foundationLevel": profile.foundation_level,
+        "dailyStudyTime": profile.daily_study_time,
+        "pace": profile.pace,
+        "learningGoals": list(profile.learning_goals or []),
+        "weakPoints": list(profile.weak_points or []),
+        "learningPreferences": dict(profile.learning_preferences or {}),
+        "expectedResources": list(profile.expected_resources or []),
+        "dimensionCount": _profile_dimension_count(profile),
+    }
+
+
+def compact_resource_pack_payload(pack: dict) -> dict:
+    compacted = dict(pack)
+    snapshot = pack.get("learnerProfileSnapshot")
+    if isinstance(snapshot, dict):
+        compacted["learnerProfileSnapshot"] = {
+            field: snapshot[field]
+            for field in RESOURCE_PACK_PROFILE_SNAPSHOT_FIELDS
+            if field in snapshot
+        }
+    return compacted
 
 
 def _profile_dimension_count(profile: LearnerProfile | None) -> int:
