@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from backend.apps.accounts.models import User
 from backend.apps.compat.models import VideoGenerationJob, VideoGenerationSegment
-from backend.apps.compat.video_jobs import serialize_video_job
+from backend.apps.compat.video_jobs import create_legacy_video_retry_job, serialize_video_job
 from backend.apps.compat.resource_generation import record_openmaic_video_artifact
 from backend.apps.profiles.models import LearnerProfile
 
@@ -109,6 +109,206 @@ class VideoGenerationJobApiTests(TestCase):
         )
         self.client = Client()
         self.client.force_login(self.user)
+
+    @staticmethod
+    def _legacy_video_pack(*, segments=None, **artifact_overrides):
+        artifact = {
+            "type": "openmaic_video",
+            "status": "partial",
+            "createdAt": "2026-07-18T00:00:00Z",
+            "segments": segments
+            or [
+                {"index": 1, "title": "Intro", "status": "failed", "videoUrl": "", "duration": 10},
+                {
+                    "index": 2,
+                    "title": "Concept",
+                    "status": "succeeded",
+                    "videoUrl": "https://server.invalid/kept.mp4",
+                    "duration": 10,
+                    "width": 1920,
+                    "height": 1080,
+                },
+            ],
+        }
+        artifact.update(artifact_overrides)
+        return {"resourcePackId": "pack-api-001", "multimodalArtifacts": [artifact]}
+
+    @staticmethod
+    def _legacy_video_payload(*, segments=None):
+        return {
+            "provider": "seedance",
+            "segments": segments
+            or [
+                {"index": 1, "title": "Intro", "prompt": "First segment prompt", "duration": 10},
+                {"index": 2, "title": "Concept", "prompt": "Second segment prompt", "duration": 10},
+            ],
+        }
+
+    @patch("backend.apps.compat.video_jobs.current_app.send_task")
+    def test_import_legacy_video_preserves_success_and_queues_only_failures(self, send_task):
+        send_task.return_value.id = "celery-legacy-001"
+        pack = self._legacy_video_pack()
+        payload = self._legacy_video_payload(
+            segments=[
+                {
+                    "index": 1,
+                    "title": "Intro",
+                    "prompt": "First segment prompt",
+                    "duration": 10,
+                    "status": "succeeded",
+                    "videoUrl": "https://attacker.invalid/failed.mp4",
+                    "width": 3840,
+                    "height": 2160,
+                },
+                {
+                    "index": 2,
+                    "title": "Concept",
+                    "prompt": "Second segment prompt",
+                    "duration": 10,
+                    "status": "failed",
+                    "videoUrl": "https://attacker.invalid/fake.mp4",
+                    "width": 1,
+                    "height": 1,
+                },
+            ]
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            job, created, imported, queued = create_legacy_video_retry_job(
+                self.user, "pack-api-001", pack, payload
+            )
+
+        self.assertTrue(created)
+        self.assertEqual((imported, queued), (1, 1))
+        failed = job.segments.get(index=1)
+        self.assertEqual(failed.status, "pending")
+        self.assertEqual(failed.video_url, "")
+        self.assertEqual((failed.width, failed.height), (0, 0))
+        kept = job.segments.get(index=2)
+        self.assertEqual(kept.status, "succeeded")
+        self.assertEqual(kept.video_url, "https://server.invalid/kept.mp4")
+        self.assertEqual((kept.width, kept.height), (1920, 1080))
+        self.assertNotEqual(kept.video_url, payload["segments"][1]["videoUrl"])
+        send_task.assert_called_once_with("compat.advance_video_generation_job", args=[job.job_id])
+
+    @patch("backend.apps.compat.video_jobs.current_app.send_task")
+    def test_import_legacy_video_replay_is_deterministic_and_dispatches_once(self, send_task):
+        send_task.return_value.id = "celery-legacy-replay"
+        pack = self._legacy_video_pack()
+        payload = self._legacy_video_payload()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            first, first_created, first_imported, first_queued = create_legacy_video_retry_job(
+                self.user, "pack-api-001", pack, payload
+            )
+        with self.captureOnCommitCallbacks(execute=True):
+            replay, replay_created, replay_imported, replay_queued = create_legacy_video_retry_job(
+                self.user, "pack-api-001", pack, payload
+            )
+
+        self.assertTrue(first_created)
+        self.assertFalse(replay_created)
+        self.assertEqual(first.job_id, replay.job_id)
+        self.assertTrue(first.job_id.startswith("a3_legacy_video_"))
+        self.assertNotIn("server.invalid", first.job_id)
+        self.assertEqual((first_imported, first_queued), (1, 1))
+        self.assertEqual((replay_imported, replay_queued), (1, 1))
+        self.assertEqual(VideoGenerationJob.objects.filter(job_id=first.job_id).count(), 1)
+        self.assertEqual(VideoGenerationSegment.objects.filter(job=first).count(), 2)
+        send_task.assert_called_once_with("compat.advance_video_generation_job", args=[first.job_id])
+
+    def test_import_legacy_video_rejects_artifact_with_job_id(self):
+        with self.assertRaises(ValueError):
+            create_legacy_video_retry_job(
+                self.user,
+                "pack-api-001",
+                self._legacy_video_pack(jobId="existing-video-job"),
+                self._legacy_video_payload(),
+            )
+
+    def test_import_legacy_video_rejects_artifact_without_successful_segment(self):
+        pack = self._legacy_video_pack(
+            segments=[
+                {"index": 1, "title": "Intro", "status": "failed", "videoUrl": ""},
+                {"index": 2, "title": "Concept", "status": "failed", "videoUrl": ""},
+            ]
+        )
+        with self.assertRaises(ValueError):
+            create_legacy_video_retry_job(self.user, "pack-api-001", pack, self._legacy_video_payload())
+
+    def test_import_legacy_video_rejects_artifact_without_failed_segment(self):
+        pack = self._legacy_video_pack(
+            segments=[
+                {
+                    "index": 1,
+                    "title": "Intro",
+                    "status": "succeeded",
+                    "videoUrl": "https://server.invalid/one.mp4",
+                },
+                {
+                    "index": 2,
+                    "title": "Concept",
+                    "status": "succeeded",
+                    "videoUrl": "https://server.invalid/two.mp4",
+                },
+            ]
+        )
+        with self.assertRaises(ValueError):
+            create_legacy_video_retry_job(self.user, "pack-api-001", pack, self._legacy_video_payload())
+
+    def test_import_legacy_video_rejects_duplicate_request_indexes(self):
+        payload = self._legacy_video_payload(
+            segments=[
+                {"index": 1, "title": "Intro", "prompt": "First segment prompt"},
+                {"index": 1, "title": "Concept", "prompt": "Second segment prompt"},
+            ]
+        )
+        with self.assertRaises(ValueError):
+            create_legacy_video_retry_job(self.user, "pack-api-001", self._legacy_video_pack(), payload)
+
+    def test_import_legacy_video_rejects_request_indexes_that_differ_from_artifact(self):
+        payload = self._legacy_video_payload(
+            segments=[
+                {"index": 1, "title": "Intro", "prompt": "First segment prompt"},
+                {"index": 3, "title": "Concept", "prompt": "Third segment prompt"},
+            ]
+        )
+        with self.assertRaises(ValueError):
+            create_legacy_video_retry_job(self.user, "pack-api-001", self._legacy_video_pack(), payload)
+
+    def test_import_legacy_video_rejects_invalid_artifact_indexes(self):
+        for invalid_segments in [
+            [
+                {"index": 1, "status": "failed"},
+                {"index": 1, "status": "succeeded", "videoUrl": "https://server.invalid/kept.mp4"},
+            ],
+            [
+                {"index": 0, "status": "failed"},
+                {"index": 2, "status": "succeeded", "videoUrl": "https://server.invalid/kept.mp4"},
+            ],
+        ]:
+            with self.subTest(invalid_segments=invalid_segments), self.assertRaises(ValueError):
+                create_legacy_video_retry_job(
+                    self.user,
+                    "pack-api-001",
+                    self._legacy_video_pack(segments=invalid_segments),
+                    self._legacy_video_payload(),
+                )
+
+    @patch("backend.apps.compat.video_jobs.current_app.send_task")
+    def test_import_legacy_video_replay_rejects_ownership_mismatch(self, send_task):
+        send_task.return_value.id = "celery-legacy-owner"
+        pack = self._legacy_video_pack()
+        payload = self._legacy_video_payload()
+        with self.captureOnCommitCallbacks(execute=True):
+            job, _, _, _ = create_legacy_video_retry_job(self.user, "pack-api-001", pack, payload)
+        job.user = self.other
+        job.save(update_fields=["user", "updated_at"])
+
+        with self.assertRaises(ValueError):
+            create_legacy_video_retry_job(self.user, "pack-api-001", pack, payload)
+
+        send_task.assert_called_once_with("compat.advance_video_generation_job", args=[job.job_id])
 
     @patch("backend.apps.compat.video_jobs.current_app.send_task")
     def test_create_list_and_detail_persist_durable_segments(self, send_task):
