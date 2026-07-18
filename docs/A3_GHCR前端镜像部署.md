@@ -158,6 +158,259 @@ PY
 
 正常输出应包含 `恢复派发 N 个视频任务`。该命令可以在 Celery/Redis 故障恢复后再次执行；刚刚仍在轮询的任务不会被重复入队。
 
+## 旧视频失败片段迁移上线与验收
+
+旧视频迁移同时依赖 Django 导入接口和前端确认、轮询逻辑，因此本次发布必须把同一完整提交 SHA 构建出的 backend、frontend 镜像作为一组切换。禁止只更新其中一个镜像，也不要使用本文后面的“仅前端镜像切换”事务发布本功能。先在 GitHub Actions 确认两个镜像均成功，再将两个不可变 RepoDigest 和它们共同的完整 `DEPLOY_SHA` 填入下面命令。
+
+本功能复用已有 `VideoGenerationJob` 和 `VideoGenerationSegment` 表，预期不会产生新 migration；上线仍必须执行 `makemigrations --check --dry-run` 和 `migrate --plan`，防止代码与数据库状态意外漂移。预期前一条输出 `No changes detected`，后一条输出 `No planned migration operations`。
+
+```bash
+(
+  set -euo pipefail
+  cd /opt/A3
+
+  DEPLOY_SHA='<40 位完整提交 SHA>'
+  BACKEND_IMAGE='ghcr.io/zhuce30/a3-backend@sha256:<64 位 digest>'
+  FRONTEND_IMAGE='ghcr.io/zhuce30/a3-frontend@sha256:<64 位 digest>'
+  ENV_FILE='/opt/A3/.env.production'
+  COMPOSE_ARGS=(--env-file "$ENV_FILE" -f docker-compose.yml -f docker-compose.prod.yml)
+  SNAPSHOT=''
+  RELEASE_OK=0
+
+  verify_revision() {
+    local image_ref=$1
+    local revision
+    revision="$(
+      sudo -H env -u DOCKER_CONFIG docker image inspect \
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_ref"
+    )"
+    test "$revision" = "$DEPLOY_SHA"
+  }
+
+  rollback_release() {
+    local rc=$?
+    trap - EXIT HUP INT TERM
+    if [ "$RELEASE_OK" -eq 1 ]; then
+      exit "$rc"
+    fi
+    if [ -n "$SNAPSHOT" ] && sudo test -f "$SNAPSHOT"; then
+      sudo install -o root -g root -m 0600 "$SNAPSHOT" "$ENV_FILE"
+      sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+        up -d --no-build --force-recreate backend celery celery-beat frontend
+      printf 'paired backend/frontend rollback completed\n' >&2
+    else
+      printf 'ROLLBACK FAILED: environment snapshot unavailable\n' >&2
+      exit 125
+    fi
+    exit "$rc"
+  }
+
+  [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+  [[ "$BACKEND_IMAGE" =~ ^ghcr\.io/zhuce30/a3-backend@sha256:[0-9a-f]{64}$ ]]
+  [[ "$FRONTEND_IMAGE" =~ ^ghcr\.io/zhuce30/a3-frontend@sha256:[0-9a-f]{64}$ ]]
+  sudo test -f "$ENV_FILE"
+  test "$(sudo stat -c '%U:%G %a' "$ENV_FILE")" = 'root:root 600'
+
+  sudo -H env -u DOCKER_CONFIG docker pull "$BACKEND_IMAGE"
+  sudo -H env -u DOCKER_CONFIG docker pull "$FRONTEND_IMAGE"
+  verify_revision "$BACKEND_IMAGE"
+  verify_revision "$FRONTEND_IMAGE"
+
+  SNAPSHOT="$(sudo mktemp /opt/A3/.env.production.legacy-video.XXXXXX)"
+  sudo install -o root -g root -m 0600 "$ENV_FILE" "$SNAPSHOT"
+  trap rollback_release EXIT HUP INT TERM
+
+  sudo env BACKEND_IMAGE="$BACKEND_IMAGE" FRONTEND_IMAGE="$FRONTEND_IMAGE" \
+    python3 - "$ENV_FILE" <<'PY'
+import os
+import pathlib
+import tempfile
+import sys
+
+env_path = pathlib.Path(sys.argv[1])
+replacements = {
+    "A3_BACKEND_IMAGE": os.environ["BACKEND_IMAGE"],
+    "A3_FRONTEND_IMAGE": os.environ["FRONTEND_IMAGE"],
+}
+lines = env_path.read_text(encoding="utf-8").splitlines()
+output = []
+seen = set()
+for line in lines:
+    key = line.split("=", 1)[0] if "=" in line else ""
+    if key in replacements:
+        if key not in seen:
+            output.append(f"{key}={replacements[key]}")
+            seen.add(key)
+        continue
+    output.append(line)
+for key, value in replacements.items():
+    if key not in seen:
+        output.append(f"{key}={value}")
+fd, temporary_name = tempfile.mkstemp(prefix=f"{env_path.name}.", dir=env_path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(output) + "\n")
+    os.chmod(temporary_name, 0o600)
+    os.replace(temporary_name, env_path)
+finally:
+    if os.path.exists(temporary_name):
+        os.unlink(temporary_name)
+PY
+  sudo chown root:root "$ENV_FILE"
+  sudo chmod 0600 "$ENV_FILE"
+
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    run --rm --no-deps backend python manage.py makemigrations --check --dry-run
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    run --rm --no-deps backend python manage.py migrate --plan
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    run --rm --no-deps backend python manage.py migrate
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    up -d --no-build --force-recreate backend celery celery-beat frontend
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    exec -T backend python manage.py recover_video_jobs --stale-minutes 5
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    ps backend celery celery-beat frontend
+
+  RELEASE_OK=1
+  trap - EXIT HUP INT TERM
+  sudo rm -f "$SNAPSHOT"
+)
+```
+
+### 迁移前哈希基线
+
+当前生产验收对象是资源包 `80df56875cca4f23be7df8816ed8736c`：片段 1、2 失败，片段 3-6 已成功。执行迁移前只记录成功 URL 的 SHA-256，不得把签名 URL 写入终端、文件、工单或聊天记录。以下脚本读取服务器拥有的 artifact，并将只含片段索引、状态和 URL 哈希的基线保存为 `root:root 0600` 文件：
+
+```bash
+(
+  set -euo pipefail
+  cd /opt/A3
+  PACK_ID='80df56875cca4f23be7df8816ed8736c'
+  HASH_DIR='/var/lib/a3-deploy'
+  HASH_FILE="${HASH_DIR}/legacy-video-${PACK_ID}.sha256.json"
+  TMP_FILE="$(mktemp)"
+  trap 'rm -f "$TMP_FILE"' EXIT
+  COMPOSE_ARGS=(--env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml)
+
+  sudo install -d -o root -g root -m 0700 "$HASH_DIR"
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    exec -T -e PACK_ID="$PACK_ID" backend python manage.py shell <<'PY' >"$TMP_FILE"
+import hashlib
+import json
+import os
+
+from backend.apps.compat.resource_generation import get_resource_pack
+from backend.apps.compat.video_jobs import eligible_legacy_video_artifact
+from backend.apps.learning.models import ResourcePackLog
+
+pack_id = os.environ["PACK_ID"]
+log = ResourcePackLog.objects.filter(task_id=f"resource-pack:{pack_id}").select_related("user").get()
+artifact = eligible_legacy_video_artifact(get_resource_pack(log.user, pack_id) or {})
+if artifact is None:
+    raise SystemExit("未找到可迁移的旧视频 artifact")
+segments = sorted(artifact["segments"], key=lambda item: int(item["index"]))
+failed = [int(item["index"]) for item in segments if item.get("status") == "failed"]
+succeeded = [item for item in segments if item.get("status") == "succeeded" and item.get("videoUrl")]
+if failed != [1, 2] or [int(item["index"]) for item in succeeded] != [3, 4, 5, 6]:
+    raise SystemExit("生产旧任务不是预期的 2 失败/4 保留状态")
+print(json.dumps({
+    "resourcePackId": pack_id,
+    "failedIndexes": failed,
+    "preserved": [
+        {
+            "index": int(item["index"]),
+            "status": "succeeded",
+            "urlSha256": hashlib.sha256(str(item["videoUrl"]).encode("utf-8")).hexdigest(),
+        }
+        for item in succeeded
+    ],
+}, ensure_ascii=True, sort_keys=True))
+PY
+  sudo install -o root -g root -m 0600 "$TMP_FILE" "$HASH_FILE"
+  sudo python3 -m json.tool "$HASH_FILE"
+)
+```
+
+### 页面操作与数据库验收
+
+1. 使用原资源包所属学生账号打开视频详情页。确认迁移提示显示“补生成 2 段，保留 4 段”。
+2. 点击迁移按钮后先取消确认，在浏览器 Network 中确认没有发出导入 `PATCH`。
+3. 再次操作并确认一次。不要双击，也不要在请求未返回时重复确认。
+4. 页面出现任务进度后记录公开 `jobId`；它必须以 `a3_legacy_video_` 开头。
+5. 刷新页面。页面必须恢复同一个 `jobId` 并继续轮询，不能创建第二个任务，也不能重新弹出付费提交。
+6. 等待片段 1、2 已提交给 provider 后执行下面验收。脚本断言只有一个 legacy job，provider task ID 仅存在于原失败片段 1、2，片段 3-6 仍为 succeeded 且 URL 哈希与迁移前完全一致。脚本只输出布尔值、状态和哈希，不输出 provider task ID 内容或签名 URL。
+
+```bash
+(
+  set -euo pipefail
+  cd /opt/A3
+  PACK_ID='80df56875cca4f23be7df8816ed8736c'
+  HASH_FILE="/var/lib/a3-deploy/legacy-video-${PACK_ID}.sha256.json"
+  COMPOSE_ARGS=(--env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml)
+  sudo test -f "$HASH_FILE"
+  test "$(sudo stat -c '%U:%G %a' "$HASH_FILE")" = 'root:root 600'
+  BASELINE_JSON="$(sudo cat "$HASH_FILE")"
+
+  sudo -H env -u DOCKER_CONFIG docker compose "${COMPOSE_ARGS[@]}" \
+    exec -T -e PACK_ID="$PACK_ID" -e BASELINE_JSON="$BASELINE_JSON" \
+    backend python manage.py shell <<'PY'
+import hashlib
+import json
+import os
+
+from backend.apps.compat.models import VideoGenerationJob
+
+pack_id = os.environ["PACK_ID"]
+baseline = json.loads(os.environ["BASELINE_JSON"])
+jobs = list(
+    VideoGenerationJob.objects.filter(
+        resource_pack_id=pack_id,
+        job_id__startswith="a3_legacy_video_",
+    ).prefetch_related("segments")
+)
+if len(jobs) != 1:
+    raise SystemExit(f"legacy job 数量异常：{len(jobs)}")
+job = jobs[0]
+segments = {segment.index: segment for segment in job.segments.all()}
+if sorted(segments) != [1, 2, 3, 4, 5, 6]:
+    raise SystemExit("任务片段索引不是 1-6")
+if not all(segments[index].provider_task_id for index in (1, 2)):
+    raise SystemExit("失败片段尚未全部取得 provider task ID，请稍后重试验收")
+if any(segments[index].provider_task_id for index in (3, 4, 5, 6)):
+    raise SystemExit("保留片段不应存在 provider task ID")
+current_hashes = {
+    index: hashlib.sha256(segments[index].video_url.encode("utf-8")).hexdigest()
+    for index in (3, 4, 5, 6)
+}
+expected_hashes = {int(item["index"]): item["urlSha256"] for item in baseline["preserved"]}
+if current_hashes != expected_hashes:
+    raise SystemExit("保留片段 URL 哈希发生变化")
+if any(segments[index].status != "succeeded" for index in (3, 4, 5, 6)):
+    raise SystemExit("保留片段状态发生变化")
+print(json.dumps({
+    "jobId": job.job_id,
+    "jobCount": 1,
+    "failedSegmentProviderTaskIdsPresent": True,
+    "preservedSegmentProviderTaskIdsAbsent": True,
+    "preservedStatuses": {str(index): segments[index].status for index in (3, 4, 5, 6)},
+    "preservedUrlSha256": {str(index): current_hashes[index] for index in (3, 4, 5, 6)},
+}, ensure_ascii=True, sort_keys=True, indent=2))
+PY
+  unset BASELINE_JSON
+)
+```
+
+哈希基线通过进程环境临时传入 backend 容器，只包含资源包 ID、失败索引和四个 SHA-256 值；命令结束后立即清除 shell 变量。最终任务完成后，再确认新 `openmaic_video` artifact 含同一个 `jobId` 和 6 个片段状态。
+
+### 恢复与回滚边界
+
+- 页面刷新只恢复同一持久化 job 的轮询，不应触发新的 Seedance 提交。若刷新后 jobId 改变，立即停止页面操作并检查数据库中的 legacy job 数量。
+- Celery/Redis 或网络故障恢复后执行 `python manage.py recover_video_jobs --stale-minutes 5`。已有 provider task ID 的片段只继续轮询；该命令不会重新生成已保留的 3-6 段。
+- 代码或运行时验收失败时，恢复 `.env.production` 快照并把 backend、celery、celery-beat、frontend 四个服务一起重建到上一组已验证 digest。不要只回滚前端或后端。
+- 数据库中已创建的 legacy job 是付费任务审计记录，镜像回滚时不要删除。回滚后先停止新的迁移操作；修复并重新发布后用恢复命令继续处理已有任务。
+- 原旧 artifact 在新任务最终写回前保持不变；不要手工覆盖其成功片段 URL，也不要把签名 URL加入部署日志。
+
 ## 自动化验证
 
 以下检查真实断言：
