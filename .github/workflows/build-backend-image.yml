@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   build-and-push:
-    if: ${{ github.ref == 'refs/heads/codex/a3-latest-integration' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/codex/a3-latest-integration' }}
     concurrency:
       group: a3-backend-image
       cancel-in-progress: true

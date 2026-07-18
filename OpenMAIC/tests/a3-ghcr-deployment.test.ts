@@ -41,6 +41,7 @@ const composeSchema = yaml.DEFAULT_SCHEMA.extend([resetSequenceType]);
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const workflowPath = path.join(root, '.github/workflows/build-frontend-image.yml');
+const backendWorkflowPath = path.join(root, '.github/workflows/build-backend-image.yml');
 const composePath = path.join(root, 'docker-compose.prod.yml');
 const dockerfilePath = path.join(root, 'OpenMAIC/Dockerfile');
 const envTemplatePath = path.join(root, '.env.production.template');
@@ -107,7 +108,9 @@ describe('A3 private GHCR frontend deployment', () => {
       branches: ['codex/a3-latest-integration'],
       paths: ['OpenMAIC/**', '.github/workflows/build-frontend-image.yml'],
     });
-    expect(buildJob?.if).toBe("${{ github.ref == 'refs/heads/codex/a3-latest-integration' }}");
+    expect(buildJob?.if).toBe(
+      "${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/codex/a3-latest-integration' }}",
+    );
     expect(buildJob?.concurrency).toEqual({
       group: 'a3-frontend-image',
       'cancel-in-progress': true,
@@ -168,6 +171,16 @@ describe('A3 private GHCR frontend deployment', () => {
     expect(envTemplate).toContain('full DEPLOY_SHA tag');
     expect(envTemplate).toContain('verified RepoDigest');
     expect(envTemplate).not.toMatch(/^A3_FRONTEND_IMAGE=.*:latest$/m);
+  });
+
+  it('allows fixed-SHA manual image builds from an explicitly selected branch', () => {
+    const backendWorkflow = yaml.load(fs.readFileSync(backendWorkflowPath, 'utf8')) as WorkflowDocument;
+    const backendBuildJob = backendWorkflow.jobs?.['build-and-push'];
+
+    expect(backendWorkflow.on).toHaveProperty('workflow_dispatch');
+    expect(backendBuildJob?.if).toBe(
+      "${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/codex/a3-latest-integration' }}",
+    );
   });
 
   it('shares the video worker token and internal frontend URL across production services', () => {
