@@ -1,8 +1,17 @@
 .page {
+  --a3-home-cream: #fff8d8;
+  --a3-home-action: #245c48;
+  --a3-home-action-hover: #1d4b3b;
+  --a3-home-ink: #18231f;
+  --a3-home-muted: #59655f;
+  --a3-home-line: rgb(24 35 31 / 14%);
+  --a3-home-soft: #f3f7f4;
+  --a3-home-surface: #ffffff;
+
   min-height: 100vh;
   overflow-x: clip;
-  background: #0b0e10;
-  color: #f5f7f2;
+  background: var(--a3-home-surface);
+  color: var(--a3-home-ink);
   scroll-behavior: smooth;
 }
 
@@ -430,9 +439,9 @@
 
 .feedbackBand {
   padding: 36px 0;
-  border-top: 1px solid rgb(245 247 242 / 10%);
-  border-bottom: 1px solid rgb(245 247 242 / 10%);
-  background: #101416;
+  border-top: 1px solid var(--a3-home-line);
+  border-bottom: 1px solid var(--a3-home-line);
+  background: var(--a3-home-soft);
 }
 
 .sectionActions {
@@ -553,9 +562,9 @@
 .knowledgeBand {
   position: relative;
   padding: 176px 0 144px;
-  border-top: 1px solid rgb(245 247 242 / 10%);
-  border-bottom: 1px solid rgb(245 247 242 / 10%);
-  background: #111619;
+  border-top: 1px solid var(--a3-home-line);
+  border-bottom: 1px solid var(--a3-home-line);
+  background: var(--a3-home-soft);
 }
 
 .knowledgeFlow {
@@ -1073,6 +1082,200 @@
   color: #9fa69c;
   font-size: 14px;
   line-height: 1.75;
+}
+
+/* Public homepage light theme. The digital-human renderer remains a contained dark media surface. */
+.skipLink {
+  background: var(--a3-home-action);
+  color: #fff;
+}
+
+.header {
+  border-bottom-color: var(--a3-home-line);
+  background: rgb(255 248 216 / 94%);
+}
+
+.brand,
+.desktopNav a:hover,
+.secondaryAction:hover,
+.mobileNav a,
+.storyCopy h2,
+.resourceIntro h2,
+.evidenceCopy h2,
+.closingSection h2,
+.trustSection h2,
+.faqSection h2,
+.resourceIndex strong,
+.evidenceGrid strong,
+.footer strong,
+.faqList summary {
+  color: var(--a3-home-ink);
+}
+
+.desktopNav a,
+.secondaryAction,
+.heroSupport,
+.heroTrust,
+.storyCopy > p:not(.eyebrow),
+.resourceIntro > p:not(.eyebrow),
+.evidenceCopy > p:last-child,
+.resourceIndex p,
+.lessonFocus,
+.citationLabels,
+.evidenceGrid p,
+.evidenceGrid span,
+.closingSection > p,
+.footer,
+.footer a,
+.trustPoints p,
+.faqList p {
+  color: var(--a3-home-muted);
+}
+
+.headerCta,
+.primaryCta {
+  background: var(--a3-home-action);
+  color: #fff;
+}
+
+.headerCta:hover,
+.primaryCta:hover {
+  background: var(--a3-home-action-hover);
+}
+
+.menuButton,
+.secondaryCta {
+  border-color: var(--a3-home-action);
+  color: var(--a3-home-action);
+}
+
+.mobileNav {
+  border-bottom-color: var(--a3-home-line);
+  background: var(--a3-home-cream);
+}
+
+.mobileNav a {
+  border-bottom-color: var(--a3-home-line);
+}
+
+.hero {
+  background: var(--a3-home-cream);
+}
+
+.hero::after,
+.foundationBand,
+.evidenceSection,
+.closingSection,
+.footer,
+.trustSection,
+.faqSection {
+  border-color: var(--a3-home-line);
+}
+
+.heroKicker,
+.eyebrow,
+.sectionLink,
+.resourceIndex span {
+  color: var(--a3-home-action);
+}
+
+.heroCopy h1 {
+  color: var(--a3-home-ink);
+}
+
+.heroCopy h1 span:first-child {
+  color: #9a6a00;
+}
+
+.heroTrust li::before {
+  color: var(--a3-home-action);
+}
+
+.heroStage:focus-visible,
+.page a:focus-visible,
+.page button:focus-visible {
+  outline-color: var(--a3-home-action);
+}
+
+.heroScreen,
+.fullProductFrame,
+.resourceProductFrame {
+  border-color: var(--a3-home-line);
+  background: #fff;
+  box-shadow: 0 24px 64px rgb(43 52 47 / 18%);
+}
+
+.mediaFallback {
+  background: var(--a3-home-soft);
+  color: var(--a3-home-ink);
+}
+
+.mediaFallback span {
+  color: var(--a3-home-muted);
+}
+
+.story,
+.foundationBand,
+.resourceShowcase,
+.classroomBand,
+.coachingSection,
+.evidenceSection,
+.trustSection,
+.faqSection,
+.closingSection,
+.footer {
+  background: var(--a3-home-surface);
+}
+
+.knowledgeFlow {
+  color: var(--a3-home-muted);
+}
+
+.knowledgeInputs::after,
+.knowledgeOutputs::before {
+  border-top-color: rgb(36 92 72 / 58%);
+}
+
+.knowledgeFlow span,
+.knowledgeFlow strong,
+.resourceIndex li,
+.segmentedControl,
+.evidenceGrid > div,
+.trustPoints p,
+.faqList details {
+  border-color: var(--a3-home-line);
+}
+
+.knowledgeFlow strong {
+  border-color: var(--a3-home-action);
+  background: #e7f0eb;
+  color: var(--a3-home-action);
+}
+
+.segmentedControl button {
+  color: var(--a3-home-muted);
+}
+
+.segmentedControl button[aria-pressed='true'] {
+  border-color: var(--a3-home-action);
+  background: var(--a3-home-action);
+  color: #fff;
+}
+
+.citationLabels span {
+  border-bottom-color: rgb(36 92 72 / 42%);
+}
+
+.teacherPrompt,
+.teacherStatus {
+  border-color: rgb(255 248 216 / 48%);
+  background: rgb(24 35 31 / 88%);
+  color: #fff;
+}
+
+.teacherStatus,
+.teacherLink {
+  color: #fff2ad;
 }
 
 .page a:focus-visible,
