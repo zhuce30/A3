@@ -17,7 +17,7 @@ export function A3Card({
   return (
     <section
       className={cn(
-        'rounded-[14px] border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] shadow-[var(--a3-shadow)]',
+        'min-w-0 rounded-[14px] border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] shadow-[var(--a3-shadow)]',
         className,
       )}
     >

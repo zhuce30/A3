@@ -103,7 +103,6 @@ export function DashboardView() {
   const currentItem = learningSummary.currentItem;
   const completedCount = activePath?.items.filter((item) => item.status === 'completed').length ?? 0;
   const tasks = useMemo(() => buildTasks(activePath, currentItem, report, studyPlan), [activePath, currentItem, report, studyPlan]);
-  const doneTasks = tasks.filter((task) => task.done).length;
   const weakSuggestions = report?.suggestions ?? [];
   const resources = classroom?.recommended ?? [];
   const planRelationship = studyPlan?.planContext?.relationship;
@@ -114,7 +113,7 @@ export function DashboardView() {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="min-w-0 space-y-5">
       <section className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
@@ -126,78 +125,38 @@ export function DashboardView() {
             当前路径进度 <span className="font-semibold text-blue-700">{activePath?.progress ?? 0}%</span>。今天先完成最小可执行任务，再回写报告和错题复习。
           </p>
         </div>
-        <div className="flex items-center gap-3 rounded-[14px] border border-blue-100 bg-blue-50 px-4 py-3">
+        <div className="flex min-w-0 items-center gap-3 rounded-[14px] border border-blue-100 bg-blue-50 px-4 py-3">
           <Bot className="size-5 text-blue-700" />
-          <div>
+          <div className="min-w-0">
             <div className="text-sm font-semibold text-blue-900">AI 辅导可用</div>
-            <div className="text-xs text-blue-700">基于当前节点、知识库和引用验证回答</div>
+            <div className="text-xs leading-5 text-blue-700">基于当前节点、知识库和引用验证回答</div>
           </div>
         </div>
       </section>
 
-      <A3Card className="overflow-hidden">
-        <div className="grid gap-5 xl:grid-cols-[240px_1fr_260px]">
-          <section className="rounded-[14px] bg-orange-50 p-5">
-            <div className="flex items-center gap-2 text-sm font-semibold text-orange-800">
-              <Flame className="size-4" />
-              连续学习
-            </div>
-            <div className="mt-4 flex items-end gap-2 text-orange-700">
-              <span className="text-5xl font-semibold leading-none">{motivation?.streakDays ?? 0}</span>
-              <span className="pb-1 text-base">天</span>
-            </div>
-            <p className="mt-3 text-sm leading-6 text-orange-800">{motivation?.nudge ?? '完成一个任务即可建立今天的学习记录。'}</p>
-          </section>
-
-          <section className="rounded-[14px] bg-blue-50 p-5">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-sm font-semibold text-blue-950">{motivation?.weeklyTarget.label ?? '完成今日学习任务'}</div>
-                <p className="mt-2 text-sm leading-6 text-blue-800">
-                  本周完成 {motivation?.weeklyCompletedTasks ?? motivation?.weeklyTarget.current ?? 0} 个任务，今日剩余约 {motivation?.todayRemainingMinutes ?? 0} 分钟，已完成 {motivation?.todayCompletedTasks ?? doneTasks}/{motivation?.todayTotalTasks ?? tasks.length} 个任务。
-                </p>
-              </div>
-              <span className="shrink-0 text-sm font-semibold text-blue-700">
-                {motivation?.weeklyTarget.current ?? doneTasks}/{motivation?.weeklyTarget.target ?? tasks.length}
-              </span>
-            </div>
-            <div className="mt-4 h-3 rounded-full bg-white">
-              <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${motivation?.weeklyTarget.progress ?? taskProgress(doneTasks, tasks.length)}%` }} />
-            </div>
-            <div className="mt-5 rounded-xl bg-white p-4">
-              <div className="text-xs font-semibold text-blue-950">现在最该做</div>
-              <p className="mt-1 text-xs leading-5 text-blue-800">{primaryAction.reason}</p>
-              <RelationshipActionContext relationship={planRelationship} testId="a3-dashboard-relationship-action-context" />
-              <Button asChild size="sm" className="mt-3 bg-blue-600 hover:bg-blue-700">
-                <Link href={primaryAction.href}>{primaryAction.label}</Link>
-              </Button>
-            </div>
-          </section>
-
-          <section className="rounded-[14px] bg-emerald-50 p-5">
-            <div className="flex items-center gap-2 text-sm font-semibold text-emerald-900">
-              <Award className="size-4" />
-              学习徽章
-            </div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {(motivation?.badges ?? [{ id: 'first-step', title: '今日起步', detail: '完成一个任务即可点亮', earned: false }]).map((badge) => (
-                <A3Pill key={badge.id} tone={badge.earned ? 'green' : 'slate'}>
-                  {badge.title}
-                </A3Pill>
-              ))}
-            </div>
-            <p className="mt-3 text-sm leading-6 text-emerald-800">徽章只由任务、复盘和计划进度触发，不做前端假点亮。</p>
-            <Button asChild size="sm" variant="outline" className="mt-4 w-full bg-white">
-              <Link href="/a3/notifications">查看提醒{motivation?.newReminders ? ` · 新增 ${motivation.newReminders}` : ''}</Link>
-            </Button>
-          </section>
+      <div
+        data-testid="a3-dashboard-action-zone"
+        className="grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]"
+      >
+        <TodayActionHub
+          tasks={tasks}
+          loading={loading}
+          motivation={motivation}
+          primaryAction={primaryAction}
+          relationship={planRelationship}
+        />
+        <div data-testid="a3-dashboard-momentum-rail" className="grid min-w-0 gap-5 sm:grid-cols-2 xl:grid-cols-1">
+          <LearningMomentum motivation={motivation} />
+          <LearningBadgeSummary motivation={motivation} />
         </div>
-      </A3Card>
+      </div>
 
-      <div className="grid gap-5 xl:grid-cols-[1fr_1.05fr_1.35fr]">
-        <LearnerSnapshot displayName={displayName} majorText={majorText} userRole={user?.role} report={report} />
-        <TodayTasks tasks={tasks} loading={loading} />
+      <div
+        data-testid="a3-dashboard-path-profile-zone"
+        className="grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]"
+      >
         <PathCard activePath={activePath} currentItem={currentItem} completedCount={completedCount} />
+        <LearnerSnapshot displayName={displayName} majorText={majorText} userRole={user?.role} report={report} />
       </div>
 
       <DynamicProfileInsightPanel
@@ -213,12 +172,12 @@ export function DashboardView() {
           subtitle={report.weeklyPrescription?.diagnosis?.headline ?? report.actionLoop?.continuityMessage ?? ''}
           action={<A3Pill tone={(report?.metrics.accuracy ?? 0) >= 70 ? 'green' : 'orange'}>{(report?.metrics.accuracy ?? 0) >= 70 ? '稳定' : '需关注'}</A3Pill>}
         >
-          <div className="grid gap-5 xl:grid-cols-[1fr_300px]">
-            <div>
+          <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(260px,300px)]">
+            <div className="min-w-0">
               <p className="text-sm leading-7 text-[var(--a3-text-muted)]">{report.weeklyPrescription?.diagnosis?.summary ?? report.actionLoop?.primaryReason ?? ''}</p>
               <EvidenceList items={(report.weeklyPrescription?.diagnosis?.evidence ?? []).slice(0, 3)} />
             </div>
-            <div className="space-y-2">
+            <div className="min-w-0 space-y-2">
               {(report.weeklyPrescription?.focusAreas ?? []).slice(0, 3).map((area) => (
                 <Link key={area.href} href={area.href} className="flex items-center justify-between rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] p-3 hover:bg-blue-50">
                   <div className="min-w-0">
@@ -246,13 +205,13 @@ export function DashboardView() {
         </A3Card>
       )}
 
-      <div className="grid gap-5 xl:grid-cols-[1fr_1.05fr_1.35fr]">
+      <div className="grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)_minmax(0,1.35fr)]">
         <LearningOverview report={report} />
         <WeakPointPanel suggestions={weakSuggestions} />
         <ResourcePanel resources={resources} />
       </div>
 
-      <div className="grid gap-5 xl:grid-cols-[1fr_1.05fr_1.35fr]">
+      <div className="grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)_minmax(0,1.35fr)]">
         <CoachEntry currentItem={currentItem} />
         <UpcomingTasks tasks={tasks} />
         <AssessmentPanel report={report} />
@@ -263,24 +222,24 @@ export function DashboardView() {
 
 function LearnerSnapshot({ displayName, majorText, userRole, report }: { displayName: string; majorText: string; userRole?: string; report: LearningReport | null }) {
   return (
-    <A3Card className="min-h-[326px]">
-      <div className="flex gap-5">
-        <div className="relative size-24 shrink-0 overflow-hidden rounded-full bg-blue-50">
+    <A3Card>
+      <div className="flex min-w-0 gap-4">
+        <div className="relative size-20 shrink-0 overflow-hidden rounded-full bg-blue-50">
           <Image src="/avatars/learner.svg" alt="学生头像" fill className="object-cover" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <h2 className="text-xl font-semibold text-[var(--a3-text)]">{displayName}</h2>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <h2 className="min-w-0 break-words text-xl font-semibold text-[var(--a3-text)]">{displayName}</h2>
             <A3Pill tone="violet">{userRole === 'teacher' ? '教师' : '学生'}</A3Pill>
           </div>
-          <p className="mt-2 text-sm text-[var(--a3-text-muted)]">{majorText}</p>
+          <p className="mt-2 break-words text-sm leading-5 text-[var(--a3-text-muted)]">{majorText}</p>
           <p className="mt-3 text-sm leading-6 text-[var(--a3-text-muted)]">画像会随路径进度、测评表现和错题记录动态更新。</p>
           <Button asChild className="mt-4 h-9" variant="outline">
             <Link href="/a3/settings">编辑资料</Link>
           </Button>
         </div>
       </div>
-      <div className="mt-6 grid grid-cols-3 divide-x divide-[var(--a3-border)] rounded-[14px] bg-[var(--a3-surface-muted)] p-5 text-center">
+      <div className="mt-5 grid grid-cols-3 divide-x divide-[var(--a3-border)] rounded-[14px] bg-[var(--a3-surface-muted)] p-4 text-center">
         <ProfileStat value={`${report?.metrics.studyDays ?? 0}`} label="学习天数" tone="blue" />
         <ProfileStat value={`${report?.metrics.answeredQuestions ?? 0}`} label="答题数" tone="green" />
         <ProfileStat value={`${report?.metrics.accuracy ?? 0}%`} label="正确率" tone="violet" />
@@ -289,25 +248,103 @@ function LearnerSnapshot({ displayName, majorText, userRole, report }: { display
   );
 }
 
-function TodayTasks({ tasks, loading }: { tasks: DashboardTask[]; loading: boolean }) {
+function TodayActionHub({
+  tasks,
+  loading,
+  motivation,
+  primaryAction,
+  relationship,
+}: {
+  tasks: DashboardTask[];
+  loading: boolean;
+  motivation: MotivationSummary | null;
+  primaryAction: { label: string; href: string; reason: string };
+  relationship?: StudyPlanRelationship;
+}) {
+  const doneTasks = tasks.filter((task) => task.done).length;
+  const completed = motivation?.todayCompletedTasks ?? doneTasks;
+  const total = motivation?.todayTotalTasks ?? tasks.length;
+  const weeklyProgress = motivation?.weeklyTarget.progress ?? taskProgress(doneTasks, tasks.length);
+
   return (
-    <A3Card title="今日任务" action={loading ? <Loader2 className="size-4 animate-spin text-blue-600" /> : <span className="text-sm font-semibold text-blue-700">{tasks.filter((task) => task.done).length}/{tasks.length} 已完成</span>} className="min-h-[326px]">
-      <div className="space-y-3">
+    <A3Card
+      title="今天先完成这些"
+      subtitle="按当前学习路径和复习队列排序，完成后会同步更新报告。"
+      action={loading ? <Loader2 className="size-4 animate-spin text-blue-600" /> : <span className="text-sm font-semibold text-blue-700">{completed}/{total} 已完成</span>}
+    >
+      <div className="rounded-[14px] border border-blue-100 bg-blue-50 p-4 md:p-5">
+        <div className="flex min-w-0 items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-blue-950">{motivation?.weeklyTarget.label ?? '完成今日学习任务'}</div>
+            <p className="mt-2 text-sm leading-6 text-blue-800">
+              今日剩余约 {motivation?.todayRemainingMinutes ?? 0} 分钟，本周已完成 {motivation?.weeklyCompletedTasks ?? motivation?.weeklyTarget.current ?? doneTasks} 项。
+            </p>
+          </div>
+          <span className="shrink-0 text-sm font-semibold tabular-nums text-blue-700">
+            {motivation?.weeklyTarget.current ?? doneTasks}/{motivation?.weeklyTarget.target ?? tasks.length}
+          </span>
+        </div>
+        <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-white">
+          <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${weeklyProgress}%` }} />
+        </div>
+        <div className="mt-4 rounded-xl bg-white p-4">
+          <div className="text-xs font-semibold text-blue-950">现在最该做</div>
+          <p className="mt-1 break-words text-sm leading-6 text-blue-800">{primaryAction.reason}</p>
+          <RelationshipActionContext relationship={relationship} testId="a3-dashboard-relationship-action-context" />
+          <Button asChild size="sm" className="mt-3 bg-blue-600 hover:bg-blue-700">
+            <Link href={primaryAction.href}>{primaryAction.label}</Link>
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-5 space-y-2">
         {tasks.map((task, index) => (
-          <Link key={task.key} href={task.href} className="flex items-center gap-3 rounded-xl p-2 hover:bg-blue-50">
-            <div className={cn('flex size-9 shrink-0 items-center justify-center rounded-[10px] text-white', index === 0 ? 'bg-blue-500' : index === 1 ? 'bg-emerald-500' : 'bg-violet-500')}>
+          <Link key={task.key} href={task.href} className="flex min-w-0 items-start gap-3 rounded-xl border border-transparent p-3 transition-colors hover:border-blue-100 hover:bg-blue-50">
+            <div className={cn('flex size-10 shrink-0 items-center justify-center rounded-[10px] text-white', index === 0 ? 'bg-blue-500' : index === 1 ? 'bg-emerald-500' : 'bg-violet-500')}>
               <CalendarDays className="size-4" />
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-semibold text-[var(--a3-text)]">{task.title}</div>
-              <div className="mt-0.5 text-xs text-[var(--a3-text-muted)]">{task.subtitle}</div>
+              <div data-testid="a3-dashboard-task-title" className="line-clamp-2 break-words text-sm font-semibold leading-5 text-[var(--a3-text)]">{task.title}</div>
+              <div className="mt-1 line-clamp-2 break-words text-xs leading-5 text-[var(--a3-text-muted)]">{task.subtitle}</div>
             </div>
-            {task.done ? <CheckCircle2 className="size-5 text-blue-600" /> : <span className="size-5 rounded-full border-2 border-slate-300" />}
+            {task.done ? <CheckCircle2 className="mt-1 size-5 shrink-0 text-blue-600" /> : <span className="mt-1 size-5 shrink-0 rounded-full border-2 border-slate-300" />}
           </Link>
         ))}
       </div>
-      <Button asChild className="mt-3 h-9 w-full" variant="outline">
+      <Button asChild className="mt-4 h-9 w-full" variant="outline">
         <Link href="/a3/study-plan">查看完整计划</Link>
+      </Button>
+    </A3Card>
+  );
+}
+
+function LearningMomentum({ motivation }: { motivation: MotivationSummary | null }) {
+  return (
+    <A3Card title="连续学习" action={<Flame className="size-4 text-orange-700" />}>
+      <div className="rounded-[14px] bg-orange-50 p-4">
+        <div className="flex items-end gap-2 text-orange-700">
+          <span className="text-4xl font-semibold leading-none tabular-nums">{motivation?.streakDays ?? 0}</span>
+          <span className="pb-1 text-sm">天</span>
+        </div>
+        <p className="mt-3 break-words text-sm leading-6 text-orange-800">{motivation?.nudge ?? '完成一个任务即可建立今天的学习记录。'}</p>
+      </div>
+    </A3Card>
+  );
+}
+
+function LearningBadgeSummary({ motivation }: { motivation: MotivationSummary | null }) {
+  return (
+    <A3Card title="学习徽章" action={<Award className="size-4 text-emerald-700" />}>
+      <div className="flex flex-wrap gap-2">
+        {(motivation?.badges ?? [{ id: 'first-step', title: '今日起步', detail: '完成一个任务即可点亮', earned: false }]).map((badge) => (
+          <A3Pill key={badge.id} tone={badge.earned ? 'green' : 'slate'}>
+            {badge.title}
+          </A3Pill>
+        ))}
+      </div>
+      <p className="mt-3 text-sm leading-6 text-emerald-800">徽章只由任务、复盘和计划进度触发，不做前端假点亮。</p>
+      <Button asChild size="sm" variant="outline" className="mt-4 w-full bg-white">
+        <Link href="/a3/notifications">查看提醒{motivation?.newReminders ? ` · 新增 ${motivation.newReminders}` : ''}</Link>
       </Button>
     </A3Card>
   );
@@ -323,28 +360,27 @@ function PathCard({ activePath, currentItem, completedCount }: { activePath: Lea
           <Link href="/a3/courses">切换路径</Link>
         </Button>
       }
-      className="min-h-[326px]"
     >
       <div className="rounded-[14px] bg-[var(--a3-surface-muted)] p-4">
-        <div className="flex items-center justify-between text-sm">
-          <span className="font-semibold text-[var(--a3-text)]">{activePath?.course.title || '操作系统'}</span>
-          <span className="text-[var(--a3-text-muted)]">
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 text-sm">
+          <span className="min-w-0 break-words font-semibold text-[var(--a3-text)]">{activePath?.course.title || '操作系统'}</span>
+          <span className="shrink-0 text-[var(--a3-text-muted)]">
             学习进度 <b className="text-blue-700">{activePath?.progress ?? 0}%</b>
           </span>
         </div>
         <div className="mt-3 h-2 rounded-full bg-slate-200">
           <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${activePath?.progress ?? 0}%` }} />
         </div>
-        <div className="mt-5 grid grid-cols-4 divide-x divide-[var(--a3-border)] text-center text-sm">
+        <div className="mt-5 grid grid-cols-2 gap-y-4 text-center text-sm sm:grid-cols-4 sm:divide-x sm:divide-[var(--a3-border)]">
           <PathStat value={`${completedCount}/${activePath?.items.length ?? 0}`} label="已学知识点" />
           <PathStat value={activePath ? '学习中' : '待规划'} label="状态" />
           <PathStat value={`V${activePath?.version ?? 0}`} label="路径版本" />
           <PathStat value={`${currentItem?.progress ?? 0}%`} label="当前节点" />
         </div>
       </div>
-      <div className="mt-4 flex items-center justify-between text-sm text-[var(--a3-text-muted)]">
-        <span>下一站：{currentItem?.knowledgePoint.title || '生成个性化路径'}</span>
-        <span>预计 {currentItem?.estimatedMinutes ?? 0} 分钟</span>
+      <div className="mt-4 flex min-w-0 flex-col gap-2 text-sm text-[var(--a3-text-muted)] sm:flex-row sm:items-start sm:justify-between">
+        <span className="min-w-0 break-words">下一站：{currentItem?.knowledgePoint.title || '生成个性化路径'}</span>
+        <span className="shrink-0">预计 {currentItem?.estimatedMinutes ?? 0} 分钟</span>
       </div>
       <Button asChild className="mt-4 h-10 w-full bg-blue-600 hover:bg-blue-700">
         <Link href={activePath ? '/a3/learning-path' : '/a3/courses'}>{activePath ? '继续学习' : '生成学习路径'}</Link>
@@ -391,7 +427,7 @@ function WeakPointPanel({ suggestions }: { suggestions: LearningReport['suggesti
     >
       <div className="space-y-3">
         {suggestions.slice(0, 3).map((item, index) => (
-          <div key={`${item.title}-${item.detail}-${index}`} className="grid grid-cols-[1fr_88px] items-center gap-3 rounded-xl bg-[var(--a3-surface-muted)] p-3">
+          <div key={`${item.title}-${item.detail}-${index}`} className="grid min-w-0 grid-cols-[minmax(0,1fr)_88px] items-center gap-3 rounded-xl bg-[var(--a3-surface-muted)] p-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <A3Pill tone={index === 0 ? 'orange' : 'blue'}>{index === 0 ? '优先' : '巩固'}</A3Pill>
@@ -428,7 +464,7 @@ function ResourcePanel({ resources }: { resources: ClassroomContext['recommended
     >
       <div className="grid gap-3 md:grid-cols-3">
         {resources.slice(0, 3).map((resource, index) => (
-          <Link key={`${resource.title}-${resource.href}-${index}`} href={resource.href} className="rounded-[12px] border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-3 hover:bg-blue-50">
+          <Link key={`${resource.title}-${resource.href}-${index}`} href={resource.href} className="min-w-0 rounded-[12px] border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-3 hover:bg-blue-50">
             <div className="mb-3 flex size-9 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
               <FileText className="size-4" />
             </div>
@@ -436,7 +472,7 @@ function ResourcePanel({ resources }: { resources: ClassroomContext['recommended
             <div className="mt-2 text-xs text-[var(--a3-text-muted)]">{resource.meta}</div>
           </Link>
         ))}
-        {!resources.length && <p className="col-span-3 rounded-xl bg-[var(--a3-surface-muted)] p-4 text-sm text-[var(--a3-text-muted)]">暂无推荐资源，进入课堂后会按当前知识点生成。</p>}
+        {!resources.length && <p className="rounded-xl bg-[var(--a3-surface-muted)] p-4 text-sm text-[var(--a3-text-muted)] md:col-span-3">暂无推荐资源，进入课堂后会按当前知识点生成。</p>}
       </div>
     </A3Card>
   );
@@ -445,16 +481,16 @@ function ResourcePanel({ resources }: { resources: ClassroomContext['recommended
 function CoachEntry({ currentItem }: { currentItem: PathItem | null }) {
   const prompts = [`讲解${currentItem?.knowledgePoint.title ?? '当前知识点'}`, '分析错题原因', '制定本周计划', '推荐练习题'];
   return (
-    <section className="rounded-[14px] border border-blue-100 bg-blue-50 p-5 text-blue-950 shadow-[var(--a3-shadow)]">
+    <section className="min-w-0 rounded-[14px] border border-blue-100 bg-blue-50 p-5 text-blue-950 shadow-[var(--a3-shadow)]">
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 text-xl font-semibold">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2 text-xl font-semibold">
             AI 助学助手<span className="rounded-full bg-blue-100 px-2 py-1 text-xs text-blue-700">进入辅导</span>
           </div>
           <p className="mt-3 text-sm leading-6 text-blue-800">这里是辅导入口。真正对话会进入面对面辅导页，并结合学习路径、知识库溯源和引用验证。</p>
-          <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
+          <div className="mt-4 grid min-w-0 gap-2 text-sm sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
             {prompts.map((item) => (
-              <Link key={item} href="/a3/coaching" className="rounded-full bg-white px-3 py-2 text-left text-blue-800 hover:bg-blue-100">
+              <Link key={item} href="/a3/coaching" className="min-w-0 break-words rounded-lg bg-white px-3 py-2 text-left leading-5 text-blue-800 hover:bg-blue-100">
                 {item}
               </Link>
             ))}
@@ -484,16 +520,16 @@ function UpcomingTasks({ tasks }: { tasks: DashboardTask[] }) {
     >
       <div className="space-y-3">
         {tasks.slice(0, 3).map((task, index) => (
-          <Link key={`upcoming-${task.key}`} href={task.href} className="flex items-center gap-3 rounded-xl p-2 hover:bg-blue-50">
+          <Link key={`upcoming-${task.key}`} href={task.href} className="flex min-w-0 items-start gap-3 rounded-xl p-2 hover:bg-blue-50">
             <div className="flex size-10 shrink-0 flex-col items-center justify-center rounded-lg bg-blue-50 text-blue-700">
               <span className="text-xs">项</span>
               <span className="text-sm font-semibold">{index + 1}</span>
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-semibold text-[var(--a3-text)]">{task.title}</div>
-              <div className="mt-1 truncate text-xs text-[var(--a3-text-muted)]">{task.subtitle}</div>
+              <div data-testid="a3-dashboard-upcoming-title" className="line-clamp-2 break-words text-sm font-semibold leading-5 text-[var(--a3-text)]">{task.title}</div>
+              <div className="mt-1 line-clamp-2 break-words text-xs leading-5 text-[var(--a3-text-muted)]">{task.subtitle}</div>
             </div>
-            <span className="rounded-md border border-[var(--a3-border)] px-2 py-1 text-xs text-[var(--a3-text)]">处理</span>
+            <span className="shrink-0 rounded-md border border-[var(--a3-border)] px-2 py-1 text-xs text-[var(--a3-text)]">处理</span>
           </Link>
         ))}
       </div>
@@ -511,7 +547,7 @@ function AssessmentPanel({ report }: { report: LearningReport | null }) {
         </Button>
       }
     >
-      <div className="grid grid-cols-[140px_1fr] items-center gap-4">
+      <div className="grid min-w-0 items-center gap-4 sm:grid-cols-[140px_minmax(0,1fr)]">
         <div>
           <div className="text-sm text-[var(--a3-text-muted)]">阶段测评</div>
           <div className="mt-3 flex items-end gap-2">
