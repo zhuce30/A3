@@ -47,6 +47,10 @@ const resourceShowcaseSource = fs.readFileSync(
   path.join(marketingDir, 'a3-homepage-resource-showcase.tsx'),
   'utf8',
 );
+const productMediaSource = fs.readFileSync(
+  path.join(marketingDir, 'a3-homepage-product-media.tsx'),
+  'utf8',
+);
 const teacherSource = fs.readFileSync(
   path.join(marketingDir, 'a3-homepage-teacher-stage.tsx'),
   'utf8',
@@ -503,12 +507,13 @@ describe('A3 product homepage hero and navigation', () => {
     expect(markup.match(/开始体验/g)).toHaveLength(1);
   });
 
-  it('requests a contained image width for the mobile hero composition', () => {
+  it('keeps contained mobile sizing while serving optimized WebP assets directly', () => {
     const markup = renderToStaticMarkup(createElement(A3HomepageHero));
 
-    expect(markup).toContain(
-      'sizes="(max-width: 767px) calc(100vw - 62px), (min-width: 1600px) 920px, 68vw"',
-    );
+    expect(productMediaSource).toContain('sizes={sizes}');
+    expect(productMediaSource).toContain('unoptimized');
+    expect(markup).toContain('src="/a3/assets/homepage/today-plan.webp"');
+    expect(markup).not.toContain('/_next/image');
     expect(markup).not.toContain('112vw');
   });
 

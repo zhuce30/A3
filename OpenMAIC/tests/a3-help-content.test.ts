@@ -141,7 +141,8 @@ describe('A3 screenshot-rich help articles', () => {
     expect(source).toContain('role="dialog"');
     expect(source).toContain('aria-modal="true"');
     expect(source).toContain("event.key === 'Escape'");
-    expect(source).toContain('triggerRef.current?.focus()');
+    expect(source).toContain('const trigger = triggerRef.current');
+    expect(source).toContain('trigger?.focus()');
   });
 
   it('ships five decodable manual screenshots under stable public paths', async () => {

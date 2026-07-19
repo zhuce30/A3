@@ -15,6 +15,7 @@ export function HelpScreenshot({ screenshot }: { screenshot: A3HelpScreenshot })
   useEffect(() => {
     if (!open) return;
     const previousOverflow = document.body.style.overflow;
+    const trigger = triggerRef.current;
     document.body.style.overflow = 'hidden';
     closeRef.current?.focus();
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -24,7 +25,7 @@ export function HelpScreenshot({ screenshot }: { screenshot: A3HelpScreenshot })
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener('keydown', closeOnEscape);
-      triggerRef.current?.focus();
+      trigger?.focus();
     };
   }, [open]);
 

@@ -29,14 +29,15 @@ export function A3GuidedTourProvider({ children }: { children: React.ReactNode }
   const [active, setActive] = useState<ActiveTour | null>(null);
   const [stepIndex, setStepIndex] = useState(0);
   const handledReplay = useRef<string | null>(null);
+  const userId = user?.id;
 
   const persist = useCallback((tour: A3GuidedTour, status: A3TourState['status']) => {
-    if (!user?.id) return;
+    if (!userId) return;
     window.localStorage.setItem(
-      buildA3TourStorageKey(user.id, tour.id, tour.version),
+      buildA3TourStorageKey(userId, tour.id, tour.version),
       JSON.stringify({ status, updatedAt: new Date().toISOString() } satisfies A3TourState),
     );
-  }, [user?.id]);
+  }, [userId]);
 
   const startTour = useCallback(async (tour: A3GuidedTour, force: boolean) => {
     if (!user?.id || !tour.audience.includes(user.role) || !tour.routes.includes(pathname)) return;
@@ -53,10 +54,13 @@ export function A3GuidedTourProvider({ children }: { children: React.ReactNode }
     const replayId = searchParams.get('tour');
     const replayKey = replayId ? `${pathname}:${replayId}` : null;
     if (replayKey && handledReplay.current !== replayKey) {
-      handledReplay.current = replayKey;
       const replayTour = getA3TourById(replayId);
-      if (replayTour) void startTour(replayTour, true);
-      return;
+      if (!replayTour) return;
+      const timer = window.setTimeout(() => {
+        handledReplay.current = replayKey;
+        void startTour(replayTour, true);
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
     const automatic = getA3TourForRoute(pathname, user.role);
     if (!automatic) return;
@@ -76,11 +80,14 @@ export function A3GuidedTourProvider({ children }: { children: React.ReactNode }
 
   useEffect(() => {
     if (!active) return;
-    const step = active.steps[stepIndex];
-    if (step && isVisibleTarget(step.target)) return;
-    const nextIndex = active.steps.findIndex((candidate, index) => index > stepIndex && isVisibleTarget(candidate.target));
-    if (nextIndex >= 0) setStepIndex(nextIndex);
-    else setActive(null);
+    const timer = window.setTimeout(() => {
+      const step = active.steps[stepIndex];
+      if (step && isVisibleTarget(step.target)) return;
+      const nextIndex = active.steps.findIndex((candidate, index) => index > stepIndex && isVisibleTarget(candidate.target));
+      if (nextIndex >= 0) setStepIndex(nextIndex);
+      else setActive(null);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [active, stepIndex]);
 
   const close = (status: A3TourState['status']) => {

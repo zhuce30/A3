@@ -79,11 +79,14 @@ export function HelpLayout({
             <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-[#245c48] text-white">
               <BookOpenCheck className="size-5" />
             </span>
-            <span className="truncate">智学引擎 · {locale === 'zh-CN' ? '帮助与手册' : 'Help'}</span>
+            <span className="truncate">
+              智学引擎<span className="hidden sm:inline"> · {locale === 'zh-CN' ? '帮助与手册' : 'Help'}</span>
+            </span>
           </Link>
           <div className="flex items-center gap-2">
-            <Link href="/a3/dashboard" className="rounded-md border border-[#245c48] px-3 py-2 text-sm font-semibold text-[#245c48]">
-              {locale === 'zh-CN' ? '返回学习区' : 'Back to learning'}
+            <Link href="/a3/dashboard" className="whitespace-nowrap rounded-md border border-[#245c48] px-3 py-2 text-sm font-semibold text-[#245c48]">
+              <span className="sm:hidden">{locale === 'zh-CN' ? '学习区' : 'Learn'}</span>
+              <span className="hidden sm:inline">{locale === 'zh-CN' ? '返回学习区' : 'Back to learning'}</span>
             </Link>
             <button
               type="button"

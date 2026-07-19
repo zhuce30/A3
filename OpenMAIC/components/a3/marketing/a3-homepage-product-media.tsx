@@ -20,7 +20,7 @@ export function A3HomepageProductMedia({
         <strong>产品界面暂未加载</strong>
         <span>你仍可继续浏览完整学习流程。</span>
       </div>
-      <Image src={src} alt={alt} fill priority={priority} sizes={sizes} />
+      <Image src={src} alt={alt} fill priority={priority} sizes={sizes} unoptimized />
     </>
   );
 }
