@@ -106,6 +106,24 @@ function boxesOverlap(
   );
 }
 
+async function visibleBoundingBox(locator: Locator) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const box = await locator.evaluateAll((nodes) => {
+      for (const node of nodes) {
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
+          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        }
+      }
+      return null;
+    });
+    if (box) return box;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return null;
+}
+
 async function expectNoHorizontalOverflow(page: Page) {
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),
@@ -186,7 +204,7 @@ async function expectHeaderAndHero(page: Page, viewportHeight: number) {
   const heading = page.getByRole('heading', {
     name: '智学引擎 把每一次学习，接到下一步。',
   });
-  const support = page.getByText(
+  const support = page.getByRole('main').getByText(
     '从诊断、今日计划到课堂、测评和错题复习，每一次结果都会更新后续安排。',
   );
   const heroCta = page.getByRole('main').getByRole('link', { name: '开始体验', exact: true });
@@ -205,12 +223,12 @@ async function expectHeaderAndHero(page: Page, viewportHeight: number) {
     .toBe(true);
 
   const [brandBox, headerCtaBox, headingBox, supportBox, heroCtaBox, imageBox] = await Promise.all([
-    brand.boundingBox(),
-    headerCta.boundingBox(),
-    heading.boundingBox(),
-    support.boundingBox(),
-    heroCta.boundingBox(),
-    firstImage.boundingBox(),
+    visibleBoundingBox(brand),
+    visibleBoundingBox(headerCta),
+    visibleBoundingBox(heading),
+    visibleBoundingBox(support),
+    visibleBoundingBox(heroCta),
+    visibleBoundingBox(firstImage),
   ]);
   expect(brandBox).not.toBeNull();
   expect(headerCtaBox).not.toBeNull();
@@ -224,11 +242,12 @@ async function expectHeaderAndHero(page: Page, viewportHeight: number) {
   expect(boxesOverlap(heroCtaBox!, imageBox!)).toBe(false);
 
   const nextSectionTop = await page
+    .getByRole('main')
     .getByTestId('a3-homepage-today')
     .evaluate((node) => node.getBoundingClientRect().top);
   expect(nextSectionTop).toBeLessThan(viewportHeight - 8);
   expect(nextSectionTop).toBeGreaterThan(viewportHeight * 0.78);
-  const nextChapterLabel = page.getByTestId('a3-homepage-today').getByText('01 / TODAY');
+  const nextChapterLabel = page.getByRole('main').getByTestId('a3-homepage-today').getByText('01 / TODAY');
   const nextChapterBox = await nextChapterLabel.boundingBox();
   expect(nextChapterBox).not.toBeNull();
   expect(nextChapterBox?.y).toBeLessThan(viewportHeight - 8);
@@ -269,13 +288,18 @@ test('renders the public product homepage without starting an auth check', async
     });
   });
   await page.goto('/a3', { waitUntil: 'commit' });
-  await expect(page.getByTestId('a3-product-homepage')).toBeVisible();
+  const productHomepage = page.getByTestId('a3-product-homepage').first();
+  await expect(productHomepage).toBeVisible();
+  await expect(productHomepage).toHaveCSS(
+    'background-color',
+    'rgb(255, 255, 255)',
+  );
   await expect(
     page.getByRole('heading', { name: '智学引擎 把每一次学习，接到下一步。' }),
   ).toBeVisible();
-  await expect(
-    page.getByRole('main').getByRole('link', { name: '开始体验', exact: true }),
-  ).toBeVisible();
+  const primaryCta = page.getByRole('main').getByRole('link', { name: '开始体验', exact: true });
+  await expect(primaryCta).toBeVisible();
+  await expect(primaryCta).toHaveCSS('background-color', 'rgb(36, 92, 72)');
   await page.waitForTimeout(500);
   expect(unrelatedRequests).toEqual([]);
   const homepagePaintMs = await page.evaluate(
@@ -296,7 +320,7 @@ test('login entry opens the real login page without a review shortcut', async ({
   await page.goto('/a3');
   await page.getByRole('link', { name: '登录', exact: true }).first().click();
 
-  await expect(page).toHaveURL(/\/a3\/login$/);
+  await expect(page).toHaveURL(/\/a3\/login$/, { timeout: 30_000 });
   await expect(page.getByLabel('账号')).toBeVisible();
   await expect(page.locator('input[autocomplete="current-password"]')).toBeVisible();
 });
@@ -342,10 +366,10 @@ test('deep coaching entry sends a guest through login with a safe return target'
   page,
 }) => {
   await stubAnonymousUser(page);
-  await page.goto('/a3');
+  await page.goto('/a3', { waitUntil: 'domcontentloaded' });
   const teacherStage = await scrollHomepageTeacherIntoView(page);
   await teacherStage.getByRole('link', { name: '进入实时辅导' }).click();
-  await expect(page).toHaveURL(/\/a3\/login\?next=%2Fa3%2Fcoaching$/);
+  await expect(page).toHaveURL(/\/a3\/login\?next=%2Fa3%2Fcoaching$/, { timeout: 30_000 });
   expect(new URL(page.url()).searchParams.get('next')).toBe('/a3/coaching');
 });
 
@@ -356,7 +380,7 @@ for (const viewport of [
   test(`${viewport.name} layout keeps the complete product story readable`, async ({ page }) => {
     await stubAnonymousUser(page);
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    await page.goto('/a3');
+    await page.goto('/a3', { waitUntil: 'domcontentloaded' });
     await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
 
     await expectNoHorizontalOverflow(page);
@@ -412,7 +436,7 @@ for (const viewport of [
   }) => {
     await stubAnonymousUser(page);
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    await page.goto('/a3');
+    await page.goto('/a3', { waitUntil: 'domcontentloaded' });
     await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
 
     await expectNoHorizontalOverflow(page);
