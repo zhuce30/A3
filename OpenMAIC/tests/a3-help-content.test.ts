@@ -105,3 +105,61 @@ describe('A3 help center page boundary', () => {
     expect(topActionsSource).toContain('getA3HelpArticleHref(article.id)');
   });
 });
+
+describe('A3 screenshot-rich help articles', () => {
+  const articlePage = path.resolve(process.cwd(), 'app/a3/help/[articleId]/page.tsx');
+  const articleView = path.resolve(
+    process.cwd(),
+    'components/a3/features/help/help-article-view.tsx',
+  );
+  const screenshotView = path.resolve(
+    process.cwd(),
+    'components/a3/features/help/help-screenshot.tsx',
+  );
+
+  it('provides a dynamic article route with a real not-found boundary', () => {
+    expect(fs.existsSync(articlePage)).toBe(true);
+    const source = fs.existsSync(articlePage) ? fs.readFileSync(articlePage, 'utf8') : '';
+    expect(source).toContain('getA3HelpArticle(articleId)');
+    expect(source).toContain('notFound()');
+    expect(source).toContain('<HelpArticleView article={article} />');
+  });
+
+  it('renders prerequisites, sections, workflow actions, and tour replay', () => {
+    expect(fs.existsSync(articleView)).toBe(true);
+    const source = fs.existsSync(articleView) ? fs.readFileSync(articleView, 'utf8') : '';
+    expect(source).toContain('article.prerequisites[locale]');
+    expect(source).toContain('article.sections.map');
+    expect(source).toContain('<HelpScreenshot');
+    expect(source).toContain('article.action.href');
+    expect(source).toContain('tour=${article.tourId}');
+  });
+
+  it('enlarges screenshots accessibly without a decorative dead button', () => {
+    expect(fs.existsSync(screenshotView)).toBe(true);
+    const source = fs.existsSync(screenshotView) ? fs.readFileSync(screenshotView, 'utf8') : '';
+    expect(source).toContain('role="dialog"');
+    expect(source).toContain('aria-modal="true"');
+    expect(source).toContain("event.key === 'Escape'");
+    expect(source).toContain('triggerRef.current?.focus()');
+  });
+
+  it('ships five decodable manual screenshots under stable public paths', async () => {
+    const sharp = (await import('sharp')).default;
+    for (const filename of [
+      'profile-setup.webp',
+      'admission-diagnostic.webp',
+      'today-plan.webp',
+      'resource-generation.webp',
+      'knowledge-base.webp',
+    ]) {
+      const file = path.resolve(process.cwd(), 'public/a3/help', filename);
+      expect(fs.existsSync(file), filename).toBe(true);
+      if (!fs.existsSync(file)) continue;
+      const metadata = await sharp(file).metadata();
+      expect(metadata.format, filename).toBe('webp');
+      expect(metadata.width, filename).toBeGreaterThanOrEqual(640);
+      expect(metadata.height, filename).toBeGreaterThanOrEqual(360);
+    }
+  });
+});
