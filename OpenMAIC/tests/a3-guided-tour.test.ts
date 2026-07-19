@@ -115,6 +115,13 @@ describe('A3 guided tour runtime boundary', () => {
     expect(source).toContain('resolveA3TourSteps');
   });
 
+  it('isolates URL search params behind suspense without suspending page content', () => {
+    const source = fs.existsSync(providerPath) ? fs.readFileSync(providerPath, 'utf8') : '';
+    expect(source).toContain('<Suspense fallback={null}>');
+    expect(source).toContain('<A3GuidedTourController />');
+    expect(source.indexOf('{children}')).toBeLessThan(source.indexOf('<Suspense fallback={null}>'));
+  });
+
   it('renders an accessible controllable overlay with mobile fallback', () => {
     expect(fs.existsSync(overlayPath)).toBe(true);
     const source = fs.existsSync(overlayPath) ? fs.readFileSync(overlayPath, 'utf8') : '';

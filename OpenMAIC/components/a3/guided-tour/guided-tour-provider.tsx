@@ -1,7 +1,7 @@
 'use client';
 
 import { usePathname, useSearchParams } from 'next/navigation';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { A3GuidedTourOverlay } from '@/components/a3/guided-tour/guided-tour-overlay';
 import {
@@ -23,6 +23,17 @@ export const A3_TOUR_START_EVENT = 'a3-guided-tour-start';
 type ActiveTour = { tour: A3GuidedTour; steps: A3TourStep[] };
 
 export function A3GuidedTourProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      {children}
+      <Suspense fallback={null}>
+        <A3GuidedTourController />
+      </Suspense>
+    </>
+  );
+}
+
+function A3GuidedTourController() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const user = useA3CurrentUser();
@@ -96,24 +107,21 @@ export function A3GuidedTourProvider({ children }: { children: React.ReactNode }
     setStepIndex(0);
   };
 
+  if (!active?.steps[stepIndex]) return null;
+
   return (
-    <>
-      {children}
-      {active?.steps[stepIndex] ? (
-        <A3GuidedTourOverlay
-          tour={active.tour}
-          step={active.steps[stepIndex]}
-          stepIndex={stepIndex}
-          stepCount={active.steps.length}
-          onPrevious={() => setStepIndex((current) => Math.max(0, current - 1))}
-          onNext={() => {
-            if (stepIndex >= active.steps.length - 1) close('completed');
-            else setStepIndex((current) => current + 1);
-          }}
-          onDismiss={() => close('dismissed')}
-        />
-      ) : null}
-    </>
+    <A3GuidedTourOverlay
+      tour={active.tour}
+      step={active.steps[stepIndex]}
+      stepIndex={stepIndex}
+      stepCount={active.steps.length}
+      onPrevious={() => setStepIndex((current) => Math.max(0, current - 1))}
+      onNext={() => {
+        if (stepIndex >= active.steps.length - 1) close('completed');
+        else setStepIndex((current) => current + 1);
+      }}
+      onDismiss={() => close('dismissed')}
+    />
   );
 }
 
