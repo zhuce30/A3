@@ -91,6 +91,13 @@
   --a3-primary: #2563eb;
   --a3-primary-2: #7c3aed;
   --a3-shadow: 0 28px 90px rgba(30, 64, 175, 0.1);
+  --a3-highlight-bg: #fff7d6;
+  --a3-highlight-surface: rgba(255, 255, 255, 0.68);
+  --a3-highlight-border: #ead99a;
+  --a3-highlight-text: #3f350f;
+  --a3-highlight-muted: #78692e;
+  --a3-highlight-accent: #9a6700;
+  --a3-highlight-shadow: 0 18px 38px rgba(126, 91, 8, 0.12);
 }
 
 .dark {
@@ -136,10 +143,33 @@
   --a3-primary: #60a5fa;
   --a3-primary-2: #a78bfa;
   --a3-shadow: 0 28px 90px rgba(0, 0, 0, 0.34);
+  --a3-highlight-bg: #292617;
+  --a3-highlight-surface: rgba(255, 244, 180, 0.07);
+  --a3-highlight-border: rgba(223, 197, 105, 0.32);
+  --a3-highlight-text: #f8edc0;
+  --a3-highlight-muted: #c8b97f;
+  --a3-highlight-accent: #f1ca58;
+  --a3-highlight-shadow: 0 18px 38px rgba(0, 0, 0, 0.28);
 }
 
 [data-a3-theme='dark'] {
   color-scheme: dark;
+}
+
+.a3-theme-transitioning,
+.a3-theme-transitioning [data-a3-shell],
+.a3-theme-transitioning [data-a3-shell] * {
+  transition-property: color, background-color, border-color, box-shadow, fill, stroke;
+  transition-duration: 220ms;
+  transition-timing-function: ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .a3-theme-transitioning,
+  .a3-theme-transitioning [data-a3-shell],
+  .a3-theme-transitioning [data-a3-shell] * {
+    transition-duration: 0ms;
+  }
 }
 
 @layer base {

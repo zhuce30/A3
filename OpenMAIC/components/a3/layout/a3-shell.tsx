@@ -98,7 +98,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="min-h-screen bg-[var(--a3-bg)] text-[var(--a3-text)]">
+    <div data-a3-shell className="min-h-screen bg-[var(--a3-bg)] text-[var(--a3-text)]">
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[248px] border-r border-[var(--a3-border)] bg-[var(--a3-surface-solid)] md:block">
         <div className="flex h-20 items-center gap-3 px-5">
           <div className="size-12 overflow-hidden rounded-[14px] shadow-[0_10px_22px_rgba(37,99,235,0.22)]">

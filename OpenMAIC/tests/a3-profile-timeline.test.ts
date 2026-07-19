@@ -27,7 +27,7 @@ describe('profile timeline helpers', () => {
     expect(profileDimensionLabel('motivationRisk')).toBe('动机风险');
     expect(profileSourceLabel(entry.source)).toBe('学习事件');
     expect(profileStatusLabel(entry.status)).toBe('待确认');
-    expect(summarizeProfileTimelineEntry(entry)).toBe('动机风险：低 -> 连续两天任务未完成');
+    expect(summarizeProfileTimelineEntry(entry)).toBe('动机风险从“低”调整为“连续两天任务未完成”');
     expect(summarizeProfileUpdateEvidence(entry)).toContain('行为和自报不一致');
     expect(summarizeProfileUpdateEvidence(entry)).toContain('学习事件：task_skip；观察窗口 7 天');
     expect(summarizeProfileUpdateEvidence(entry)).toContain('确认后会影响今日任务、学习计划和推荐排序。');

@@ -172,21 +172,21 @@ export function StudyPlanView() {
 
   return (
     <div className="space-y-5" data-testid="a3-study-plan-view">
-      <section data-testid="a3-study-plan-hub" className="overflow-hidden rounded-[18px] border border-blue-100 bg-slate-950 p-6 text-white shadow-[0_18px_38px_rgba(15,23,42,0.22)]">
+      <section data-testid="a3-study-plan-hub" className="overflow-hidden rounded-[18px] border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-bg)] p-6 text-[var(--a3-highlight-text)] shadow-[var(--a3-highlight-shadow)]">
         <div className="grid gap-6 xl:grid-cols-[1fr_420px]">
           <div>
             <A3Pill tone="green">学习计划</A3Pill>
             <h1 className="mt-4 text-3xl font-semibold tracking-normal">今天先按这条线学</h1>
-            <p className="mt-2 text-sm text-slate-400">{plan?.course.title ?? '当前课程'} / {primaryGoal}</p>
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">{studentPlanReason}</p>
+            <p className="mt-2 text-sm text-[var(--a3-highlight-muted)]">{plan?.course.title ?? '当前课程'} / {primaryGoal}</p>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-[var(--a3-highlight-muted)]">{studentPlanReason}</p>
             <div className="mt-5 grid gap-3 lg:grid-cols-4">
               <HubSignal label="课程" value={plan?.course.title ?? '--'} detail={plan?.course.id ?? 'course'} />
               <HubSignal label="当前节点" value={currentPathItem?.title ?? '待生成路径'} detail={currentPathItem?.chapter ?? '完成画像或诊断后生成'} />
               <HubSignal label="薄弱点" value={currentWeakPoints.slice(0, 2).join('、') || '暂无明显薄弱点'} detail={`复习队列 ${plan?.reviewQueue.length ?? 0} 个`} />
               <HubSignal label="今日安排" value={todayPrimaryTask?.title ?? '暂无今日任务'} detail={todayPrimaryTask ? `${todayPrimaryTask.estimatedMinutes} 分钟` : '查看今日学习'} />
             </div>
-            <div className="mt-4 rounded-2xl bg-white/10 p-4 text-sm leading-6 text-slate-200">
-              <span className="font-semibold text-emerald-200">安排依据：</span>
+            <div className="mt-4 rounded-2xl bg-[var(--a3-highlight-surface)] p-4 text-sm leading-6 text-[var(--a3-highlight-text)]">
+              <span className="font-semibold text-[var(--a3-highlight-accent)]">安排依据：</span>
               {shortPlanReason(planningReason)}
             </div>
             <div className="mt-5 grid gap-3 lg:grid-cols-3">
@@ -201,7 +201,7 @@ export function StudyPlanView() {
                   disabled={generating}
                   className={cn(
                     'h-auto justify-start rounded-xl px-4 py-3 text-left',
-                    option.selected ? 'bg-emerald-500 text-slate-950 hover:bg-emerald-400' : 'border-white/20 bg-white/10 text-white hover:bg-white/15',
+                    option.selected ? 'bg-amber-400 text-amber-950 hover:bg-amber-300' : 'border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] text-[var(--a3-highlight-text)] hover:bg-white/80 dark:hover:bg-white/10',
                   )}
                 >
                   <span className="flex flex-col">
@@ -213,18 +213,18 @@ export function StudyPlanView() {
                 </Button>
               ))}
             </div>
-            <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-300">
+            <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-[var(--a3-highlight-muted)]">
               <span>切换周期会立即重排今日和后续任务。</span>
-              <Button onClick={() => void generate(durationDays)} disabled={generating} size="sm" variant="outline" className="border-white/20 bg-white/10 text-white hover:bg-white/15">
+              <Button onClick={() => void generate(durationDays)} disabled={generating} size="sm" variant="outline" className="border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] text-[var(--a3-highlight-text)] hover:bg-white/80 dark:hover:bg-white/10">
                 {generating ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                 按当前周期重新排程
               </Button>
             </div>
           </div>
           <div className="space-y-3">
-            <div className="rounded-2xl border border-white/10 bg-white/10 p-4">
-              <div className="text-sm font-semibold text-white">计划快照</div>
-              <p className="mt-2 text-xs leading-5 text-slate-300">今天完成后，学习路径、错题复习和报告会同步更新。</p>
+            <div className="rounded-2xl border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] p-4">
+              <div className="text-sm font-semibold text-[var(--a3-highlight-text)]">计划快照</div>
+              <p className="mt-2 text-xs leading-5 text-[var(--a3-highlight-muted)]">今天完成后，学习路径、错题复习和报告会同步更新。</p>
             </div>
             <PlanContextMetric
               icon={Route}
@@ -245,7 +245,7 @@ export function StudyPlanView() {
       <StudyPlanFlowInsightPanel insights={planFlowInsights} />
       <StudyPlanProfileChangePanel insight={profileChangeInsight} />
 
-      {error && <div className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+      {error && <div className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:bg-rose-950/40 dark:text-rose-200">{error}</div>}
 
       <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_390px]" data-testid="a3-study-plan-continuity">
         <A3Card title="这条计划怎么接上学习" subtitle="从路径到今天任务，完成后自动更新进度。">
@@ -255,16 +255,16 @@ export function StudyPlanView() {
             <ContinuityStep index={3} title="今天" detail={todayPrimaryTask?.title ?? '查看今日任务'} href="/a3/today" />
             <ContinuityStep index={4} title="报告" detail="完成后同步进度和薄弱点" href="/a3/report" />
           </div>
-          <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 p-4">
-            <div className="text-sm font-semibold text-blue-950">今天要推进的节点</div>
+          <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 p-4 dark:border-blue-900/60 dark:bg-blue-950/35">
+            <div className="text-sm font-semibold text-blue-950 dark:text-blue-100">今天要推进的节点</div>
             <div className="mt-3 grid gap-2 md:grid-cols-2">
               {todayBindings.slice(0, 4).map((binding) => (
-                <div key={binding.taskId} className="rounded-lg bg-white px-3 py-2 text-xs leading-5 text-blue-900">
+                <div key={binding.taskId} className="rounded-lg bg-white px-3 py-2 text-xs leading-5 text-blue-900 dark:bg-slate-950/40 dark:text-blue-100">
                   <div className="font-semibold">{binding.title}</div>
-                  <div className="mt-1 text-blue-700">{binding.chapter ?? '复习任务'} · 当前进度 {binding.pathProgress}%</div>
+                  <div className="mt-1 text-blue-700 dark:text-blue-300">{binding.chapter ?? '复习任务'} · 当前进度 {binding.pathProgress}%</div>
                 </div>
               ))}
-              {!todayBindings.length && <div className="rounded-lg bg-white px-3 py-2 text-xs text-blue-700">暂无今日绑定任务，完成诊断或重新排程后会生成。</div>}
+              {!todayBindings.length && <div className="rounded-lg bg-white px-3 py-2 text-xs text-blue-700 dark:bg-slate-950/40 dark:text-blue-300">暂无今日绑定任务，完成诊断或重新排程后会生成。</div>}
             </div>
           </div>
         </A3Card>
@@ -312,12 +312,12 @@ export function StudyPlanView() {
               detail="错题会进入分层复习安排，并影响后续讲解、练习和复盘任务。"
             />
           </div>
-          <div data-testid="a3-study-plan-explainer" className="mt-4 rounded-[14px] border border-blue-100 bg-blue-50 p-4">
-            <div className="flex items-center gap-2 text-sm font-semibold text-blue-950">
-              <Sparkles className="size-4 text-blue-700" />
+          <div data-testid="a3-study-plan-explainer" className="mt-4 rounded-[14px] border border-blue-100 bg-blue-50 p-4 dark:border-blue-900/60 dark:bg-blue-950/35">
+            <div className="flex items-center gap-2 text-sm font-semibold text-blue-950 dark:text-blue-100">
+              <Sparkles className="size-4 text-blue-700 dark:text-blue-300" />
               今天的安排
             </div>
-            <div className="mt-3 grid gap-3 text-xs leading-5 text-blue-900 md:grid-cols-2">
+            <div className="mt-3 grid gap-3 text-xs leading-5 text-blue-900 dark:text-blue-100 md:grid-cols-2">
               <PlanExplainItem
                 label="画像"
                 value={`${explanation?.profileSignals.level.label ?? plan?.level.label ?? '待诊断'}，路径进度 ${explanation?.profileSignals.level.pathProgress ?? plan?.level.pathProgress ?? 0}%`}
@@ -339,19 +339,19 @@ export function StudyPlanView() {
                 detail={explanation?.reviewPolicy.reason ?? ((plan?.reviewQueue.length ?? 0) > 0 ? '错题会穿插到每日任务，避免只学新内容不复盘。' : '暂无待复习错题，后续测评会自动进入队列。')}
               />
             </div>
-            <div className="mt-3 rounded-lg bg-white/75 px-3 py-2 text-xs leading-5 text-blue-900">
+            <div className="mt-3 rounded-lg bg-white/75 px-3 py-2 text-xs leading-5 text-blue-900 dark:bg-slate-950/40 dark:text-blue-100">
               调整记录：{(explanation?.adjustments ?? plan?.adjustmentTimeline ?? []).slice(0, 2).map((event) => event.title).join('、') || '完成任务或测评后会记录计划变化原因'}
             </div>
             {currentChange && (
-              <div data-testid="a3-study-plan-current-change" className="mt-3 rounded-xl border border-blue-200 bg-white px-4 py-3">
+              <div data-testid="a3-study-plan-current-change" className="mt-3 rounded-xl border border-blue-200 bg-white px-4 py-3 dark:border-blue-900/60 dark:bg-slate-950/40">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-xs font-semibold text-blue-700">最近任务为什么变了</div>
-                    <div className="mt-1 text-sm font-semibold text-blue-950">{currentChange.title}</div>
-                    {currentChange.detail && <p className="mt-2 text-xs leading-5 text-blue-800">{currentChange.detail}</p>}
-                    <p className="mt-2 text-xs leading-5 text-blue-800">{currentChange.reason}</p>
-                    <p className="mt-1 text-xs leading-5 text-blue-700">{currentChange.impact}</p>
-                    {changeNextAction?.reason && <p className="mt-2 text-xs leading-5 text-blue-700">下一步：{changeNextAction.reason}</p>}
+                    <div className="text-xs font-semibold text-blue-700 dark:text-blue-300">最近任务为什么变了</div>
+                    <div className="mt-1 text-sm font-semibold text-blue-950 dark:text-blue-100">{currentChange.title}</div>
+                    {currentChange.detail && <p className="mt-2 text-xs leading-5 text-blue-800 dark:text-blue-200">{currentChange.detail}</p>}
+                    <p className="mt-2 text-xs leading-5 text-blue-800 dark:text-blue-200">{currentChange.reason}</p>
+                    <p className="mt-1 text-xs leading-5 text-blue-700 dark:text-blue-300">{currentChange.impact}</p>
+                    {changeNextAction?.reason && <p className="mt-2 text-xs leading-5 text-blue-700 dark:text-blue-300">下一步：{changeNextAction.reason}</p>}
                   </div>
                   {changeNextAction && (
                     <Button asChild size="sm" className="shrink-0 bg-blue-600 hover:bg-blue-700">
@@ -366,9 +366,9 @@ export function StudyPlanView() {
                 <div className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">ResourceFeedbackAgent</div>
                 <div className="mt-1 text-sm font-semibold">资源反馈已写回学习计划：{resourceFeedbackAdjustment.strategy}</div>
                 <div className="mt-2 grid gap-2 text-xs leading-5 md:grid-cols-3">
-                  <span className="rounded-lg bg-white/75 px-3 py-2">目标：{resourceFeedbackAdjustment.evidence?.latestGoal || '--'}</span>
-                  <span className="rounded-lg bg-white/75 px-3 py-2">反馈均分：{resourceFeedbackAdjustment.evidence?.averageFeedbackScore ?? 0}</span>
-                  <span className="rounded-lg bg-white/75 px-3 py-2">写回任务：{resourceFeedbackAdjustment.taskId ?? '--'}</span>
+                  <span className="rounded-lg bg-white/75 px-3 py-2 dark:bg-slate-950/40">目标：{resourceFeedbackAdjustment.evidence?.latestGoal || '--'}</span>
+                  <span className="rounded-lg bg-white/75 px-3 py-2 dark:bg-slate-950/40">反馈均分：{resourceFeedbackAdjustment.evidence?.averageFeedbackScore ?? 0}</span>
+                  <span className="rounded-lg bg-white/75 px-3 py-2 dark:bg-slate-950/40">写回任务：{resourceFeedbackAdjustment.taskId ?? '--'}</span>
                 </div>
                 {resourceFeedbackAdjustment.reason && <p className="mt-2 text-xs leading-5 text-emerald-800">{resourceFeedbackAdjustment.reason}</p>}
                 {resourceFeedbackAdjustment.nextAction && (
@@ -444,7 +444,7 @@ export function StudyPlanView() {
             >
               <div className="grid gap-3 lg:grid-cols-2">
                 {scheduledDays.map((day) => (
-                  <Link key={day.dayIndex} href={day.tasks[0]?.href ?? '/a3/classroom'} className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 transition-colors hover:border-blue-300 hover:bg-blue-50/50">
+                  <Link key={day.dayIndex} href={day.tasks[0]?.href ?? '/a3/classroom'} className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 transition-colors hover:border-blue-300 hover:bg-blue-50/50 dark:hover:bg-blue-950/30">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="text-sm font-semibold text-[var(--a3-text)]">{day.title}</div>
@@ -454,7 +454,7 @@ export function StudyPlanView() {
                       </div>
                       <A3Pill tone={day.status === 'completed' ? 'green' : day.status === 'today' ? 'blue' : day.status === 'rolled_over' ? 'orange' : 'slate'}>{dayStatusLabel[day.status]}</A3Pill>
                     </div>
-                    <div className="mt-4 h-2 rounded-full bg-slate-100">
+                    <div className="mt-4 h-2 rounded-full bg-slate-100 dark:bg-slate-800">
                       <div className="h-full rounded-full bg-blue-600" style={{ width: `${day.progress}%` }} />
                     </div>
                     <div className="mt-3 flex justify-between text-xs text-[var(--a3-text-muted)]">
@@ -494,7 +494,7 @@ export function StudyPlanView() {
                       </div>
                       <A3Pill tone={adjustmentTone[event.type]}>{adjustmentLabel(event.type)}</A3Pill>
                     </div>
-                    <div className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">{event.impact ?? event.detail ?? event.reason}</div>
+                    <div className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800 dark:bg-blue-950/35 dark:text-blue-200">{event.impact ?? event.detail ?? event.reason}</div>
                   </div>
                 ))}
                 {!plan?.adjustmentTimeline?.length && (
@@ -515,7 +515,7 @@ export function StudyPlanView() {
                       <span className="truncate text-[var(--a3-text)]">{item.title}</span>
                       <span className="font-semibold text-orange-700">{item.score}%</span>
                     </div>
-                    <div className="h-2 rounded-full bg-slate-100">
+                    <div className="h-2 rounded-full bg-slate-100 dark:bg-slate-800">
                       <div className="h-full rounded-full bg-orange-500" style={{ width: `${item.score}%` }} />
                     </div>
                     <div className="mt-1 text-xs text-[var(--a3-text-muted)]">
@@ -532,7 +532,7 @@ export function StudyPlanView() {
             <A3Card title="间隔复习队列">
               <div className="space-y-3">
                 {reviewQueue.slice(0, 5).map((item) => (
-                  <Link key={item.id} href={item.href} className="block rounded-xl bg-[var(--a3-surface-muted)] p-3 hover:bg-blue-50">
+                  <Link key={item.id} href={item.href} className="block rounded-xl bg-[var(--a3-surface-muted)] p-3 hover:bg-blue-50 dark:hover:bg-blue-950/35">
                     <div className="flex items-center justify-between gap-3">
                       <span className="truncate text-sm font-medium text-[var(--a3-text)]">{item.title}</span>
                       <A3Pill tone={getReviewStatusMeta(item).tone}>{getReviewStatusMeta(item).label}</A3Pill>
@@ -623,7 +623,7 @@ function StudyPlanFlowInsightPanel({ insights }: { insights: LearningFlowInsight
           <Link
             key={`${item.title}-${item.href}`}
             href={item.href}
-            className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 transition-colors hover:border-blue-300 hover:bg-blue-50/60"
+            className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 transition-colors hover:border-blue-300 hover:bg-blue-50/60 dark:hover:bg-blue-950/30"
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 text-sm font-semibold text-[var(--a3-text)]">{item.title}</div>
@@ -645,10 +645,10 @@ function StudyPlanProfileChangePanel({ insight }: { insight: LearningFlowInsight
       subtitle={insight.detail}
       action={<A3Pill tone={insight.tone}>{insight.meta || '画像时间线'}</A3Pill>}
     >
-      <div data-testid="a3-study-plan-profile-change-reason" className="grid gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
+      <div data-testid="a3-study-plan-profile-change-reason" className="grid gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4 dark:border-blue-900/60 dark:bg-blue-950/35 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
         <div>
-          <div className="text-sm font-semibold text-blue-950">{insight.title}</div>
-          <p className="mt-1 text-xs leading-5 text-blue-800">计划会把已确认画像用于任务时长、复习队列、资源类型和下一次推荐排序。</p>
+          <div className="text-sm font-semibold text-blue-950 dark:text-blue-100">{insight.title}</div>
+          <p className="mt-1 text-xs leading-5 text-blue-800 dark:text-blue-200">计划会把已确认画像用于任务时长、复习队列、资源类型和下一次推荐排序。</p>
         </div>
         <Button asChild size="sm" className="bg-blue-600 hover:bg-blue-700">
           <Link href={insight.href}>查看画像证据</Link>
@@ -670,22 +670,22 @@ function RationaleItem({ label, value, detail }: { label: string; value: string;
 
 function PlanExplainItem({ label, value, detail }: { label: string; value: string; detail: string }) {
   return (
-    <div className="rounded-lg bg-white/75 px-3 py-2">
-      <div className="font-semibold text-blue-950">{label}</div>
+    <div className="rounded-lg bg-white/75 px-3 py-2 dark:bg-slate-950/40">
+      <div className="font-semibold text-blue-950 dark:text-blue-100">{label}</div>
       <div className="mt-1 font-medium">{value}</div>
-      <div className="mt-1 text-blue-700">{detail}</div>
+      <div className="mt-1 text-blue-700 dark:text-blue-300">{detail}</div>
     </div>
   );
 }
 
 function HubSignal({ label, value, detail }: { label: string; value: string; detail: string }) {
   return (
-    <div className="rounded-2xl bg-white/10 p-4">
-      <div className="text-xs font-medium text-emerald-200">{label}</div>
-      <div className="mt-2 truncate text-sm font-semibold text-white" title={value}>
+    <div className="rounded-2xl bg-[var(--a3-highlight-surface)] p-4">
+      <div className="text-xs font-medium text-[var(--a3-highlight-accent)]">{label}</div>
+      <div className="mt-2 truncate text-sm font-semibold text-[var(--a3-highlight-text)]" title={value}>
         {value}
       </div>
-      <div className="mt-1 truncate text-xs text-slate-400" title={detail}>
+      <div className="mt-1 truncate text-xs text-[var(--a3-highlight-muted)]" title={detail}>
         {detail}
       </div>
     </div>
@@ -694,7 +694,7 @@ function HubSignal({ label, value, detail }: { label: string; value: string; det
 
 function ContinuityStep({ index, title, detail, href }: { index: number; title: string; detail: string; href: string }) {
   return (
-    <Link href={href} className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 transition-colors hover:border-blue-300 hover:bg-blue-50/60">
+    <Link href={href} className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 transition-colors hover:border-blue-300 hover:bg-blue-50/60 dark:hover:bg-blue-950/30">
       <div className="flex size-8 items-center justify-center rounded-lg bg-blue-600 text-sm font-semibold text-white">{index}</div>
       <div className="mt-3 text-sm font-semibold text-[var(--a3-text)]">{title}</div>
       <p className="mt-2 text-xs leading-5 text-[var(--a3-text-muted)]">{detail}</p>
@@ -704,13 +704,13 @@ function ContinuityStep({ index, title, detail, href }: { index: number; title: 
 
 function PlanContextMetric({ icon: Icon, label, value, detail }: { icon: typeof Target; label: string; value: string; detail: string }) {
   return (
-    <div className="rounded-xl bg-white/10 p-4">
-      <Icon className="size-5 text-emerald-300" />
-      <div className="mt-3 text-xs text-slate-300">{label}</div>
-      <div className="mt-1 truncate text-base font-semibold text-white" title={value}>
+    <div className="rounded-xl bg-[var(--a3-highlight-surface)] p-4">
+      <Icon className="size-5 text-[var(--a3-highlight-accent)]" />
+      <div className="mt-3 text-xs text-[var(--a3-highlight-muted)]">{label}</div>
+      <div className="mt-1 truncate text-base font-semibold text-[var(--a3-highlight-text)]" title={value}>
         {value}
       </div>
-      <div className="mt-1 truncate text-xs text-slate-400" title={detail}>
+      <div className="mt-1 truncate text-xs text-[var(--a3-highlight-muted)]" title={detail}>
         {detail}
       </div>
     </div>
@@ -719,7 +719,7 @@ function PlanContextMetric({ icon: Icon, label, value, detail }: { icon: typeof 
 
 function PlanSyncMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg bg-white/75 px-3 py-2">
+    <div className="rounded-lg bg-white/75 px-3 py-2 dark:bg-slate-950/40">
       <div className="text-[11px] font-medium text-emerald-700">{label}</div>
       <div className="mt-1 truncate font-semibold text-emerald-950" title={value}>{value}</div>
     </div>

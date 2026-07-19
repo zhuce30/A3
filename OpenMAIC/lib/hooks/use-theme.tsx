@@ -12,6 +12,17 @@ interface ThemeContextType {
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
+function isTheme(value: string | null): value is Theme {
+  return value === 'light' || value === 'dark' || value === 'system';
+}
+
+function beginThemeTransition() {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const root = document.documentElement;
+  root.classList.add('a3-theme-transitioning');
+  window.setTimeout(() => root.classList.remove('a3-theme-transitioning'), 260);
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>('system');
   const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>('light');
@@ -21,9 +32,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // Hydrate from localStorage after mount (avoids SSR mismatch)
   /* eslint-disable react-hooks/set-state-in-effect -- Hydration from localStorage must happen in effect */
   useEffect(() => {
-    const stored = localStorage.getItem('theme') as Theme | null;
-    if (stored && ['light', 'dark', 'system'].includes(stored)) {
+    const stored = localStorage.getItem('theme');
+    const legacyA3Theme = localStorage.getItem('a3-theme');
+    if (isTheme(stored)) {
       setThemeState(stored);
+    } else if (isTheme(legacyA3Theme)) {
+      setThemeState(legacyA3Theme);
+      localStorage.setItem('theme', legacyA3Theme);
     }
     setSystemTheme(window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   }, []);
@@ -32,11 +47,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // Apply theme to document
   useEffect(() => {
     const root = document.documentElement;
-    if (resolvedTheme === 'dark') {
-      root.classList.add('dark');
-    } else {
-      root.classList.remove('dark');
-    }
+    root.classList.toggle('dark', resolvedTheme === 'dark');
+    root.dataset.a3Theme = resolvedTheme;
   }, [resolvedTheme]);
 
   // Listen to system theme changes
@@ -51,8 +63,10 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   // Save theme to localStorage
   const handleSetTheme = (newTheme: Theme) => {
+    beginThemeTransition();
     setThemeState(newTheme);
     localStorage.setItem('theme', newTheme);
+    localStorage.setItem('a3-theme', newTheme);
   };
 
   return (

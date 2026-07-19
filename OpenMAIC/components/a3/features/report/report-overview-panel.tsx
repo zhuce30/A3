@@ -15,46 +15,46 @@ export function ReportOverviewPanel({
   const evidenceLabel = evidenceState === 'ready' ? '证据充分' : evidenceState === 'partial' ? '部分证据' : '证据待补充';
 
   return (
-    <section className="overflow-hidden rounded-lg border border-slate-200 bg-white" aria-labelledby="report-overview-title">
+    <section className="overflow-hidden rounded-lg border border-[var(--a3-border)] bg-[var(--a3-surface-solid)]" aria-labelledby="report-overview-title">
       <div className="grid lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="p-5 sm:p-7">
           <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700">
+            <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700 dark:text-emerald-300">
               <TrendingUp className="size-4" />
               阶段结论
             </span>
-            <span className="text-slate-300">|</span>
-            <span className="inline-flex items-center gap-1.5 text-slate-500">
+            <span className="text-[var(--a3-border)]">|</span>
+            <span className="inline-flex items-center gap-1.5 text-[var(--a3-text-muted)]">
               <ShieldCheck className="size-4" />
               {evidenceLabel}
             </span>
             {updating && <span className="text-blue-600" role="status">正在更新周期数据...</span>}
           </div>
-          <h2 id="report-overview-title" className="mt-4 max-w-3xl text-2xl font-semibold text-slate-950 sm:text-3xl">
+          <h2 id="report-overview-title" className="mt-4 max-w-3xl text-2xl font-semibold text-[var(--a3-text)] sm:text-3xl">
             {overview.headline}
           </h2>
-          <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600">{overview.summary}</p>
+          <p className="mt-3 max-w-3xl text-sm leading-7 text-[var(--a3-text-muted)]">{overview.summary}</p>
           <div className="mt-5 flex flex-wrap gap-x-6 gap-y-3 text-sm">
-            <span className="inline-flex items-center gap-2 font-medium text-emerald-700">
+            <span className="inline-flex items-center gap-2 font-medium text-emerald-700 dark:text-emerald-300">
               <TrendingUp className="size-4" />
               {overview.progressSignal}
             </span>
-            <span className="inline-flex items-center gap-2 font-medium text-amber-700">
+            <span className="inline-flex items-center gap-2 font-medium text-amber-700 dark:text-amber-300">
               <CircleAlert className="size-4" />
               {overview.primaryRisk}
             </span>
           </div>
         </div>
 
-        <div className="border-t border-slate-200 bg-slate-950 p-5 text-white lg:border-l lg:border-t-0 sm:p-6">
-          <p className="text-xs font-semibold text-slate-300">现在先做这一件事</p>
+        <div className="border-t border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-bg)] p-5 text-[var(--a3-highlight-text)] lg:border-l lg:border-t-0 sm:p-6">
+          <p className="text-xs font-semibold text-[var(--a3-highlight-accent)]">现在先做这一件事</p>
           <h3 className="mt-3 text-xl font-semibold">{overview.primaryAction.label}</h3>
-          <p className="mt-3 text-sm leading-6 text-slate-300">{overview.primaryAction.expectedOutcome}</p>
-          <div className="mt-4 inline-flex items-center gap-2 text-xs text-slate-300">
+          <p className="mt-3 text-sm leading-6 text-[var(--a3-highlight-muted)]">{overview.primaryAction.expectedOutcome}</p>
+          <div className="mt-4 inline-flex items-center gap-2 text-xs text-[var(--a3-highlight-muted)]">
             <Clock3 className="size-4" />
             预计 {overview.primaryAction.estimatedMinutes} 分钟
           </div>
-          <Button asChild className="mt-5 w-full bg-white text-slate-950 hover:bg-slate-100">
+          <Button asChild className="mt-5 w-full bg-blue-600 text-white hover:bg-blue-700">
             <Link data-testid="a3-report-primary-action" href={overview.primaryAction.href}>
               开始行动
               <ArrowRight className="size-4" />

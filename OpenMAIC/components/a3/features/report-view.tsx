@@ -148,8 +148,8 @@ export function ReportView() {
 
   if (!report) {
     return (
-      <div className="rounded-lg border border-rose-200 bg-white p-6" role="alert">
-        <h1 className="text-lg font-semibold text-slate-950">学习报告暂时无法打开</h1>
+      <div className="rounded-lg border border-rose-200 bg-[var(--a3-surface-solid)] p-6" role="alert">
+        <h1 className="text-lg font-semibold text-[var(--a3-text)]">学习报告暂时无法打开</h1>
         <p className="mt-2 text-sm text-rose-700">{error || '请稍后重试。'}</p>
         <Button className="mt-4" onClick={() => { setLoading(true); setReloadToken((value) => value + 1); }}>
           <RotateCcw className="size-4" />重新加载
@@ -187,8 +187,8 @@ export function ReportView() {
             <Image src="/avatars/learner.svg" alt={`${displayName}头像`} fill className="object-cover" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-2xl font-semibold text-slate-950">{displayName}的学习报告</h1>
-            <p className="mt-1 text-sm text-slate-500">{studentReport.period.label}：{studentReport.period.start} 至 {studentReport.period.end}</p>
+            <h1 className="text-2xl font-semibold text-[var(--a3-text)]">{displayName}的学习报告</h1>
+            <p className="mt-1 text-sm text-[var(--a3-text-muted)]">{studentReport.period.label}：{studentReport.period.start} 至 {studentReport.period.end}</p>
           </div>
         </div>
         <PeriodSegmentedControl value={period} loading={reportLoading} onChange={(nextPeriod) => {
@@ -223,7 +223,7 @@ export function ReportView() {
           router.push(`/a3/wrong-notebook?${query.toString()}`);
         }}
       />
-      <p className="pb-2 text-center text-xs text-slate-400">报告仅统计系统内已记录的学习行为。</p>
+      <p className="pb-2 text-center text-xs text-[var(--a3-text-muted)]">报告仅统计系统内已记录的学习行为。</p>
     </div>
   );
 }
@@ -235,9 +235,9 @@ function PeriodSegmentedControl({ value, loading, onChange }: { value: ReportPer
     { key: 'term', label: '本学期' },
   ];
   return (
-    <div className="a3-report-no-print inline-flex h-10 items-center rounded-lg border border-slate-200 bg-white p-1" aria-label="报告周期">
+    <div className="a3-report-no-print inline-flex h-10 items-center rounded-lg border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-1" aria-label="报告周期">
       {options.map((option) => (
-        <button key={option.key} type="button" disabled={loading} onClick={() => onChange(option.key)} className={`h-8 px-3 text-sm font-medium ${value === option.key ? 'rounded-md bg-slate-950 text-white' : 'text-slate-600 hover:text-slate-950'}`}>
+        <button key={option.key} type="button" disabled={loading} onClick={() => onChange(option.key)} className={`h-8 px-3 text-sm font-medium transition-colors ${value === option.key ? 'rounded-md bg-blue-600 text-white' : 'text-[var(--a3-text-muted)] hover:text-[var(--a3-text)]'}`}>
           {option.label}
         </button>
       ))}
@@ -270,25 +270,25 @@ function LearningSummaryPanel({
     <section data-testid="a3-report-summary-tool" className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
       <div className="min-w-0">
         <label className="block">
-          <span className="text-sm font-semibold text-slate-900">总结要求</span>
-          <textarea data-testid="a3-report-summary-prompt" value={prompt} maxLength={200} rows={3} onChange={(event) => onPromptChange(event.target.value)} className="mt-2 w-full resize-none rounded-lg border border-slate-200 px-3 py-2 text-sm leading-6 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" />
+          <span className="text-sm font-semibold text-[var(--a3-text)]">总结要求</span>
+          <textarea data-testid="a3-report-summary-prompt" value={prompt} maxLength={200} rows={3} onChange={(event) => onPromptChange(event.target.value)} className="mt-2 w-full resize-none rounded-lg border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-3 py-2 text-sm leading-6 text-[var(--a3-text)] outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-950" />
         </label>
         <Button data-testid="a3-report-summary-generate" type="button" onClick={onGenerate} disabled={loading} className="mt-3">
           {loading ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}生成总结
         </Button>
         {error && <p className="mt-3 text-sm text-rose-700">{error}</p>}
-        <div data-testid="a3-report-summary-markdown" className="mt-4 min-h-40 rounded-lg bg-slate-50 p-4">
-          {selected ? <A3Markdown className="text-slate-700">{selected.contentMd}</A3Markdown> : <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-slate-500"><FileText className="size-5" />还没有学习总结</div>}
+        <div data-testid="a3-report-summary-markdown" className="mt-4 min-h-40 rounded-lg bg-[var(--a3-surface-muted)] p-4">
+          {selected ? <A3Markdown className="text-[var(--a3-text)]">{selected.contentMd}</A3Markdown> : <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-[var(--a3-text-muted)]"><FileText className="size-5" />还没有学习总结</div>}
         </div>
       </div>
       <div data-testid="a3-report-summary-history" className="space-y-2">
-        <h3 className="text-sm font-semibold text-slate-900">历史总结</h3>
+        <h3 className="text-sm font-semibold text-[var(--a3-text)]">历史总结</h3>
         {documents.length ? documents.map((item) => (
-          <button key={item.id} type="button" onClick={() => onSelect(item.id)} className={`w-full rounded-lg border p-3 text-left ${item.id === selected?.id ? 'border-blue-300 bg-blue-50' : 'border-slate-200 bg-white'}`}>
-            <span className="block truncate text-sm font-semibold text-slate-900">{item.title}</span>
-            <span className="mt-1 block text-xs text-slate-500">{item.summaryDate}</span>
+          <button key={item.id} type="button" onClick={() => onSelect(item.id)} className={`w-full rounded-lg border p-3 text-left transition-colors ${item.id === selected?.id ? 'border-blue-300 bg-blue-50 dark:bg-blue-950/40' : 'border-[var(--a3-border)] bg-[var(--a3-surface-solid)]'}`}>
+            <span className="block truncate text-sm font-semibold text-[var(--a3-text)]">{item.title}</span>
+            <span className="mt-1 block text-xs text-[var(--a3-text-muted)]">{item.summaryDate}</span>
           </button>
-        )) : <p className="rounded-lg bg-slate-50 p-3 text-sm text-slate-500">生成后会保留在这里。</p>}
+        )) : <p className="rounded-lg bg-[var(--a3-surface-muted)] p-3 text-sm text-[var(--a3-text-muted)]">生成后会保留在这里。</p>}
       </div>
     </section>
   );

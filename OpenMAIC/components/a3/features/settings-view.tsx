@@ -9,6 +9,7 @@ import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { a3GetJson, a3PatchJson, a3PostJson } from '@/lib/a3/api-client';
 import { getA3LocaleLabel, useA3Locale, type A3Locale } from '@/lib/a3/i18n';
 import type { A3SystemCheck, A3SystemCheckStatus, A3SystemHealthResponse } from '@/lib/a3/system-types';
+import { useTheme } from '@/lib/hooks/use-theme';
 import { cn } from '@/lib/utils';
 
 type ConsentState = {
@@ -150,14 +151,11 @@ export function SettingsView() {
   const router = useRouter();
   const user = useA3CurrentUser();
   const { locale, setLocale } = useA3Locale();
+  const { resolvedTheme: theme, setTheme } = useTheme();
   const [displayName, setDisplayName] = useState(user?.displayName ?? '');
   const [school, setSchool] = useState(user?.school ?? '');
   const [email, setEmail] = useState(user?.email ?? '');
   const [studentId, setStudentId] = useState(user?.studentId ?? '');
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    if (typeof window === 'undefined') return 'light';
-    return window.localStorage.getItem('a3-theme') === 'dark' ? 'dark' : 'light';
-  });
   const [consents, setConsents] = useState<ConsentState>(defaultConsents);
   const [message, setMessage] = useState('');
   const [saving, setSaving] = useState(false);
@@ -208,9 +206,6 @@ export function SettingsView() {
 
   function applyTheme(nextTheme: 'light' | 'dark') {
     setTheme(nextTheme);
-    document.documentElement.classList.toggle('dark', nextTheme === 'dark');
-    document.documentElement.dataset.a3Theme = nextTheme;
-    window.localStorage.setItem('a3-theme', nextTheme);
   }
 
   async function saveProfile() {

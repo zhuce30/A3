@@ -9,9 +9,9 @@ import type { A3Notification, A3NotificationsResponse } from '@/lib/a3/engagemen
 import { searchA3HelpArticles } from '@/lib/a3/help-content';
 import { getA3LocaleLabel, useA3Locale, type A3Locale } from '@/lib/a3/i18n';
 import { startA3TaskStream } from '@/lib/a3/task-stream-client';
+import { useTheme } from '@/lib/hooks/use-theme';
 import { cn } from '@/lib/utils';
 
-type ThemeMode = 'light' | 'dark';
 type Panel = 'tasks' | 'notifications' | 'help' | 'language' | null;
 
 type A3TaskProgressCounter = {
@@ -69,24 +69,14 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
   const [activePanel, setActivePanel] = useState<Panel>(null);
   const currentUser = useA3CurrentUser();
   const { locale, messages, setLocale } = useA3Locale();
+  const { resolvedTheme, setTheme } = useTheme();
   const [helpQuery, setHelpQuery] = useState('');
-  const [theme, setTheme] = useState<ThemeMode>(() => {
-    if (typeof window === 'undefined') return 'light';
-    const savedTheme = window.localStorage.getItem('a3-theme');
-    return savedTheme === 'dark' ? 'dark' : 'light';
-  });
   const [notifications, setNotifications] = useState<A3Notification[]>([]);
   const [notificationSummary, setNotificationSummary] = useState<A3NotificationsResponse['summary'] | null>(null);
   const [tasks, setTasks] = useState<A3UnifiedTask[]>([]);
   const [taskSummary, setTaskSummary] = useState<A3TasksResponse['summary'] | null>(null);
   const [taskError, setTaskError] = useState('');
   const [taskStreamState, setTaskStreamState] = useState<'connecting' | 'live' | 'fallback'>('connecting');
-
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', theme === 'dark');
-    document.documentElement.dataset.a3Theme = theme;
-    window.localStorage.setItem('a3-theme', theme);
-  }, [theme]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -490,15 +480,15 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
       {showThemeToggle && (
         <button
           type="button"
-          onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
+          onClick={() => setTheme(resolvedTheme === 'light' ? 'dark' : 'light')}
           className={cn(
             'hidden h-10 w-[86px] items-center rounded-full border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-1 shadow-sm transition-colors sm:flex',
-            theme === 'dark' && 'bg-slate-900',
+            resolvedTheme === 'dark' && 'bg-slate-900',
           )}
           aria-label={messages.themeToggle}
         >
-          <span className={cn('flex size-8 items-center justify-center rounded-full transition-all', theme === 'light' ? 'translate-x-0 bg-blue-50 text-slate-800' : 'translate-x-10 bg-slate-700 text-white')}>
-            {theme === 'light' ? <Sun className="size-5" /> : <Moon className="size-5" />}
+          <span className={cn('flex size-8 items-center justify-center rounded-full transition-all', resolvedTheme === 'light' ? 'translate-x-0 bg-blue-50 text-slate-800' : 'translate-x-10 bg-slate-700 text-white')}>
+            {resolvedTheme === 'light' ? <Sun className="size-5" /> : <Moon className="size-5" />}
           </span>
         </button>
       )}

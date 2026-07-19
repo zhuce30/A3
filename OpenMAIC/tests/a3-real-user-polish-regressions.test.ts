@@ -5,6 +5,11 @@ import { describe, expect, it } from 'vitest';
 const root = process.cwd();
 const authPages = readFileSync(join(root, 'components/a3/auth/a3-auth-pages.tsx'), 'utf8');
 const classroom = readFileSync(join(root, 'components/a3/features/classroom-view-redesign.tsx'), 'utf8');
+const globalStyles = readFileSync(join(root, 'app/globals.css'), 'utf8');
+const recommendations = readFileSync(join(root, 'components/a3/features/recommendations-view.tsx'), 'utf8');
+const studyPlan = readFileSync(join(root, 'components/a3/features/study-plan-view.tsx'), 'utf8');
+const reportOverview = readFileSync(join(root, 'components/a3/features/report/report-overview-panel.tsx'), 'utf8');
+const themeHook = readFileSync(join(root, 'lib/hooks/use-theme.tsx'), 'utf8');
 const profileSetupStartMarker = 'export function ProfileSetupPage() {';
 const profileSetupEndMarker = '\nfunction ProfileUpdateTimelinePanel({';
 const profileSetupStart = authPages.indexOf(profileSetupStartMarker);
@@ -71,5 +76,23 @@ describe('A3 real-user polish regressions', () => {
     expect(classroom).toContain('data-testid="a3-classroom-workspace"');
     expect(classroom).toContain('CLASSROOM_OUTLINE_BUTTON_CLASS');
     expect(classroom).toContain('dark:disabled:opacity-100');
+  });
+
+  it('uses one adaptive warm highlight surface instead of isolated black cards', () => {
+    expect(globalStyles).toContain('--a3-highlight-bg: #fff7d6');
+    expect(globalStyles).toContain('--a3-highlight-bg: #292617');
+    expect(recommendations).toContain('bg-[var(--a3-highlight-bg)]');
+    expect(studyPlan).toContain('bg-[var(--a3-highlight-bg)]');
+    expect(reportOverview).toContain('bg-[var(--a3-highlight-bg)]');
+    expect(recommendations).not.toContain('border border-slate-200 bg-slate-950 text-slate-50');
+    expect(studyPlan).not.toContain('border border-blue-100 bg-slate-950');
+    expect(reportOverview).not.toContain('bg-slate-950 p-5 text-white');
+  });
+
+  it('keeps A3 theme state in the shared provider with a softened transition', () => {
+    expect(themeHook).toContain("localStorage.getItem('a3-theme')");
+    expect(themeHook).toContain("root.dataset.a3Theme = resolvedTheme");
+    expect(themeHook).toContain("root.classList.add('a3-theme-transitioning')");
+    expect(globalStyles).toContain('.a3-theme-transitioning [data-a3-shell] *');
   });
 });

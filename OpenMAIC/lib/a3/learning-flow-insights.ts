@@ -39,7 +39,7 @@ export function buildProfileChangeInsight(feed: DynamicProfileFeedResponse | nul
   if (pending.length > 0) {
     return {
       title: `画像有 ${pending.length} 条变化待确认`,
-      detail: `${profileSourceLabel(current.source)}建议调整${dimension}：${summarizeProfileTimelineEntry(current)}。确认后会影响今日任务、计划节奏和推荐排序。`,
+      detail: `${profileSourceLabel(current.source)}建议更新画像：${summarizeProfileTimelineEntry(current)}。确认后会影响今日任务、计划节奏和推荐排序。`,
       href: '/a3/profile-setup',
       tone: 'orange',
       meta: `${Math.round((current.confidence ?? 0) * 100)}% 置信度`,

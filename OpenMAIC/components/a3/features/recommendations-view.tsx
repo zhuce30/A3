@@ -574,21 +574,21 @@ export function RecommendationsView() {
 
   return (
     <div data-testid="a3-recommendations-view" className="space-y-5">
-      <section className="overflow-hidden rounded-[18px] border border-slate-200 bg-slate-950 text-slate-50 shadow-sm">
+      <section className="overflow-hidden rounded-[18px] border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-bg)] text-[var(--a3-highlight-text)] shadow-[var(--a3-highlight-shadow)]">
         <div className="grid gap-6 p-5 lg:grid-cols-[1fr_360px] lg:p-6">
           <div>
-            <div className="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-1 text-sm font-medium text-blue-100">
+            <div className="inline-flex items-center gap-2 rounded-lg bg-[var(--a3-highlight-surface)] px-3 py-1 text-sm font-medium text-[var(--a3-highlight-accent)]">
               <Sparkles className="size-4" />
               资源生成工作台
             </div>
             <h1 className="mt-4 max-w-3xl text-2xl font-semibold tracking-normal">
               说出你现在卡住的内容，生成一套能直接学习的专属资料。
             </h1>
-            <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--a3-highlight-muted)]">
               文档、课件、导图、练习、案例、代码实验和视频会分开呈现，想先看哪一类就打开哪一类。
             </p>
             <div className="mt-5">
-              <label htmlFor="resource-goal" className="text-sm font-semibold text-slate-100">
+              <label htmlFor="resource-goal" className="text-sm font-semibold text-[var(--a3-highlight-text)]">
                 你的学习需求
               </label>
               <textarea
@@ -597,13 +597,13 @@ export function RecommendationsView() {
                 onChange={(event) => setGoal(event.target.value)}
                 rows={5}
                 placeholder="例如：进程调度、同步互斥、死锁和虚拟内存这些内容我还不太清楚，希望生成一套适合复习和练习的资料。"
-                className="mt-2 w-full resize-none rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm leading-6 text-slate-50 outline-none transition placeholder:text-slate-500 focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
+                className="mt-2 w-full resize-none rounded-xl border border-[var(--a3-highlight-border)] bg-[var(--a3-surface-solid)] px-4 py-3 text-sm leading-6 text-[var(--a3-text)] outline-none transition placeholder:text-[var(--a3-text-muted)] focus:border-blue-400 focus:ring-2 focus:ring-blue-500/20"
                 data-testid="a3-resource-goal-input"
               />
-              <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-400">
-                <span className="rounded-full bg-white/5 px-3 py-1">示例：时间片轮转怎么分析</span>
-                <span className="rounded-full bg-white/5 px-3 py-1">示例：信号量不会做题</span>
-                <span className="rounded-full bg-white/5 px-3 py-1">示例：虚拟内存复习</span>
+              <div className="mt-2 flex flex-wrap gap-2 text-xs text-[var(--a3-highlight-muted)]">
+                <span className="rounded-full bg-[var(--a3-highlight-surface)] px-3 py-1">示例：时间片轮转怎么分析</span>
+                <span className="rounded-full bg-[var(--a3-highlight-surface)] px-3 py-1">示例：信号量不会做题</span>
+                <span className="rounded-full bg-[var(--a3-highlight-surface)] px-3 py-1">示例：虚拟内存复习</span>
               </div>
               <div className="mt-4 flex flex-wrap gap-3">
                 <Button
@@ -616,27 +616,27 @@ export function RecommendationsView() {
                   {generatingPack ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
                   生成完整资源包
                  </Button>
-                 <Button asChild type="button" variant="outline" className="h-11 border-slate-600 bg-slate-900 text-slate-100 hover:bg-slate-800" data-testid="a3-full-resource-pack-generate">
+                 <Button asChild type="button" variant="outline" className="h-11 border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] text-[var(--a3-highlight-text)] hover:bg-white/80 dark:hover:bg-white/10" data-testid="a3-full-resource-pack-generate">
                    <Link href="/a3/resources/latest" data-testid="a3-open-latest-resource-pack">查看最新资源包</Link>
                  </Button>
-                 <Button asChild type="button" variant="outline" className="h-11 border-slate-600 bg-slate-900 text-slate-100 hover:bg-slate-800">
+                 <Button asChild type="button" variant="outline" className="h-11 border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] text-[var(--a3-highlight-text)] hover:bg-white/80 dark:hover:bg-white/10">
                    <Link href="/a3/classroom">进课堂学习</Link>
                  </Button>
-                <Button asChild type="button" variant="outline" className="h-11 border-slate-600 bg-slate-900 text-slate-100 hover:bg-slate-800">
+                <Button asChild type="button" variant="outline" className="h-11 border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] text-[var(--a3-highlight-text)] hover:bg-white/80 dark:hover:bg-white/10">
                   <Link href="/a3/knowledge-base">
                     <BookOpenText className="size-4" />
                     管理知识库资料
                   </Link>
                 </Button>
-                <Button asChild type="button" variant="outline" className="h-11 border-slate-600 bg-slate-900 text-slate-100 hover:bg-slate-800">
+                <Button asChild type="button" variant="outline" className="h-11 border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] text-[var(--a3-highlight-text)] hover:bg-white/80 dark:hover:bg-white/10">
                   <Link href="/a3/resources">
                     <Archive className="size-4" />
                     查看资源记录
                   </Link>
                 </Button>
               </div>
-              <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.04] p-3">
-                <div className="text-xs font-semibold text-slate-300">按需单项生成</div>
+              <div className="mt-5 rounded-2xl border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] p-3">
+                <div className="text-xs font-semibold text-[var(--a3-highlight-muted)]">按需单项生成</div>
                 <div className="mt-3 flex flex-wrap gap-2" data-testid="a3-single-resource-type-grid">
                   {resourceEntries.map((entry) => {
                     const item = { type: entry.resourceType, label: entry.title };
@@ -659,7 +659,7 @@ export function RecommendationsView() {
                           else if (isVideo) void generateVideoFromScript();
                           else if (item.type) void generateSingleResourceV2(item.type);
                         }}
-                        className="border-slate-600 bg-slate-900 text-slate-100 hover:bg-slate-800"
+                        className="border-[var(--a3-highlight-border)] bg-[var(--a3-surface-solid)] text-[var(--a3-text)] hover:bg-[var(--a3-surface-muted)]"
                       >
                         {loading ? <Loader2 className="size-3.5 animate-spin" /> : <entry.icon className="size-3.5" />}
                         {entry.title}
@@ -675,7 +675,7 @@ export function RecommendationsView() {
                          variant="outline"
                          disabled={!goal.trim() || singleGeneratingType === item.type || generatingPack}
                          data-testid="a3-single-resource-generate"
-                         className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10"
+                         className="border-[var(--a3-highlight-border)] bg-[var(--a3-surface-solid)] text-[var(--a3-text)] hover:bg-[var(--a3-surface-muted)]"
                          onClick={() => void generateSingleResourceV2(item.type)}
                        >
                          快速生成讲义文档
@@ -687,11 +687,11 @@ export function RecommendationsView() {
             </div>
           </div>
 
-          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4" data-testid="a3-resource-generation-evidence">
+          <div className="rounded-2xl border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] p-4" data-testid="a3-resource-generation-evidence">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-sm font-semibold text-slate-100">本次会参考</div>
-                <p className="mt-1 text-xs leading-5 text-slate-400">系统会把你的描述和学习记录一起使用。</p>
+                <div className="text-sm font-semibold text-[var(--a3-highlight-text)]">本次会参考</div>
+                <p className="mt-1 text-xs leading-5 text-[var(--a3-highlight-muted)]">系统会把你的描述和学习记录一起使用。</p>
               </div>
               <A3Pill tone="blue">实时更新</A3Pill>
             </div>
@@ -702,7 +702,7 @@ export function RecommendationsView() {
               <EvidenceLine label="知识库来源" value={evidence.sourceCount} />
               <EvidenceLine label="生成范围" value="文档、PPT、导图、练习、案例、代码实验、视频" />
             </div>
-            <div className="mt-4 rounded-xl bg-blue-500/10 p-3 text-xs leading-5 text-blue-100">
+            <div className="mt-4 rounded-xl bg-blue-50 p-3 text-xs leading-5 text-blue-900 dark:bg-blue-950/40 dark:text-blue-100">
               RetrieverAgent 先检索资料，ResourceSynthesisAgent 生成资源，VerifierAgent 标明来源状态。
             </div>
           </div>
@@ -727,7 +727,7 @@ export function RecommendationsView() {
               </h2>
               <p className="mt-1 text-sm text-[var(--a3-text-muted)]">已入库资料按你的路径、错题、薄弱点和可用时间排序，不需要重复上传解析。</p>
             </div>
-            <Button asChild size="sm" variant="outline" className="bg-white">
+            <Button asChild size="sm" variant="outline" className="bg-[var(--a3-surface-solid)]">
               <Link href="/a3/library">进入系统资料库<ArrowRight className="size-4" /></Link>
             </Button>
           </div>
@@ -736,7 +736,7 @@ export function RecommendationsView() {
               <Link
                 key={resource.resourceCode}
                 href={`/a3/library/${resource.resourceCode}`}
-                className="group rounded-lg border border-[var(--a3-border)] bg-white p-4 transition-colors hover:border-blue-300"
+                className="group rounded-lg border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 transition-colors hover:border-blue-300"
               >
                 <div className="flex items-center justify-between gap-3">
                   <A3Pill tone={resource.resourceType === 'video' ? 'violet' : resource.resourceType === 'code_lab' ? 'green' : 'blue'}>{resource.resourceTypeLabel}</A3Pill>
@@ -759,9 +759,9 @@ export function RecommendationsView() {
           <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3" data-testid="a3-recommendation-sort-benefit-strip">
             <div className="text-sm font-semibold text-blue-950">这次排序给你的直接帮助</div>
             <div className="mt-2 flex flex-wrap gap-2 text-xs text-blue-800" data-testid="a3-recommendation-user-benefit">
-              <span className="rounded-full bg-white px-3 py-1">今日优先学习动作：进课堂学习</span>
-              <span className="rounded-full bg-white px-3 py-1">按目标重新推荐</span>
-              <span className="rounded-full bg-white px-3 py-1">补充知识库证据</span>
+              <span className="rounded-full bg-[var(--a3-surface-solid)] px-3 py-1">今日优先学习动作：进课堂学习</span>
+              <span className="rounded-full bg-[var(--a3-surface-solid)] px-3 py-1">按目标重新推荐</span>
+              <span className="rounded-full bg-[var(--a3-surface-solid)] px-3 py-1">补充知识库证据</span>
             </div>
           </div>
           <A3Card
@@ -771,7 +771,7 @@ export function RecommendationsView() {
               <div className="flex items-center gap-2">
                 <A3Pill tone={context?.rationale.resourceEffectAttribution?.summary?.resourceEventCount ? 'green' : 'orange'}>{context?.rationale.resourceEffectAttribution?.summary?.resourceEventCount ?? 0} 条学习记录</A3Pill>
                 {recommendations.length > 3 && (
-                  <Button type="button" size="sm" variant="outline" className="bg-white" data-testid="a3-recommendation-list-toggle" onClick={() => setRecommendationsExpanded((value) => !value)}>
+                  <Button type="button" size="sm" variant="outline" className="bg-[var(--a3-surface-solid)]" data-testid="a3-recommendation-list-toggle" onClick={() => setRecommendationsExpanded((value) => !value)}>
                     {recommendationsExpanded ? '收起' : `展开 ${recommendations.length - 3} 条`}
                   </Button>
                 )}
@@ -788,7 +788,7 @@ export function RecommendationsView() {
             </div>
             {recommendations.length > 3 && (
               <div className="mt-4 flex items-center gap-2" data-testid="a3-recommendation-list-inline-toggle">
-                <Button type="button" size="sm" variant="outline" className="bg-white" onClick={() => setRecommendationsExpanded((value) => !value)}>
+                <Button type="button" size="sm" variant="outline" className="bg-[var(--a3-surface-solid)]" onClick={() => setRecommendationsExpanded((value) => !value)}>
                   {recommendationsExpanded ? '收起推荐' : '查看更多推荐'}
                 </Button>
               </div>
@@ -800,11 +800,11 @@ export function RecommendationsView() {
       <A3Card
         title="成品入口"
         subtitle="每一类资源进入自己的页面查看，不在当前页展开内容。"
-        action={pack ? <Button asChild size="sm" variant="outline" className="bg-white"><Link href={`/a3/resources/${pack.resourcePackId}`}>查看审计记录</Link></Button> : null}
+        action={pack ? <Button asChild size="sm" variant="outline" className="bg-[var(--a3-surface-solid)]"><Link href={`/a3/resources/${pack.resourcePackId}`}>查看审计记录</Link></Button> : null}
       >
         {pack ? (
           <div className="space-y-4">
-            <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 md:grid-cols-4" data-testid="a3-resource-result-overview">
+            <div className="grid gap-3 rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] p-4 text-sm text-[var(--a3-text-muted)] md:grid-cols-4" data-testid="a3-resource-result-overview">
               <Metric label="资源包" value={pack.resourcePackId.slice(0, 10)} />
               <Metric label="结构化资源" value={`${pack.resources.length} 类`} />
               <Metric label="已验证" value={`${pack.resources.filter((resource) => resource.verified).length}/${pack.resources.length}`} />
@@ -827,35 +827,35 @@ export function RecommendationsView() {
                 />
               ))}
             </div>
-            <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 md:grid-cols-3" data-testid="a3-resource-result-evidence">
+            <div className="grid gap-3 rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 text-sm text-[var(--a3-text-muted)] md:grid-cols-3" data-testid="a3-resource-result-evidence">
               <Metric label="当前课程" value={evidence.course} />
               <Metric label="当前路径节点" value={evidence.node} />
               <Metric label="知识库来源" value={evidence.sourceCount} />
             </div>
-            <div className="flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-slate-50 p-4" data-testid="a3-resource-result-next-actions">
+            <div className="flex flex-wrap gap-2 rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] p-4" data-testid="a3-resource-result-next-actions">
               {(pack.nextActions.length ? pack.nextActions : [{ label: '进课堂学习', href: '/a3/classroom', reason: '用资源包继续学习' }]).map((action, index) => (
-                <Button key={`${action.label}-${index}`} asChild size="sm" variant="outline" className="bg-white">
+                <Button key={`${action.label}-${index}`} asChild size="sm" variant="outline" className="bg-[var(--a3-surface-solid)]">
                   <Link href={action.href}>{action.label}</Link>
                 </Button>
               ))}
             </div>
           </div>
         ) : (
-          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
+          <div className="rounded-2xl border border-dashed border-[var(--a3-border)] bg-[var(--a3-surface-muted)] p-8 text-center">
             <Brain className="mx-auto size-9 text-blue-600" />
-            <div className="mt-3 text-base font-semibold text-slate-950">还没有生成资源包</div>
-            <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate-600">
+            <div className="mt-3 text-base font-semibold text-[var(--a3-text)]">还没有生成资源包</div>
+            <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-[var(--a3-text-muted)]">
               在上方输入你的学习需求后生成。系统会调用真实后端 `/api/resources/generate/`，不是前端假数据。
             </p>
           </div>
         )}
       </A3Card>
 
-      <details className="rounded-[14px] border border-slate-200 bg-white p-5 text-sm text-slate-600">
-        <summary className="cursor-pointer font-semibold text-slate-950">查看系统自动识别的学习上下文</summary>
+      <details className="rounded-[14px] border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-5 text-sm text-[var(--a3-text-muted)]">
+        <summary className="cursor-pointer font-semibold text-[var(--a3-text)]">查看系统自动识别的学习上下文</summary>
         <div className="mt-4 grid gap-3 md:grid-cols-2">
           {loadingContext ? (
-            <div className="flex items-center gap-2 text-slate-500"><Loader2 className="size-4 animate-spin" />正在读取画像、路径和知识库。</div>
+            <div className="flex items-center gap-2 text-[var(--a3-text-muted)]"><Loader2 className="size-4 animate-spin" />正在读取画像、路径和知识库。</div>
           ) : (
             <>
               <ContextBox title="当前路径" value={context?.target?.title || '暂无路径节点'} />
@@ -889,14 +889,14 @@ function RecommendationEvidenceItem({ item, profileFeed }: { item: A3Recommendat
   const confidenceTone = confidence === 'high' ? 'green' : confidence === 'medium' ? 'blue' : 'orange';
   const action = buildRecommendationAction(item);
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm" data-testid="a3-recommendation-effect-evidence">
+    <div className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 shadow-sm" data-testid="a3-recommendation-effect-evidence">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <A3Pill tone={effectInsight.tone}>{effectInsight.label}</A3Pill>
-            <div className="text-sm font-semibold leading-5 text-slate-950">{item.title}</div>
+            <div className="text-sm font-semibold leading-5 text-[var(--a3-text)]">{item.title}</div>
           </div>
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-600">{item.reason}</p>
+          <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--a3-text-muted)]">{item.reason}</p>
           <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800" data-testid="a3-recommendation-effect-reason">
             {effectInsight.detail}
           </div>
@@ -914,13 +914,13 @@ function RecommendationEvidenceItem({ item, profileFeed }: { item: A3Recommendat
         <A3Pill tone={confidenceTone}>{confidenceLabel}</A3Pill>
       </div>
 
-      <div className="mt-4 grid gap-3 text-xs leading-5 text-slate-600 sm:grid-cols-3">
+      <div className="mt-4 grid gap-3 text-xs leading-5 text-[var(--a3-text-muted)] sm:grid-cols-3">
         <RecommendationSignal label="适合现在学" value={item.evidence.profileMatch.reason || '匹配当前画像和学习路径'} />
         <RecommendationSignal label="参考资料" value={sourceValue} />
         <RecommendationSignal label="使用反馈" value={usageText} />
       </div>
 
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-[var(--a3-surface-muted)] px-3 py-2 text-xs text-[var(--a3-text-muted)]">
         <span>{action.reason}</span>
         {action.href ? (
           <Link href={action.href} className="inline-flex items-center gap-1 font-semibold text-blue-700 hover:text-blue-800" data-testid="a3-recommendation-next-action">
@@ -945,9 +945,9 @@ function buildRecommendationAction(item: A3Recommendation) {
 
 function RecommendationSignal({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
-      <div className="text-[11px] font-medium text-slate-500">{label}</div>
-      <div className="mt-1 line-clamp-2 font-semibold text-slate-900">{value}</div>
+    <div className="rounded-lg border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] px-3 py-2">
+      <div className="text-[11px] font-medium text-[var(--a3-text-muted)]">{label}</div>
+      <div className="mt-1 line-clamp-2 font-semibold text-[var(--a3-text)]">{value}</div>
     </div>
   );
 }
@@ -976,11 +976,11 @@ function ProfileSignalStrip({ signals }: { signals: NonNullable<RecommendationRe
 function RecommendationWeights({ weights }: { weights: RecommendationResponse['rationale']['weights'] }) {
   if (!weights.length) return null;
   return (
-    <div className="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-3">
+    <div className="mt-3 grid gap-2 text-xs text-[var(--a3-text-muted)] sm:grid-cols-3">
       {weights.slice(0, 3).map((weight, index) => (
-        <div key={`${weight.label}-${index}`} className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
-          <span className="font-semibold text-slate-900">{weight.label}</span>
-          <span className="ml-2 text-slate-500">{Math.round(weight.value * 100)}%</span>
+        <div key={`${weight.label}-${index}`} className="rounded-lg border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] px-3 py-2">
+          <span className="font-semibold text-[var(--a3-text)]">{weight.label}</span>
+          <span className="ml-2 text-[var(--a3-text-muted)]">{Math.round(weight.value * 100)}%</span>
         </div>
       ))}
     </div>
@@ -1043,18 +1043,18 @@ function ResourceEntryRow({
   if (entry.key === 'video') status = videoSucceeded ? '视频已生成' : generated ? '脚本已生成' : '需生成脚本';
 
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 transition hover:border-blue-200 hover:shadow-sm" data-testid="a3-resource-entry">
+    <div className="rounded-2xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4 transition hover:border-blue-200 hover:shadow-sm" data-testid="a3-resource-entry">
       <div className="flex gap-3">
-        <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-700">
+        <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-[var(--a3-surface-muted)] text-[var(--a3-text-muted)]">
           <Icon className="size-5" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-base font-semibold text-slate-950">{entry.title}</h3>
+            <h3 className="text-base font-semibold text-[var(--a3-text)]">{entry.title}</h3>
             <A3Pill tone={entry.tone}>{status}</A3Pill>
           </div>
-          <p className="mt-1 text-sm leading-6 text-slate-600">{entry.subtitle}</p>
-          <p className="mt-2 text-xs leading-5 text-slate-500">{entry.productNote}</p>
+          <p className="mt-1 text-sm leading-6 text-[var(--a3-text-muted)]">{entry.subtitle}</p>
+          <p className="mt-2 text-xs leading-5 text-[var(--a3-text-muted)]">{entry.productNote}</p>
         </div>
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
@@ -1074,7 +1074,7 @@ function ResourceEntryRow({
             单独生成
           </Button>
         ) : null}
-        <Button asChild size="sm" variant="outline" className="bg-white">
+        <Button asChild size="sm" variant="outline" className="bg-[var(--a3-surface-solid)]">
           <Link
             href={href}
             data-testid="a3-resource-entry-open"
@@ -1103,7 +1103,7 @@ function RecommendationProfileChangePanel({ insight }: { insight: LearningFlowIn
         </div>
         <A3Pill tone={insight.tone}>{insight.meta || '画像证据'}</A3Pill>
       </div>
-      <Button asChild size="sm" variant="outline" className="mt-3 border-orange-200 bg-white text-orange-800 hover:bg-orange-50">
+      <Button asChild size="sm" variant="outline" className="mt-3 border-orange-200 bg-[var(--a3-surface-solid)] text-orange-800 hover:bg-orange-50 dark:text-orange-200 dark:hover:bg-orange-950/40">
         <Link href={insight.href}>确认后刷新推荐</Link>
       </Button>
     </div>
@@ -1127,11 +1127,11 @@ function LongRunningProgressPanel({ progress }: { progress: LongRunningProgress 
     </div>
   );
   return (
-    <div data-testid="a3-long-running-progress" className="rounded-2xl border border-blue-100 bg-white p-4 shadow-sm">
+    <div data-testid="a3-long-running-progress" className="rounded-2xl border border-blue-100 bg-[var(--a3-surface-solid)] p-4 shadow-sm dark:border-blue-900/50">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div>
-          <div className="text-sm font-semibold text-slate-950">{progress.title}</div>
-          <p className="mt-1 text-sm leading-6 text-slate-600">{progress.message}</p>
+          <div className="text-sm font-semibold text-[var(--a3-text)]">{progress.title}</div>
+          <p className="mt-1 text-sm leading-6 text-[var(--a3-text-muted)]">{progress.message}</p>
         </div>
         <A3Pill tone={progress.steps.some((step) => step.status === 'failed') ? 'red' : percent === 100 ? 'green' : 'blue'}>
           {percent}%
@@ -1151,7 +1151,9 @@ function StatusStrip({ message, error }: { message: string; error: string }) {
     <div
       className={cn(
         'flex flex-col gap-2 rounded-xl border px-4 py-3 text-sm md:flex-row md:items-center md:justify-between',
-        error ? 'border-rose-200 bg-rose-50 text-rose-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800',
+        error
+          ? 'border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200'
+          : 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200',
       )}
       data-testid="a3-recommendation-message"
     >
@@ -1165,9 +1167,9 @@ function StatusStrip({ message, error }: { message: string; error: string }) {
 
 function EvidenceLine({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl bg-white/5 px-3 py-2">
-      <div className="text-xs text-slate-400">{label}</div>
-      <div className="mt-1 line-clamp-2 text-sm font-medium text-slate-100">{value}</div>
+    <div className="rounded-xl bg-[var(--a3-surface-solid)] px-3 py-2">
+      <div className="text-xs text-[var(--a3-text-muted)]">{label}</div>
+      <div className="mt-1 line-clamp-2 text-sm font-medium text-[var(--a3-text)]">{value}</div>
     </div>
   );
 }
@@ -1175,17 +1177,17 @@ function EvidenceLine({ label, value }: { label: string; value: string }) {
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-xs text-slate-500">{label}</div>
-      <div className="mt-1 font-semibold text-slate-950">{value}</div>
+      <div className="text-xs text-[var(--a3-text-muted)]">{label}</div>
+      <div className="mt-1 font-semibold text-[var(--a3-text)]">{value}</div>
     </div>
   );
 }
 
 function ContextBox({ title, value }: { title: string; value: string }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+    <div className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] p-3">
       <div className="text-xs font-semibold text-blue-700">{title}</div>
-      <p className="mt-2 text-sm leading-6 text-slate-700">{value}</p>
+      <p className="mt-2 text-sm leading-6 text-[var(--a3-text-muted)]">{value}</p>
     </div>
   );
 }

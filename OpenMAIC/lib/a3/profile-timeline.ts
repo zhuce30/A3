@@ -104,9 +104,13 @@ export function formatProfileValue(value: unknown) {
 
 export function summarizeProfileTimelineEntry(entry: ProfileTimelineEntry) {
   const dimension = profileDimensionLabel(entry.changedDimensions?.[0] || '');
-  const before = formatProfileValue(entry.previousValue);
-  const after = formatProfileValue(entry.nextValue);
-  return `${dimension}：${before} -> ${after}`;
+  const before = trimProfileValuePunctuation(formatProfileValue(entry.previousValue));
+  const after = trimProfileValuePunctuation(formatProfileValue(entry.nextValue));
+  return `${dimension}从“${before}”调整为“${after}”`;
+}
+
+function trimProfileValuePunctuation(value: string) {
+  return value.trim().replace(/[\s。；;，,：:]+$/u, '');
 }
 
 export function summarizeProfileUpdateEvidence(entry: ProfileTimelineEntry) {
