@@ -131,7 +131,7 @@ export function AdmissionDiagnosticView() {
 
   return (
     <div className="space-y-5" data-testid="a3-admission-diagnostic-view">
-      <section className="overflow-hidden rounded-[18px] border border-blue-100 bg-[linear-gradient(135deg,oklch(0.98_0.012_235),oklch(0.94_0.032_255))] p-6 shadow-[0_18px_42px_rgba(37,99,235,0.12)]">
+      <section data-tour-id="diagnostic-overview" className="overflow-hidden rounded-[18px] border border-blue-100 bg-[linear-gradient(135deg,oklch(0.98_0.012_235),oklch(0.94_0.032_255))] p-6 shadow-[0_18px_42px_rgba(37,99,235,0.12)]">
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_390px]">
           <div>
             <A3Pill tone="blue">PlacementAgent</A3Pill>
@@ -224,9 +224,9 @@ export function AdmissionDiagnosticView() {
           <A3Card
             title="快速诊断题"
             subtitle={blueprint?.degraded ? (blueprint.degradationReason || '画像不足时使用课程核心题库。') : '题目顺序已根据画像薄弱点、目标和基础水平调整。'}
-            action={<A3Pill tone={answeredCount === questions.length ? 'green' : 'blue'}>{answeredCount}/{questions.length}</A3Pill>}
+            action={<span data-tour-id="diagnostic-progress"><A3Pill tone={answeredCount === questions.length ? 'green' : 'blue'}>{answeredCount}/{questions.length}</A3Pill></span>}
           >
-            <div className="space-y-4">
+            <div data-tour-id="diagnostic-question" className="space-y-4">
               {questions.map((question, index) => (
                 <QuestionBlock
                   key={question.id}
@@ -239,7 +239,7 @@ export function AdmissionDiagnosticView() {
             </div>
             <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--a3-surface-muted)] p-4">
               <div className="text-sm text-[var(--a3-text-muted)]">完成后会自动刷新学习画像、路径顺序和每日计划。</div>
-              <Button data-testid="a3-admission-diagnostic-submit" onClick={submit} disabled={!canSubmit} className="bg-blue-600 hover:bg-blue-700">
+              <Button data-tour-id="diagnostic-submit" data-testid="a3-admission-diagnostic-submit" onClick={submit} disabled={!canSubmit} className="bg-blue-600 hover:bg-blue-700">
                 {submitting ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
                 生成我的计划
               </Button>

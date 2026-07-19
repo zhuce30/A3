@@ -145,7 +145,7 @@ export function TodayLearningView() {
 
   return (
     <div className="space-y-5" data-testid="a3-today-view">
-      <section data-testid="a3-today-hub" className="overflow-hidden rounded-[18px] border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-bg)] p-6 text-[var(--a3-highlight-text)] shadow-[var(--a3-highlight-shadow)]">
+      <section data-tour-id="today-prescription" data-testid="a3-today-hub" className="overflow-hidden rounded-[18px] border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-bg)] p-6 text-[var(--a3-highlight-text)] shadow-[var(--a3-highlight-shadow)]">
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
           <div>
             <A3Pill tone="green">DailySessionAgent 执行写回</A3Pill>
@@ -153,7 +153,7 @@ export function TodayLearningView() {
             <p className="mt-3 max-w-3xl text-sm leading-7 text-[var(--a3-highlight-muted)]">
               {relationship?.today ?? '今日学习只执行当前日期的计划任务。'}{relationship?.writeback ? ` ${relationship.writeback}` : ' 完成后写回路径进度、错题复习、通知和报告指标。'}
             </p>
-            <div className="mt-4 grid gap-2 md:grid-cols-4" data-testid="a3-today-relationship">
+            <div data-tour-id="today-plan-relationship" className="mt-4 grid gap-2 md:grid-cols-4" data-testid="a3-today-relationship">
               <TodayLoopStep title="路径" detail={relationship?.path ?? '学习路径决定知识点顺序和先修关系。'} />
               <TodayLoopStep title="计划" detail={relationship?.plan ?? '学习计划把路径节点、错题复习和资源包排到具体日期。'} />
               <TodayLoopStep title="今日" detail={relationship?.today ?? '今日学习只执行当前日期的计划任务。'} />
@@ -174,7 +174,7 @@ export function TodayLearningView() {
             </div>
             <div className="mt-6 flex flex-wrap gap-3">
               <Button asChild className="bg-emerald-500 text-slate-950 hover:bg-emerald-400">
-                <Link href={activeTask?.href ?? '/a3/study-plan'}>
+                <Link data-tour-id="today-next-action" href={activeTask?.href ?? '/a3/study-plan'}>
                   {finished ? '查看学习计划' : taskCopy[activeTask?.type ?? 'learn'].action}
                   <ArrowRight className="size-4" />
                 </Link>
@@ -221,6 +221,7 @@ export function TodayLearningView() {
           subtitle={today ? `${today.date} · 预计 ${today.estimatedMinutes} 分钟` : '请先生成学习计划'}
           action={<A3Pill tone={finished ? 'green' : 'blue'}>{finished ? '已完成' : '进行中'}</A3Pill>}
         >
+          <div data-tour-id="today-task-list">
           {tasks.length ? (
             <div className="space-y-4">
               {tasks.map((task, index) => (
@@ -246,6 +247,7 @@ export function TodayLearningView() {
               </div>
             </div>
           )}
+          </div>
         </A3Card>
 
         <div className="space-y-5">

@@ -587,7 +587,7 @@ export function RecommendationsView() {
             <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--a3-highlight-muted)]">
               文档、课件、导图、练习、案例、代码实验和视频会分开呈现，想先看哪一类就打开哪一类。
             </p>
-            <div className="mt-5">
+            <div data-tour-id="resource-generation-need" className="mt-5">
               <label htmlFor="resource-goal" className="text-sm font-semibold text-[var(--a3-highlight-text)]">
                 你的学习需求
               </label>
@@ -605,7 +605,7 @@ export function RecommendationsView() {
                 <span className="rounded-full bg-[var(--a3-highlight-surface)] px-3 py-1">示例：信号量不会做题</span>
                 <span className="rounded-full bg-[var(--a3-highlight-surface)] px-3 py-1">示例：虚拟内存复习</span>
               </div>
-              <div className="mt-4 flex flex-wrap gap-3">
+              <div data-tour-id="resource-generation-actions" className="mt-4 flex flex-wrap gap-3">
                 <Button
                   type="button"
                   onClick={generateResourcePack}
@@ -635,7 +635,7 @@ export function RecommendationsView() {
                   </Link>
                 </Button>
               </div>
-              <div className="mt-5 rounded-2xl border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] p-3">
+              <div data-tour-id="resource-generation-types" className="mt-5 rounded-2xl border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] p-3">
                 <div className="text-xs font-semibold text-[var(--a3-highlight-muted)]">按需单项生成</div>
                 <div className="mt-3 flex flex-wrap gap-2" data-testid="a3-single-resource-type-grid">
                   {resourceEntries.map((entry) => {
@@ -687,7 +687,7 @@ export function RecommendationsView() {
             </div>
           </div>
 
-          <div className="rounded-2xl border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] p-4" data-testid="a3-resource-generation-evidence">
+          <div data-tour-id="resource-generation-context" className="rounded-2xl border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] p-4" data-testid="a3-resource-generation-evidence">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-[var(--a3-highlight-text)]">本次会参考</div>

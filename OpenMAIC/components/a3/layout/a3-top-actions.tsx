@@ -1,12 +1,15 @@
 'use client';
 
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 import { Activity, ArrowRight, Bell, CheckCheck, ChevronDown, CircleHelp, Clock3, Globe2, Loader2, Moon, Search, Sun, XCircle } from 'lucide-react';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
+import { A3_TOUR_START_EVENT } from '@/components/a3/guided-tour/guided-tour-provider';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import type { A3Notification, A3NotificationsResponse } from '@/lib/a3/engagement-types';
 import { getA3HelpArticleHref, searchA3HelpArticles } from '@/lib/a3/help-content';
+import { getA3TourForRoute } from '@/lib/a3/guided-tour';
 import { getA3LocaleLabel, useA3Locale, type A3Locale } from '@/lib/a3/i18n';
 import { startA3TaskStream } from '@/lib/a3/task-stream-client';
 import { useTheme } from '@/lib/hooks/use-theme';
@@ -68,6 +71,8 @@ type A3TasksResponse = {
 export function A3TopActions({ compact = false, showThemeToggle = true }: { compact?: boolean; showThemeToggle?: boolean }) {
   const [activePanel, setActivePanel] = useState<Panel>(null);
   const currentUser = useA3CurrentUser();
+  const pathname = usePathname();
+  const currentTour = getA3TourForRoute(pathname, currentUser?.role);
   const { locale, messages, setLocale } = useA3Locale();
   const { resolvedTheme, setTheme } = useTheme();
   const [helpQuery, setHelpQuery] = useState('');
@@ -417,6 +422,23 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
                 </div>
               )}
             </div>
+            {currentTour && (
+              <button
+                type="button"
+                onClick={() => {
+                  window.dispatchEvent(
+                    new CustomEvent(A3_TOUR_START_EVENT, {
+                      detail: { tourId: currentTour.id },
+                    }),
+                  );
+                  closePanel();
+                }}
+                className="mt-3 flex w-full items-center justify-between rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-3 py-2.5 text-left text-sm font-semibold text-[var(--a3-text)] transition hover:bg-[var(--a3-surface-muted)]"
+              >
+                <span>重新查看本页引导</span>
+                <ArrowRight className="size-4 shrink-0" />
+              </button>
+            )}
             <div className="mt-3 flex items-center gap-2 rounded-xl bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700 dark:bg-blue-950/50 dark:text-blue-200">
               <CircleHelp className="size-4" />{messages.helpSearchHint}
             </div>

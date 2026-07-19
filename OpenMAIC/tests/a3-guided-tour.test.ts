@@ -127,3 +127,32 @@ describe('A3 guided tour runtime boundary', () => {
     expect(source).toContain('max-sm:inset-x-3');
   });
 });
+
+describe('A3 guided tour workflow anchors', () => {
+  const targetSources = [
+    'components/a3/auth/a3-auth-pages.tsx',
+    'components/a3/features/admission-diagnostic-view.tsx',
+    'components/a3/features/today-learning-view.tsx',
+    'components/a3/features/recommendations-view.tsx',
+    'components/a3/features/knowledge-base-view.tsx',
+  ].map((file) => fs.readFileSync(path.resolve(process.cwd(), file), 'utf8')).join('\n');
+  const topActionsSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'components/a3/layout/a3-top-actions.tsx'),
+    'utf8',
+  );
+
+  it('maps every configured target to exactly one stable page anchor', () => {
+    for (const target of a3GuidedTours.flatMap((tour) => tour.steps.map((step) => step.target))) {
+      const tourId = target.match(/data-tour-id="([^"]+)"/)?.[1];
+      expect(tourId, target).toBeTruthy();
+      expect(targetSources.match(new RegExp(`data-tour-id=["']${tourId}["']`, 'g'))?.length ?? 0, target)
+        .toBe(1);
+    }
+  });
+
+  it('offers a current-page restart only when a route has a configured tour', () => {
+    expect(topActionsSource).toContain('getA3TourForRoute(pathname, currentUser?.role)');
+    expect(topActionsSource).toContain('A3_TOUR_START_EVENT');
+    expect(topActionsSource).toContain('重新查看本页引导');
+  });
+});

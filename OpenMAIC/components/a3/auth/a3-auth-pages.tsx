@@ -1136,7 +1136,7 @@ export function ProfileSetupPage() {
     <SimpleFlowFrame>
       <div data-testid="a3-profile-setup-view">
         <div className="mb-7 grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-end">
-          <div>
+          <div data-tour-id="profile-intro">
             <Button
               type="button"
               variant="outline"
@@ -1160,7 +1160,7 @@ export function ProfileSetupPage() {
             </span>
           </div>
         </div>
-        <section className="mb-7 overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.07)]">
+        <section data-tour-id="profile-interview" className="mb-7 overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.07)]">
           <div className="border-b border-slate-200 bg-slate-50 px-5 py-4 md:px-6">
             <div className="grid gap-3 sm:grid-cols-3">
               {['说说情况', '回答追问', '确认并开始诊断'].map((label, index) => (
@@ -1282,6 +1282,7 @@ export function ProfileSetupPage() {
           <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
             <div>
               <button
+                data-tour-id="profile-manual"
                 type="button"
                 onClick={() => setAdvancedOpen((value) => !value)}
                 className="flex w-full items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-slate-50 px-5 py-4 text-left transition hover:border-blue-200 hover:bg-blue-50/50"
@@ -1300,7 +1301,7 @@ export function ProfileSetupPage() {
               <ProfilePreviewStrip previewRows={previewRows} />
               <ErrorBox message={message} />
             </div>
-            <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
+            <div data-tour-id="profile-save" className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-blue-950">
                 <Sparkles className="size-4 text-blue-600" />
                 下一步

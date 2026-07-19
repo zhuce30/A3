@@ -590,7 +590,7 @@ export function KnowledgeBaseView() {
               上传新资料会自动完成文本、图片、PDF/PPT 页面等多模态解析和索引；重新解析已有资料不会新增文件，只会刷新证据和结构化知识。
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div data-tour-id="knowledge-base-upload" className="flex flex-wrap gap-2">
             {canManageKnowledgeBase && (
               <select
                 aria-label="资料上传范围"
@@ -665,6 +665,7 @@ export function KnowledgeBaseView() {
       <MetricGrid metrics={metrics} />
 
       <div className="grid gap-5 xl:grid-cols-[1fr_0.85fr]">
+        <div data-tour-id="knowledge-base-resources">
         <A3Card title="资料空间" action={<Button type="button" variant="ghost" size="sm" onClick={() => void loadResources()}><RefreshCw className="size-4" />刷新</Button>}>
           <div className="mb-4 flex flex-wrap gap-2" data-testid="a3-kb-scope-tabs">
             {scopeTabs.map((tab) => (
@@ -762,7 +763,9 @@ export function KnowledgeBaseView() {
             <EmptyState icon={<Database className="size-8" />} title="当前范围没有资料" desc="上传 PDF、PPTX、图片或表格后，后台解析结果会出现在这里。" />
           )}
         </A3Card>
+        </div>
 
+        <div data-tour-id="knowledge-base-status">
         <A3Card
           title="后台任务"
           action={
@@ -830,8 +833,10 @@ export function KnowledgeBaseView() {
             </button>
           )}
         </A3Card>
+        </div>
       </div>
 
+      <div data-tour-id="knowledge-base-search">
       <A3Card title="知识库检索" action={<Search className="size-4 text-blue-600" />}>
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <div className="min-w-0">
@@ -1091,6 +1096,7 @@ export function KnowledgeBaseView() {
           </aside>
         </div>
       </A3Card>
+      </div>
     </div>
   );
 }
