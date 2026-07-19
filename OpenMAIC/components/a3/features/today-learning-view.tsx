@@ -145,12 +145,12 @@ export function TodayLearningView() {
 
   return (
     <div className="space-y-5" data-testid="a3-today-view">
-      <section className="overflow-hidden rounded-[18px] border border-blue-100 bg-slate-950 p-6 text-white shadow-[0_18px_42px_rgba(15,23,42,0.22)]">
+      <section data-testid="a3-today-hub" className="overflow-hidden rounded-[18px] border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-bg)] p-6 text-[var(--a3-highlight-text)] shadow-[var(--a3-highlight-shadow)]">
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
           <div>
             <A3Pill tone="green">DailySessionAgent 执行写回</A3Pill>
             <h1 className="mt-4 text-3xl font-semibold tracking-normal">今日学习</h1>
-            <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-300">
+            <p className="mt-3 max-w-3xl text-sm leading-7 text-[var(--a3-highlight-muted)]">
               {relationship?.today ?? '今日学习只执行当前日期的计划任务。'}{relationship?.writeback ? ` ${relationship.writeback}` : ' 完成后写回路径进度、错题复习、通知和报告指标。'}
             </p>
             <div className="mt-4 grid gap-2 md:grid-cols-4" data-testid="a3-today-relationship">
@@ -160,14 +160,14 @@ export function TodayLearningView() {
               <TodayLoopStep title="写回" detail={relationship?.writeback ?? '任务完成后写回路径进度、错题复习、通知和报告指标。'} />
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
-              <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-200">
+              <span className="rounded-full bg-[var(--a3-highlight-surface)] px-3 py-1 text-xs text-[var(--a3-highlight-muted)]">
                 策略：{policy ? policyLabel[policy.mode] : '标准节奏'}
               </span>
-              <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-200">
+              <span className="rounded-full bg-[var(--a3-highlight-surface)] px-3 py-1 text-xs text-[var(--a3-highlight-muted)]">
                 今日绑定 {todayBindings.length} 个路径/复习任务
               </span>
               {rolloverCount > 0 && (
-                <span className="rounded-full bg-orange-400/20 px-3 py-1 text-xs text-orange-100">
+                <span className="rounded-full bg-orange-100 px-3 py-1 text-xs text-orange-800 dark:bg-orange-950/50 dark:text-orange-200">
                   {rolloverCount} 个任务已顺延到今天
                 </span>
               )}
@@ -179,26 +179,26 @@ export function TodayLearningView() {
                   <ArrowRight className="size-4" />
                 </Link>
               </Button>
-              <Button asChild variant="outline" className="min-w-[104px] justify-center border-slate-600 bg-slate-800 text-slate-50 hover:bg-slate-700 hover:text-white">
+              <Button asChild variant="outline" className="min-w-[104px] justify-center border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] text-[var(--a3-highlight-text)] hover:bg-white/80 dark:hover:bg-white/10">
                 <Link href="/a3/admission-diagnostic">重新诊断</Link>
               </Button>
-              <Button onClick={load} variant="outline" className="min-w-[112px] justify-center border-slate-600 bg-slate-800 text-slate-50 hover:bg-slate-700 hover:text-white">
+              <Button onClick={load} variant="outline" className="min-w-[112px] justify-center border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] text-[var(--a3-highlight-text)] hover:bg-white/80 dark:hover:bg-white/10">
                 <RotateCcw className="size-4" />
                 刷新任务
               </Button>
             </div>
           </div>
-          <div className="rounded-2xl bg-white/10 p-5">
+          <div className="rounded-2xl border border-[var(--a3-highlight-border)] bg-[var(--a3-highlight-surface)] p-5">
             <div className="flex items-center justify-between">
               <div>
-                <div className="text-sm text-slate-300">今日完成度</div>
+                <div className="text-sm text-[var(--a3-highlight-muted)]">今日完成度</div>
                 <div className="mt-2 text-5xl font-semibold">{progress}%</div>
               </div>
-              <div className="flex size-16 items-center justify-center rounded-2xl bg-emerald-400/20 text-emerald-200">
+              <div className="flex size-16 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-200">
                 <BookOpenCheck className="size-9" />
               </div>
             </div>
-            <div className="mt-5 h-3 rounded-full bg-white/15">
+            <div className="mt-5 h-3 rounded-full bg-[var(--a3-highlight-border)]">
               <div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${progress}%` }} />
             </div>
             <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
@@ -210,7 +210,7 @@ export function TodayLearningView() {
         </div>
       </section>
 
-      {error && <div className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+      {error && <div className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:bg-rose-950/40 dark:text-rose-200">{error}</div>}
 
       <TodayFlowInsightPanel insights={flowInsights} />
       <ProfileChangeReasonCard insight={profileChangeInsight} />
@@ -576,18 +576,18 @@ function trackTaskCompletedEvent(day: StudyPlanDay, task: StudyPlanTask, planId:
 
 function SessionMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl bg-white/10 p-3">
-      <div className="text-xs text-slate-300">{label}</div>
-      <div className="mt-1 font-semibold text-white">{value}</div>
+    <div className="rounded-xl bg-[var(--a3-surface-solid)] p-3">
+      <div className="text-xs text-[var(--a3-text-muted)]">{label}</div>
+      <div className="mt-1 font-semibold text-[var(--a3-text)]">{value}</div>
     </div>
   );
 }
 
 function TodayLoopStep({ title, detail }: { title: string; detail: string }) {
   return (
-    <div className="rounded-xl bg-white/10 px-3 py-2">
-      <div className="text-xs font-semibold text-emerald-200">{title}</div>
-      <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-300" title={detail}>
+    <div className="rounded-xl bg-[var(--a3-highlight-surface)] px-3 py-2">
+      <div className="text-xs font-semibold text-[var(--a3-highlight-accent)]">{title}</div>
+      <div className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--a3-highlight-muted)]" title={detail}>
         {detail}
       </div>
     </div>

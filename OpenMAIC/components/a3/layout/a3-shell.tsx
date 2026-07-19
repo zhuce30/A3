@@ -3,8 +3,8 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ChevronDown, LogOut, Repeat2, Settings, UserRound } from 'lucide-react';
-import { useState } from 'react';
+import { ChevronDown, LogOut, PanelLeftClose, PanelLeftOpen, Repeat2, Settings, UserRound } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import {
   A3_SHELL_BYPASS_PATHS,
   useA3CurrentUser,
@@ -16,11 +16,14 @@ import { useA3Locale } from '@/lib/a3/i18n';
 import { a3GetActiveNavHref, a3NavItems } from '@/lib/a3/navigation';
 import { cn } from '@/lib/utils';
 
+const A3_SIDEBAR_STORAGE_KEY = 'a3-sidebar-collapsed';
+
 export function A3Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const user = useA3CurrentUser();
   const { messages } = useA3Locale();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const activeNavHref = a3GetActiveNavHref(pathname);
   const [navDisclosure, setNavDisclosure] = useState<{ activeHref: string; expanded: Set<string> }>(() => {
     const activeItem = a3NavItems.find((item) => item.href === activeNavHref);
@@ -33,6 +36,12 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
   const expandedNavGroups = navDisclosure.activeHref === activeNavHref || !activeItem?.children?.length
     ? navDisclosure.expanded
     : new Set([...navDisclosure.expanded, activeNavHref]);
+
+  /* eslint-disable react-hooks/set-state-in-effect -- Restore the persisted desktop navigation preference after hydration. */
+  useEffect(() => {
+    setSidebarCollapsed(window.localStorage.getItem(A3_SIDEBAR_STORAGE_KEY) === '1');
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   if (A3_SHELL_BYPASS_PATHS.has(pathname)) return <>{children}</>;
 
@@ -83,6 +92,14 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     setNavDisclosure({ activeHref: activeNavHref, expanded: next });
   }
 
+  function toggleSidebar() {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      window.localStorage.setItem(A3_SIDEBAR_STORAGE_KEY, next ? '1' : '0');
+      return next;
+    });
+  }
+
   async function logout() {
     await a3PostJson('/api/auth/logout/', {});
     window.dispatchEvent(new CustomEvent('a3-auth-user-updated', { detail: null }));
@@ -99,12 +116,20 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
 
   return (
     <div data-a3-shell className="min-h-screen bg-[var(--a3-bg)] text-[var(--a3-text)]">
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[248px] border-r border-[var(--a3-border)] bg-[var(--a3-surface-solid)] md:block">
-        <div className="flex h-20 items-center gap-3 px-5">
+      <aside
+        id="a3-primary-sidebar"
+        data-testid="a3-primary-sidebar"
+        data-collapsed={sidebarCollapsed ? 'true' : 'false'}
+        className={cn(
+          'fixed inset-y-0 left-0 z-30 hidden border-r border-[var(--a3-border)] bg-[var(--a3-surface-solid)] transition-[width] duration-300 ease-out md:block',
+          sidebarCollapsed ? 'w-20' : 'w-[248px]',
+        )}
+      >
+        <div className={cn('flex h-20 items-center gap-3 transition-[padding] duration-300', sidebarCollapsed ? 'justify-center px-0' : 'px-5')}>
           <div className="size-12 overflow-hidden rounded-[14px] shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
             <Image src="/a3-brand-icon.png" alt="" width={48} height={48} className="size-full object-cover" priority unoptimized />
           </div>
-          <div>
+          <div className={cn('min-w-0 transition-opacity duration-200', sidebarCollapsed && 'hidden opacity-0')}>
             <div className="text-[22px] font-semibold leading-tight text-[var(--a3-text)]">{messages.appName}</div>
             <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
               {messages.appNameEn}
@@ -112,7 +137,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
 
-        <nav className="max-h-[calc(100vh-176px)] space-y-2 overflow-y-auto px-4 pb-4">
+        <nav className={cn('max-h-[calc(100vh-176px)] space-y-2 overflow-y-auto pb-4 transition-[padding] duration-300', sidebarCollapsed ? 'px-3' : 'px-4')}>
           {visibleNavItems.map((item) => {
             const active = activeNavHref === item.href;
             const Icon = item.icon;
@@ -120,6 +145,26 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
             const grouped = itemChildren.length > 0;
             const expanded = grouped && expandedNavGroups.has(item.href);
             const childrenId = `a3-sidebar-children-${item.href.replaceAll('/', '-')}`;
+            const itemLabel = navLabels[item.href] ?? item.label;
+            if (sidebarCollapsed) {
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  title={itemLabel}
+                  aria-label={itemLabel}
+                  data-testid={`a3-sidebar-collapsed-${item.href.replaceAll('/', '-')}`}
+                  className={cn(
+                    'flex h-12 w-full items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
+                    active
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-[var(--a3-text-muted)] hover:bg-[var(--a3-surface-muted)] hover:text-[var(--a3-text)]',
+                  )}
+                >
+                  <Icon className="size-5" />
+                </Link>
+              );
+            }
             return (
               <div key={item.href} className="space-y-1">
                 {grouped ? (
@@ -137,7 +182,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
                     )}
                   >
                     <Icon className={cn('size-4 shrink-0', active && 'text-blue-600 dark:text-blue-300')} />
-                    <span className="min-w-0 flex-1 truncate">{navLabels[item.href] ?? item.label}</span>
+                    <span className="min-w-0 flex-1 truncate">{itemLabel}</span>
                     <ChevronDown className={cn('size-4 shrink-0 transition-transform duration-200', expanded && 'rotate-180')} />
                   </button>
                 ) : (
@@ -152,7 +197,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
                     )}
                   >
                     <Icon className="size-4 shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">{navLabels[item.href] ?? item.label}</span>
+                    <span className="min-w-0 flex-1 truncate">{itemLabel}</span>
                   </Link>
                 )}
                 {grouped && expanded ? (
@@ -181,12 +226,15 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
           })}
         </nav>
 
-        <div className="absolute inset-x-3 bottom-4 rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] p-4">
-          <div className="flex items-center gap-3">
+        <div
+          title={sidebarCollapsed ? `${displayName} · ${studyGroup}` : undefined}
+          className={cn('absolute inset-x-3 bottom-4 rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] transition-[padding] duration-300', sidebarCollapsed ? 'p-2' : 'p-4')}
+        >
+          <div className={cn('flex items-center gap-3', sidebarCollapsed && 'justify-center')}>
             <div className="flex size-10 items-center justify-center rounded-full bg-blue-100 text-sm font-semibold text-blue-700">
               {userInitial}
             </div>
-            <div className="min-w-0">
+            <div className={cn('min-w-0', sidebarCollapsed && 'hidden')}>
               <div className="truncate text-sm font-semibold">{displayName}</div>
               <div className="truncate text-xs text-[var(--a3-text-muted)]">{studyGroup}</div>
             </div>
@@ -194,9 +242,21 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
-      <div className="md:pl-[248px]">
+      <div className={cn('transition-[padding] duration-300 ease-out', sidebarCollapsed ? 'md:pl-20' : 'md:pl-[248px]')}>
         <header className="sticky top-0 z-40 flex h-[72px] min-w-0 items-center justify-between gap-2 border-b border-[var(--a3-border)] bg-[var(--a3-surface)] px-3 backdrop-blur sm:px-4 md:px-6">
           <div className="flex min-w-0 items-center gap-3">
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              aria-controls="a3-primary-sidebar"
+              aria-expanded={!sidebarCollapsed}
+              aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+              title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+              data-testid="a3-sidebar-toggle"
+              className="hidden size-10 shrink-0 items-center justify-center rounded-lg border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] text-[var(--a3-text-muted)] transition-colors hover:bg-[var(--a3-surface-muted)] hover:text-[var(--a3-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 md:flex"
+            >
+              {sidebarCollapsed ? <PanelLeftOpen className="size-5" /> : <PanelLeftClose className="size-5" />}
+            </button>
             <div className="md:hidden">
               <div className="size-10 overflow-hidden rounded-xl shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
                 <Image src="/a3-brand-icon.png" alt="" width={40} height={40} className="size-full object-cover" priority unoptimized />
