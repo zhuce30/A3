@@ -6,7 +6,7 @@ import { Activity, ArrowRight, Bell, CheckCheck, ChevronDown, CircleHelp, Clock3
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import type { A3Notification, A3NotificationsResponse } from '@/lib/a3/engagement-types';
-import { searchA3HelpArticles } from '@/lib/a3/help-content';
+import { getA3HelpArticleHref, searchA3HelpArticles } from '@/lib/a3/help-content';
 import { getA3LocaleLabel, useA3Locale, type A3Locale } from '@/lib/a3/i18n';
 import { startA3TaskStream } from '@/lib/a3/task-stream-client';
 import { useTheme } from '@/lib/hooks/use-theme';
@@ -400,7 +400,7 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
               {helpResults.map((article) => (
                 <Link
                   key={article.id}
-                  href={article.href}
+                  href={getA3HelpArticleHref(article.id)}
                   onClick={closePanel}
                   className="group rounded-xl bg-[var(--a3-surface-muted)] px-3 py-3 text-sm hover:bg-blue-50 dark:hover:bg-blue-950/40"
                 >

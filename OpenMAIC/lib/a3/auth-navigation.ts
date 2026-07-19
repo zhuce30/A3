@@ -24,6 +24,10 @@ const blockedReturnPaths = new Set(['/a3', '/a3/login', '/a3/register', '/a3/for
 
 const returnPathBase = 'https://a3.local';
 
+export function isA3PublicPath(pathname: string) {
+  return A3_PUBLIC_PATHS.has(pathname) || pathname === '/a3/help' || pathname.startsWith('/a3/help/');
+}
+
 type A3SearchParams = Pick<URLSearchParams, 'toString'> | string | null | undefined;
 
 type A3AuthPathState = {
@@ -114,7 +118,7 @@ export function getA3AuthTarget(
   pathname: string,
   user: A3PublicUser | null | undefined,
   pathState: A3AuthPathState = {
-    isPublicPath: A3_PUBLIC_PATHS.has(pathname),
+    isPublicPath: isA3PublicPath(pathname),
     isGuestPath: A3_GUEST_PATHS.has(pathname),
     isFlowPath: A3_FLOW_PATHS.has(pathname),
   },

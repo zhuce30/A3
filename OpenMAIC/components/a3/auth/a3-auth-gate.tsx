@@ -7,13 +7,12 @@ import type { A3PublicUser } from '@/lib/a3/auth-types';
 import {
   A3_FLOW_PATHS,
   A3_GUEST_PATHS,
-  A3_PUBLIC_PATHS,
   buildA3CurrentPath,
   getA3AuthTarget,
   getInitialA3Hash,
+  isA3PublicPath,
 } from '@/lib/a3/auth-navigation';
 
-const publicPaths = A3_PUBLIC_PATHS;
 const guestPaths = A3_GUEST_PATHS;
 const flowPaths = A3_FLOW_PATHS;
 
@@ -33,7 +32,7 @@ export function A3AuthGate({ children }: { children: React.ReactNode }) {
 
 function A3AuthGateFallback({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  if (publicPaths.has(pathname)) {
+  if (isA3PublicPath(pathname)) {
     return <A3CurrentUserContext.Provider value={null}>{children}</A3CurrentUserContext.Provider>;
   }
   return <A3AuthLoading />;
@@ -46,7 +45,7 @@ function A3AuthGateWithLocation({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<A3PublicUser | null | undefined>(undefined);
   const [initialHash] = useState(getInitialA3Hash);
 
-  const isPublicPath = publicPaths.has(pathname);
+  const isPublicPath = isA3PublicPath(pathname);
   const isGuestPath = guestPaths.has(pathname);
   const isFlowPath = flowPaths.has(pathname);
   const currentPath = useMemo(

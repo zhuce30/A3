@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ChevronDown, LogOut, PanelLeftClose, PanelLeftOpen, Repeat2, Settings, UserRound } from 'lucide-react';
+import { ChevronDown, CircleHelp, LogOut, PanelLeftClose, PanelLeftOpen, Repeat2, Settings, UserRound } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
   A3_SHELL_BYPASS_PATHS,
@@ -13,6 +13,7 @@ import { A3GlobalSearch } from '@/components/a3/layout/a3-global-search';
 import { A3TopActions } from '@/components/a3/layout/a3-top-actions';
 import { a3PostJson } from '@/lib/a3/api-client';
 import { useA3Locale } from '@/lib/a3/i18n';
+import { isA3PublicPath } from '@/lib/a3/auth-navigation';
 import { a3GetActiveNavHref, a3NavItems } from '@/lib/a3/navigation';
 import { cn } from '@/lib/utils';
 
@@ -43,7 +44,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  if (A3_SHELL_BYPASS_PATHS.has(pathname)) return <>{children}</>;
+  if (A3_SHELL_BYPASS_PATHS.has(pathname) || isA3PublicPath(pathname)) return <>{children}</>;
 
   const displayName = user?.displayName?.trim() || messages.unnamedUser;
   const userInitial = displayName.slice(0, 1);
@@ -225,6 +226,19 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
             );
           })}
         </nav>
+
+        <Link
+          href="/a3/help"
+          data-testid="a3-sidebar-help-link"
+          title={sidebarCollapsed ? '帮助与手册' : undefined}
+          className={cn(
+            'absolute inset-x-3 bottom-[100px] flex h-11 items-center rounded-lg border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] text-sm font-medium text-[var(--a3-text-muted)] transition-colors hover:bg-[var(--a3-surface-muted)] hover:text-[var(--a3-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
+            sidebarCollapsed ? 'justify-center px-0' : 'gap-3 px-3',
+          )}
+        >
+          <CircleHelp className="size-4 shrink-0" />
+          <span className={cn('truncate', sidebarCollapsed && 'hidden')}>帮助与手册</span>
+        </Link>
 
         <div
           title={sidebarCollapsed ? `${displayName} · ${studyGroup}` : undefined}

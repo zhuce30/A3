@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   a3HelpArticles,
@@ -67,5 +69,39 @@ describe('A3 help content contract', () => {
         'knowledge-base-indexing',
       ]),
     );
+  });
+});
+
+describe('A3 help center page boundary', () => {
+  const viewSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'components/a3/features/help-center-view.tsx'),
+    'utf8',
+  );
+  const shellSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'components/a3/layout/a3-shell.tsx'),
+    'utf8',
+  );
+  const topActionsSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'components/a3/layout/a3-top-actions.tsx'),
+    'utf8',
+  );
+
+  it('uses a task-first landing instead of dumping full article steps', () => {
+    expect(viewSource).toContain('data-testid="a3-help-search"');
+    expect(viewSource).toContain('data-testid="a3-help-quick-start"');
+    expect(viewSource).toContain('getA3HelpArticleHref(article.id)');
+    expect(viewSource).not.toContain('article.steps[locale].map');
+  });
+
+  it('offers a useful reset action when search has no results', () => {
+    expect(viewSource).toContain('没有找到相关答案');
+    expect(viewSource).toContain('查看全部帮助');
+    expect(viewSource).toContain("setQuery('')");
+  });
+
+  it('keeps stable article entry points in the learning shell and top help search', () => {
+    expect(shellSource).toContain('data-testid="a3-sidebar-help-link"');
+    expect(shellSource).toContain('href="/a3/help"');
+    expect(topActionsSource).toContain('getA3HelpArticleHref(article.id)');
   });
 });
