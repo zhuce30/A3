@@ -135,6 +135,23 @@ describe('A3 product homepage learning story modules', () => {
     expect(homepageCss).not.toMatch(/font-size:\s*[^;]*(vw|cqw)/);
   });
 
+  it('uses the approved cream and forest-green public theme', () => {
+    expect(homepageCss).toContain('--a3-home-cream: #fff8d8');
+    expect(homepageCss).toContain('--a3-home-action: #245c48');
+    expect(homepageCss).toContain('--a3-home-ink: #18231f');
+    expect(homepageCss).not.toMatch(/\.page\s*\{[^}]*background:\s*#0b0e10/);
+    expect(homepageCss).not.toMatch(
+      /\.(?:headerCta|primaryCta)\s*\{[^}]*background:\s*#(?:2563eb|3b82f6)/i,
+    );
+  });
+
+  it('keeps dark renderer surfaces local instead of making them page bands', () => {
+    expect(homepageCss).toMatch(/\.teacherVisual\s*\{[^}]*background:/);
+    expect(homepageCss).not.toMatch(
+      /\.(?:page|story|knowledgeBand|foundationBand|feedbackBand)\s*\{[^}]*background:\s*#0[0-9a-f]{5}/i,
+    );
+  });
+
   it('defines scoped responsive and reduced-motion resilience contracts', () => {
     const mobileCss = homepageCss
       .split('@media (max-width: 767px)')[1]
