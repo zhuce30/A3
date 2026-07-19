@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -14,6 +15,9 @@ from backend.apps.profiles.dynamic_profile import append_learning_event, merge_d
 from backend.apps.profiles.models import LearnerProfile
 from backend.apps.profiles.profile_aggregator import aggregate_profile_snapshot
 from backend.apps.profiles.profile_signals import append_profile_signal
+
+
+logger = logging.getLogger(__name__)
 
 
 SESSION_SCHEMA_VERSION = "a3.profile-interview-session.v1"
@@ -430,17 +434,25 @@ def confirm_profile_interview(user) -> dict:
 
 
 def _extract_profile_dimensions(text: str, profile: LearnerProfile | None = None) -> dict:
+    rule_based = _rule_extract_profile_dimensions(text)
     try:
         return _merge_extracted_profiles(
-            _rule_extract_profile_dimensions(text),
+            rule_based,
             _llm_extract_profile_dimensions(
                 text,
                 profile_context=_public_interview_profile(profile) if profile is not None else {},
                 recent_messages=_recent_interview_messages(profile),
             ),
         )
-    except Exception:
-        return _rule_extract_profile_dimensions(text)
+    except Exception as exc:
+        logger.warning("Profile interview LLM extraction failed; using rule fallback: %s", exc)
+        rule_based["_llm"] = {
+            "provider": "rules",
+            "model": "",
+            "fallback": True,
+            "error": str(exc)[:500],
+        }
+        return rule_based
 
 
 def _llm_extract_profile_dimensions(
@@ -463,7 +475,12 @@ def _llm_extract_profile_dimensions(
                     "字段包括 grade, major_direction, foundation_level, daily_study_time, pace, "
                     "learning_goals, weak_points, expected_resources, learning_preferences, "
                     "cognitiveStyle, motivationRisk, learningHistory, mistakePatterns。"
-                    "历史画像和对话只用于理解本轮消息中的指代。只抽取学生本轮明确新增或修正的信息，"
+                    "历史画像和对话只用于理解本轮消息中的指代。"
+                    "当 currentMessage 是对 recentConversation 最后一条追问的直接回答时，"
+                    "即使学生没有重复字段名称，也必须按该追问对应的画像字段抽取。"
+                    "例如，最后一条追问询问坚持学习时遇到的困难，学生回答‘对基础知识的深入掌握’，"
+                    "应返回 motivationRisk 为‘对基础知识的深入掌握’。"
+                    "只抽取学生本轮明确新增或修正的信息，"
                     "不要重复输出未变化的历史字段，不要使用默认占位补齐；无法判断的字段返回空字符串、空数组或空对象。"
                 ),
             },
@@ -523,7 +540,7 @@ def _rule_extract_profile_dimensions(text: str) -> dict:
         "expected_resources": resources,
         "learning_preferences": learning_preferences,
         "cognitiveStyle": cognitive_style,
-        "motivationRisk": "考研目标明确，建议保持连续反馈" if _contains_any(text, normalized, ["考研", "graduate exam"]) else "",
+        "motivationRisk": _extract_motivation_risk(text, normalized),
         "learningHistory": _learning_history_hint(normalized),
         "mistakePatterns": mistake_patterns,
         "_llm": {"provider": "rules", "model": "", "fallback": True},
@@ -960,6 +977,27 @@ def _extract_weak_points(text: str, normalized: str) -> list[str]:
     if has_weak_context and has_concept_context and "基础概念与知识边界" not in weak_points:
         weak_points.append("基础概念与知识边界")
     return weak_points
+
+
+def _extract_motivation_risk(text: str, normalized: str) -> str:
+    explicit_patterns = (
+        r"(?:最近)?(?:坚持)?学习时(?:最容易)?遇到的?困难(?:是|在于|主要是|为|[：:])?\s*(.+)",
+        r"(?:遇到的)?困难(?:是|在于|主要是|为|[：:])\s*(.+)",
+    )
+    for pattern in explicit_patterns:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            answer = match.group(1).strip(" \t\r\n，。！？；;,.!?")
+            if answer:
+                return answer[:120]
+
+    if _contains_any(
+        text,
+        normalized,
+        ["容易分心", "容易拖延", "坚持不下去", "时间不够", "临时任务", "容易被打断", "缺乏动力", "没有反馈"],
+    ):
+        return text.strip(" \t\r\n，。！？；;,.!?")[:120]
+    return ""
 
 
 def _extract_mistake_patterns(text: str, normalized: str) -> list[str]:

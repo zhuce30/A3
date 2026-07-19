@@ -273,6 +273,40 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertIn("符号方向混淆", dynamic_profile["mistakePatterns"])
         self.assertIn("公式套用不稳", dynamic_profile["mistakePatterns"])
 
+    def test_profile_interview_rule_fallback_accepts_short_motivation_follow_up(self):
+        profile, _ = LearnerProfile.objects.get_or_create(user=self.user)
+        profile.grade = "大二"
+        profile.major_direction = "计算机科学与技术"
+        profile.foundation_level = "基础一般"
+        profile.daily_study_time = 45
+        profile.learning_goals = ["掌握操作系统核心知识"]
+        profile.weak_points = ["虚拟内存"]
+        profile.expected_resources = ["代码实验"]
+        profile.learning_preferences = {"cognitiveStyle": "结合案例理解"}
+        profile.extra_profile = {
+            **dict(profile.extra_profile or {}),
+            "learningHistory": "学过程序设计和数据结构",
+            "motivationRisk": "",
+        }
+        profile.save()
+
+        with patch(
+            "backend.apps.compat.profile_interview._llm_extract_profile_dimensions",
+            side_effect=RuntimeError("force deterministic rule fallback"),
+        ):
+            response = self.client.post(
+                "/api/profile/interview/",
+                data=json.dumps({"message": "遇到的困难是对基础知识的深入掌握"}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        missing_fields = {item["field"] for item in payload["missingDimensions"]}
+        self.assertEqual(payload["profile"]["motivationRisk"], "对基础知识的深入掌握")
+        self.assertNotIn("motivationRisk", missing_fields)
+        self.assertNotEqual(payload["nextQuestion"], "最近坚持学习时最容易遇到什么困难？")
+
     def test_learning_events_collect_profile_assessment_and_diagnostic_updates(self):
         self.client.post(
             "/api/profile/interview/",
