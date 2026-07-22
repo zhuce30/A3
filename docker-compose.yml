@@ -47,6 +47,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      A3_INTERNAL_FRONTEND_BASE_URL: http://frontend:3000
+      A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:-a3-docker-dev-video-worker-token}
+      A3_VIDEO_STORAGE_ROOT: /app/storage/a3-videos
+      A3_VIDEO_STORAGE_MAX_BYTES: ${A3_VIDEO_STORAGE_MAX_BYTES:-209715200}
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "1"
       A3_SEED_DEMO_DATA: "1"
@@ -56,6 +60,7 @@ services:
       - ./data:/app/data
       - ./backend/knowledge_base:/app/backend/knowledge_base
       - ./backend/tmp:/app/backend/tmp
+      - a3-video-data:/app/storage/a3-videos
     depends_on:
       mysql:
         condition: service_healthy
@@ -79,6 +84,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      A3_INTERNAL_FRONTEND_BASE_URL: http://frontend:3000
+      A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:-a3-docker-dev-video-worker-token}
+      A3_VIDEO_STORAGE_ROOT: /app/storage/a3-videos
+      A3_VIDEO_STORAGE_MAX_BYTES: ${A3_VIDEO_STORAGE_MAX_BYTES:-209715200}
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "0"
       A3_SEED_DEMO_DATA: "0"
@@ -86,6 +95,7 @@ services:
       - ./data:/app/data
       - ./backend/knowledge_base:/app/backend/knowledge_base
       - ./backend/tmp:/app/backend/tmp
+      - a3-video-data:/app/storage/a3-videos
     depends_on:
       backend:
         condition: service_started
@@ -131,6 +141,7 @@ services:
       NODE_ENV: production
       NEXT_PUBLIC_A3_API_BASE_URL: http://localhost:8000
       A3_API_BASE_URL: http://backend:8000
+      A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:-a3-docker-dev-video-worker-token}
       A3_COACHING_BASE_URL: ${A3_COACHING_BASE_URL:-}
       A3_COACHING_API_KEY: ${A3_COACHING_API_KEY:-}
       A3_COACHING_MODEL: ${A3_COACHING_MODEL:-qwen-plus}
@@ -144,3 +155,4 @@ services:
 volumes:
   a3-mysql-data:
   a3-redis-data:
+  a3-video-data:

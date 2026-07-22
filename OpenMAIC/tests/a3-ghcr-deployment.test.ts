@@ -182,6 +182,25 @@ describe('A3 private GHCR frontend deployment', () => {
     expect(dockerfile).toMatch(/chown -R nextjs:nodejs \/app\/data/);
   });
 
+  it('shares persistent generated-video storage between backend and Celery', () => {
+    const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
+      schema: composeSchema,
+    }) as ComposeDocument;
+    const envTemplate = fs.readFileSync(envTemplatePath, 'utf8');
+
+    for (const serviceName of ['backend', 'celery']) {
+      expect(compose.services?.[serviceName]?.environment).toMatchObject({
+        A3_VIDEO_STORAGE_ROOT: '/app/storage/a3-videos',
+        A3_VIDEO_STORAGE_MAX_BYTES: '${A3_VIDEO_STORAGE_MAX_BYTES:-209715200}',
+      });
+      expect(compose.services?.[serviceName]?.volumes).toContain(
+        'a3-video-data:/app/storage/a3-videos',
+      );
+    }
+    expect(compose.volumes).toHaveProperty('a3-video-data');
+    expect(envTemplate).toMatch(/^A3_VIDEO_STORAGE_MAX_BYTES=209715200$/m);
+  });
+
   it('ties deployment source and image identity to the full deployment SHA', () => {
     const runbook = fs.readFileSync(runbookPath, 'utf8');
 

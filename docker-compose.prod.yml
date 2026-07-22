@@ -57,9 +57,15 @@ services:
       CACHE_REDIS_URL: redis://redis:6379/2
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      A3_INTERNAL_FRONTEND_BASE_URL: http://frontend:3000
+      A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:?set A3_VIDEO_WORKER_TOKEN in .env.production}
+      A3_VIDEO_STORAGE_ROOT: /app/storage/a3-videos
+      A3_VIDEO_STORAGE_MAX_BYTES: ${A3_VIDEO_STORAGE_MAX_BYTES:-209715200}
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "1"
       A3_SEED_DEMO_DATA: ${A3_SEED_DEMO_DATA:-1}
+    volumes:
+      - a3-video-data:/app/storage/a3-videos
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/ready/', timeout=3)"]
       interval: 15s
@@ -102,9 +108,15 @@ services:
       CACHE_REDIS_URL: redis://redis:6379/2
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      A3_INTERNAL_FRONTEND_BASE_URL: http://frontend:3000
+      A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:?set A3_VIDEO_WORKER_TOKEN in .env.production}
+      A3_VIDEO_STORAGE_ROOT: /app/storage/a3-videos
+      A3_VIDEO_STORAGE_MAX_BYTES: ${A3_VIDEO_STORAGE_MAX_BYTES:-209715200}
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "0"
       A3_SEED_DEMO_DATA: "0"
+    volumes:
+      - a3-video-data:/app/storage/a3-videos
 
   celery-beat:
     image: ${A3_BACKEND_IMAGE:-ghcr.io/zhuce30/a3-backend:latest}
@@ -148,6 +160,7 @@ services:
       NEXT_PUBLIC_A3_API_BASE_URL: ${NEXT_PUBLIC_A3_API_BASE_URL:-https://api.zhuce.work}
       A3_API_BASE_URL: http://backend:8000
       A3_INTERNAL_FRONTEND_BASE_URL: http://127.0.0.1:3000
+      A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:?set A3_VIDEO_WORKER_TOKEN in .env.production}
       A3_COACHING_BASE_URL: ${A3_COACHING_BASE_URL:-}
       A3_COACHING_API_KEY: ${A3_COACHING_API_KEY:-}
       A3_COACHING_MODEL: ${A3_COACHING_MODEL:-qwen-plus}
@@ -204,3 +217,4 @@ volumes:
   a3-caddy-config:
   a3-caddy-logs:
   a3-frontend-data:
+  a3-video-data:

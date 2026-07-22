@@ -122,3 +122,89 @@ test.describe.serial('A3 resource feedback learning loop', () => {
     await expect(planAdjustment).toContainText(/reinforce_mastery|keep_current_pace/);
   });
 });
+
+test.describe('A3 legacy video migration', () => {
+  test.setTimeout(90_000);
+
+  test.beforeEach(() => {
+    runManage('seed_demo_data');
+  });
+
+  test('legacy video confirmation reports exact counts and cancel sends no PATCH', async ({ page }) => {
+    await loginAsStudent(page);
+    let patchCount = 0;
+    const segments = [
+      { index: 1, title: '导入', status: 'failed', videoUrl: '', duration: 10, width: 0, height: 0 },
+      { index: 2, title: '概念', status: 'failed', videoUrl: '', duration: 10, width: 0, height: 0 },
+      ...[3, 4, 5, 6].map((index) => ({
+        index,
+        title: `片段 ${index}`,
+        status: 'succeeded',
+        videoUrl: `https://media.example.test/segment-${index}.mp4`,
+        duration: 10,
+        width: 1920,
+        height: 1080,
+      })),
+    ];
+
+    await page.route('**/api/resources/packs/legacy-video-pack/', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          resourcePack: {
+            schemaVersion: 'a3.resource-pack.v2',
+            resourcePackId: 'legacy-video-pack',
+            goal: '理解操作系统中的死锁',
+            learnerProfileSnapshot: {},
+            resources: [{
+              resourceId: 'legacy-video-script',
+              type: 'micro_video_script',
+              title: '死锁微课脚本',
+              summary: '解释死锁条件与处理策略',
+              content: {
+                objective: '掌握死锁的四个必要条件',
+                narration: '从资源竞争理解死锁。',
+                shots: [{ scene: '导入', visual: '进程等待资源', narration: '先观察资源竞争。' }],
+              },
+              personalizationReason: '针对薄弱点生成',
+              citations: [],
+              estimatedMinutes: 1,
+            }],
+            multimodalArtifacts: [{
+              type: 'openmaic_video',
+              status: 'partial',
+              provider: 'seedance',
+              resourceType: 'micro_video_script',
+              videoUrl: '',
+              duration: 60,
+              width: 1920,
+              height: 1080,
+              segments,
+              elapsedMs: 0,
+              createdAt: '2026-07-18T08:00:00Z',
+            }],
+          },
+        }),
+      });
+    });
+    await page.route('**/api/a3/resources/openmaic-video**', async (route) => {
+      if (route.request().method() === 'PATCH') patchCount += 1;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, jobs: [] }) });
+    });
+
+    await page.goto('/a3/resources/legacy-video-pack/video');
+    await expect(page.getByTestId('a3-legacy-video-migration')).toBeVisible();
+    await page.getByRole('button', { name: '补生成失败片段' }).click();
+
+    const dialog = page.getByRole('alertdialog');
+    await expect(dialog).toContainText('补生成 2 段');
+    await expect(dialog).toContainText('保留 4 段');
+    await expect(dialog).toContainText('付费 Seedance');
+    await dialog.getByRole('button', { name: '取消' }).click();
+
+    await expect(dialog).toBeHidden();
+    expect(patchCount).toBe(0);
+  });
+});

@@ -2,11 +2,23 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, ExternalLink, Loader2, Play, ShieldCheck, Video } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, ExternalLink, Loader2, Play, RefreshCw, ShieldCheck, Video } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import { trackResourceComplete, trackResourceOpen } from '@/lib/a3/learning-event-client';
 import type { A3OpenMAICVideoArtifact, A3ResourceFeedbackResponse, A3ResourcePackV2, A3ResourcePackV2Resource } from '@/lib/a3/recommendation-types';
+import { getVideoPlaybackState } from '@/lib/a3/video-playback';
+import { buildA3VideoPrompt } from '@/lib/a3/video-prompt';
 import { A3Card, A3Pill } from '../ui/a3-card';
 
 type ResourcePackDetailResponse = {
@@ -28,6 +40,10 @@ export function ResourceVideoView({ packId }: { packId: string }) {
   const [openedRecorded, setOpenedRecorded] = useState(false);
   const [completedRecorded, setCompletedRecorded] = useState(false);
   const [activeSegmentIndex, setActiveSegmentIndex] = useState(0);
+  const [retryingFailedSegments, setRetryingFailedSegments] = useState(false);
+  const [retryMessage, setRetryMessage] = useState('');
+  const [legacyConfirmOpen, setLegacyConfirmOpen] = useState(false);
+  const [playbackFailed, setPlaybackFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,15 +79,42 @@ export function ResourceVideoView({ packId }: { packId: string }) {
   const script = pack?.resources.find((resource) => resource.type === 'micro_video_script') ?? null;
   const playableSegments = useMemo(() => {
     return (videoArtifact?.segments ?? [])
-      .filter((segment) => segment.status === 'succeeded' && Boolean(segment.videoUrl))
+      .filter((segment) => (
+        segment.status === 'succeeded'
+        && getVideoPlaybackState(segment.videoUrl, videoArtifact?.createdAt) !== 'expired'
+        && getVideoPlaybackState(segment.videoUrl, videoArtifact?.createdAt) !== 'unavailable'
+      ))
       .sort((a, b) => Number(a.index || 0) - Number(b.index || 0));
   }, [videoArtifact]);
   const activeSegment = playableSegments[activeSegmentIndex] ?? null;
   const playerUrl = activeSegment?.videoUrl || videoArtifact?.videoUrl || '';
+  const playerState = getVideoPlaybackState(playerUrl, videoArtifact?.createdAt);
+  const playerAvailable = Boolean(playerUrl) && !playbackFailed && !['expired', 'unavailable'].includes(playerState);
   const totalSegmentCount = videoArtifact?.segments?.length ?? 0;
+  const failedSegmentCount = videoArtifact?.segments?.filter((segment) => segment.status === 'failed').length ?? 0;
+  const legacyFailedSegments = (videoArtifact?.segments ?? []).filter(
+    (segment) => !videoArtifact?.jobId && segment.status === 'failed',
+  );
+  const legacySucceededSegments = (videoArtifact?.segments ?? []).filter(
+    (segment) => (
+      !videoArtifact?.jobId
+      && segment.status === 'succeeded'
+      && getVideoPlaybackState(segment.videoUrl, videoArtifact?.createdAt) === 'remote'
+    ),
+  );
+  const expiredSegmentCount = (videoArtifact?.segments ?? []).filter(
+    (segment) => getVideoPlaybackState(segment.videoUrl, videoArtifact?.createdAt) === 'expired',
+  ).length;
+  const hasExpiredVideo = expiredSegmentCount > 0
+    || getVideoPlaybackState(videoArtifact?.videoUrl, videoArtifact?.createdAt) === 'expired';
+  const canImportLegacyFailures = legacyFailedSegments.length > 0 && legacySucceededSegments.length > 0;
   const playableDuration = playableSegments.length
     ? playableSegments.reduce((sum, segment) => sum + Number(segment.duration || 0), 0)
     : Number(videoArtifact?.duration || 0);
+
+  useEffect(() => {
+    setPlaybackFailed(false);
+  }, [playerUrl]);
 
   async function recordVideoFeedback(action: 'opened' | 'completed') {
     if (!pack || (action === 'opened' && openedRecorded) || (action === 'completed' && completedRecorded)) return;
@@ -84,6 +127,113 @@ export function ResourceVideoView({ packId }: { packId: string }) {
     if (result.success && action === 'opened') setOpenedRecorded(true);
     if (result.success && action === 'completed') setCompletedRecorded(true);
   }
+
+  async function retryFailedSegments() {
+    if (!videoArtifact?.jobId || !failedSegmentCount || retryingFailedSegments) return;
+    setRetryingFailedSegments(true);
+    setRetryMessage(`正在只重试 ${failedSegmentCount} 个失败片段，已成功片段会保留。`);
+    try {
+      const response = await fetch('/api/a3/resources/openmaic-video', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'retry-failed', jobId: videoArtifact.jobId }),
+      });
+      const initial = await response.json() as VideoJobResponse;
+      if (!response.ok || !initial.success) throw new Error(initial.error || '失败片段重试未能启动');
+      const job = await pollVideoJob(initial);
+      const refreshed = await loadResourcePack(packId);
+      if (refreshed.success && refreshed.resourcePack) setPack(sanitizeResourcePack(refreshed.resourcePack));
+      setRetryMessage(job.status === 'succeeded' ? '失败片段已补齐。' : '重试已完成，请查看各片段状态。');
+    } catch (retryError) {
+      setRetryMessage(`重试失败：${retryError instanceof Error ? retryError.message : '请稍后再试'}`);
+    } finally {
+      setRetryingFailedSegments(false);
+    }
+  }
+
+  async function pollVideoJob(initial: VideoJobResponse, isCancelled: () => boolean = () => false) {
+    let job = initial;
+    if (!job.jobId) throw new Error('视频任务缺少 jobId');
+    const jobId = job.jobId;
+    while (!job.done && !['succeeded', 'partial', 'failed'].includes(String(job.status))) {
+      await wait(5000);
+      if (isCancelled()) return job;
+      const poll = await fetch(`/api/a3/resources/openmaic-video?jobId=${encodeURIComponent(jobId)}`, { cache: 'no-store' });
+      job = await poll.json() as VideoJobResponse;
+      if (!poll.ok || !job.success) throw new Error(job.error || '视频任务进度查询失败');
+      if (!isCancelled()) setRetryMessage(job.message || `视频任务进度 ${job.progress ?? 0}%`);
+    }
+    return job;
+  }
+
+  async function importLegacyFailures() {
+    if (!pack || !script || !canImportLegacyFailures || retryingFailedSegments) return;
+    setLegacyConfirmOpen(false);
+    setRetryingFailedSegments(true);
+    setRetryMessage(`正在补生成 ${legacyFailedSegments.length} 段，保留 ${legacySucceededSegments.length} 段。`);
+    try {
+      const response = await fetch('/api/a3/resources/openmaic-video', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'import-legacy-failures',
+          resourcePackId: pack.resourcePackId,
+          provider: 'seedance',
+          prompt: buildA3VideoPrompt(pack.goal, script),
+          aspectRatio: '16:9',
+          resolution: '1080p',
+        }),
+      });
+      const initial = await response.json() as VideoJobResponse;
+      if (!response.ok || !initial.success) throw new Error(initial.error || '旧视频迁移未能启动');
+      const job = await pollVideoJob(initial);
+      const refreshed = await loadResourcePack(packId);
+      if (refreshed.success && refreshed.resourcePack) setPack(sanitizeResourcePack(refreshed.resourcePack));
+      setRetryMessage(job.status === 'succeeded' ? '失败片段已补齐。' : '补生成任务已完成，请查看各片段状态。');
+    } catch (importError) {
+      setRetryMessage(`补生成失败：${importError instanceof Error ? importError.message : '请稍后再试'}`);
+    } finally {
+      setRetryingFailedSegments(false);
+    }
+  }
+
+  useEffect(() => {
+    const resourcePackId = pack?.resourcePackId;
+    if (!resourcePackId) return;
+    let cancelled = false;
+
+    async function restoreActiveVideoJob() {
+      const result = await a3GetJson<VideoJobResponse>('/api/a3/resources/openmaic-video');
+      const active = (result.jobs ?? []).find(
+        (job) => (
+          job.resourcePackId === resourcePackId
+          || (packId !== 'latest' && job.resourcePackId === packId)
+        ) && ['queued', 'running'].includes(String(job.status)),
+      );
+      if (!active?.jobId || cancelled) return;
+      setRetryingFailedSegments(true);
+      setRetryMessage(active.message || '正在恢复视频任务进度。');
+      try {
+        await pollVideoJob({ ...active, success: true }, () => cancelled);
+        if (cancelled) return;
+        const refreshed = await loadResourcePack(packId);
+        if (!cancelled && refreshed.success && refreshed.resourcePack) {
+          setPack(sanitizeResourcePack(refreshed.resourcePack));
+        }
+      } catch (restoreError) {
+        if (!cancelled) {
+          setRetryMessage(`任务恢复失败：${restoreError instanceof Error ? restoreError.message : '请稍后再试'}`);
+        }
+      } finally {
+        if (!cancelled) setRetryingFailedSegments(false);
+      }
+    }
+
+    void restoreActiveVideoJob();
+    return () => {
+      cancelled = true;
+    };
+  }, [pack?.resourcePackId, packId]);
 
   if (loading) {
     return (
@@ -139,7 +289,79 @@ export function ResourceVideoView({ packId }: { packId: string }) {
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
         <A3Card title="视频成品" subtitle="有成功 artifact 时直接在线播放；无 artifact 时展示失败或降级原因。">
-          {playerUrl ? (
+          {hasExpiredVideo || playbackFailed ? (
+            <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-950" data-testid="a3-video-playback-expired">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="mt-0.5 size-5 shrink-0 text-amber-700" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-semibold">视频已过期或文件不可用</div>
+                  <p className="mt-1 text-xs leading-5 text-amber-800">
+                    旧视频使用了供应商临时地址，过期后无法继续播放。新生成的视频会保存到智学引擎的持久化存储中。
+                  </p>
+                  <Button asChild size="sm" className="mt-3 bg-amber-700 text-white hover:bg-amber-800">
+                    <Link href="/a3/recommendations">
+                      <RefreshCw className="size-4" />
+                      重新生成完整视频
+                    </Link>
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {canImportLegacyFailures ? (
+            <div className="mb-4 rounded-xl border border-orange-200 bg-orange-50 p-4" data-testid="a3-legacy-video-migration">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-orange-950">旧视频有 {legacyFailedSegments.length} 个片段生成失败</div>
+                  <p className="mt-1 text-xs leading-5 text-orange-800">
+                    可补生成失败片段，并保留现有 {legacySucceededSegments.length} 个成功片段。
+                  </p>
+                  {retryMessage ? <p className="mt-1 text-xs text-orange-700">{retryMessage}</p> : null}
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="shrink-0 bg-white"
+                  disabled={retryingFailedSegments}
+                  onClick={() => setLegacyConfirmOpen(true)}
+                >
+                  {retryingFailedSegments ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                  补生成失败片段
+                </Button>
+              </div>
+              <AlertDialog open={legacyConfirmOpen} onOpenChange={setLegacyConfirmOpen}>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>确认补生成失败片段</AlertDialogTitle>
+                    <AlertDialogDescription className="space-y-2 text-left">
+                      <span className="block">本次将补生成 {legacyFailedSegments.length} 段，保留 {legacySucceededSegments.length} 段。</span>
+                      <span className="block">确认后会提交付费 Seedance 任务，已成功片段不会重新生成。</span>
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>取消</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => void importLegacyFailures()}>
+                      确认补生成
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </div>
+          ) : null}
+          {failedSegmentCount > 0 && videoArtifact?.jobId ? (
+            <div className="mb-4 flex flex-col gap-3 rounded-xl border border-orange-200 bg-orange-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-orange-950">有 {failedSegmentCount} 个片段生成失败</div>
+                <p className="mt-1 text-xs leading-5 text-orange-800">只重试失败片段，已成功片段会保留并继续可播放。</p>
+                {retryMessage ? <p className="mt-1 text-xs text-orange-700">{retryMessage}</p> : null}
+              </div>
+              <Button type="button" variant="outline" className="shrink-0 bg-white" disabled={retryingFailedSegments} onClick={() => void retryFailedSegments()}>
+                {retryingFailedSegments ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                只重试失败片段
+              </Button>
+            </div>
+          ) : null}
+          {playerAvailable ? (
             <div className="space-y-4">
               <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-950">
                 <video
@@ -149,6 +371,7 @@ export function ResourceVideoView({ packId }: { packId: string }) {
                   controls
                   playsInline
                   preload="metadata"
+                  onError={() => setPlaybackFailed(true)}
                   onPlay={() => void recordVideoFeedback('opened')}
                   onEnded={() => {
                     if (playableSegments.length && activeSegmentIndex < playableSegments.length - 1) {
@@ -175,7 +398,8 @@ export function ResourceVideoView({ packId }: { packId: string }) {
                   </div>
                   <div className="mt-3 grid gap-2 md:grid-cols-3">
                     {(videoArtifact?.segments ?? []).map((segment) => {
-                      const enabled = segment.status === 'succeeded' && Boolean(segment.videoUrl);
+                      const enabled = segment.status === 'succeeded'
+                        && !['expired', 'unavailable'].includes(getVideoPlaybackState(segment.videoUrl, videoArtifact?.createdAt));
                       const active = activeSegment?.index === segment.index;
                       return (
                         <button
@@ -221,7 +445,9 @@ export function ResourceVideoView({ packId }: { packId: string }) {
                 暂无可播放视频
               </div>
               <p className="mt-2">
-                {videoArtifact?.degradedReason || '当前资源包只有视频脚本，还没有成功的视频 artifact。请回到资源生成入口点击“生成视频”。'}
+                {hasExpiredVideo || playbackFailed
+                  ? '旧视频链接已经失效，请重新生成。新视频会保存到系统持久化存储，不再依赖短期签名链接。'
+                  : videoArtifact?.degradedReason || '当前资源包只有视频脚本，还没有成功的视频 artifact。请回到资源生成入口点击“生成视频”。'}
               </p>
               <Button asChild className="mt-4 bg-orange-600 text-white hover:bg-orange-700">
                 <Link href="/a3/recommendations">
@@ -239,6 +465,24 @@ export function ResourceVideoView({ packId }: { packId: string }) {
       </div>
     </div>
   );
+}
+
+type VideoJobResponse = {
+  success: boolean;
+  error?: string;
+  jobId?: string;
+  resourcePackId?: string;
+  status?: string;
+  progress?: number;
+  message?: string;
+  done?: boolean;
+  importedSucceeded?: number;
+  queuedFailed?: number;
+  jobs?: VideoJobResponse[];
+};
+
+function wait(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function VideoScriptSummary({ resource }: { resource: A3ResourcePackV2Resource }) {

@@ -32,7 +32,13 @@ from backend.apps.compat.agent_runtime import AgentRun, recent_agent_runs
 from backend.apps.compat.agent_workflows import summarize_workflow_readiness
 from backend.apps.compat.code_lab_runner import run_code_lab
 from backend.apps.compat.management.commands.evaluate_demo_retrieval import DEFAULT_CASES, EVALUATION_TARGET_CASES
-from backend.apps.compat.models import AgentRun as AgentRunModel, OpenMAICArtifact, ResourceGenerationJob
+from backend.apps.compat.models import (
+    AgentRun as AgentRunModel,
+    OpenMAICArtifact,
+    ResourceGenerationJob,
+    VideoGenerationJob,
+    VideoGenerationSegment,
+)
 from backend.apps.compat.profile_interview import confirm_profile_interview, get_profile_interview_session, run_profile_interview
 from backend.apps.compat.recommendations import build_recommendation_payload
 from backend.apps.compat.resource_generation import (
@@ -48,6 +54,13 @@ from backend.apps.compat.resource_generation import (
     record_resource_feedback,
 )
 from backend.apps.compat.verification import verify_answer
+from backend.apps.compat.video_jobs import (
+    create_legacy_video_retry_job,
+    create_video_job,
+    retry_failed_video_segments,
+    serialize_video_job,
+)
+from backend.apps.compat.video_storage import build_video_stream_response
 from backend.apps.engagement.models import UserNotification
 from backend.apps.knowledge_base.models import KnowledgeGraphClaim, KnowledgeGraphEntity, KnowledgeGraphRelation, KnowledgeParseRun
 from backend.apps.knowledge_base.services import accessible_resources_for_user
@@ -287,6 +300,110 @@ def resource_generation_job_detail(request, job_id):
         return JsonResponse({"success": True, "job": serialize_resource_generation_job(job)})
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["POST"])
+def resource_pack_video_jobs(request, pack_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    if not get_resource_pack(request.user, str(pack_id)):
+        return JsonResponse({"success": False, "error": "资源包不存在"}, status=404)
+    try:
+        job, created = create_video_job(request.user, str(pack_id), _body(request))
+        job = VideoGenerationJob.objects.prefetch_related("segments").get(id=job.id)
+        return JsonResponse({"success": True, "created": created, "job": serialize_video_job(job)}, status=201 if created else 200)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["POST"])
+def import_legacy_resource_pack_video_job(request, pack_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    pack = get_resource_pack(request.user, str(pack_id))
+    if not pack:
+        return JsonResponse({"success": False, "error": "资源包不存在"}, status=404)
+    try:
+        job, created, imported, queued = create_legacy_video_retry_job(
+            request.user,
+            str(pack_id),
+            pack,
+            _body(request),
+        )
+        refreshed = VideoGenerationJob.objects.prefetch_related("segments").get(id=job.id)
+        return JsonResponse(
+            {
+                "success": True,
+                "created": created,
+                "importedSucceeded": imported,
+                "queuedFailed": queued,
+                "job": serialize_video_job(refreshed),
+            },
+            status=201 if created else 200,
+        )
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["GET"])
+def video_generation_jobs(request):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    jobs = VideoGenerationJob.objects.filter(user=request.user).prefetch_related("segments")[:20]
+    return JsonResponse({"success": True, "jobs": [serialize_video_job(job) for job in jobs]})
+
+
+@require_http_methods(["GET"])
+def video_generation_job_detail(request, job_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(
+        VideoGenerationJob.objects.prefetch_related("segments"),
+        user=request.user,
+        job_id=str(job_id),
+    )
+    return JsonResponse({"success": True, "job": serialize_video_job(job)})
+
+
+@require_http_methods(["POST"])
+def retry_failed_video_generation_segments(request, job_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(VideoGenerationJob, user=request.user, job_id=str(job_id))
+    try:
+        retried = retry_failed_video_segments(job)
+        refreshed = VideoGenerationJob.objects.prefetch_related("segments").get(id=job.id)
+        return JsonResponse({"success": True, "retried": retried, "job": serialize_video_job(refreshed)}, status=202)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["GET"])
+def video_playback(request, playback_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    segment = get_object_or_404(
+        VideoGenerationSegment.objects.select_related("job"),
+        playback_id=playback_id,
+        job__user=request.user,
+    )
+    try:
+        return build_video_stream_response(request, segment)
+    except FileNotFoundError:
+        return JsonResponse(
+            {"success": False, "error": "视频文件已不可用，请重新生成"},
+            status=410,
+        )
+    except ValueError as exc:
+        response = JsonResponse({"success": False, "error": str(exc)}, status=416)
+        response["Content-Range"] = f"bytes */{segment.file_size}"
+        return response
 
 
 @require_http_methods(["GET"])
