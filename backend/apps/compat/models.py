@@ -175,6 +175,11 @@ class VideoGenerationSegment(models.Model):
     index = models.PositiveSmallIntegerField()
     title = models.CharField(max_length=120)
     prompt = models.TextField()
+    visual = models.TextField(blank=True)
+    narration = models.TextField(blank=True)
+    source_ids = models.JSONField(default=list, blank=True)
+    narration_estimated_ms = models.PositiveIntegerField(default=0)
+    narration_fits = models.BooleanField(default=True)
     duration = models.PositiveSmallIntegerField(default=10)
     aspect_ratio = models.CharField(max_length=16, default="16:9")
     resolution = models.CharField(max_length=16, default="1080p")
@@ -191,6 +196,13 @@ class VideoGenerationSegment(models.Model):
     content_type = models.CharField(max_length=120, blank=True)
     file_size = models.PositiveBigIntegerField(default=0)
     sha256 = models.CharField(max_length=64, blank=True)
+    audio_status = models.CharField(max_length=32, default="pending")
+    audio_path = models.TextField(blank=True)
+    audio_content_type = models.CharField(max_length=120, blank=True)
+    audio_file_size = models.PositiveBigIntegerField(default=0)
+    audio_sha256 = models.CharField(max_length=64, blank=True)
+    audio_duration_ms = models.PositiveIntegerField(default=0)
+    audio_playback_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     width = models.PositiveIntegerField(default=0)
     height = models.PositiveIntegerField(default=0)
     error_code = models.CharField(max_length=80, blank=True)
@@ -214,3 +226,41 @@ class VideoGenerationSegment(models.Model):
 
     def __str__(self) -> str:
         return f"{self.job.job_id}:{self.index}:{self.status}"
+
+
+class VideoComposition(models.Model):
+    job = models.OneToOneField(VideoGenerationJob, on_delete=models.CASCADE, related_name="composition")
+    status = models.CharField(max_length=32, default="draft")
+    stage = models.CharField(max_length=40, default="storyboard")
+    progress = models.PositiveSmallIntegerField(default=0)
+    message = models.CharField(max_length=255, blank=True)
+    tts_provider = models.CharField(max_length=40, default="qwen-tts")
+    tts_model = models.CharField(max_length=80, default="qwen3-tts-flash")
+    voice = models.CharField(max_length=80, default="Cherry")
+    speed = models.FloatField(default=1.0)
+    narration_text = models.TextField(blank=True)
+    subtitles_path = models.TextField(blank=True)
+    final_video_path = models.TextField(blank=True)
+    final_content_type = models.CharField(max_length=120, blank=True)
+    final_file_size = models.PositiveBigIntegerField(default=0)
+    final_sha256 = models.CharField(max_length=64, blank=True)
+    playback_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    celery_task_id = models.CharField(max_length=64, blank=True)
+    narration_attempts = models.PositiveSmallIntegerField(default=0)
+    compose_attempts = models.PositiveSmallIntegerField(default=0)
+    error_code = models.CharField(max_length=80, blank=True)
+    error_message = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_video_compositions"
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["status", "updated_at"], name="a3_vidcomp_status_update_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.job.job_id}:{self.status}:{self.progress}"
