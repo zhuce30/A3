@@ -38,6 +38,7 @@ from backend.apps.compat.models import (
     ResourceGenerationJob,
     VideoGenerationJob,
     VideoGenerationSegment,
+    VideoComposition,
 )
 from backend.apps.compat.profile_interview import confirm_profile_interview, get_profile_interview_session, run_profile_interview
 from backend.apps.compat.recommendations import build_recommendation_payload
@@ -61,6 +62,19 @@ from backend.apps.compat.video_jobs import (
     serialize_video_job,
 )
 from backend.apps.compat.video_storage import build_video_stream_response
+from backend.apps.compat.video_composition_storage import (
+    InvalidRangeError,
+    asset_file,
+    build_file_response,
+    segment_audio_file,
+)
+from backend.apps.compat.video_compositions import (
+    dispatch_compose,
+    dispatch_narration,
+    get_or_create_composition,
+    serialize_composition,
+    update_composition,
+)
 from backend.apps.engagement.models import UserNotification
 from backend.apps.knowledge_base.models import KnowledgeGraphClaim, KnowledgeGraphEntity, KnowledgeGraphRelation, KnowledgeParseRun
 from backend.apps.knowledge_base.services import accessible_resources_for_user
@@ -404,6 +418,144 @@ def video_playback(request, playback_id):
         response = JsonResponse({"success": False, "error": str(exc)}, status=416)
         response["Content-Range"] = f"bytes */{segment.file_size}"
         return response
+
+
+@require_http_methods(["GET", "PATCH"])
+def video_composition_detail(request, job_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(
+        VideoGenerationJob.objects.prefetch_related("segments"),
+        user=request.user,
+        job_id=str(job_id),
+    )
+    try:
+        composition = (
+            get_or_create_composition(job)
+            if request.method == "GET"
+            else update_composition(job, _body(request))
+        )
+        composition = VideoComposition.objects.select_related("job").prefetch_related("job__segments").get(
+            id=composition.id
+        )
+        return JsonResponse({"success": True, "composition": serialize_composition(composition)})
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["POST"])
+def video_composition_generate_narration(request, job_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(
+        VideoGenerationJob.objects.prefetch_related("segments"),
+        user=request.user,
+        job_id=str(job_id),
+    )
+    try:
+        payload = _body(request)
+        indexes = payload.get("segmentIndexes")
+        if indexes not in (None, []) and not isinstance(indexes, list):
+            raise ValueError("重试片段格式无效")
+        composition = dispatch_narration(job, indexes)
+        composition = VideoComposition.objects.select_related("job").prefetch_related("job__segments").get(
+            id=composition.id
+        )
+        return JsonResponse(
+            {"success": True, "composition": serialize_composition(composition)},
+            status=202,
+        )
+    except (TypeError, ValueError) as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["POST"])
+def video_composition_compose(request, job_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(
+        VideoGenerationJob.objects.prefetch_related("segments"),
+        user=request.user,
+        job_id=str(job_id),
+    )
+    try:
+        composition = dispatch_compose(job)
+        composition = VideoComposition.objects.select_related("job").prefetch_related("job__segments").get(
+            id=composition.id
+        )
+        return JsonResponse(
+            {"success": True, "composition": serialize_composition(composition)},
+            status=202,
+        )
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["GET"])
+def video_audio_playback(request, playback_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    segment = get_object_or_404(
+        VideoGenerationSegment.objects.select_related("job"),
+        audio_playback_id=playback_id,
+        job__user=request.user,
+    )
+    try:
+        return build_file_response(
+            request,
+            segment_audio_file(segment),
+            content_type=segment.audio_content_type or "audio/wav",
+            filename=f"segment-{segment.index}.wav",
+            inline=True,
+        )
+    except FileNotFoundError:
+        return JsonResponse({"success": False, "error": "旁白音频文件不存在"}, status=404)
+    except InvalidRangeError as exc:
+        response = JsonResponse({"success": False, "error": str(exc)}, status=416)
+        response["Content-Range"] = f"bytes */{exc.size}"
+        return response
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=416)
+
+
+@require_http_methods(["GET"])
+def video_composition_asset(request, job_id, asset):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    composition = get_object_or_404(
+        VideoComposition.objects.select_related("job"),
+        job__user=request.user,
+        job__job_id=str(job_id),
+    )
+    content_types = {
+        "final": ("video/mp4", "final.mp4", True),
+        "narration": ("text/plain; charset=utf-8", "narration.txt", False),
+        "subtitles": ("text/vtt; charset=utf-8", "subtitles.vtt", False),
+    }
+    if asset not in content_types:
+        return JsonResponse({"success": False, "error": "不支持的文件类型"}, status=404)
+    try:
+        content_type, filename, inline = content_types[asset]
+        return build_file_response(
+            request,
+            asset_file(composition, asset),
+            content_type=content_type,
+            filename=filename,
+            inline=inline,
+        )
+    except FileNotFoundError:
+        return JsonResponse({"success": False, "error": "文件尚未生成"}, status=404)
+    except InvalidRangeError as exc:
+        response = JsonResponse({"success": False, "error": str(exc)}, status=416)
+        response["Content-Range"] = f"bytes */{exc.size}"
+        return response
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=416)
 
 
 @require_http_methods(["GET"])

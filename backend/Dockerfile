@@ -11,6 +11,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     default-libmysqlclient-dev \
+    ffmpeg \
     fontconfig \
     fonts-noto-cjk \
     libreoffice-impress \

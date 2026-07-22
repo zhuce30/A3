@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ArrowLeft, ExternalLink, Loader2, Play, RefreshCw, ShieldCheck, Video } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, ExternalLink, Film, Loader2, Play, RefreshCw, ShieldCheck, Video } from 'lucide-react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -285,6 +285,16 @@ export function ResourceVideoView({ packId }: { packId: string }) {
             <Metric label="时长" value={playableDuration ? `${playableDuration}s` : '--'} />
           </div>
         </div>
+        {videoArtifact?.jobId ? (
+          <div className="mt-4 border-t border-slate-200 pt-4">
+            <Button asChild className="bg-amber-700 text-white hover:bg-amber-800">
+              <Link href={`/a3/resources/${pack.resourcePackId}/video/compose`}>
+                <Film className="size-4" />
+                制作最终成片
+              </Link>
+            </Button>
+          </div>
+        ) : null}
       </section>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">

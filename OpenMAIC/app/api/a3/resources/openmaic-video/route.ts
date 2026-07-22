@@ -8,10 +8,25 @@ type AuthMeResponse = { user?: A3PublicUser | null };
 
 type SegmentedVideoRequest = {
   prompt: string;
-  duration: 10;
+  visual: string;
+  narration: string;
+  sourceIds: string[];
+  duration: number;
   aspectRatio: string;
   resolution: string;
   title: string;
+};
+
+type StoryboardRequest = {
+  index?: number;
+  scene?: string;
+  title?: string;
+  visual?: string;
+  narration?: string;
+  durationSeconds?: number;
+  duration?: number;
+  prompt?: string;
+  sourceIds?: string[];
 };
 
 type DjangoVideoJob = {
@@ -56,6 +71,7 @@ export async function POST(request: NextRequest) {
       duration?: number;
       aspectRatio?: string;
       resolution?: string;
+      storyboard?: StoryboardRequest[];
     };
     const resourcePackId = String(body.resourcePackId || '').trim();
     const rawPrompt = String(body.prompt || '').trim();
@@ -65,16 +81,16 @@ export async function POST(request: NextRequest) {
     const duration = Math.max(1, Math.min(Number(body.duration || 60), 60));
     const aspectRatio = String(body.aspectRatio || '16:9');
     const resolution = String(body.resolution || '1080p');
-    const segmented = buildSegmentedVideoRequests({
-      prompt: rawPrompt,
-      duration,
-      aspectRatio,
-      resolution,
-    });
+    const segmented = Array.isArray(body.storyboard) && body.storyboard.length
+      ? normalizeStoryboard(body.storyboard, { aspectRatio, resolution })
+      : buildSegmentedVideoRequests({ prompt: rawPrompt, duration, aspectRatio, resolution });
     const segmentRequests = segmented.length
       ? segmented
       : [{
           prompt: hardenVideoPromptForProvider(rawPrompt),
+          visual: '用人物动作、图标、颜色和箭头表现核心概念，不出现文字。',
+          narration: rawPrompt.slice(0, 300),
+          sourceIds: [],
           duration: Math.min(duration, 10) as 10,
           aspectRatio,
           resolution,
@@ -95,6 +111,9 @@ export async function POST(request: NextRequest) {
           index: index + 1,
           title: segment.title,
           prompt: segment.prompt,
+          visual: segment.visual,
+          narration: segment.narration,
+          sourceIds: segment.sourceIds,
           duration: segment.duration,
         })),
       },
@@ -228,6 +247,9 @@ async function rejectUnauthenticated(cookieHeader: string | null) {
 
 export function buildSegmentedVideoRequests(input: {
   prompt: string;
+  visual?: string;
+  narration?: string;
+  sourceIds?: string[];
   duration?: number;
   aspectRatio?: string;
   resolution?: string;
@@ -249,11 +271,39 @@ export function buildSegmentedVideoRequests(input: {
       '这是 1 分钟课程视频的一个连续片段，保持同一画风、角色、色彩和节奏。',
       input.prompt,
     ].join('\n')),
+    visual: input.visual || '用人物动作、图标、颜色和箭头表现教学阶段，不出现文字。',
+    narration: `${stage}。${input.narration || input.prompt}`.slice(0, 2_000),
+    sourceIds: input.sourceIds || [],
     duration: 10,
     aspectRatio: input.aspectRatio || '16:9',
     resolution: input.resolution || '1080p',
     title: stage.split('：')[0],
   }));
+}
+
+function normalizeStoryboard(
+  storyboard: StoryboardRequest[],
+  defaults: { aspectRatio: string; resolution: string },
+): SegmentedVideoRequest[] {
+  return storyboard.slice(0, 6).map((item, index) => {
+    const duration = Math.max(1, Math.min(Number(item.durationSeconds || item.duration || 10), 10)) as 10;
+    const visual = String(item.visual || '用人物动作、图标、颜色和箭头表现教学阶段，不出现文字。').trim();
+    const narration = String(item.narration || '').trim();
+    const prompt = hardenVideoPromptForProvider(String(item.prompt || visual).trim());
+    if (!prompt) throw new Error(`第 ${index + 1} 段缺少画面提示词`);
+    return {
+      prompt,
+      visual,
+      narration,
+      sourceIds: Array.isArray(item.sourceIds)
+        ? item.sourceIds.filter((id): id is string => typeof id === 'string').slice(0, 20)
+        : [],
+      duration,
+      aspectRatio: defaults.aspectRatio,
+      resolution: defaults.resolution,
+      title: String(item.title || item.scene || `片段 ${index + 1}`).slice(0, 120),
+    };
+  });
 }
 
 export function hardenVideoPromptForProvider(prompt: string) {

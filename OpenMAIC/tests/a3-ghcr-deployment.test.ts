@@ -42,6 +42,7 @@ const composeSchema = yaml.DEFAULT_SCHEMA.extend([resetSequenceType]);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const workflowPath = path.join(root, '.github/workflows/build-frontend-image.yml');
 const composePath = path.join(root, 'docker-compose.prod.yml');
+const caddyPath = path.join(root, 'Caddyfile');
 const dockerfilePath = path.join(root, 'OpenMAIC/Dockerfile');
 const envTemplatePath = path.join(root, '.env.production.template');
 const runbookPath = path.join(root, 'docs/A3_GHCR前端镜像部署.md');
@@ -77,6 +78,18 @@ function parseKeyValueLines(value: unknown, field: string): Array<readonly [stri
 }
 
 describe('A3 private GHCR frontend deployment', () => {
+  it('records the real visitor IP behind Cloudflare without logging credentials', () => {
+    const caddy = fs.readFileSync(caddyPath, 'utf8');
+
+    expect(caddy).toContain('trusted_proxies static');
+    expect(caddy).toContain('173.245.48.0/20');
+    expect(caddy).toContain('2c0f:f248::/32');
+    expect(caddy).toContain('client_ip_headers CF-Connecting-IP X-Forwarded-For');
+    expect(caddy.match(/log_append visitor_ip \{http\.request\.client_ip\}/g)).toHaveLength(2);
+    expect(caddy).toContain('request>headers>Authorization delete');
+    expect(caddy).toContain('request>headers>Cookie delete');
+  });
+
   it('builds and publishes amd64 latest and full-SHA lookup tags', () => {
     expect(fs.existsSync(workflowPath)).toBe(true);
     const workflowSource = fs.readFileSync(workflowPath, 'utf8');

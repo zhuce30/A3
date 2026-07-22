@@ -62,6 +62,29 @@ export async function postA3DjangoJson<T>(
   return data;
 }
 
+export async function patchA3DjangoJson<T>(
+  path: string,
+  cookieHeader: string | null,
+  body: unknown,
+): Promise<DjangoJsonResponse<T>> {
+  let csrf = await resolveCsrfForServerPost(cookieHeader);
+  let response = await patchA3Django(path, body, csrf);
+  if (response.status === 403) {
+    csrf = await resolveCsrfForServerPost(cookieHeader, true);
+    response = await patchA3Django(path, body, csrf);
+  }
+  const responseText = await response.text();
+  const data = parseJsonResponse<T>(responseText);
+  if (!response.ok) {
+    return {
+      ...data,
+      success: false,
+      error: data.error || djangoErrorMessage(response.status, responseText),
+    };
+  }
+  return data;
+}
+
 function parseJsonResponse<T>(text: string): DjangoJsonResponse<T> {
   try {
     return JSON.parse(text || '{}') as DjangoJsonResponse<T>;
@@ -85,6 +108,24 @@ async function postA3Django(
 ) {
   return fetch(resolveA3DjangoEndpoint(path), {
     method: 'POST',
+    headers: {
+      ...(csrf.cookieHeader ? { Cookie: csrf.cookieHeader } : {}),
+      ...(csrf.token ? { 'X-CSRFToken': csrf.token } : {}),
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+    body: JSON.stringify(body),
+  });
+}
+
+async function patchA3Django(
+  path: string,
+  body: unknown,
+  csrf: { token: string; cookieHeader: string | null },
+) {
+  return fetch(resolveA3DjangoEndpoint(path), {
+    method: 'PATCH',
     headers: {
       ...(csrf.cookieHeader ? { Cookie: csrf.cookieHeader } : {}),
       ...(csrf.token ? { 'X-CSRFToken': csrf.token } : {}),

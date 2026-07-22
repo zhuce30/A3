@@ -36,6 +36,30 @@ export function buildA3VideoPrompt(goal: string, resource: A3ResourcePackV2Resou
   ].join('\n');
 }
 
+export function buildA3VideoStoryboard(goal: string, resource: A3ResourcePackV2Resource) {
+  const content = resource.content ?? {};
+  const shots = Array.isArray(content.shots)
+    ? content.shots.map((shot) => (typeof shot === 'object' && shot ? shot as Record<string, unknown> : {}))
+    : [];
+  if (!shots.length) return [];
+  return shots.slice(0, 6).map((shot, index) => ({
+    index: index + 1,
+    scene: sanitizeText(shot.scene, `镜头 ${index + 1}`),
+    title: sanitizeText(shot.scene, `片段 ${index + 1}`),
+    visual: sanitizeVideoVisualText(shot.visual),
+    narration: sanitizeText(shot.narration, `围绕${sanitizeText(goal, '当前学习目标')}解释这一阶段。`).slice(0, 2_000),
+    durationSeconds: Math.min(Math.max(Number(shot.durationSeconds || 10), 1), 10),
+    sourceIds: Array.isArray(shot.sourceIds)
+      ? shot.sourceIds.filter((sourceId): sourceId is string => typeof sourceId === 'string').slice(0, 20)
+      : [],
+    prompt: [
+      'Use only people, icons, colors, shapes, objects, and motion to explain the concept.',
+      `Topic: ${sanitizeText(goal, 'the learning goal')}.`,
+      `Visual direction: ${sanitizeVideoVisualText(shot.visual)}.`,
+    ].join(' '),
+  }));
+}
+
 export function estimateA3VideoDuration(): 60 {
   return 60;
 }

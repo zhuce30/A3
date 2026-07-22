@@ -10,6 +10,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from backend.apps.compat.models import VideoGenerationJob, VideoGenerationSegment
+from backend.apps.compat.video_director import VideoDirectorAgent
 from backend.apps.compat.video_storage import segment_playback_available
 
 
@@ -33,34 +34,7 @@ def dispatch_video_job(job: VideoGenerationJob) -> VideoGenerationJob:
 
 
 def _normalize_video_segment_requests(value) -> list[dict[str, Any]]:
-    segments = value if isinstance(value, list) else []
-    if not 1 <= len(segments) <= 6:
-        raise ValueError("视频任务必须包含 1-6 个分段")
-
-    normalized = []
-    seen_indexes = set()
-    for fallback_index, item in enumerate(segments, start=1):
-        if not isinstance(item, dict):
-            raise ValueError("视频分段格式无效")
-        raw_index = item.get("index")
-        try:
-            index = int(raw_index) if raw_index not in (None, "") else fallback_index
-            duration = max(1, min(int(item.get("duration") or 10), 10))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("视频分段序号或时长无效") from exc
-        prompt = str(item.get("prompt") or "").strip()
-        if index < 1 or index > 6 or index in seen_indexes or not prompt or len(prompt) > 12_000:
-            raise ValueError("视频分段序号或提示词无效")
-        seen_indexes.add(index)
-        normalized.append(
-            {
-                "index": index,
-                "title": str(item.get("title") or f"片段 {index}")[:120],
-                "prompt": prompt,
-                "duration": duration,
-            }
-        )
-    return normalized
+    return VideoDirectorAgent().direct(value)
 
 
 def eligible_legacy_video_artifact(pack: dict) -> dict | None:
@@ -181,6 +155,11 @@ def create_video_job(user, pack_id: str, payload: dict) -> tuple[VideoGeneration
                     index=item["index"],
                     title=item["title"],
                     prompt=item["prompt"],
+                    visual=item["visual"],
+                    narration=item["narration"],
+                    source_ids=item["sourceIds"],
+                    narration_estimated_ms=item["narrationEstimatedMs"],
+                    narration_fits=item["narrationFits"],
                     duration=item["duration"],
                     aspect_ratio=job.aspect_ratio,
                     resolution=job.resolution,
@@ -269,6 +248,11 @@ def create_legacy_video_retry_job(
                         index=index,
                         title=str(old.get("title") or request_item["title"])[:120],
                         prompt=request_item["prompt"],
+                        visual=request_item["visual"],
+                        narration=request_item["narration"],
+                        source_ids=request_item["sourceIds"],
+                        narration_estimated_ms=request_item["narrationEstimatedMs"],
+                        narration_fits=request_item["narrationFits"],
                         duration=duration,
                         aspect_ratio=job.aspect_ratio,
                         resolution=job.resolution,
@@ -364,6 +348,11 @@ def _serialize_video_segment(segment: VideoGenerationSegment) -> dict[str, Any]:
         "index": segment.index,
         "title": segment.title,
         "status": segment.status,
+        "visual": segment.visual,
+        "narration": segment.narration,
+        "sourceIds": segment.source_ids if isinstance(segment.source_ids, list) else [],
+        "narrationEstimatedMs": segment.narration_estimated_ms,
+        "narrationFits": segment.narration_fits,
         "duration": segment.duration,
         "videoUrl": video_url,
         "width": segment.width,
@@ -374,5 +363,12 @@ def _serialize_video_segment(segment: VideoGenerationSegment) -> dict[str, Any]:
         "pollAttempts": segment.poll_attempts,
         "storageAttempts": segment.storage_attempts,
         "playbackStatus": playback_status,
+        "audioStatus": segment.audio_status,
+        "audioUrl": (
+            f"/api/resources/video-audio/{segment.audio_playback_id}/"
+            if segment.audio_status == "succeeded" and segment.audio_path
+            else ""
+        ),
+        "audioDurationMs": segment.audio_duration_ms,
         "updatedAt": _epoch_milliseconds(segment.updated_at),
     }

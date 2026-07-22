@@ -25,7 +25,7 @@ import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import { buildProfileChangeInsight, buildRecommendationEffectInsight, buildRecommendationProfileRationale, type LearningFlowInsight } from '@/lib/a3/learning-flow-insights';
 import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
 import type { A3SystemLibraryResponse } from '@/lib/a3/library-types';
-import { buildA3VideoPrompt, estimateA3VideoDuration } from '@/lib/a3/video-prompt';
+import { buildA3VideoPrompt, buildA3VideoStoryboard, estimateA3VideoDuration } from '@/lib/a3/video-prompt';
 import type {
   A3MultimodalArtifact,
   A3OpenMAICClassroomArtifact,
@@ -440,6 +440,7 @@ export function RecommendationsView() {
       provider: 'seedance',
       resourceType: script.type,
       prompt: buildA3VideoPrompt(currentPack.goal, script),
+      storyboard: buildA3VideoStoryboard(currentPack.goal, script),
       duration: estimateA3VideoDuration(),
       aspectRatio: '16:9',
       resolution: '1080p',

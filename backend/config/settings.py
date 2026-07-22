@@ -201,3 +201,7 @@ if CELERY_BROKER_URL == "filesystem://":
         "processed_folder": str(CELERY_QUEUE_ROOT / "processed"),
         "store_processed": True,
     }
+elif CELERY_BROKER_URL.startswith(("redis://", "rediss://")):
+    CELERY_BROKER_TRANSPORT_OPTIONS = {
+        "visibility_timeout": int(os.getenv("CELERY_REDIS_VISIBILITY_TIMEOUT", "18000")),
+    }

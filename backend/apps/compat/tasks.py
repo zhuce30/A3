@@ -122,3 +122,4 @@ def run_resource_generation_job(self, job_id: str) -> dict:
 
 # Celery autodiscovery imports tasks.py; importing registers the durable video state-machine tasks.
 from backend.apps.compat.video_tasks import advance_video_generation_job, poll_video_generation_segment  # noqa: E402,F401
+from backend.apps.compat.video_composition_tasks import compose_final_video, generate_video_narration  # noqa: E402,F401

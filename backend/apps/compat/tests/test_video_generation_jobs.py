@@ -11,7 +11,11 @@ from django.utils import timezone
 
 from backend.apps.accounts.models import User
 from backend.apps.compat.models import VideoGenerationJob, VideoGenerationSegment
-from backend.apps.compat.video_jobs import create_legacy_video_retry_job, serialize_video_job
+from backend.apps.compat.video_jobs import (
+    create_legacy_video_retry_job,
+    create_video_job,
+    serialize_video_job,
+)
 from backend.apps.compat.resource_generation import record_openmaic_video_artifact
 from backend.apps.profiles.models import LearnerProfile
 
@@ -96,6 +100,89 @@ class VideoGenerationJobModelTests(TestCase):
             self.assertIsInstance(payload[key], int)
             self.assertGreater(payload[key], 1_000_000_000_000)
         self.assertIsInstance(payload["segments"][0]["updatedAt"], int)
+
+    def test_public_serializer_exposes_storyboard_and_available_audio_metadata(self):
+        segment = VideoGenerationSegment.objects.create(
+            job=self.job,
+            index=1,
+            title="概念",
+            prompt="Provider prompt remains private",
+            visual="Use arrows to show the state change",
+            narration="状态变化从这里开始。",
+            source_ids=["source-1", "source-2"],
+            narration_estimated_ms=2250,
+            narration_fits=True,
+            audio_status="succeeded",
+            audio_path="video-jobs/video-job-001/audio/segment-1.wav",
+            audio_duration_ms=2180,
+        )
+
+        payload = serialize_video_job(
+            VideoGenerationJob.objects.prefetch_related("segments").get(id=self.job.id)
+        )
+        serialized = payload["segments"][0]
+
+        self.assertEqual(serialized["visual"], segment.visual)
+        self.assertEqual(serialized["narration"], segment.narration)
+        self.assertEqual(serialized["sourceIds"], ["source-1", "source-2"])
+        self.assertEqual(serialized["narrationEstimatedMs"], 2250)
+        self.assertTrue(serialized["narrationFits"])
+        self.assertEqual(serialized["audioStatus"], "succeeded")
+        self.assertEqual(
+            serialized["audioUrl"],
+            f"/api/resources/video-audio/{segment.audio_playback_id}/",
+        )
+        self.assertEqual(serialized["audioDurationMs"], 2180)
+        self.assertNotIn("audio_path", serialized)
+        self.assertNotIn("audioPath", serialized)
+
+    def test_public_serializer_omits_audio_url_until_audio_is_stored(self):
+        VideoGenerationSegment.objects.create(
+            job=self.job,
+            index=1,
+            title="概念",
+            prompt="Provider prompt remains private",
+            audio_status="pending",
+        )
+
+        payload = serialize_video_job(
+            VideoGenerationJob.objects.prefetch_related("segments").get(id=self.job.id)
+        )
+
+        self.assertEqual(payload["segments"][0]["audioUrl"], "")
+
+    @patch("backend.apps.compat.video_jobs.current_app.send_task")
+    def test_create_video_job_persists_directed_storyboard_fields(self, send_task):
+        send_task.return_value.id = "celery-directed-video"
+        payload = {
+            "jobId": "video-job-directed",
+            "provider": "seedance",
+            "segments": [
+                {
+                    "index": 1,
+                    "title": "概念",
+                    "prompt": "Provider prompt",
+                    "visual": "Animated state transition",
+                    "narration": "你好世界你好",
+                    "duration": 1,
+                    "sourceIds": ["source-1", "source-1", "source-2"],
+                }
+            ],
+        }
+
+        with self.captureOnCommitCallbacks(execute=True):
+            job, created = create_video_job(self.user, "pack-001", payload)
+
+        self.assertTrue(created)
+        segment = job.segments.get()
+        self.assertEqual(segment.visual, "Animated state transition")
+        self.assertEqual(segment.narration, "你好世界你好")
+        self.assertEqual(segment.source_ids, ["source-1", "source-2"])
+        self.assertEqual(segment.narration_estimated_ms, 1500)
+        self.assertFalse(segment.narration_fits)
+        send_task.assert_called_once_with(
+            "compat.advance_video_generation_job", args=[job.job_id]
+        )
 
 
 class VideoGenerationJobApiTests(TestCase):
@@ -229,6 +316,9 @@ class VideoGenerationJobApiTests(TestCase):
                     "index": 1,
                     "title": "Intro",
                     "prompt": "First segment prompt",
+                    "visual": "A process enters the waiting state",
+                    "narration": "第一段旁白",
+                    "sourceIds": ["source-1"],
                     "duration": 10,
                     "status": "succeeded",
                     "videoUrl": "https://attacker.invalid/failed.mp4",
@@ -239,6 +329,9 @@ class VideoGenerationJobApiTests(TestCase):
                     "index": 2,
                     "title": "Concept",
                     "prompt": "Second segment prompt",
+                    "visual": "The process resumes execution",
+                    "narration": "Second segment narration",
+                    "sourceIds": ["source-2"],
                     "duration": 10,
                     "status": "failed",
                     "videoUrl": "https://attacker.invalid/fake.mp4",
@@ -259,11 +352,21 @@ class VideoGenerationJobApiTests(TestCase):
         self.assertEqual(failed.status, "pending")
         self.assertEqual(failed.video_url, "")
         self.assertEqual((failed.width, failed.height), (0, 0))
+        self.assertEqual(failed.visual, "A process enters the waiting state")
+        self.assertEqual(failed.narration, "第一段旁白")
+        self.assertEqual(failed.source_ids, ["source-1"])
+        self.assertEqual(failed.narration_estimated_ms, 1250)
+        self.assertTrue(failed.narration_fits)
         kept = job.segments.get(index=2)
         self.assertEqual(kept.status, "succeeded")
         self.assertEqual(kept.video_url, "https://server.invalid/kept.mp4")
         self.assertEqual(kept.duration, 12)
         self.assertEqual((kept.width, kept.height), (1920, 1080))
+        self.assertEqual(kept.visual, "The process resumes execution")
+        self.assertEqual(kept.narration, "Second segment narration")
+        self.assertEqual(kept.source_ids, ["source-2"])
+        self.assertEqual(kept.narration_estimated_ms, 1200)
+        self.assertTrue(kept.narration_fits)
         self.assertNotEqual(kept.video_url, payload["segments"][1]["videoUrl"])
         send_task.assert_called_once_with("compat.advance_video_generation_job", args=[job.job_id])
 

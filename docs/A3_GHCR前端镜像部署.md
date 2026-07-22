@@ -486,3 +486,20 @@ ROOT_UPSERT
 ```bash
 sudo -H env -u DOCKER_CONFIG docker compose --env-file /opt/A3/.env.production -f /opt/A3/docker-compose.yml -f /opt/A3/docker-compose.prod.yml logs --tail=200 frontend realtime-proxy caddy
 ```
+
+## 查看访客 IP 访问日志
+
+Caddy 的访问日志写入持久化卷 `a3-caddy-logs`，前端域名和 API 域名分别写入 `a3-access.log` 与 `api-access.log`。日志为 JSON；`visitor_ip` 是经过 Cloudflare 可信代理校正后的访客 IP，`request.remote_ip` 是与服务器直接建立连接的 Cloudflare 节点 IP。日志会过滤 Cookie、Authorization、CSRF 和代理认证头，不要把日志公开给访客。
+
+```bash
+cd /opt/A3
+sudo docker compose --env-file .env.production \
+  -f docker-compose.yml -f docker-compose.prod.yml \
+  exec -T caddy sh -c 'tail -n 200 /var/log/caddy/a3-access.log'
+
+sudo docker compose --env-file .env.production \
+  -f docker-compose.yml -f docker-compose.prod.yml \
+  exec -T caddy sh -c 'tail -n 200 /var/log/caddy/api-access.log'
+```
+
+其中 `ts` 为 UTC Unix 时间戳；查看北京时间时在分析工具中按 `Asia/Shanghai` 转换。Cloudflare 网段配置位于仓库根目录 `Caddyfile`，修改后必须先执行 Caddy 配置校验，再重建或重启 Caddy。

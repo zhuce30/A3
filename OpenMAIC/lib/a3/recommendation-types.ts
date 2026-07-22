@@ -182,6 +182,11 @@ export type A3OpenMAICVideoArtifact = {
   segments?: Array<{
     index: number;
     title: string;
+    visual?: string;
+    narration?: string;
+    sourceIds?: string[];
+    narrationEstimatedMs?: number;
+    narrationFits?: boolean;
     status: 'succeeded' | 'failed' | string;
     videoUrl: string;
     duration: number;

@@ -160,6 +160,7 @@ def poll_video_generation_segment(self, job_id: str, index: int) -> dict:
             return {"jobId": job_id, "segment": index, "status": "failed"}
         segment.status = "succeeded"
         segment.duration = max(1, int(video.get("duration") or segment.duration))
+        segment.narration_fits = segment.narration_estimated_ms <= segment.duration * 1_000
         segment.width = max(0, int(video.get("width") or 0))
         segment.height = max(0, int(video.get("height") or 0))
         segment.error_code = ""
@@ -228,6 +229,11 @@ def _finalize_video_job(job: VideoGenerationJob) -> dict:
             {
                 "index": segment.index,
                 "title": segment.title,
+                "visual": segment.visual,
+                "narration": segment.narration,
+                "sourceIds": segment.source_ids if isinstance(segment.source_ids, list) else [],
+                "narrationEstimatedMs": segment.narration_estimated_ms,
+                "narrationFits": segment.narration_fits,
                 "status": segment.status,
                 "videoUrl": segment.video_url,
                 "duration": segment.duration,

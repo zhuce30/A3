@@ -84,6 +84,7 @@ services:
       - worker
       - -l
       - info
+      - --queues=celery
       - --concurrency=1
       - --max-tasks-per-child=5
       - --max-memory-per-child=900000
@@ -117,6 +118,56 @@ services:
       A3_SEED_DEMO_DATA: "0"
     volumes:
       - a3-video-data:/app/storage/a3-videos
+
+  video-worker:
+    image: ${A3_BACKEND_IMAGE:-ghcr.io/zhuce30/a3-backend:latest}
+    restart: unless-stopped
+    logging: *a3-logging
+    command:
+      - celery
+      - -A
+      - backend.config
+      - worker
+      - -l
+      - info
+      - --queues=video-compose
+      - --concurrency=1
+      - --prefetch-multiplier=1
+      - --max-tasks-per-child=3
+      - --max-memory-per-child=1200000
+    mem_limit: 1800m
+    memswap_limit: 2200m
+    env_file:
+      - .env.production
+    environment:
+      DJANGO_DEBUG: "0"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env.production}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-api.zhuce.work,localhost,127.0.0.1,backend}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-a3_learning}
+      MYSQL_USER: ${MYSQL_USER:-a3}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env.production}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      A3_VIDEO_TTS_API_KEY: ${A3_VIDEO_TTS_API_KEY:-}
+      TTS_QWEN_API_KEY: ${TTS_QWEN_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      A3_LLM_API_KEY: ${A3_LLM_API_KEY:-}
+      A3_VIDEO_STORAGE_ROOT: /app/storage/a3-videos
+      A3_VIDEO_STORAGE_MAX_BYTES: ${A3_VIDEO_STORAGE_MAX_BYTES:-209715200}
+      A3_WAIT_FOR_DB: "1"
+      A3_RUN_MIGRATIONS: "0"
+      A3_SEED_DEMO_DATA: "0"
+    volumes:
+      - a3-video-data:/app/storage/a3-videos
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   celery-beat:
     image: ${A3_BACKEND_IMAGE:-ghcr.io/zhuce30/a3-backend:latest}
