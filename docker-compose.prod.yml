@@ -34,7 +34,7 @@ services:
       - --port
       - "8000"
       - --workers
-      - "1"
+      - "2"
       - --limit-max-requests
       - "500"
       - --limit-max-requests-jitter

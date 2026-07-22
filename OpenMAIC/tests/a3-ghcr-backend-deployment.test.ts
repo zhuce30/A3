@@ -110,11 +110,12 @@ describe('A3 private GHCR backend deployment', () => {
       'info',
       '--concurrency=1',
       '--max-tasks-per-child=5',
+      '--max-memory-per-child=900000',
     ]);
     expect(compose.services?.['celery-beat']?.command).toBeUndefined();
   });
 
-  it('bounds the production web worker memory footprint on the 4 GB host', () => {
+  it('keeps one web worker available while another is recycled on the 8 GB host', () => {
     const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
       schema: composeSchema,
     }) as ComposeDocument;
@@ -127,7 +128,7 @@ describe('A3 private GHCR backend deployment', () => {
       '--port',
       '8000',
       '--workers',
-      '1',
+      '2',
       '--limit-max-requests',
       '500',
       '--limit-max-requests-jitter',
