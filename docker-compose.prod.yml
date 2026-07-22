@@ -193,6 +193,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - a3-caddy-data:/data
       - a3-caddy-config:/config
+      - a3-caddy-logs:/var/log/caddy
     depends_on:
       - frontend
       - backend
@@ -201,4 +202,5 @@ services:
 volumes:
   a3-caddy-data:
   a3-caddy-config:
+  a3-caddy-logs:
   a3-frontend-data:

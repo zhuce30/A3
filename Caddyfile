@@ -1,5 +1,22 @@
 a3.zhuce.work {
 	encode zstd gzip
+	log {
+		output file /var/log/caddy/a3-access.log {
+			roll_size 10MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+				request>headers>Proxy-Authorization delete
+				request>headers>X-CsrfToken delete
+				request>headers>X-Csrftoken delete
+			}
+		}
+	}
 	@root path /
 	redir @root /a3 308
 	@realtime path /a3/realtime/ws
@@ -9,6 +26,23 @@ a3.zhuce.work {
 
 api.zhuce.work {
 	encode zstd gzip
+	log {
+		output file /var/log/caddy/api-access.log {
+			roll_size 10MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+				request>headers>Proxy-Authorization delete
+				request>headers>X-CsrfToken delete
+				request>headers>X-Csrftoken delete
+			}
+		}
+	}
 	reverse_proxy backend:8000
 }
 
