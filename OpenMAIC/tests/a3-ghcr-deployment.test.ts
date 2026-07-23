@@ -85,7 +85,7 @@ describe('A3 private GHCR frontend deployment', () => {
     expect(caddy).toContain('173.245.48.0/20');
     expect(caddy).toContain('2c0f:f248::/32');
     expect(caddy).toContain('client_ip_headers CF-Connecting-IP X-Forwarded-For');
-    expect(caddy.match(/log_append visitor_ip \{client_ip\}/g)).toHaveLength(2);
+    expect(caddy).not.toContain('log_append visitor_ip');
     expect(caddy).toContain('request>headers>Authorization delete');
     expect(caddy).toContain('request>headers>Cookie delete');
   });

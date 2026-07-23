@@ -489,7 +489,7 @@ sudo -H env -u DOCKER_CONFIG docker compose --env-file /opt/A3/.env.production -
 
 ## 查看访客 IP 访问日志
 
-Caddy 的访问日志写入持久化卷 `a3-caddy-logs`，前端域名和 API 域名分别写入 `a3-access.log` 与 `api-access.log`。日志为 JSON；`visitor_ip` 是经过 Cloudflare 可信代理校正后的访客 IP，`request.remote_ip` 是与服务器直接建立连接的 Cloudflare 节点 IP。日志会过滤 Cookie、Authorization、CSRF 和代理认证头，不要把日志公开给访客。
+Caddy 的访问日志写入持久化卷 `a3-caddy-logs`，前端域名和 API 域名分别写入 `a3-access.log` 与 `api-access.log`。日志为 JSON；`request.client_ip` 是经过 Cloudflare 可信代理校正后的访客 IP，`request.remote_ip` 是与服务器直接建立连接的 Cloudflare 节点 IP。日志会过滤 Cookie、Authorization、CSRF 和代理认证头，不要把日志公开给访客。
 
 ```bash
 cd /opt/A3
