@@ -85,7 +85,7 @@ describe('A3 private GHCR frontend deployment', () => {
     expect(caddy).toContain('173.245.48.0/20');
     expect(caddy).toContain('2c0f:f248::/32');
     expect(caddy).toContain('client_ip_headers CF-Connecting-IP X-Forwarded-For');
-    expect(caddy.match(/log_append visitor_ip \{http\.request\.client_ip\}/g)).toHaveLength(2);
+    expect(caddy.match(/log_append visitor_ip \{client_ip\}/g)).toHaveLength(2);
     expect(caddy).toContain('request>headers>Authorization delete');
     expect(caddy).toContain('request>headers>Cookie delete');
   });
@@ -212,6 +212,16 @@ describe('A3 private GHCR frontend deployment', () => {
     }
     expect(compose.volumes).toHaveProperty('a3-video-data');
     expect(envTemplate).toMatch(/^A3_VIDEO_STORAGE_MAX_BYTES=209715200$/m);
+  });
+
+  it('provides the shared Redis cache to the production video worker', () => {
+    const compose = yaml.load(fs.readFileSync(composePath, 'utf8'), {
+      schema: composeSchema,
+    }) as ComposeDocument;
+
+    expect(compose.services?.['video-worker']?.environment).toMatchObject({
+      CACHE_REDIS_URL: 'redis://redis:6379/2',
+    });
   });
 
   it('ties deployment source and image identity to the full deployment SHA', () => {

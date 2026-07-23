@@ -8,7 +8,7 @@
 
 a3.zhuce.work {
 	encode zstd gzip
-	log_append visitor_ip {http.request.client_ip}
+	log_append visitor_ip {client_ip}
 	log {
 		output file /var/log/caddy/a3-access.log {
 			roll_size 10MiB
@@ -35,7 +35,7 @@ a3.zhuce.work {
 
 api.zhuce.work {
 	encode zstd gzip
-	log_append visitor_ip {http.request.client_ip}
+	log_append visitor_ip {client_ip}
 	log {
 		output file /var/log/caddy/api-access.log {
 			roll_size 10MiB
