@@ -6,10 +6,19 @@ from django.db.models import Count, Q
 from backend.apps.accounts.client_ip import mask_ip
 from backend.apps.accounts.models import UserAccessState
 from backend.apps.accounts.presence import get_user_presence
+from backend.apps.compat.models import AgentRun
+from backend.apps.learning.models import CoachingSession, LearningEvent, ResourcePackLog
 from backend.apps.profiles.models import LearnerProfile
 
 
 User = get_user_model()
+
+ACTIVITY_SOURCES = (
+    ("learning_event_count", "learning_events", LearningEvent),
+    ("coaching_session_count", "coaching_sessions", CoachingSession),
+    ("resource_pack_count", "resource_pack_logs", ResourcePackLog),
+    ("agent_run_count", "a3_agent_runs", AgentRun),
+)
 
 
 def _mask_identifier(value: str, *, email: bool = False) -> str:
@@ -31,6 +40,28 @@ def _access_payload(state: UserAccessState | None, field: str) -> dict:
     if not value:
         return {"status": "not_collected", "masked": "", "label": "历史未记录"}
     return {"status": "collected", "masked": mask_ip(str(value)), "label": mask_ip(str(value))}
+
+
+def _activity_count(user, annotation: str, related_name: str) -> int:
+    value = getattr(user, annotation, None)
+    if value is not None:
+        return int(value)
+    return int(getattr(user, related_name).count())
+
+
+def _hydrate_activity_counts(users: list) -> None:
+    user_ids = [user.pk for user in users]
+    if not user_ids:
+        return
+    for annotation, _related_name, model in ACTIVITY_SOURCES:
+        counts = {
+            row["user_id"]: row["total"]
+            for row in model.objects.filter(user_id__in=user_ids)
+            .values("user_id")
+            .annotate(total=Count("pk"))
+        }
+        for user in users:
+            setattr(user, annotation, counts.get(user.pk, 0))
 
 
 def serialize_admin_user(user) -> dict:
@@ -63,21 +94,16 @@ def serialize_admin_user(user) -> dict:
             "primaryGoal": str((profile.learning_goals or [""])[0]) if profile and profile.learning_goals else "",
         },
         "activity": {
-            "learningEvents": int(getattr(user, "learning_event_count", 0)),
-            "coachingSessions": int(getattr(user, "coaching_session_count", 0)),
-            "resourcePacks": int(getattr(user, "resource_pack_count", 0)),
-            "agentRuns": int(getattr(user, "agent_run_count", 0)),
+            "learningEvents": _activity_count(user, "learning_event_count", "learning_events"),
+            "coachingSessions": _activity_count(user, "coaching_session_count", "coaching_sessions"),
+            "resourcePacks": _activity_count(user, "resource_pack_count", "resource_pack_logs"),
+            "agentRuns": _activity_count(user, "agent_run_count", "a3_agent_runs"),
         },
     }
 
 
 def admin_user_queryset():
-    return User.objects.select_related("learner_profile", "access_state").annotate(
-        learning_event_count=Count("learning_events", distinct=True),
-        coaching_session_count=Count("coaching_sessions", distinct=True),
-        resource_pack_count=Count("resource_pack_logs", distinct=True),
-        agent_run_count=Count("a3_agent_runs", distinct=True),
-    ).order_by("-created_at", "-id")
+    return User.objects.select_related("learner_profile", "access_state").order_by("-created_at", "-id")
 
 
 def list_admin_users(params) -> dict:
@@ -105,5 +131,7 @@ def list_admin_users(params) -> dict:
         raise ValueError("分页参数无效")
     total = queryset.count()
     start = (page - 1) * page_size
-    items = [serialize_admin_user(user) for user in queryset[start:start + page_size]]
+    users = list(queryset[start:start + page_size])
+    _hydrate_activity_counts(users)
+    items = [serialize_admin_user(user) for user in users]
     return {"items": items, "pagination": {"page": page, "pageSize": page_size, "total": total}}

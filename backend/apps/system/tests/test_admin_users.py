@@ -1,4 +1,6 @@
+from django.db import connection
 from django.test import Client, TestCase
+from django.test.utils import CaptureQueriesContext
 
 from backend.apps.accounts.models import User, UserRole
 from backend.apps.learning.models import LearningEvent
@@ -27,6 +29,26 @@ class AdminUsersTests(TestCase):
         self.assertNotEqual(item['phone'], '13800138000')
         self.assertEqual(item['activity']['learningEvents'], 1)
         self.assertEqual(item['registrationIp']['status'], 'not_collected')
+
+    def test_user_list_does_not_join_multiple_activity_tables_in_one_query(self):
+        activity_tables = {
+            'a3_learning_events',
+            'a3_coaching_sessions',
+            'a3_resource_pack_logs',
+            'a3_agent_runs',
+        }
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.get('/api/admin/users/?page=1&pageSize=20')
+
+        self.assertEqual(response.status_code, 200)
+        joined_activity_tables = [
+            {table for table in activity_tables if table in query['sql']}
+            for query in captured.captured_queries
+        ]
+        self.assertFalse(
+            any(len(tables) > 1 for tables in joined_activity_tables),
+            joined_activity_tables,
+        )
 
     def test_status_update_is_audited_and_cannot_disable_self(self):
         response = self.client.post(
