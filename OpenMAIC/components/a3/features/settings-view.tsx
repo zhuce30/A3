@@ -79,8 +79,9 @@ function ToggleRow({ title, description, checked, disabled, onChange }: { title:
   );
 }
 
-function statusLabel(status: A3SystemCheckStatus) {
+export function statusLabel(status: A3SystemCheckStatus, checkName?: string) {
   if (status === 'ok') return '正常';
+  if (status === 'warning' && (checkName === 'celery' || checkName === 'celeryBeat')) return '已配置 · 未监控';
   if (status === 'warning') return '需配置';
   return '异常';
 }
@@ -91,12 +92,12 @@ function statusClassName(status: A3SystemCheckStatus) {
   return 'bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-200';
 }
 
-function StatusBadge({ status }: { status: A3SystemCheckStatus }) {
+function StatusBadge({ status, checkName }: { status: A3SystemCheckStatus; checkName?: string }) {
   const Icon = status === 'ok' ? CircleCheck : AlertTriangle;
   return (
     <span className={cn('inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold', statusClassName(status))}>
       <Icon className="size-3.5" />
-      {statusLabel(status)}
+      {statusLabel(status, checkName)}
     </span>
   );
 }
@@ -131,7 +132,7 @@ function SystemCheckItem({ item }: { item: A3SystemCheck }) {
           <div className="font-medium text-[var(--a3-text)]">{item.name}</div>
           <div className="mt-1 text-sm text-[var(--a3-text-muted)]">{item.message}</div>
         </div>
-        <StatusBadge status={item.status} />
+        <StatusBadge status={item.status} checkName={item.name} />
       </div>
       {details.length > 0 && (
         <div className="mt-2 grid gap-1 text-xs text-[var(--a3-text-muted)]">
