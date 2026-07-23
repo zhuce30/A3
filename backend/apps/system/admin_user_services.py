@@ -131,7 +131,12 @@ def list_admin_users(params) -> dict:
         raise ValueError("分页参数无效")
     total = queryset.count()
     start = (page - 1) * page_size
-    users = list(queryset[start:start + page_size])
+    user_ids = list(queryset.values_list("pk", flat=True)[start:start + page_size])
+    users_by_id = {
+        user.pk: user
+        for user in User.objects.select_related("learner_profile", "access_state").filter(pk__in=user_ids)
+    }
+    users = [users_by_id[user_id] for user_id in user_ids if user_id in users_by_id]
     _hydrate_activity_counts(users)
     items = [serialize_admin_user(user) for user in users]
     return {"items": items, "pagination": {"page": page, "pageSize": page_size, "total": total}}

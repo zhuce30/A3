@@ -49,6 +49,14 @@ class AdminUsersTests(TestCase):
             any(len(tables) > 1 for tables in joined_activity_tables),
             joined_activity_tables,
         )
+        profile_and_access_sorts = [
+            query['sql']
+            for query in captured.captured_queries
+            if 'a3_learner_profiles' in query['sql']
+            and 'a3_user_access_states' in query['sql']
+            and 'ORDER BY' in query['sql'].upper()
+        ]
+        self.assertEqual(profile_and_access_sorts, [])
 
     def test_status_update_is_audited_and_cannot_disable_self(self):
         response = self.client.post(
