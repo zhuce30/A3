@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { answerA3VisionQuestion } from '@/lib/server/a3-vision-answer';
 import { postA3DjangoJson } from '@/lib/server/a3-django-api';
+import { validateNormalizedRegion } from '@/lib/a3/realtime-media-focus';
 
 const MAX_IMAGE_DATA_URL_LENGTH = 7_000_000;
 const FAST_VISION_TIMEOUT_MS = 12_000;
@@ -29,6 +30,7 @@ export async function POST(request: NextRequest) {
       source?: 'camera' | 'screen' | 'upload';
       prompt?: string;
       fast?: boolean;
+      region?: unknown;
     };
     const imageDataUrl = String(body.imageDataUrl || '').trim();
     if (!imageDataUrl.startsWith('data:image/')) {
@@ -38,12 +40,20 @@ export async function POST(request: NextRequest) {
       return apiError('INVALID_REQUEST', 400, '图片帧过大，请压缩后重试');
     }
     const source = body.source || 'camera';
+    if (!['camera', 'screen', 'upload'].includes(source)) {
+      return apiError('INVALID_REQUEST', 400, '画面来源无效');
+    }
+    const region = body.region === undefined ? undefined : validateNormalizedRegion(body.region);
+    if (body.region !== undefined && !region) {
+      return apiError('INVALID_REQUEST', 400, '分析区域无效，请重新框选');
+    }
     const fast = Boolean(body.fast);
     const prompt = String(body.prompt || '').trim() || '请识别当前画面中的题目、公式、图表或板书，并结合本地知识库证据给出辅导建议。';
     const message = [
       `实时面对面辅导视觉帧来源：${source}`,
       fast ? '实时截图快速模式：优先识别画面中可见的题目、公式、图表或板书；不要等待额外检索。' : '',
       body.coachingSessionId ? `会话 ID：${body.coachingSessionId}` : '',
+      region ? `用户框选区域（归一化坐标）：x=${region.x}, y=${region.y}, width=${region.width}, height=${region.height}` : '',
       prompt,
     ].filter(Boolean).join('\n');
     const visionResponse = await answerA3VisionQuestion({
@@ -102,6 +112,7 @@ export async function POST(request: NextRequest) {
                   prompt,
                   citationCount: Array.isArray(visionPayload.citations) ? visionPayload.citations.length : 0,
                   capturedAt: new Date().toISOString(),
+                  ...(region ? { region } : {}),
                 },
               },
             },

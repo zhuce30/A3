@@ -16,6 +16,8 @@ from backend.apps.accounts.services import (
     verify_code,
 )
 from backend.apps.accounts.tokens import create_access_token
+from backend.apps.accounts.permissions import require_authenticated
+from backend.apps.accounts.presence import touch_user_presence
 from backend.utils.http import json_body
 
 User = get_user_model()
@@ -148,3 +150,16 @@ def reset_password(request):
         return JsonResponse({"success": True, "user": public_user(user)})
     except Exception as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["POST"])
+def presence_heartbeat(request):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    body = json_body(request)
+    path = str(body.get("path", ""))[:255]
+    if path and not path.startswith("/a3"):
+        return JsonResponse({"success": False, "error": "页面路径无效"}, status=400)
+    presence = touch_user_presence(request.user, request, path)
+    return JsonResponse({"success": True, "presence": presence})

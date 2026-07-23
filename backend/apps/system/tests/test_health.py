@@ -76,7 +76,10 @@ class SystemHealthTests(TestCase):
     @override_settings(CACHE_REDIS_URL="redis://redis:6379/2")
     def test_ready_returns_503_when_redis_probe_fails_without_leaking_details(self):
         secret_error = "redis://a3:cache-password@redis:6379/2"
-        with patch("backend.apps.system.views.Redis.from_url") as redis_factory:
+        with (
+            patch("backend.apps.system.views._database_ready", return_value=True),
+            patch("backend.apps.system.views.Redis.from_url") as redis_factory,
+        ):
             redis_factory.side_effect = RuntimeError(
                 secret_error
             )
@@ -148,7 +151,7 @@ class SystemHealthTests(TestCase):
         self.assertIn("defaultCourse", checks)
         self.assertEqual(checks["defaultCourse"]["detail"].get("defaultCourseCode"), "OS-001")
         self.assertIn("smsVerification", checks)
-        self.assertEqual(checks["celeryBeat"]["status"], "ok")
+        self.assertEqual(checks["celeryBeat"]["status"], "warning")
         self.assertEqual(checks["celeryBeat"]["detail"]["task"], "learning.evaluate_optimization_policy_outcomes")
         self.assertEqual(checks["celeryBeat"]["detail"]["kwargs"], {"days": 7})
         self.assertNotIn("SMS_WEBHOOK_TOKEN", str(data))

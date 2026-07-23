@@ -1,4 +1,10 @@
 const DEFAULT_A3_API_BASE_URL = 'http://localhost:8000';
+const SESSION_MUTATION_PATHS = new Set([
+  '/api/auth/login/',
+  '/api/auth/register/',
+  '/api/auth/token/',
+  '/api/auth/logout/',
+]);
 
 export async function a3GetJson<T>(url: string): Promise<T> {
   try {
@@ -70,9 +76,21 @@ async function a3JsonRequest<T>(method: 'POST' | 'PATCH', url: string, body: unk
       },
       body: JSON.stringify(body),
     });
-    return readJsonResponse<T>(response);
+    const result = await readJsonResponse<T>(response);
+    if (response.ok && isSessionMutation(url)) {
+      csrfTokenPromise = null;
+    }
+    return result;
   } catch (error) {
     return requestFailure<T>(error);
+  }
+}
+
+function isSessionMutation(url: string) {
+  try {
+    return SESSION_MUTATION_PATHS.has(new URL(url, DEFAULT_A3_API_BASE_URL).pathname);
+  } catch {
+    return false;
   }
 }
 

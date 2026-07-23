@@ -16,6 +16,7 @@ from django.db.models import Q
 from django.http import HttpRequest
 
 from backend.apps.accounts.models import User, UserRole
+from backend.apps.accounts.presence import record_user_access
 
 
 VERIFICATION_CODE_TTL_SECONDS = 600
@@ -133,6 +134,7 @@ def register_user(
         onboarding_step="role",
     )
     login(request, user)
+    record_user_access(user, request, "register", request.path)
     return user
 
 
@@ -146,7 +148,10 @@ def login_user(request: HttpRequest, *, identifier: str, password: str) -> User:
             user = None
     if user is None:
         raise ValueError("账号或密码不正确")
+    if not user.is_active:
+        raise ValueError("账号已停用，请联系管理员")
     login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+    record_user_access(user, request, "login", request.path)
     return user
 
 

@@ -12,6 +12,8 @@ import type {
   A3RealtimeStatus,
   A3RealtimeTranscriptEvent,
 } from '@/lib/a3/realtime-coaching-types';
+import { captureRealtimeVideoFrame } from '@/lib/a3/realtime-frame-capture';
+import type { NormalizedMediaRegion } from '@/lib/a3/realtime-media-focus';
 
 type ToolResponse = {
   success: boolean;
@@ -1419,32 +1421,42 @@ export function useRealtimeCoaching() {
     }
   }, [attachScreenStream, syncOutgoingVideoTrack]);
 
-  const captureFrame = useCallback(async () => {
+  const captureFrame = useCallback(async (options?: {
+    source?: 'camera' | 'screen';
+    region?: NormalizedMediaRegion;
+    prompt?: string;
+    fast?: boolean;
+  }) => {
+    const requestedSource = options?.source;
     const screenVideo = screenEnabled ? screenVideoRef.current : null;
     const cameraVideo = cameraEnabled ? cameraVideoRef.current : null;
-    const video = screenVideo && screenVideo.videoWidth ? screenVideo : cameraVideo;
-    const source = screenVideo && screenVideo.videoWidth ? 'screen' : 'camera';
+    const video = requestedSource === 'screen'
+      ? screenVideo
+      : requestedSource === 'camera'
+        ? cameraVideo
+        : screenVideo && screenVideo.videoWidth
+          ? screenVideo
+          : cameraVideo;
+    const source = requestedSource || (screenVideo && screenVideo.videoWidth ? 'screen' : 'camera');
     if (!video || !video.videoWidth || !video.videoHeight) {
       setError('请先开启摄像头或屏幕共享，并等待画面加载后再点击“看这里”。');
       return;
     }
-    const canvas = document.createElement('canvas');
-    const maxWidth = 960;
-    const scale = Math.min(1, maxWidth / video.videoWidth);
-    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-    const context = canvas.getContext('2d');
-    if (!context) {
-      setError('当前浏览器无法读取画面帧');
-      return;
+    try {
+      const maxWidth = 960;
+      const frame = captureRealtimeVideoFrame(video, options?.region, undefined, maxWidth);
+      await sendFrame({
+        imageDataUrl: frame.imageDataUrl,
+        source,
+        prompt: options?.prompt || (options?.region
+          ? '请重点分析用户框选区域中的题目、公式、图表、作业或板书，并给出有证据的辅导建议。'
+          : '请看这里，识别当前画面中的题目、公式、图表或板书，并结合本地知识库证据讲解。'),
+        fast: options?.fast ?? true,
+        ...(options?.region ? { region: options.region } : {}),
+      });
+    } catch (captureError) {
+      setError(captureError instanceof Error ? captureError.message : '当前浏览器无法读取画面帧');
     }
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    await sendFrame({
-      imageDataUrl: canvas.toDataURL('image/jpeg', 0.72),
-      source,
-      prompt: '请看这里，识别当前画面中的题目、公式、图表或板书，并结合本地知识库证据讲解。',
-      fast: true,
-    });
   }, [cameraEnabled, screenEnabled, sendFrame]);
 
   return {

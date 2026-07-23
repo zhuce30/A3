@@ -5,6 +5,7 @@ from django.urls import path
 from backend.apps.accounts import views
 
 urlpatterns = [
+    path("presence/heartbeat/", views.presence_heartbeat),
     path("csrf/", views.csrf_token),
     path("register/", views.register),
     path("login/", views.login_view),

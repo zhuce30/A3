@@ -38,11 +38,33 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     ? navDisclosure.expanded
     : new Set([...navDisclosure.expanded, activeNavHref]);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- Restore the persisted desktop navigation preference after hydration. */
   useEffect(() => {
     setSidebarCollapsed(window.localStorage.getItem(A3_SIDEBAR_STORAGE_KEY) === '1');
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
+
+  useEffect(() => {
+    if (!user?.id || !pathname.startsWith('/a3') || isA3PublicPath(pathname)) return;
+    let inFlight = false;
+    const sendHeartbeat = async () => {
+      if (inFlight || document.visibilityState !== 'visible') return;
+      inFlight = true;
+      try {
+        await a3PostJson('/api/auth/presence/heartbeat/', { path: pathname });
+      } finally {
+        inFlight = false;
+      }
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') void sendHeartbeat();
+    };
+    void sendHeartbeat();
+    const interval = window.setInterval(() => void sendHeartbeat(), 60_000);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [pathname, user?.id]);
 
   if (A3_SHELL_BYPASS_PATHS.has(pathname) || isA3PublicPath(pathname)) return <>{children}</>;
 
@@ -77,6 +99,8 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     '/a3/teacher': messages.navTeacher,
     '/a3/knowledge-base': messages.navKnowledgeBase,
     '/a3/settings': messages.navSettings,
+    '/a3/admin/overview': '系统管理',
+    '/a3/admin/users': '用户管理',
   };
   const ownerPageLabels: Record<string, string> = {
     '/a3/today': messages.navTodayTasks,
@@ -84,6 +108,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     '/a3/assessment': messages.navPracticeCenter,
     '/a3/classroom': messages.navAiClassroom,
     '/a3/knowledge-base': messages.navKnowledgeBaseHome,
+    '/a3/admin/overview': '运行总览',
   };
 
   function toggleNavGroup(href: string) {

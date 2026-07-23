@@ -29,13 +29,17 @@ async function loginAsStudent(page: Page) {
 }
 
 test.describe('A3 realtime coaching', () => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
 
   test.beforeAll(() => {
     seedDemoData();
   });
 
   test('shows fallback call state, visual evidence thumbnails, frame capture and capability metrics', async ({ page }) => {
+    page.on('console', (message) => {
+      if (message.type() === 'error') console.error(`[browser console] ${message.text()}`);
+    });
+    page.on('pageerror', (error) => console.error(`[browser pageerror] ${error.message}`));
     await page.addInitScript(() => {
       const canvas = document.createElement('canvas');
       canvas.width = 320;
@@ -53,6 +57,12 @@ test.describe('A3 realtime coaching', () => {
           getDisplayMedia: async () => stream,
         },
       });
+    });
+    const browserVisionAssetRequests: string[] = [];
+    page.on('request', (request) => {
+      if (request.url().includes('/models/a3-detection/') || request.url().includes('/vendor/mediapipe/')) {
+        browserVisionAssetRequests.push(request.url());
+      }
     });
 
     await page.route('**/api/a3/coaching/realtime/session', async (route) => {
@@ -98,13 +108,16 @@ test.describe('A3 realtime coaching', () => {
       });
     });
     let frameRequestCount = 0;
+    let lastFramePayload: Record<string, unknown> | null = null;
     await page.route('**/api/a3/coaching/realtime/frame', async (route) => {
       frameRequestCount += 1;
-      const payload = route.request().postDataJSON();
+      const payload = route.request().postDataJSON() as Record<string, unknown>;
+      lastFramePayload = payload;
       expect(payload.imageDataUrl).toContain('data:image/jpeg;base64,');
       expect(['camera', 'screen']).toContain(payload.source);
       expect(payload.fast).toBe(true);
-      expect(payload.prompt).toContain('请看这里');
+      if (payload.region) expect(payload.prompt).toContain('框选区域');
+      else expect(payload.prompt).toContain('请看这里');
       expect(payload.prompt).not.toContain('auto_shared_screen');
       expect(payload.prompt).not.toContain('screen_share_auto_frame');
       await route.fulfill({
@@ -160,10 +173,65 @@ test.describe('A3 realtime coaching', () => {
     await expect(call.locator('img').first()).toBeVisible();
 
     await call.getByRole('button', { name: '开启摄像头' }).click();
-    await expect(call.getByTestId('a3-realtime-camera-preview')).toBeVisible();
+    const cameraPreview = call.getByTestId('a3-realtime-camera-preview');
+    const cameraTile = call.getByTestId('a3-realtime-camera-tile');
+    await expect(cameraPreview).toBeVisible();
+    await expect.poll(() => cameraPreview.evaluate((video) => (video as HTMLVideoElement).videoWidth)).toBeGreaterThan(0);
+    await cameraPreview.evaluate((element) => {
+      (window as Window & { __a3CameraPreview?: Element }).__a3CameraPreview = element;
+    });
     await call.getByTestId('a3-realtime-capture-frame').click();
     await expect.poll(() => frameRequestCount).toBe(1);
     await expect(call).toContainText('视觉帧已识别');
+
+    await cameraTile.click();
+    await expect(cameraTile).toHaveAttribute('data-focused', 'true');
+    await expect.poll(() => cameraPreview.evaluate((element) => (
+      (window as Window & { __a3CameraPreview?: Element }).__a3CameraPreview === element
+    ))).toBe(true);
+
+    expect(browserVisionAssetRequests).toHaveLength(0);
+    await call.getByTestId('a3-realtime-detection-toggle').click();
+    const detectionStatus = call.getByTestId('a3-realtime-detection-status');
+    await expect(detectionStatus).toContainText('本地识别已开启', { timeout: 90_000 });
+    expect(browserVisionAssetRequests.some((url) => url.endsWith('efficientdet-lite0-int8-v1.tflite'))).toBe(true);
+    expect(browserVisionAssetRequests.some((url) => url.includes('/vendor/mediapipe/tasks-vision/0.10.35/wasm/'))).toBe(true);
+    expect(frameRequestCount).toBe(1);
+    await call.getByTestId('a3-realtime-detection-toggle').click();
+    await expect(detectionStatus).toBeHidden();
+
+    await call.getByTestId('a3-realtime-region-toggle').click();
+    const regionOverlay = call.getByTestId('a3-realtime-region-overlay');
+    const overlayBox = await regionOverlay.boundingBox();
+    expect(overlayBox).not.toBeNull();
+    if (!overlayBox) throw new Error('Realtime region overlay has no bounding box');
+    await page.mouse.move(overlayBox.x + overlayBox.width * 0.35, overlayBox.y + overlayBox.height * 0.35);
+    await page.mouse.down();
+    await page.mouse.move(overlayBox.x + overlayBox.width * 0.68, overlayBox.y + overlayBox.height * 0.67, { steps: 8 });
+    await page.mouse.up();
+    await expect(call.getByTestId('a3-realtime-selected-region')).toBeVisible();
+
+    await call.getByTestId('a3-realtime-region-analyze').click();
+    await expect.poll(() => frameRequestCount).toBe(2);
+    const region = lastFramePayload?.region as Record<string, number> | undefined;
+    expect(lastFramePayload?.source).toBe('camera');
+    expect(region).toBeDefined();
+    expect(region?.x).toBeGreaterThanOrEqual(0);
+    expect(region?.y).toBeGreaterThanOrEqual(0);
+    expect(region?.width).toBeGreaterThan(0.1);
+    expect(region?.height).toBeGreaterThan(0.1);
+    expect((region?.x ?? 0) + (region?.width ?? 0)).toBeLessThanOrEqual(1);
+    expect((region?.y ?? 0) + (region?.height ?? 0)).toBeLessThanOrEqual(1);
+
+    await call.getByTestId('a3-realtime-focus-return').click();
+    await expect(cameraTile).toHaveAttribute('data-focused', 'false');
+    await cameraTile.click();
+    await expect(cameraTile).toHaveAttribute('data-focused', 'true');
+    await page.keyboard.press('Escape');
+    await expect(cameraTile).toHaveAttribute('data-focused', 'false');
+    await expect.poll(() => cameraPreview.evaluate((element) => (
+      (window as Window & { __a3CameraPreview?: Element }).__a3CameraPreview === element
+    ))).toBe(true);
 
     await page.goto('/a3/capabilities', { waitUntil: 'domcontentloaded' });
     const capability = page.getByTestId('a3-realtime-coaching-capability');

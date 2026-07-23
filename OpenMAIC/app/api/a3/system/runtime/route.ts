@@ -127,5 +127,16 @@ export async function GET(request: NextRequest) {
   ];
   const statuses = new Set(checks.map((item) => item.status));
   const overallStatus: RuntimeCheckStatus = statuses.has('error') ? 'error' : statuses.has('warning') ? 'warning' : 'ok';
-  return apiSuccess({ overallStatus, checks, openmaicSmokeReport: readOpenMAICSmokeReport() });
+  const isAdmin = auth.user.role === 'admin';
+  const visibleChecks = isAdmin ? checks : checks.map(({ detail: _detail, ...item }) => ({ ...item, detail: {} }));
+  const smokeReport = readOpenMAICSmokeReport();
+  const visibleSmokeReport = isAdmin
+    ? smokeReport
+    : {
+        available: smokeReport.available,
+        status: smokeReport.status,
+        success: smokeReport.success,
+        checkedAt: 'checkedAt' in smokeReport ? smokeReport.checkedAt : '',
+      };
+  return apiSuccess({ overallStatus, checks: visibleChecks, openmaicSmokeReport: visibleSmokeReport });
 }

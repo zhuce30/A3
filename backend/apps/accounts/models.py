@@ -55,3 +55,34 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self) -> str:
         return f"{self.display_name}({self.phone})"
+
+
+class UserAccessState(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="access_state")
+    registration_ip = models.GenericIPAddressField(null=True, blank=True)
+    registration_country = models.CharField(max_length=8, blank=True)
+    last_ip = models.GenericIPAddressField(null=True, blank=True)
+    last_country = models.CharField(max_length=8, blank=True)
+    last_path = models.CharField(max_length=255, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_persisted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_user_access_states"
+
+
+class UserAccessEvent(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="access_events")
+    event_type = models.CharField(max_length=32)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    country = models.CharField(max_length=8, blank=True)
+    path = models.CharField(max_length=255, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "a3_user_access_events"
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["user", "event_type", "-created_at"], name="a3_access_user_event_idx")]

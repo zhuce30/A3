@@ -138,9 +138,10 @@ describe('A3 realtime coaching contracts', () => {
     expect(hook).toContain('A3_SCREEN_CONTEXT');
     expect(hook).toContain('不要再说你看不到共享屏幕');
     expect(hook).toContain('REALTIME_FRAME_SLOW_FEEDBACK_MS');
-    expect(hook).toContain('fast: true');
+    expect(hook).toContain('options?.fast ?? true');
     expect(hook).toContain('maxWidth = 960');
-    expect(hook).toContain("toDataURL('image/jpeg', 0.72)");
+    expect(hook).toContain('captureRealtimeVideoFrame');
+    expect(hook).toContain('options?.region');
     expect(hook).toContain('正在发送给视觉模型识别');
     expect(hook).toContain('视觉模型响应较慢');
     expect(hook).toContain('视觉分析请求失败');
@@ -152,8 +153,8 @@ describe('A3 realtime coaching contracts', () => {
     expect(component).toContain('data-testid="a3-realtime-capture-frame"');
     expect(component).toContain('data-testid="a3-realtime-audio-level"');
     expect(component).toContain('md:bottom-28 md:left-6');
-    expect(component).toContain('md:top-24 md:w-[244px]');
-    expect(component).not.toContain('md:right-6 md:top-6 md:w-[244px]');
+    expect(component).toContain('RealtimeMediaStage');
+    expect(component).toContain('renderSuspended={avatarCovered}');
     expect(component).toContain('data-testid={`a3-realtime-panel-tab-${tab.key}`}');
     expect(component).toContain('data-testid="a3-coaching-merged-side-panel"');
     expect(component).toContain('rightRail');

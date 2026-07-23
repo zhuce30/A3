@@ -5,6 +5,7 @@ import {
   Database,
   LineChart,
   PlayCircle,
+  ShieldCheck,
   Users,
 } from 'lucide-react';
 import type { A3NavItem } from './types';
@@ -65,6 +66,16 @@ export const a3NavItems: A3NavItem[] = [
   },
   { href: '/a3/report', label: '学习报告', icon: LineChart },
   { href: '/a3/teacher', label: '教师工作台', icon: Users, roles: ['teacher', 'admin'] },
+  {
+    href: '/a3/admin/overview',
+    label: '系统管理',
+    icon: ShieldCheck,
+    roles: ['admin'],
+    children: [
+      { href: '/a3/admin/overview', label: '运行总览' },
+      { href: '/a3/admin/users', label: '用户管理' },
+    ],
+  },
 ];
 
 const secondaryNavOwners: Array<{ prefix: string; owner: string }> = [
@@ -81,6 +92,7 @@ const secondaryNavOwners: Array<{ prefix: string; owner: string }> = [
   { prefix: '/a3/resources', owner: '/a3/classroom' },
   { prefix: '/a3/favorites', owner: '/a3/classroom' },
   { prefix: '/a3/knowledge-graph', owner: '/a3/knowledge-base' },
+  { prefix: '/a3/admin', owner: '/a3/admin/overview' },
 ];
 
 export function a3GetActiveNavHref(pathname: string) {

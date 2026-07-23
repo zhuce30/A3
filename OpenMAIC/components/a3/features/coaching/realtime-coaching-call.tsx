@@ -8,6 +8,7 @@ import type { A3DigitalHumanAvatarState } from '@/lib/a3/digital-human-types';
 import { cn } from '@/lib/utils';
 import type { A3RealtimeEvidence, A3RealtimeStatus } from '@/lib/a3/realtime-coaching-types';
 import { DigitalHumanAvatar } from './digital-human-avatar';
+import { RealtimeMediaStage } from './realtime-media-stage';
 import { canStartRealtimeCall, useRealtimeCoaching } from './use-realtime-coaching';
 
 const statusCopy: Record<A3RealtimeStatus, string> = {
@@ -62,6 +63,7 @@ export function mapRealtimeStatusToAvatarState(
 
 export function RealtimeCoachingCall({ rightRail }: RealtimeCoachingCallProps = {}) {
   const [activePanelTab, setActivePanelTab] = useState<PanelTabKey>('dialogue');
+  const [avatarCovered, setAvatarCovered] = useState(false);
   const realtime = useRealtimeCoaching();
   const {
     cameraEnabled,
@@ -180,44 +182,26 @@ export function RealtimeCoachingCall({ rightRail }: RealtimeCoachingCallProps = 
             </div>
 
             <div className="relative z-10 flex flex-1 flex-col">
-              <DigitalHumanAvatar
-                state={avatarState}
-                mode="local_vrm"
-                audioLevel={audioLevel}
-                assistantSpeaking={assistantSpeaking}
-                speechCues={speechCues}
-                providerLabel={provider}
-                modelLabel={session?.model || '未连接'}
-                fallbackReason={fallbackReason}
-              />
-              <div data-testid="a3-realtime-preview-strip" className="z-30 grid gap-3 p-4 md:absolute md:right-6 md:top-24 md:w-[244px] md:p-0">
-                <PreviewTile active={cameraEnabled} label="摄像头">
-                  <video
-                    ref={cameraVideoRef}
-                    data-testid="a3-realtime-camera-preview"
-                    autoPlay
-                    playsInline
-                    muted
-                    className={cn(
-                      'size-full rounded-xl bg-black object-cover',
-                      !cameraEnabled && 'opacity-40',
-                    )}
-                  />
-                </PreviewTile>
-                <PreviewTile active={screenEnabled} label="屏幕">
-                  <video
-                    ref={screenVideoRef}
-                    data-testid="a3-realtime-screen-preview"
-                    autoPlay
-                    playsInline
-                    muted
-                    className={cn(
-                      'size-full rounded-xl bg-black object-cover',
-                      !screenEnabled && 'opacity-40',
-                    )}
-                  />
-                </PreviewTile>
-              </div>
+              <RealtimeMediaStage
+                cameraEnabled={cameraEnabled}
+                screenEnabled={screenEnabled}
+                cameraVideoRef={cameraVideoRef}
+                screenVideoRef={screenVideoRef}
+                onAnalyze={captureFrame}
+                onAvatarCoveredChange={setAvatarCovered}
+              >
+                <DigitalHumanAvatar
+                  state={avatarState}
+                  mode="local_vrm"
+                  audioLevel={audioLevel}
+                  assistantSpeaking={assistantSpeaking}
+                  speechCues={speechCues}
+                  providerLabel={provider}
+                  modelLabel={session?.model || '未连接'}
+                  fallbackReason={fallbackReason}
+                  renderSuspended={avatarCovered}
+                />
+              </RealtimeMediaStage>
             </div>
 
             <div data-testid="a3-realtime-floating-controls" className="absolute inset-x-4 bottom-4 z-30 rounded-[28px] border border-white/22 bg-slate-950/46 px-4 py-3 shadow-[0_18px_50px_rgba(15,23,42,0.30)] backdrop-blur-xl md:inset-x-6 md:bottom-6">
@@ -239,7 +223,7 @@ export function RealtimeCoachingCall({ rightRail }: RealtimeCoachingCallProps = 
                   type="button"
                   variant="secondary"
                   size="sm"
-                  onClick={captureFrame}
+                  onClick={() => void captureFrame()}
                   className="h-11 rounded-full border border-white/18 bg-white/16 px-4 text-white hover:bg-white/24"
                   title="截取当前摄像头或共享屏幕画面，并调用视觉模型分析"
                 >
@@ -438,22 +422,6 @@ function Metric({ label, value }: { label: string; value: number }) {
     <div className="rounded-lg bg-white/75 px-3 py-2">
       <div className="text-lg font-semibold text-emerald-950">{value}</div>
       <div className="mt-0.5 text-emerald-700">{label}</div>
-    </div>
-  );
-}
-
-function PreviewTile({ active, label, children }: { active: boolean; label: string; children: ReactNode }) {
-  return (
-    <div className="relative min-h-[116px] overflow-hidden rounded-2xl border border-white/35 bg-black shadow-[0_14px_36px_rgba(15,23,42,0.26)] md:min-h-[96px]">
-      <div className="absolute left-3 top-3 z-10 rounded-full bg-slate-950/75 px-3 py-1 text-xs font-medium text-white">
-        {label}
-      </div>
-      {children}
-      {!active && (
-        <div className="absolute inset-0 flex items-center justify-center bg-slate-950/72 text-xs text-slate-300">
-          未开启
-        </div>
-      )}
     </div>
   );
 }

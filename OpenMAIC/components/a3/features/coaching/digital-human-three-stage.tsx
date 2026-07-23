@@ -73,6 +73,7 @@ type DigitalHumanThreeStageProps = {
   audioLevel: number;
   assistantSpeaking: boolean;
   speechCues?: A3DigitalHumanSpeechCue[];
+  renderSuspended?: boolean;
 };
 
 type ActiveAvatarRenderer = 'vrm' | 'vrm_idle_animation' | 'primitive' | 'static_fallback';
@@ -601,9 +602,12 @@ export function DigitalHumanThreeStage({
   audioLevel,
   assistantSpeaking,
   speechCues = [],
+  renderSuspended = false,
 }: DigitalHumanThreeStageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const signalRef = useRef<AvatarSignal>({ state, audioLevel, assistantSpeaking, speechCues });
+  const renderSuspendedRef = useRef(renderSuspended);
+  const syncAnimationRef = useRef<() => void>(() => undefined);
   const [activeRenderer, setActiveRenderer] = useState<ActiveAvatarRenderer>('primitive');
   const [idleAnimationState, setIdleAnimationState] = useState<IdleAnimationState>('pending');
   const [activeAction, setActiveAction] = useState<TeacherVrmActionKey>('idle');
@@ -615,6 +619,11 @@ export function DigitalHumanThreeStage({
   useEffect(() => {
     signalRef.current = { state, audioLevel, assistantSpeaking, speechCues };
   }, [assistantSpeaking, audioLevel, speechCues, state]);
+
+  useEffect(() => {
+    renderSuspendedRef.current = renderSuspended;
+    syncAnimationRef.current();
+  }, [renderSuspended]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -756,7 +765,7 @@ export function DigitalHumanThreeStage({
     let intersecting = typeof IntersectionObserver === 'undefined';
     let documentVisible = document.visibilityState === 'visible';
 
-    const canAnimate = () => shouldRunAvatarAnimation({ disposed, documentVisible, intersecting });
+    const canAnimate = () => !renderSuspendedRef.current && shouldRunAvatarAnimation({ disposed, documentVisible, intersecting });
     const stopAnimation = () => {
       if (raf) window.cancelAnimationFrame(raf);
       raf = 0;
@@ -816,6 +825,7 @@ export function DigitalHumanThreeStage({
         raf = window.requestAnimationFrame(animate);
       }
     };
+    syncAnimationRef.current = syncAnimation;
     const handleVisibilityChange = () => {
       documentVisible = document.visibilityState === 'visible';
       syncAnimation();
@@ -837,6 +847,7 @@ export function DigitalHumanThreeStage({
 
     return () => {
       disposed = true;
+      syncAnimationRef.current = () => undefined;
       stopAnimation();
       intersectionObserver?.disconnect();
       document.removeEventListener('visibilitychange', handleVisibilityChange);

@@ -5,6 +5,7 @@ from typing import Literal
 
 from django.conf import settings
 from django.db import connection
+from django.core.cache import cache
 
 from backend.apps.learning.models import Course
 from backend.apps.learning.services import DEFAULT_COURSE_CODE
@@ -36,6 +37,7 @@ def _path_writable(path: Path) -> bool:
 def build_system_health() -> dict:
     checks = [
         _database_check(),
+        _cache_check(),
         _course_check(),
         _knowledge_upload_check(),
         _vector_index_check(),
@@ -72,6 +74,19 @@ def _database_check() -> dict:
         )
     except Exception as exc:  # pragma: no cover - depends on local database availability
         return _check("database", "error", "Database connection failed", {"error": str(exc)})
+
+
+def _cache_check() -> dict:
+    try:
+        key = "a3:health:cache"
+        cache.set(key, "ok", timeout=5)
+        available = cache.get(key) == "ok"
+        cache.delete(key)
+        if available:
+            return _check("redis", "ok", "Shared cache read and write probe succeeded")
+        return _check("redis", "error", "Shared cache probe returned an unexpected value")
+    except Exception:
+        return _check("redis", "error", "Shared cache probe failed")
 
 
 def _course_check() -> dict:
@@ -126,7 +141,7 @@ def _verification_code_check() -> dict:
 def _celery_check() -> dict:
     broker_url = str(getattr(settings, "CELERY_BROKER_URL", ""))
     if broker_url.startswith("redis://") or broker_url == "filesystem://":
-        return _check("celery", "ok", "Celery broker is configured", {"broker": _mask_url(broker_url)})
+        return _check("celery", "warning", "Celery broker is configured; worker heartbeat is not collected", {"configured": True})
     return _check("celery", "warning", "Celery broker configuration should be reviewed", {"broker": _mask_url(broker_url)})
 
 
@@ -151,7 +166,7 @@ def _celery_beat_check() -> dict:
         "deployment": "docker compose service celery-beat or equivalent scheduler",
     }
     if task == "learning.evaluate_optimization_policy_outcomes":
-        return _check("celeryBeat", "ok", "Optimization policy outcome beat schedule is registered", detail)
+        return _check("celeryBeat", "warning", "Celery Beat schedule is registered; scheduler heartbeat is not collected", detail)
     return _check("celeryBeat", "warning", "Optimization policy beat task name should be reviewed", detail)
 
 

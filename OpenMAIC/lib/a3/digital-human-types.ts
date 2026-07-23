@@ -44,4 +44,5 @@ export type A3DigitalHumanAvatarProps = {
   modelLabel: string;
   fallbackReason?: string;
   speechCues?: A3DigitalHumanSpeechCue[];
+  renderSuspended?: boolean;
 };

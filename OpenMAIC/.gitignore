@@ -25,6 +25,12 @@ CLAUDE.local.md
 /blob-report/
 /playwright/.cache/
 
+# Generated browser-vision runtime assets and verified model cache
+/public/vendor/mediapipe/
+/public/vendor/opencv/
+/public/vendor/a3-browser-vision/
+/public/models/a3-detection/*.tflite
+
 # next.js
 /.next/
 /out/

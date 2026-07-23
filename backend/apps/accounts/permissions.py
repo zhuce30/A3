@@ -9,7 +9,7 @@ TEACHING_ROLES = {UserRole.TEACHER, UserRole.ADMIN}
 
 
 def require_authenticated(request):
-    if not request.user.is_authenticated:
+    if not request.user.is_authenticated or not request.user.is_active:
         return JsonResponse({"success": False, "error": "请先登录"}, status=401)
     return None
 
@@ -20,4 +20,13 @@ def require_teacher_role(request):
         return rejected
     if request.user.role not in TEACHING_ROLES:
         return JsonResponse({"success": False, "error": "当前账号无教师权限"}, status=403)
+    return None
+
+
+def require_admin_role(request):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    if request.user.role != UserRole.ADMIN:
+        return JsonResponse({"success": False, "error": "当前账号无系统管理权限"}, status=403)
     return None

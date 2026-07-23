@@ -29,6 +29,14 @@ if not SECRET_KEY:
     else:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DJANGO_DEBUG=0")
 ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")]
+A3_TRUSTED_PROXY_CIDRS = [
+    cidr.strip()
+    for cidr in os.getenv(
+        "A3_TRUSTED_PROXY_CIDRS",
+        "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+    ).split(",")
+    if cidr.strip()
+]
 
 INSTALLED_APPS = [
     "django.contrib.auth",
