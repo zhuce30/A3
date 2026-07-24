@@ -64,6 +64,9 @@ class AdminGovernanceTests(TestCase):
             before={"is_active": True, "label": "safe ordinary value"},
             after={"is_active": False, "label": "safe ordinary value"},
             metadata={"request_id": "req-123", "safe_note": "token is harmless here"},
+            before_allowlist=("is_active", "label"),
+            after_allowlist=("is_active", "label"),
+            metadata_allowlist=("request_id", "safe_note"),
             actor_ip="203.0.113.10",
             success=True,
         )
@@ -123,6 +126,35 @@ class AdminGovernanceTests(TestCase):
                 ],
             },
         }
+        allowlist = (
+            "password",
+            "passwd",
+            "refreshToken",
+            "session_cookie",
+            "clientSecret",
+            "Authorization",
+            "api-key",
+            "api_key",
+            "apikey",
+            "access_key",
+            "session",
+            "session_id",
+            "verification_code",
+            "smtp_auth_code",
+            "signed_url",
+            "conversation_body",
+            "file_content",
+            "private_key",
+            "safe",
+            "request_id",
+            "safe_note",
+            "nested.safe_nested",
+            "nested.secret_key",
+            "nested.items.cookieValue",
+            "nested.items.signedDownloadUrl",
+            "nested.items.message_body",
+            "nested.items.label",
+        )
 
         log = record_admin_audit(
             actor=self.admin,
@@ -132,6 +164,9 @@ class AdminGovernanceTests(TestCase):
             before=sensitive_payload,
             after=sensitive_payload,
             metadata=sensitive_payload,
+            before_allowlist=allowlist,
+            after_allowlist=allowlist,
+            metadata_allowlist=allowlist,
             success=False,
         )
 
@@ -147,6 +182,47 @@ class AdminGovernanceTests(TestCase):
         self.assertEqual(log.before, expected)
         self.assertEqual(log.after, expected)
         self.assertEqual(log.metadata, expected)
+
+    def test_record_admin_audit_drops_unknown_mapping_keys_by_default(self):
+        from backend.apps.system.admin_audit import record_admin_audit
+
+        log = record_admin_audit(
+            actor=self.admin,
+            action="untrusted.payload.capture",
+            before={"value": 1, "url": "https://example.com"},
+            after={"messages": [{"role": "user", "content": "private"}]},
+            metadata={"content": "private", "request_id": "also not implicitly trusted"},
+        )
+
+        self.assertEqual(log.before, {})
+        self.assertEqual(log.after, {})
+        self.assertEqual(log.metadata, {})
+
+    def test_record_admin_audit_persists_only_explicit_nested_paths(self):
+        from backend.apps.system.admin_audit import record_admin_audit
+
+        log = record_admin_audit(
+            actor=self.admin,
+            action="safe.payload.capture",
+            before={
+                "requested": {"label": "keep", "other": "drop"},
+                "unrequested": "drop",
+            },
+            metadata={
+                "items": [
+                    {"label": "first", "detail": "drop"},
+                    {"label": "second", "content": "drop"},
+                ]
+            },
+            before_allowlist=("requested.label",),
+            metadata_allowlist=("items.label",),
+        )
+
+        self.assertEqual(log.before, {"requested": {"label": "keep"}})
+        self.assertEqual(
+            log.metadata,
+            {"items": [{"label": "first"}, {"label": "second"}]},
+        )
 
     def test_record_admin_audit_preserves_falsey_json_values(self):
         from backend.apps.system.admin_audit import record_admin_audit
@@ -176,6 +252,9 @@ class AdminGovernanceTests(TestCase):
             before={"nan": float("nan"), "safe": 1.5},
             after={"positive_infinity": float("inf")},
             metadata={"values": [float("-inf"), 2.5]},
+            before_allowlist=("nan", "safe"),
+            after_allowlist=("positive_infinity",),
+            metadata_allowlist=("values",),
         )
         log.refresh_from_db()
 
