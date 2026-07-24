@@ -8,10 +8,14 @@ class AdminAuditLog(models.Model):
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="admin_audit_logs")
     action = models.CharField(max_length=64)
     target_user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="admin_audit_targets")
+    target_type = models.CharField(max_length=64, blank=True)
+    target_id = models.CharField(max_length=128, blank=True)
+    summary = models.CharField(max_length=255, blank=True)
     success = models.BooleanField(default=True)
     reason = models.CharField(max_length=255, blank=True)
     before = models.JSONField(default=dict, blank=True)
     after = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
     actor_ip = models.GenericIPAddressField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
@@ -22,12 +26,33 @@ class AdminAuditLog(models.Model):
 
 
 class SecurityEvent(models.Model):
+    class ReviewStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        CONFIRMED = "confirmed", "Confirmed"
+        FALSE_POSITIVE = "false_positive", "False positive"
+        RESOLVED = "resolved", "Resolved"
+
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="security_events")
     category = models.CharField(max_length=64)
     severity = models.CharField(max_length=16, default="info")
     source = models.CharField(max_length=64, default="a3")
     summary = models.CharField(max_length=255)
     metadata = models.JSONField(default=dict, blank=True)
+    review_status = models.CharField(
+        max_length=32,
+        choices=ReviewStatus.choices,
+        default=ReviewStatus.PENDING,
+        db_index=True,
+    )
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_security_events",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_note = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
