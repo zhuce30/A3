@@ -98,12 +98,27 @@ class AdminGovernanceTests(TestCase):
             "api_key": "remove",
             "apikey": "remove",
             "access_key": "remove",
+            "session": "remove",
+            "session_id": "remove",
+            "verification_code": "remove",
+            "smtp_auth_code": "remove",
+            "signed_url": "remove",
+            "conversation_body": "remove",
+            "file_content": "remove",
+            "private_key": "remove",
             "safe": "keep",
+            "request_id": "req-456",
+            "safe_note": "keep this ordinary value",
             "nested": {
                 "safe_nested": 7,
                 "secret_key": "remove",
                 "items": [
-                    {"cookieValue": "remove", "label": "keep"},
+                    {
+                        "cookieValue": "remove",
+                        "signedDownloadUrl": "remove",
+                        "message_body": "remove",
+                        "label": "keep",
+                    },
                     "safe-list-value",
                 ],
             },
@@ -122,6 +137,8 @@ class AdminGovernanceTests(TestCase):
 
         expected = {
             "safe": "keep",
+            "request_id": "req-456",
+            "safe_note": "keep this ordinary value",
             "nested": {
                 "safe_nested": 7,
                 "items": [{"label": "keep"}, "safe-list-value"],
@@ -131,3 +148,37 @@ class AdminGovernanceTests(TestCase):
         self.assertEqual(log.after, expected)
         self.assertEqual(log.metadata, expected)
 
+    def test_record_admin_audit_preserves_falsey_json_values(self):
+        from backend.apps.system.admin_audit import record_admin_audit
+
+        for index, value in enumerate((False, 0, "", [])):
+            with self.subTest(value=value):
+                log = record_admin_audit(
+                    actor=self.admin,
+                    action="json.falsey.persist",
+                    target_id=str(index),
+                    before=value,
+                    after=value,
+                    metadata=value,
+                )
+                log.refresh_from_db()
+
+                self.assertEqual(log.before, value)
+                self.assertEqual(log.after, value)
+                self.assertEqual(log.metadata, value)
+
+    def test_record_admin_audit_normalizes_non_finite_floats_to_null(self):
+        from backend.apps.system.admin_audit import record_admin_audit
+
+        log = record_admin_audit(
+            actor=self.admin,
+            action="metrics.capture",
+            before={"nan": float("nan"), "safe": 1.5},
+            after={"positive_infinity": float("inf")},
+            metadata={"values": [float("-inf"), 2.5]},
+        )
+        log.refresh_from_db()
+
+        self.assertEqual(log.before, {"nan": None, "safe": 1.5})
+        self.assertEqual(log.after, {"positive_infinity": None})
+        self.assertEqual(log.metadata, {"values": [None, 2.5]})

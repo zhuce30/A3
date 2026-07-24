@@ -4,6 +4,7 @@ import re
 from collections.abc import Mapping
 from datetime import date, datetime, time
 from decimal import Decimal
+from math import isfinite
 from typing import Any
 from uuid import UUID
 
@@ -19,12 +20,27 @@ _SENSITIVE_KEY_MARKERS = (
     "authorization",
     "apikey",
     "accesskey",
+    "privatekey",
+    "credential",
+    "session",
+    "verificationcode",
+    "authcode",
+    "otp",
+    "signedurl",
+    "presignedurl",
+    "conversationbody",
+    "conversationcontent",
+    "messagebody",
+    "filecontent",
+    "filebody",
+    "rawcontent",
 )
 
 
 def _is_sensitive_key(key: object) -> bool:
     normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
-    return any(marker in normalized for marker in _SENSITIVE_KEY_MARKERS)
+    is_signed_url = normalized.startswith(("signed", "presigned")) and normalized.endswith("url")
+    return is_signed_url or any(marker in normalized for marker in _SENSITIVE_KEY_MARKERS)
 
 
 def _sanitize_json_value(value: Any) -> Any:
@@ -36,13 +52,19 @@ def _sanitize_json_value(value: Any) -> Any:
         }
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_sanitize_json_value(item) for item in value]
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if isinstance(value, float):
+        return value if isfinite(value) else None
+    if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     if isinstance(value, (Decimal, UUID)):
         return str(value)
     return str(value)
+
+
+def _sanitize_audit_payload(value: Any) -> Any:
+    return {} if value is None else _sanitize_json_value(value)
 
 
 def record_admin_audit(
@@ -68,9 +90,9 @@ def record_admin_audit(
         target_id=str(target_id),
         summary=summary,
         reason=reason,
-        before=_sanitize_json_value(before or {}),
-        after=_sanitize_json_value(after or {}),
-        metadata=_sanitize_json_value(metadata or {}),
+        before=_sanitize_audit_payload(before),
+        after=_sanitize_audit_payload(after),
+        metadata=_sanitize_audit_payload(metadata),
         actor_ip=actor_ip,
         success=success,
     )
