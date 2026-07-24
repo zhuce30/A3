@@ -35,7 +35,11 @@ def overview(request):
     rejected = _admin_rejection(request)
     if rejected:
         return rejected
-    return JsonResponse({"success": True, **build_admin_overview()})
+    try:
+        payload = build_admin_overview(request.GET.get("range", "24h"))
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+    return JsonResponse({"success": True, **payload})
 
 
 @require_http_methods(["GET"])
