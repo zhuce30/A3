@@ -224,6 +224,33 @@ class AdminGovernanceTests(TestCase):
             {"items": [{"label": "first"}, {"label": "second"}]},
         )
 
+    def test_record_admin_audit_does_not_confuse_dotted_keys_with_nested_paths(self):
+        from backend.apps.system.admin_audit import record_admin_audit
+
+        log = record_admin_audit(
+            actor=self.admin,
+            action="path.ambiguity.capture",
+            before={
+                "requested.label": "secret",
+                "requested": {"label": "safe"},
+            },
+            before_allowlist=("requested.label",),
+        )
+
+        self.assertEqual(log.before, {"requested": {"label": "safe"}})
+
+    def test_record_admin_audit_treats_string_allowlist_as_one_path(self):
+        from backend.apps.system.admin_audit import record_admin_audit
+
+        log = record_admin_audit(
+            actor=self.admin,
+            action="single.path.capture",
+            before={"safe": "keep", "other": "drop"},
+            before_allowlist="safe",
+        )
+
+        self.assertEqual(log.before, {"safe": "keep"})
+
     def test_record_admin_audit_preserves_falsey_json_values(self):
         from backend.apps.system.admin_audit import record_admin_audit
 

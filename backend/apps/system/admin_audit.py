@@ -11,7 +11,9 @@ from uuid import UUID
 from backend.apps.system.models import AdminAuditLog
 
 
-AuditFieldAllowlist = Collection[str]
+AuditFieldAllowlist = str | Collection[str]
+AuditPath = tuple[str, ...]
+NormalizedAuditAllowlist = frozenset[AuditPath]
 
 
 _SENSITIVE_KEY_MARKERS = (
@@ -46,27 +48,44 @@ def _is_sensitive_key(key: object) -> bool:
     return is_signed_url or any(marker in normalized for marker in _SENSITIVE_KEY_MARKERS)
 
 
-def _normalize_allowlist(allowlist: AuditFieldAllowlist | None) -> frozenset[str]:
+def _normalize_allowlist(
+    allowlist: AuditFieldAllowlist | None,
+) -> NormalizedAuditAllowlist:
     if allowlist is None:
         return frozenset()
-    return frozenset(path for item in allowlist if (path := str(item).strip(".")))
+    items = (allowlist,) if isinstance(allowlist, str) else allowlist
+    paths = set()
+    for item in items:
+        path = str(item).strip()
+        if not path:
+            continue
+        segments = tuple(path.split("."))
+        if any(not segment for segment in segments):
+            raise ValueError("Audit allowlist paths must use non-empty dot-separated segments")
+        paths.add(segments)
+    return frozenset(paths)
 
 
-def _is_allowlisted_path(path: str, allowlist: frozenset[str]) -> bool:
-    return path in allowlist or any(item.startswith(f"{path}.") for item in allowlist)
+def _is_allowlisted_path(
+    path: AuditPath,
+    allowlist: NormalizedAuditAllowlist,
+) -> bool:
+    return any(item[: len(path)] == path for item in allowlist)
 
 
 def _sanitize_json_value(
     value: Any,
     *,
-    allowlist: frozenset[str],
-    path: str = "",
+    allowlist: NormalizedAuditAllowlist,
+    path: AuditPath = (),
 ) -> Any:
     if isinstance(value, Mapping):
         sanitized = {}
         for key, item in value.items():
             key_text = str(key)
-            item_path = f"{path}.{key_text}" if path else key_text
+            if "." in key_text:
+                continue
+            item_path = (*path, key_text)
             if _is_sensitive_key(key) or not _is_allowlisted_path(item_path, allowlist):
                 continue
             sanitized[key_text] = _sanitize_json_value(
@@ -120,8 +139,8 @@ def record_admin_audit(
 ) -> AdminAuditLog:
     """Persist an audit event with explicit dot-path allowlists for mapping fields.
 
-    Unknown mapping keys are dropped. The hard sensitive-key policy always wins,
-    including for nested mappings and mappings contained in lists.
+    Unknown and dotted mapping keys are dropped. The hard sensitive-key policy
+    always wins, including for nested mappings and mappings contained in lists.
     """
     return AdminAuditLog.objects.create(
         actor=actor,
