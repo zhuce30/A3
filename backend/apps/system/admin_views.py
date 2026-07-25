@@ -8,7 +8,15 @@ from django.views.decorators.http import require_http_methods
 from backend.apps.accounts.client_ip import get_client_ip
 from backend.apps.accounts.models import UserAccessState, UserRole
 from backend.apps.accounts.permissions import require_admin_role
+from backend.apps.system.admin_agent_services import get_agent_run, list_agent_runs
+from backend.apps.system.admin_catalog_services import list_courses, list_resources
+from backend.apps.system.admin_conversation_services import (
+    get_conversation,
+    list_conversations,
+    reveal_conversation_messages,
+)
 from backend.apps.system.admin_overview import build_admin_overview
+from backend.apps.system.admin_task_services import get_task, list_tasks
 from backend.apps.system.admin_user_services import admin_user_queryset, list_admin_users, serialize_admin_user
 from backend.apps.system.models import AdminAuditLog, SecurityEvent
 from backend.utils.http import json_body
@@ -155,3 +163,107 @@ def security_events(request):
         item["id"] = str(item["id"])
         item["createdAt"] = item.pop("created_at").isoformat()
     return JsonResponse({"success": True, "items": items})
+
+
+def _service_response(service, *args, **kwargs):
+    try:
+        payload = service(*args, **kwargs)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+    return JsonResponse({"success": True, **payload})
+
+
+@require_http_methods(["GET"])
+def conversations(request):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    return _service_response(list_conversations, request.GET)
+
+
+@require_http_methods(["GET"])
+def conversation_detail(request, session_id):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    payload = get_conversation(session_id)
+    if payload is None:
+        return JsonResponse({"success": False, "error": "辅导会话不存在"}, status=404)
+    return JsonResponse({"success": True, "conversation": payload})
+
+
+@require_http_methods(["POST"])
+def conversation_reveal(request, session_id):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    try:
+        body = json_body(request)
+        payload = reveal_conversation_messages(
+            request=request,
+            session_id=session_id,
+            reason=body.get("reason", ""),
+            params=request.GET,
+        )
+    except (ValueError, UnicodeDecodeError) as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+    if payload is None:
+        return JsonResponse({"success": False, "error": "辅导会话不存在"}, status=404)
+    return JsonResponse({"success": True, **payload})
+
+
+@require_http_methods(["GET"])
+def courses(request):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    return _service_response(list_courses, request.GET)
+
+
+@require_http_methods(["GET"])
+def resources(request):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    return _service_response(list_resources, request.GET)
+
+
+@require_http_methods(["GET"])
+def tasks(request):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    return _service_response(list_tasks, request.GET)
+
+
+@require_http_methods(["GET"])
+def task_detail(request, kind: str, item_id: str):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    try:
+        payload = get_task(kind, item_id)
+    except (TypeError, ValueError):
+        return JsonResponse({"success": False, "error": "任务类型或编号无效"}, status=400)
+    if payload is None:
+        return JsonResponse({"success": False, "error": "任务不存在"}, status=404)
+    return JsonResponse({"success": True, "task": payload})
+
+
+@require_http_methods(["GET"])
+def agent_runs(request):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    return _service_response(list_agent_runs, request.GET)
+
+
+@require_http_methods(["GET"])
+def agent_run_detail(request, trace_id: str):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    payload = get_agent_run(trace_id)
+    if payload is None:
+        return JsonResponse({"success": False, "error": "Agent 运行记录不存在"}, status=404)
+    return JsonResponse({"success": True, "run": payload})
