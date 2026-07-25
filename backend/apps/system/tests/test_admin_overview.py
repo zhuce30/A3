@@ -8,8 +8,8 @@ from django.core.cache import cache
 from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 
-from backend.apps.accounts.models import User, UserAccessState, UserRole
-from backend.apps.compat.models import AgentRun, ResourceGenerationJob, VideoGenerationJob
+from backend.apps.accounts.models import User, UserAccessEvent, UserAccessState, UserRole
+from backend.apps.compat.models import AgentRun, ResourceGenerationJob, VideoGenerationJob, VideoGenerationSegment
 from backend.apps.knowledge_base.models import IndexJobType, KnowledgeIndexJob
 from backend.apps.learning.models import CoachingSession, LearningEvent, ResourcePackLog
 from backend.apps.system.admin_overview import build_admin_overview
@@ -63,7 +63,10 @@ class AdminOverviewTests(TestCase):
             [f"2026-07-{day:02d}" for day in range(19, 26)],
         )
         self.assertEqual(trends[0]["activeUsers"], 1)
+        self.assertEqual(trends[1]["activeUsers"], 1)
         self.assertEqual(trends[3]["activeUsers"], 1)
+        self.assertEqual(trends[0]["seriesDataStatus"]["activeUsers"], "partial")
+        self.assertEqual(trends[0]["dataStatus"], "partial")
         self.assertEqual(trends[0]["coachingSessions"], 1)
         self.assertEqual(trends[2]["resourcePacks"], 1)
         self.assertEqual(trends[5]["agentRuns"], 1)
@@ -277,6 +280,36 @@ class AdminOverviewTests(TestCase):
             {"queued": 1, "running": 1, "succeeded": 0, "failed": 0, "cancelled": 0, "stale": 2},
         )
 
+    @override_settings(VIDEO_GENERATION_JOB_STALE_MINUTES=5)
+    @patch("backend.apps.system.admin_overview._build_services", return_value=([], False))
+    @patch("backend.apps.system.admin_overview.timezone.now", return_value=NOW)
+    def test_recent_segment_poll_keeps_old_video_parent_running(self, _now, _services):
+        job = VideoGenerationJob.objects.create(
+            job_id="video-active-segment",
+            user=self.student,
+            resource_pack_id="overview-pack",
+            status="running",
+        )
+        segment = VideoGenerationSegment.objects.create(
+            job=job,
+            index=0,
+            title="仍在轮询",
+            prompt="active provider task",
+            status="running",
+            provider_task_id="provider-task-1",
+            last_polled_at=NOW - timedelta(minutes=1),
+        )
+        self._set_timestamps(job, NOW - timedelta(minutes=20))
+        VideoGenerationSegment.objects.filter(pk=segment.pk).update(
+            updated_at=NOW - timedelta(minutes=1),
+            last_polled_at=NOW - timedelta(minutes=1),
+        )
+
+        overview = build_admin_overview("7d")
+
+        self.assertEqual(overview["tasks"]["video"]["running"], 1)
+        self.assertEqual(overview["tasks"]["video"]["stale"], 0)
+
     @patch("backend.apps.system.admin_overview._build_services", return_value=([], False))
     @patch("backend.apps.system.admin_overview.timezone.now", return_value=NOW)
     def test_rolling_24h_uses_semantic_timestamps_at_leading_boundary(self, _now, _services):
@@ -334,8 +367,8 @@ class AdminOverviewTests(TestCase):
         self._seed_operational_records()
         cache.clear()
 
-        # The 22nd query is the fixed compatibility aggregate for security.events24h.
-        with self.assertNumQueries(22):
+        # Access-event history adds one fixed query; aggregation remains independent of users and days.
+        with self.assertNumQueries(23):
             overview = build_admin_overview("7d")
 
         self.assertEqual(len(overview["trends"]), 7)
@@ -344,6 +377,12 @@ class AdminOverviewTests(TestCase):
         self._set_created_at(self.admin, self._local_time(-10, 9))
         self._set_created_at(self.student, self._local_time(-2, 9))
         UserAccessState.objects.create(user=self.student, last_seen_at=self._local_time(-6, 0, 30))
+        access_event = UserAccessEvent.objects.create(
+            user=self.student,
+            event_type="login",
+            path="/a3/today",
+        )
+        UserAccessEvent.objects.filter(pk=access_event.pk).update(created_at=self._local_time(-5, 3))
         LearningEvent.objects.create(
             user=self.student,
             event_type="overview_overlap",

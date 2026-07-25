@@ -6,12 +6,18 @@ from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.db.models import Count, Q
+from django.db.models import Count, Exists, OuterRef, Q
 from django.db.models.functions import TruncDay, TruncHour
 from django.utils import timezone
 
-from backend.apps.accounts.models import UserAccessState
-from backend.apps.compat.models import AgentRun, AgentSpan, ResourceGenerationJob, VideoGenerationJob
+from backend.apps.accounts.models import UserAccessEvent, UserAccessState
+from backend.apps.compat.models import (
+    AgentRun,
+    AgentSpan,
+    ResourceGenerationJob,
+    VideoGenerationJob,
+    VideoGenerationSegment,
+)
 from backend.apps.knowledge_base.models import KnowledgeIndexJob, KnowledgeResource
 from backend.apps.learning.models import CoachingSession, LearningEvent, ResourcePackLog
 from backend.apps.system.models import AdminAuditLog, SecurityEvent
@@ -24,7 +30,6 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 VALID_RANGES = {"24h", "7d", "30d"}
 DEFAULT_RANGE = "24h"
 CACHE_TTL_SECONDS = 30
-STALE_AFTER = timedelta(minutes=30)
 ACTIVITY_LIMIT = 20
 TASK_STATES = ("queued", "running", "succeeded", "failed", "cancelled", "stale")
 STATUS_ALIASES = {
@@ -261,6 +266,7 @@ def _active_user_evidence(period: dict, now: datetime) -> tuple[int, dict[str, i
     users_by_bucket: dict[str, set[int]] = {}
     all_users: set[int] = set()
     for model, field in (
+        (UserAccessEvent, "created_at"),
         (UserAccessState, "last_seen_at"),
         (LearningEvent, "created_at"),
     ):
@@ -294,7 +300,15 @@ def _build_trends(period: dict, now: datetime, active_user_trends: dict[str, int
                 "date": key,
                 "label": bucket_start.strftime("%H:00" if period["bucket_unit"] == "hour" else "%m-%d"),
                 **{name: values.get(key, 0) for name, values in counts.items()},
-                "dataStatus": "collected",
+                # Presence is stored as a latest-value snapshot. Access and learning events
+                # preserve real history, but older heartbeat-only activity is not recoverable.
+                "dataStatus": "partial",
+                "seriesDataStatus": {
+                    "activeUsers": "partial",
+                    "coachingSessions": "collected",
+                    "resourcePacks": "collected",
+                    "agentRuns": "collected",
+                },
             }
         )
     return trends
@@ -321,17 +335,23 @@ def _bucket_key(value: datetime, bucket_unit: str) -> str:
 
 def _task_counts(model, now: datetime | None = None) -> dict:
     current_time = now or timezone.now()
+    queryset = model.objects
     if model is ResourceGenerationJob:
         filters = _resource_task_filters(current_time)
     elif model is KnowledgeIndexJob:
         filters = _knowledge_task_filters(current_time)
     elif model is VideoGenerationJob:
+        cutoff = current_time - timedelta(minutes=_setting_minutes("VIDEO_GENERATION_JOB_STALE_MINUTES", 5))
+        recent_segment = VideoGenerationSegment.objects.filter(job_id=OuterRef("pk")).filter(
+            Q(updated_at__gte=cutoff) | Q(last_polled_at__gte=cutoff)
+        )
+        queryset = queryset.annotate(has_recent_segment=Exists(recent_segment))
         filters = _video_task_filters(current_time)
     elif model is AgentRun:
         filters = _agent_task_filters(current_time)
     else:  # pragma: no cover - only the four operational models are supported
         raise ValueError(f"Unsupported admin task model: {model.__name__}")
-    counts = model.objects.aggregate(
+    counts = queryset.aggregate(
         **{
             state: Count("pk", filter=filters[state])
             for state in TASK_STATES
@@ -384,8 +404,8 @@ def _knowledge_task_filters(now: datetime) -> dict[str, Q]:
 def _video_task_filters(now: datetime) -> dict[str, Q]:
     cutoff = now - timedelta(minutes=_setting_minutes("VIDEO_GENERATION_JOB_STALE_MINUTES", 5))
     active_statuses = STATUS_ALIASES["queued"] | STATUS_ALIASES["running"]
-    stale_active = Q(status__in=active_statuses, updated_at__lt=cutoff)
-    fresh_active = Q(updated_at__gte=cutoff)
+    stale_active = Q(status__in=active_statuses, updated_at__lt=cutoff, has_recent_segment=False)
+    fresh_active = Q(updated_at__gte=cutoff) | Q(has_recent_segment=True)
     return {
         "queued": Q(status__in=STATUS_ALIASES["queued"]) & fresh_active,
         "running": Q(status__in=STATUS_ALIASES["running"]) & fresh_active,
@@ -558,7 +578,7 @@ def _build_alerts(
                 "warning",
                 "陈旧任务",
                 task_totals["stale"],
-                f"排队或运行状态超过 {int(STALE_AFTER.total_seconds() // 60)} 分钟",
+                "按各任务的恢复策略判定为长时间未推进",
             )
         )
     if task_groups["agent"]["failed"]:
