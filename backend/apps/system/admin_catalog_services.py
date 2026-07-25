@@ -6,8 +6,15 @@ from typing import Any
 from django.db import transaction
 from django.db.models import Count, Q
 
-from backend.apps.knowledge_base.models import IndexJobStatus, KnowledgeResource, ResourceScope, ResourceStatus
-from backend.apps.knowledge_base.services import create_parse_job
+from backend.apps.knowledge_base.models import (
+    IndexJobStatus,
+    KnowledgeIndexJob,
+    KnowledgeResource,
+    PUBLISHED_RESOURCE_VISIBILITIES,
+    ResourceScope,
+    ResourceStatus,
+)
+from backend.apps.knowledge_base.services import create_parse_job, dispatch_index_job
 from backend.apps.learning.models import Course
 from backend.apps.system.admin_audit import record_admin_audit
 from backend.apps.system.admin_conversation_services import parse_pagination
@@ -43,6 +50,20 @@ _PUBLISHED_VISIBILITY = {
     ResourceScope.GLOBAL: "global",
     "course": "course",
 }
+
+
+def _publication_status(visibility: str) -> str:
+    if visibility == "offline":
+        return "offline"
+    if visibility in PUBLISHED_RESOURCE_VISIBILITIES:
+        return "published"
+    return "owner_only"
+
+
+def _dispatch_index_job_after_commit(job_id) -> None:
+    job = KnowledgeIndexJob.objects.filter(pk=job_id).first()
+    if job is not None:
+        dispatch_index_job(job)
 
 
 def _error_summary(value: Any) -> str:
@@ -113,7 +134,7 @@ def list_resources(params) -> dict[str, Any]:
         if status == "ready":
             queryset = queryset.filter(status__in=[ResourceStatus.INDEXED, ResourceStatus.INDEXED_WITH_WARNINGS])
         elif status == "published":
-            queryset = queryset.exclude(visibility="offline")
+            queryset = queryset.filter(visibility__in=PUBLISHED_RESOURCE_VISIBILITIES)
         elif status == "offline":
             queryset = queryset.filter(visibility="offline")
         else:
@@ -146,7 +167,7 @@ def list_resources(params) -> dict[str, Any]:
                 "scope": resource.resource_scope,
                 "courseKey": resource.course_key,
                 "visibility": resource.visibility,
-                "publicationStatus": "offline" if resource.visibility == "offline" else "published",
+                "publicationStatus": _publication_status(resource.visibility),
                 "status": resource.status,
                 "documentCount": resource.document_count,
                 "chunkCount": resource.chunk_count,
@@ -310,7 +331,7 @@ def set_resource_status(
                 raise AdminActionError("资料已处于目标状态", status_code=409, error_code="invalid_transition")
             before = {
                 "visibility": resource.visibility,
-                "publicationStatus": "offline" if resource.visibility == "offline" else "published",
+                "publicationStatus": _publication_status(resource.visibility),
             }
             resource.visibility = visibility
             resource.save(update_fields=["visibility", "updated_at"])
@@ -322,7 +343,7 @@ def set_resource_status(
                 summary="发布知识资料" if status == "published" else "下线知识资料",
                 reason=normalized_reason,
                 before=before,
-                after={"visibility": visibility, "publicationStatus": status},
+                after={"visibility": visibility, "publicationStatus": _publication_status(visibility)},
                 before_allowlist=("visibility", "publicationStatus"),
                 after_allowlist=("visibility", "publicationStatus"),
                 actor_ip=actor_ip,
@@ -331,7 +352,7 @@ def set_resource_status(
             "resource": {
                 "id": str(resource.pk),
                 "visibility": resource.visibility,
-                "publicationStatus": status,
+                "publicationStatus": _publication_status(resource.visibility),
                 "status": resource.status,
             }
         }
@@ -378,7 +399,7 @@ def reindex_resource(
                 raise AdminActionError("只有失败或已完成的资料可以重建索引", status_code=409, error_code="invalid_transition")
             before = {"status": resource.status, "indexJobId": str(resource.index_job_id or "")}
             try:
-                job = create_parse_job(resource.owner, [resource])
+                job = create_parse_job(resource.owner, [resource], dispatch=False)
             except ValueError as exc:
                 raise AdminActionError(str(exc), status_code=409, error_code="dispatch_rejected") from exc
             if job.status == IndexJobStatus.FAILED:
@@ -396,6 +417,7 @@ def reindex_resource(
                 after_allowlist=("status", "indexJobId"),
                 actor_ip=actor_ip,
             )
+            transaction.on_commit(lambda job_id=job.pk: _dispatch_index_job_after_commit(job_id))
         return {
             "resource": {"id": str(resource.pk), "status": ResourceStatus.INDEXING},
             "job": {"id": str(job.pk), "kind": "knowledge_index", "status": job.status},

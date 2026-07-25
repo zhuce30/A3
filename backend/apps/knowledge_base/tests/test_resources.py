@@ -1017,6 +1017,25 @@ class KnowledgeResourceTests(TestCase):
         self.assertEqual(payload["type"], "parse")
         self.assertEqual(payload["summary"], {"parsed": 0, "indexed": 0, "failed": 0})
 
+    @patch("backend.apps.knowledge_base.tasks.run_index_job.delay")
+    def test_parse_job_can_defer_dispatch(self, delay):
+        resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            original_name="deferred-lesson.pdf",
+            stored_path=str((Path(self.temp_dir.name) / "deferred-lesson.pdf").resolve()),
+            file_type=".pdf",
+            file_size=10,
+        )
+
+        job = create_parse_job(self.user, [resource], dispatch=False)
+
+        delay.assert_not_called()
+        resource.refresh_from_db()
+        self.assertEqual(job.status, IndexJobStatus.QUEUED)
+        self.assertEqual(job.celery_task_id, "")
+        self.assertEqual(resource.index_job_id, job.id)
+        self.assertEqual(resource.status, ResourceStatus.INDEXING)
+
     @patch("backend.apps.knowledge_base.tasks.close_old_connections")
     @patch("backend.apps.knowledge_base.services.reparse_resource")
     def test_parse_job_updates_progress_status_and_summary(self, reparse_resource_mock, _close_connections):
@@ -1277,6 +1296,25 @@ class KnowledgeResourceTests(TestCase):
         self.assertEqual(job.error_message, "")
         self.assertEqual(job.celery_task_id, "retry-task-id")
 
+    @patch("backend.apps.knowledge_base.tasks.run_index_job.delay")
+    def test_failed_job_can_be_reset_without_dispatch(self, delay):
+        job = KnowledgeIndexJob.objects.create(
+            owner=self.user,
+            job_type=IndexJobType.UPLOAD,
+            status=IndexJobStatus.FAILED,
+            progress=45,
+            error_message="temporary failure",
+        )
+
+        retry_index_job(job, dispatch=False)
+
+        delay.assert_not_called()
+        job.refresh_from_db()
+        self.assertEqual(job.status, IndexJobStatus.QUEUED)
+        self.assertEqual(job.progress, 0)
+        self.assertEqual(job.error_message, "")
+        self.assertEqual(job.celery_task_id, "")
+
     @override_settings(KNOWLEDGE_INDEX_JOB_STALE_MINUTES=15)
     @patch("backend.config.celery.app.control.inspect")
     def test_resources_api_keeps_stale_heartbeat_job_running_when_celery_task_is_active(self, inspect):
@@ -1338,6 +1376,7 @@ class KnowledgeResourceTests(TestCase):
             stored_path=str(path),
             file_type=".pdf",
             file_size=path.stat().st_size,
+            visibility="owner",
             status=ResourceStatus.INDEXING,
         )
         stale_at = timezone.now() - timedelta(minutes=30)
@@ -1647,6 +1686,7 @@ class KnowledgeBaseApiPermissionTests(TestCase):
             file_size=10,
             resource_scope=ResourceScope.GLOBAL,
             course_key="OS-001",
+            visibility="shared",
             status=ResourceStatus.INDEXED,
         )
         KnowledgeResource.objects.create(
@@ -1656,6 +1696,7 @@ class KnowledgeBaseApiPermissionTests(TestCase):
             file_type=".pdf",
             file_size=10,
             resource_scope=ResourceScope.TEACHER,
+            visibility="owner",
             status=ResourceStatus.INDEXED,
         )
 
@@ -1666,6 +1707,27 @@ class KnowledgeBaseApiPermissionTests(TestCase):
         names = {item["name"] for item in response.json()["resources"]}
         self.assertIn("os-global-courseware.pdf", names)
         self.assertNotIn("other-teacher-private.pdf", names)
+
+    def test_owner_keeps_non_offline_resource_access_regardless_of_scope(self):
+        owned = KnowledgeResource.objects.create(
+            owner=self.student,
+            original_name="student-owned-teacher-scope.pdf",
+            stored_path=str((Path(self.temp_dir.name) / "student-owned-teacher-scope.pdf").resolve()),
+            file_type=".pdf",
+            file_size=10,
+            resource_scope=ResourceScope.TEACHER,
+            visibility="owner",
+            status=ResourceStatus.INDEXING,
+        )
+        other_student = User.objects.create_user(phone="13800139019", password="secure-pass-123")
+
+        self.client.force_login(self.student)
+        owner_response = self.client.get("/api/kb/resources/")
+        self.client.force_login(other_student)
+        other_response = self.client.get("/api/kb/resources/")
+
+        self.assertIn(str(owned.pk), {item["id"] for item in owner_response.json()["resources"]})
+        self.assertNotIn(str(owned.pk), {item["id"] for item in other_response.json()["resources"]})
 
     def test_resource_list_includes_wiki_build_status(self):
         resource = KnowledgeResource.objects.create(

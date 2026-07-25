@@ -28,6 +28,7 @@ from backend.apps.knowledge_base.models import (
     KnowledgeParseRun,
     KnowledgeResource,
     KnowledgeSummary,
+    PUBLISHED_RESOURCE_VISIBILITIES,
     ResourceScope,
     ResourceStatus,
 )
@@ -319,22 +320,25 @@ def _build_report_skipped_items(raw_skipped) -> list[dict]:
 
 def accessible_resources_for_user(user):
     queryset = KnowledgeResource.objects.exclude(visibility="offline")
-    published_visibility = {"shared", "teacher", "course", "class", "global", "public"}
+    owner_access = models.Q(owner=user)
     if getattr(user, "role", "") in {"teacher", "admin"}:
-        return queryset.filter(
-            models.Q(owner=user) & ~models.Q(resource_scope=ResourceScope.PERSONAL)
-            | models.Q(resource_scope=ResourceScope.GLOBAL)
-            | models.Q(
-                resource_scope__in=[ResourceScope.CLASS, "course"],
-                visibility__in=published_visibility,
-            )
+        shared_scope_access = models.Q(
+            resource_scope__in=[ResourceScope.GLOBAL, ResourceScope.CLASS, "course"]
+        )
+    else:
+        shared_scope_access = models.Q(
+            resource_scope__in=[
+                ResourceScope.GLOBAL,
+                ResourceScope.TEACHER,
+                ResourceScope.CLASS,
+                "course",
+            ]
         )
     return queryset.filter(
-        models.Q(owner=user, resource_scope=ResourceScope.PERSONAL)
-        | models.Q(resource_scope=ResourceScope.GLOBAL)
-        | models.Q(
-            resource_scope__in=[ResourceScope.TEACHER, ResourceScope.CLASS, "course"],
-            visibility__in=published_visibility,
+        owner_access
+        | (
+            shared_scope_access
+            & models.Q(visibility__in=PUBLISHED_RESOURCE_VISIBILITIES)
         )
     )
 
@@ -432,7 +436,12 @@ def create_upload_index_job(owner, resources: list[KnowledgeResource]) -> Knowle
     return dispatch_index_job(job)
 
 
-def create_parse_job(owner, resources: list[KnowledgeResource]) -> KnowledgeIndexJob:
+def create_parse_job(
+    owner,
+    resources: list[KnowledgeResource],
+    *,
+    dispatch: bool = True,
+) -> KnowledgeIndexJob:
     if not resources:
         raise ValueError("没有可解析的资源")
     job = KnowledgeIndexJob.objects.create(
@@ -445,7 +454,7 @@ def create_parse_job(owner, resources: list[KnowledgeResource]) -> KnowledgeInde
         resource.status = ResourceStatus.INDEXING
         resource.error_message = ""
     KnowledgeResource.objects.bulk_update(resources, ["index_job", "status", "error_message"])
-    return dispatch_index_job(job)
+    return dispatch_index_job(job) if dispatch else job
 
 
 def create_rebuild_job(owner) -> KnowledgeIndexJob:
@@ -516,7 +525,7 @@ def _should_run_upload_index_synchronously(job: KnowledgeIndexJob) -> bool:
     return os.getenv("A3_KB_SYNC_INDEX_ON_UPLOAD", "").lower() in {"1", "true", "yes", "on"}
 
 
-def retry_index_job(job: KnowledgeIndexJob) -> KnowledgeIndexJob:
+def retry_index_job(job: KnowledgeIndexJob, *, dispatch: bool = True) -> KnowledgeIndexJob:
     if job.status != IndexJobStatus.FAILED:
         raise ValueError("只有失败任务可以重试")
     job.status = IndexJobStatus.QUEUED
@@ -537,7 +546,7 @@ def retry_index_job(job: KnowledgeIndexJob) -> KnowledgeIndexJob:
             status=ResourceStatus.UPLOADED,
             error_message="",
         )
-    return dispatch_index_job(job)
+    return dispatch_index_job(job) if dispatch else job
 
 
 def fail_stale_index_jobs(owner=None, *, stale_after: timedelta | None = None) -> int:

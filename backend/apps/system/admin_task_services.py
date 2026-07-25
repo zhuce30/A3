@@ -18,7 +18,7 @@ from backend.apps.compat.models import (
 from backend.apps.compat.video_compositions import dispatch_compose, dispatch_narration
 from backend.apps.compat.video_jobs import retry_failed_video_segments
 from backend.apps.knowledge_base.models import IndexJobStatus, KnowledgeIndexJob
-from backend.apps.knowledge_base.services import retry_index_job
+from backend.apps.knowledge_base.services import dispatch_index_job, retry_index_job
 from backend.apps.system.admin_audit import record_admin_audit
 from backend.apps.system.admin_catalog_services import (
     AdminActionError,
@@ -57,9 +57,14 @@ _STATUS_ALIASES = {
 }
 _CANCELLABLE_RUNTIME_STATES = {
     "knowledge_index": {"queued", "running"},
-    "video_generation": {"queued", "running"},
     "video_composition": {"queued", "generating_narration", "composing"},
 }
+
+
+def _dispatch_index_job_after_commit(job_id) -> None:
+    job = KnowledgeIndexJob.objects.filter(pk=job_id).first()
+    if job is not None:
+        dispatch_index_job(job)
 
 
 def _normalized_status(status: str) -> str:
@@ -338,7 +343,10 @@ def retry_task(
             before = {"status": task.status, "stage": _task_stage(kind, task), "progress": task.progress}
             try:
                 if kind == "knowledge_index":
-                    retry_index_job(task)
+                    retry_index_job(task, dispatch=False)
+                    transaction.on_commit(
+                        lambda job_id=task.pk: _dispatch_index_job_after_commit(job_id)
+                    )
                 elif kind == "video_generation":
                     retry_failed_video_segments(task)
                 elif kind == "video_composition":

@@ -145,22 +145,61 @@ class AdminActionApiTests(TestCase):
             success=True,
         )
 
+    def test_resource_catalog_publication_status_uses_visibility_allowlist(self):
+        shared = KnowledgeResource.objects.create(
+            owner=self.teacher,
+            original_name="shared.pdf",
+            stored_path="relative/shared.pdf",
+            file_type="pdf",
+            resource_scope=ResourceScope.TEACHER,
+            visibility="shared",
+            status=ResourceStatus.INDEXED,
+        )
+        offline = KnowledgeResource.objects.create(
+            owner=self.teacher,
+            original_name="offline.pdf",
+            stored_path="relative/offline.pdf",
+            file_type="pdf",
+            resource_scope=ResourceScope.TEACHER,
+            visibility="offline",
+            status=ResourceStatus.INDEXED,
+        )
+
+        all_response = self.client.get("/api/admin/catalog/resources/?page=1&pageSize=20")
+        published_response = self.client.get(
+            "/api/admin/catalog/resources/?page=1&pageSize=20&status=published"
+        )
+
+        self.assertEqual(all_response.status_code, 200)
+        statuses = {item["id"]: item["publicationStatus"] for item in all_response.json()["items"]}
+        self.assertEqual(statuses[str(self.resource.pk)], "owner_only")
+        self.assertEqual(statuses[str(shared.pk)], "published")
+        self.assertEqual(statuses[str(offline.pk)], "offline")
+        published_ids = {item["id"] for item in published_response.json()["items"]}
+        self.assertEqual(published_ids, {str(shared.pk)})
+
     @patch("backend.apps.knowledge_base.tasks.run_index_job.delay")
     def test_resource_reindex_reuses_real_dispatch_and_audits(self, delay):
         delay.return_value.id = "reindex-task-id"
 
-        response = self.post_json(
-            f"/api/admin/catalog/resources/{self.resource.pk}/reindex/",
-            {"reason": "索引版本已升级"},
-        )
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            response = self.post_json(
+                f"/api/admin/catalog/resources/{self.resource.pk}/reindex/",
+                {"reason": "索引版本已升级"},
+            )
+            delay.assert_not_called()
 
         self.assertEqual(response.status_code, 202)
         self.resource.refresh_from_db()
         job = KnowledgeIndexJob.objects.get(pk=self.resource.index_job_id)
         self.assertEqual(job.job_type, IndexJobType.PARSE)
         self.assertEqual(job.status, IndexJobStatus.QUEUED)
-        self.assertEqual(job.celery_task_id, "reindex-task-id")
+        self.assertEqual(job.celery_task_id, "")
         self.assertEqual(self.resource.status, ResourceStatus.INDEXING)
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()
+        job.refresh_from_db()
+        self.assertEqual(job.celery_task_id, "reindex-task-id")
         delay.assert_called_once_with(str(job.pk))
         self.assert_audit(
             action="resource.reindex",
@@ -168,6 +207,32 @@ class AdminActionApiTests(TestCase):
             reason="索引版本已升级",
             success=True,
         )
+
+    @override_settings(DEBUG=False)
+    @patch(
+        "backend.apps.knowledge_base.tasks.run_index_job.delay",
+        side_effect=RuntimeError("broker token=queue-secret D:\\private\\broker.ini"),
+    )
+    def test_resource_reindex_records_post_commit_dispatch_failure_without_leaking_error(self, delay):
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            response = self.post_json(
+                f"/api/admin/catalog/resources/{self.resource.pk}/reindex/",
+                {"reason": "验证队列故障处理"},
+            )
+            delay.assert_not_called()
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()
+
+        self.resource.refresh_from_db()
+        job = KnowledgeIndexJob.objects.get(pk=self.resource.index_job_id)
+        self.assertEqual(job.status, IndexJobStatus.FAILED)
+        catalog = self.client.get("/api/admin/catalog/resources/?page=1&pageSize=20")
+        payload = json.dumps(catalog.json(), ensure_ascii=False).lower()
+        self.assertNotIn("queue-secret", payload)
+        self.assertNotIn("broker.ini", payload)
+        self.assertNotIn("d:\\private", payload)
 
     @patch("backend.apps.knowledge_base.tasks.run_index_job.delay")
     def test_failed_supported_job_retries_but_resource_generation_does_not(self, delay):
@@ -182,14 +247,20 @@ class AdminActionApiTests(TestCase):
         self.resource.status = ResourceStatus.FAILED
         self.resource.save(update_fields=["index_job", "status", "updated_at"])
 
-        response = self.post_json(
-            f"/api/admin/tasks/knowledge_index/{index_job.pk}/retry/",
-            {"reason": "修复解析依赖后重试"},
-        )
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            response = self.post_json(
+                f"/api/admin/tasks/knowledge_index/{index_job.pk}/retry/",
+                {"reason": "修复解析依赖后重试"},
+            )
+            delay.assert_not_called()
 
         self.assertEqual(response.status_code, 202)
         index_job.refresh_from_db()
         self.assertEqual(index_job.status, IndexJobStatus.QUEUED)
+        self.assertEqual(index_job.celery_task_id, "")
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()
+        index_job.refresh_from_db()
         self.assertEqual(index_job.celery_task_id, "retry-task-id")
         self.assert_audit(
             action="task.retry",
@@ -356,6 +427,30 @@ class AdminActionApiTests(TestCase):
         self.assertEqual(unsupported_response.status_code, 409)
         unsupported.refresh_from_db()
         self.assertEqual(unsupported.status, "queued")
+
+    @patch("backend.apps.system.admin_task_services.current_app.control.revoke")
+    def test_video_generation_is_never_cancellable_from_parent_task(self, revoke):
+        job = VideoGenerationJob.objects.create(
+            job_id="non-cooperative-video-cancel",
+            user=self.student,
+            resource_pack_id="video-cancel-pack",
+            status="running",
+            stage="generating",
+            celery_task_id="parent-video-task-id",
+        )
+
+        detail = self.client.get(f"/api/admin/tasks/video_generation/{job.pk}/")
+        response = self.post_json(
+            f"/api/admin/tasks/video_generation/{job.pk}/cancel/",
+            {"reason": "尝试取消视频生成"},
+        )
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertFalse(detail.json()["task"]["eligibility"]["cancel"])
+        self.assertEqual(response.status_code, 409)
+        job.refresh_from_db()
+        self.assertEqual(job.status, "running")
+        revoke.assert_not_called()
 
     def test_security_review_enforces_transitions_and_audits_failures(self):
         event = SecurityEvent.objects.create(

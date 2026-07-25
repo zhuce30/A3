@@ -22,6 +22,11 @@ class ResourceScope(models.TextChoices):
     GLOBAL = "global", "global"
 
 
+PUBLISHED_RESOURCE_VISIBILITIES = frozenset(
+    {"shared", "teacher", "course", "class", "global", "public"}
+)
+
+
 class CuratedResourceType(models.TextChoices):
     LECTURE_DOC = "lecture_doc", "讲解文档"
     CODE_LAB = "code_lab", "实操案例"
