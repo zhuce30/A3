@@ -5,6 +5,7 @@ import json
 from django.test import Client, TestCase
 
 from backend.apps.accounts.models import User
+from backend.apps.learning.tutor_personas import resolve_tutor_persona
 from backend.apps.profiles.models import LearnerProfile
 
 
@@ -42,6 +43,9 @@ class TutorPreferenceTests(TestCase):
             },
         )
         self.assertEqual(persona["schemaVersion"], "a3.tutor-persona.v1")
+        self.assertEqual(persona["avatarAssetId"], "teacher-default-v1")
+        self.assertIn("coaching", persona["allowedWorkflows"])
+        self.assertIn("classroom", persona["allowedWorkflows"])
 
     def test_get_requires_authentication(self):
         self.client.logout()
@@ -66,8 +70,20 @@ class TutorPreferenceTests(TestCase):
                 "foundation-coach",
             ],
         )
+        expected_copy = {
+            "structured-teacher": ("结构讲解", "先搭框架，再分步骤讲清概念", "structured"),
+            "socratic-guide": ("启发追问", "通过关键问题，引导你自己找到答案", "socratic"),
+            "practice-coach": ("例题实战", "用例题、步骤和即时反馈巩固薄弱点", "practice"),
+            "foundation-coach": ("基础补强", "从先修概念开始，用短句和小步讲解", "foundation"),
+        }
         for persona in data["personas"]:
             self.assert_public_persona(persona)
+            self.assertEqual(
+                (persona["name"], persona["shortDescription"], persona["teachingStyle"]),
+                expected_copy[persona["id"]],
+            )
+            private_persona = resolve_tutor_persona(persona["id"])
+            self.assertRegex(private_persona["instruction"], r"[\u4e00-\u9fff]")
         self.assertEqual(data["preference"]["personaId"], "structured-teacher")
         self.assertEqual(data["preference"]["source"], "default")
         self.assertEqual(data["selectedPersona"]["id"], "structured-teacher")
