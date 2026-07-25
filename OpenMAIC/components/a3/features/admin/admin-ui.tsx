@@ -8,7 +8,7 @@ import {
   RefreshCw,
   X,
 } from 'lucide-react';
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState, type RefObject } from 'react';
 import type {
   A3AdminDataStatus,
   A3AdminPagination as PaginationValue,
@@ -16,6 +16,65 @@ import type {
   A3AdminTaskStatus,
 } from '@/lib/a3/admin-types';
 import { cn } from '@/lib/utils';
+
+const ADMIN_MODAL_FOCUSABLE = [
+  'a[href]',
+  'button:not([disabled])',
+  'textarea:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+function useAdminModalFocus(
+  open: boolean,
+  onClose: () => void,
+  containerRef: RefObject<HTMLElement | null>,
+) {
+  useEffect(() => {
+    if (!open) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    const frame = window.requestAnimationFrame(() => {
+      const container = containerRef.current;
+      const firstFocusable = container?.querySelector<HTMLElement>(ADMIN_MODAL_FOCUSABLE);
+      (firstFocusable ?? container)?.focus();
+    });
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const container = containerRef.current;
+      if (!container) return;
+      const focusable = Array.from(container.querySelectorAll<HTMLElement>(ADMIN_MODAL_FOCUSABLE));
+      if (!focusable.length) {
+        event.preventDefault();
+        container.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus();
+    };
+  }, [containerRef, onClose, open]);
+}
 
 export function AdminPageHeader({
   title,
@@ -236,27 +295,18 @@ export function AdminDetailDrawer({
   children: React.ReactNode;
 }) {
   const titleId = useId();
-  useEffect(() => {
-    if (!open) return;
-    const previousOverflow = document.body.style.overflow;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    document.body.style.overflow = 'hidden';
-    window.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener('keydown', onKeyDown);
-    };
-  }, [onClose, open]);
+  const dialogRef = useRef<HTMLElement>(null);
+  useAdminModalFocus(open, onClose, dialogRef);
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-[70]">
       <button type="button" aria-label="关闭详情" className="absolute inset-0 bg-[#102b22]/35" onClick={onClose} />
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        tabIndex={-1}
         className="absolute inset-y-0 right-0 flex w-full max-w-[560px] flex-col border-l border-[#d9d6c9] bg-[#fffdf7] shadow-[-18px_0_50px_rgba(20,63,50,0.14)]"
       >
         <header className="flex h-16 items-center justify-between gap-3 border-b border-[#d9d6c9] px-5">
@@ -288,8 +338,11 @@ export function AdminReasonDialog({
 }) {
   const titleId = useId();
   const reasonId = useId();
+  const dialogRef = useRef<HTMLFormElement>(null);
   const [reason, setReason] = useState('');
   const [error, setError] = useState('');
+
+  useAdminModalFocus(open, onClose, dialogRef);
 
   useEffect(() => {
     if (open) {
@@ -315,9 +368,11 @@ export function AdminReasonDialog({
     <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
       <button type="button" aria-label="取消操作" className="absolute inset-0 bg-[#102b22]/45" onClick={onClose} />
       <form
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        tabIndex={-1}
         onSubmit={submit}
         className="relative w-full max-w-md rounded-md border border-[#d9d6c9] bg-[#fffdf7] p-5 shadow-[0_24px_70px_rgba(20,63,50,0.2)]"
       >
