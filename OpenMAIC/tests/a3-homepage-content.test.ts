@@ -517,15 +517,18 @@ describe('A3 product homepage hero and navigation', () => {
     expect(markup).not.toContain('112vw');
   });
 
-  it('renders stable login, workspace and registration routes without an auth fetch', () => {
+  it('renders stable role login and registration routes without an auth fetch', () => {
     const markup = renderToStaticMarkup(createElement(A3ProductHomepage));
 
     expect(markup).toContain('data-testid="a3-product-homepage"');
     expect(markup).toContain('href="/a3/login"');
-    expect(markup).toContain('href="/a3/dashboard"');
+    expect(markup).toContain('href="/a3/login?workspace=student"');
+    expect(markup).toContain('href="/a3/login?workspace=teacher"');
+    expect(markup).toContain('href="/a3/login?workspace=admin"');
     expect(markup).toContain('href="/a3/register"');
     expect(markup).toContain('aria-expanded="false"');
-    expect(markup).toContain('进入学习区');
+    expect(markup).not.toContain('href="/a3/dashboard"');
+    expect(markup).not.toContain('进入学习区');
     expect(markup).not.toContain('评审体验');
   });
 

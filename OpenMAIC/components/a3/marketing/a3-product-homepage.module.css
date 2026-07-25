@@ -40,7 +40,7 @@
   top: 0;
   z-index: 50;
   display: grid;
-  grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr);
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
   align-items: center;
   min-height: 72px;
   padding: 0 clamp(24px, 5vw, 80px);
@@ -86,7 +86,7 @@
   display: flex;
   align-items: center;
   justify-self: end;
-  gap: clamp(12px, 1.5vw, 24px);
+  gap: clamp(8px, 1vw, 16px);
   white-space: nowrap;
 }
 
@@ -1285,6 +1285,72 @@
   outline-offset: 4px;
 }
 
+.roleEntries {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid rgb(36 92 72 / 18%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 52%);
+}
+
+.roleEntry {
+  min-width: 0;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-radius: 4px;
+  color: var(--a3-home-ink);
+  font-size: 12px;
+  font-weight: 680;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease;
+}
+
+.roleEntry svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: #9a6a00;
+}
+
+.roleEntry:hover {
+  background: rgb(36 92 72 / 9%);
+  color: var(--a3-home-action);
+}
+
+.mobileRoleEntries {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px 0 10px;
+  border-bottom: 1px solid var(--a3-home-line);
+}
+
+.mobileRoleEntries .roleEntry {
+  min-height: 40px;
+  padding: 0 4px;
+  border: 1px solid rgb(36 92 72 / 18%);
+  background: rgb(255 255 255 / 46%);
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.mobileRoleEntries .roleEntry span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @keyframes a3HeroCycle {
   0%,
   20% {
@@ -1320,12 +1386,16 @@
   }
 }
 
-@media (max-width: 1120px) {
+@media (max-width: 1240px) {
   .header {
     grid-template-columns: auto 1fr;
   }
 
   .desktopNav {
+    display: none;
+  }
+
+  .roleEntries {
     display: none;
   }
 
@@ -1746,6 +1816,10 @@
 }
 
 @media (max-width: 390px) {
+  .mobileRoleEntries {
+    gap: 4px;
+  }
+
   .heroCopy h1 {
     font-size: 43px;
   }

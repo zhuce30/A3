@@ -4,6 +4,7 @@ import { Menu, X } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { A3_HOMEPAGE_ACTIONS, A3_HOMEPAGE_NAV, A3_HOMEPAGE_ROUTES } from './a3-homepage-content';
+import { A3HomepageRoleEntries } from './a3-homepage-role-entry';
 import styles from './a3-product-homepage.module.css';
 
 export function A3HomepageMobileNav() {
@@ -38,7 +39,7 @@ export function A3HomepageMobileNav() {
   }, [open]);
 
   useEffect(() => {
-    const desktop = window.matchMedia('(min-width: 1121px)');
+    const desktop = window.matchMedia('(min-width: 1241px)');
     const closeForDesktop = (event: MediaQueryListEvent | MediaQueryList) => {
       if (!event.matches || !open) return;
       setOpen(false);
@@ -71,6 +72,7 @@ export function A3HomepageMobileNav() {
           className={styles.mobileNav}
           aria-label="移动端首页导航"
         >
+          <A3HomepageRoleEntries mobile onNavigate={() => close()} />
           {A3_HOMEPAGE_NAV.map((item) => (
             <a key={item.href} href={item.href} onClick={() => close(true)}>
               {item.label}
@@ -79,8 +81,8 @@ export function A3HomepageMobileNav() {
           <Link href={A3_HOMEPAGE_ROUTES.login} onClick={() => close()}>
             {A3_HOMEPAGE_ACTIONS.login}
           </Link>
-          <Link href={A3_HOMEPAGE_ROUTES.workspace} prefetch={false} onClick={() => close()}>
-            {A3_HOMEPAGE_ACTIONS.workspace}
+          <Link href={A3_HOMEPAGE_ROUTES.register} onClick={() => close()}>
+            {A3_HOMEPAGE_ACTIONS.registerShort}
           </Link>
         </nav>
       ) : null}

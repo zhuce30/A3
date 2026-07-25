@@ -9,15 +9,19 @@ export const A3_HOMEPAGE_NAV = [
   { label: '教师端', href: '#teacher' },
 ] as const;
 
+export const A3_HOMEPAGE_ROLE_ENTRIES = [
+  { role: 'student', label: '学生', href: '/a3/login?workspace=student' },
+  { role: 'teacher', label: '教师', href: '/a3/login?workspace=teacher' },
+  { role: 'admin', label: '管理员', href: '/a3/login?workspace=admin' },
+] as const;
+
 export const A3_HOMEPAGE_ROUTES = {
   register: '/a3/register',
   login: '/a3/login',
-  workspace: '/a3/dashboard',
 } as const;
 
 export const A3_HOMEPAGE_ACTIONS = {
   login: '登录',
-  workspace: '进入学习区',
   registerShort: '开始体验',
 } as const;
 

@@ -7,6 +7,7 @@ import {
 } from './a3-homepage-content';
 import { A3HomepageHero } from './a3-homepage-hero';
 import { A3HomepageMobileNav } from './a3-homepage-mobile-nav';
+import { A3HomepageRoleEntries } from './a3-homepage-role-entry';
 import { A3HomepageStory } from './a3-homepage-story';
 import styles from './a3-product-homepage.module.css';
 
@@ -43,15 +44,9 @@ export function A3ProductHomepage() {
         </nav>
 
         <div className={styles.headerActions}>
+          <A3HomepageRoleEntries />
           <Link className={styles.secondaryAction} href={A3_HOMEPAGE_ROUTES.login}>
             {A3_HOMEPAGE_ACTIONS.login}
-          </Link>
-          <Link
-            className={styles.secondaryAction}
-            href={A3_HOMEPAGE_ROUTES.workspace}
-            prefetch={false}
-          >
-            {A3_HOMEPAGE_ACTIONS.workspace}
           </Link>
           <Link className={styles.headerCta} href={A3_HOMEPAGE_ROUTES.register}>
             {A3_HOMEPAGE_ACTIONS.registerShort}
