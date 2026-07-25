@@ -3,6 +3,7 @@ import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { fetchA3DjangoJson } from '@/lib/server/a3-django-api';
 import { answerA3TextQuestionWithVisualEvidence, answerA3VisionQuestion } from '@/lib/server/a3-vision-answer';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
+import type { A3TutorPersona } from '@/lib/a3/tutor-persona-types';
 
 type AuthMeResponse = {
   user?: A3PublicUser | null;
@@ -30,6 +31,7 @@ type BackendQaResponse = {
   followUps?: FollowUpSuggestion[];
   traceId?: string;
   modelRuntime?: ModelRuntime;
+  resolvedPersona?: A3TutorPersona;
   error?: string;
 };
 
@@ -93,6 +95,7 @@ export async function POST(request: NextRequest) {
       mode?: ClassroomRetrievalMode;
       scope?: ClassroomRetrievalScope;
       resourceId?: string;
+      personaId?: string;
     };
     const message = body.message?.trim();
     if (!message) return apiError('MISSING_REQUIRED_FIELD', 400, '请输入问题');
@@ -124,6 +127,8 @@ export async function POST(request: NextRequest) {
     });
     const resourceId = typeof body.resourceId === 'string' ? body.resourceId.trim() : '';
     if (resourceId) query.set('resourceId', resourceId);
+    const personaId = typeof body.personaId === 'string' ? body.personaId.trim() : '';
+    if (personaId) query.set('persona_id', personaId);
 
     let result: BackendQaResponse & { success?: boolean };
     try {
@@ -157,6 +162,7 @@ export async function POST(request: NextRequest) {
       followUps: normalizeFollowUps(result.followUps),
       traceId: result.traceId ?? '',
       modelRuntime: result.modelRuntime ?? {},
+      resolvedPersona: result.resolvedPersona,
     });
   } catch (error) {
     return apiError('INTERNAL_ERROR', 500, 'AI 辅导服务暂时不可用', error instanceof Error ? error.message : undefined);

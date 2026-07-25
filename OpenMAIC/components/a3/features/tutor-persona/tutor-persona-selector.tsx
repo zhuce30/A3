@@ -81,7 +81,8 @@ export function TutorPersonaSelector({
               title={persona.shortDescription}
               onClick={() => void onSelect(persona.id)}
               className={cn(
-                'min-h-[72px] min-w-0 rounded px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f6b53] focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-65',
+                'min-w-0 rounded px-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f6b53] focus-visible:ring-offset-1 disabled:cursor-wait disabled:opacity-65',
+                compact ? 'min-h-[64px] py-1.5' : 'min-h-[72px] py-2',
                 selected
                   ? 'bg-[#fffdf7] text-[#153f32] shadow-sm ring-1 ring-[#b8c6bd]'
                   : 'text-[#4f6059] hover:bg-[#ebe7dc]',
@@ -120,4 +121,3 @@ export function TutorPersonaSelector({
     </div>
   );
 }
-

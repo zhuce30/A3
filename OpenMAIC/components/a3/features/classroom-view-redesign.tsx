@@ -48,6 +48,8 @@ import { cn } from '@/lib/utils';
 import { A3Pill } from '../ui/a3-card';
 import { A3Markdown } from '../ui/a3-markdown';
 import { A3SpeechControls } from '../ui/a3-speech-controls';
+import { TutorPersonaSelector } from './tutor-persona/tutor-persona-selector';
+import { useTutorPersona } from './tutor-persona/use-tutor-persona';
 
 type ClassroomResponse = { success: boolean; error?: string; classroom: ClassroomContext };
 type FavoriteResponse = { success: boolean; error?: string };
@@ -509,6 +511,7 @@ function resolveClassroomBubbleWidthClass(historyOpen: boolean, drawerOpen: bool
 
 export function ClassroomViewRedesign() {
   const { copy } = useClassroomCopy();
+  const tutorPersona = useTutorPersona();
   const [classroom, setClassroom] = useState<ClassroomContext | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
@@ -663,6 +666,7 @@ export function ClassroomViewRedesign() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: normalized,
+          personaId: tutorPersona.selectedPersonaId,
           history: chatRef.current.map(({ role, content }) => ({ role, content })),
           mode: retrievalMode,
           scope: retrievalScope,
@@ -1051,6 +1055,19 @@ export function ClassroomViewRedesign() {
           onToggleHistory={() => setHistoryOpen((value) => !value)}
           onToggleDrawer={() => setDrawerOpen((value) => !value)}
         />
+        <div className="border-b border-slate-200 bg-[#fbfaf5] px-4 py-2 md:px-6">
+          <TutorPersonaSelector
+            compact
+            personas={tutorPersona.personas}
+            selectedPersonaId={tutorPersona.selectedPersonaId}
+            recommendedPersonaId={tutorPersona.recommendedPersonaId}
+            loading={tutorPersona.loading}
+            saving={tutorPersona.saving}
+            error={tutorPersona.error}
+            onSelect={tutorPersona.selectPersona}
+            onRetry={tutorPersona.reload}
+          />
+        </div>
         <OpenMAICInlineBar copy={copy} artifact={openmaicClassroomArtifact} />
 
         <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]">

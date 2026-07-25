@@ -33,6 +33,7 @@ type PanelTabKey = (typeof panelTabs)[number]['key'];
 
 type RealtimeCoachingCallProps = {
   rightRail?: ReactNode;
+  tutorPersonaId?: string;
 };
 
 const realtimeAvatarState: Record<Exclude<A3RealtimeStatus, 'live'>, A3DigitalHumanAvatarState> = {
@@ -61,10 +62,10 @@ export function mapRealtimeStatusToAvatarState(
   return resolveRealtimeAvatarState(status, assistantSpeaking);
 }
 
-export function RealtimeCoachingCall({ rightRail }: RealtimeCoachingCallProps = {}) {
+export function RealtimeCoachingCall({ rightRail, tutorPersonaId = '' }: RealtimeCoachingCallProps = {}) {
   const [activePanelTab, setActivePanelTab] = useState<PanelTabKey>('dialogue');
   const [avatarCovered, setAvatarCovered] = useState(false);
-  const realtime = useRealtimeCoaching();
+  const realtime = useRealtimeCoaching(tutorPersonaId);
   const {
     cameraEnabled,
     cameraVideoRef,

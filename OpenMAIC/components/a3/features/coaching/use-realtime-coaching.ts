@@ -265,7 +265,7 @@ export function createRemoteAudioSpeakingController(
   };
 }
 
-export function useRealtimeCoaching() {
+export function useRealtimeCoaching(personaId: string = '') {
   const [status, setStatus] = useState<A3RealtimeStatus>('idle');
   const [session, setSession] = useState<A3RealtimeCoachingSession | null>(null);
   const [error, setError] = useState('');
@@ -597,6 +597,7 @@ export function useRealtimeCoaching() {
         provider: realtime.provider,
         model: realtime.model,
         offerSdp: peer.localDescription?.sdp || offer.sdp,
+        coachingSessionId: realtime.coachingSessionId,
       }),
     });
     if (operation && !isStartOperationCurrent(operation)) return false;
@@ -959,7 +960,7 @@ export function useRealtimeCoaching() {
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           signal: operation.controller.signal,
-          body: JSON.stringify({ mode: 'voice_video' }),
+          body: JSON.stringify({ mode: 'voice_video', personaId }),
         }),
         (error) => { startFailure = error; },
       );
@@ -1052,7 +1053,7 @@ export function useRealtimeCoaching() {
           : '实时面对面辅导连接失败，请检查网络后重试。',
       );
     }
-  }, [connectRealtimePeer, connectRealtimeWebSocket, isStartOperationCurrent, stopMediaTracks]);
+  }, [connectRealtimePeer, connectRealtimeWebSocket, isStartOperationCurrent, personaId, stopMediaTracks]);
 
   const persistRealtimeTranscript = useCallback(async (
     sessionSnapshot: A3RealtimeCoachingSession | null,
