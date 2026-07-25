@@ -42,30 +42,6 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     setSidebarCollapsed(window.localStorage.getItem(A3_SIDEBAR_STORAGE_KEY) === '1');
   }, []);
 
-  useEffect(() => {
-    if (!user?.id || !pathname.startsWith('/a3') || isA3PublicPath(pathname)) return;
-    let inFlight = false;
-    const sendHeartbeat = async () => {
-      if (inFlight || document.visibilityState !== 'visible') return;
-      inFlight = true;
-      try {
-        await a3PostJson('/api/auth/presence/heartbeat/', { path: pathname });
-      } finally {
-        inFlight = false;
-      }
-    };
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') void sendHeartbeat();
-    };
-    void sendHeartbeat();
-    const interval = window.setInterval(() => void sendHeartbeat(), 60_000);
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => {
-      window.clearInterval(interval);
-      document.removeEventListener('visibilitychange', handleVisibility);
-    };
-  }, [pathname, user?.id]);
-
   if (A3_SHELL_BYPASS_PATHS.has(pathname) || isA3PublicPath(pathname)) return <>{children}</>;
 
   const displayName = user?.displayName?.trim() || messages.unnamedUser;

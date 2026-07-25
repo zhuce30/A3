@@ -1,4 +1,4 @@
-import type { A3PublicUser } from '@/lib/a3/auth-types';
+import type { A3PublicUser, A3UserRole } from '@/lib/a3/auth-types';
 
 export const A3_PUBLIC_PATHS: ReadonlySet<string> = new Set(['/a3']);
 export const A3_GUEST_PATHS: ReadonlySet<string> = new Set([
@@ -24,6 +24,12 @@ const blockedReturnPaths = new Set(['/a3', '/a3/login', '/a3/register', '/a3/for
 
 const returnPathBase = 'https://a3.local';
 
+const A3_ROLE_HOME: Record<A3UserRole, string> = {
+  student: '/a3/today',
+  teacher: '/a3/teacher',
+  admin: '/a3/admin/overview',
+};
+
 export function isA3PublicPath(pathname: string) {
   return A3_PUBLIC_PATHS.has(pathname) || pathname === '/a3/help' || pathname.startsWith('/a3/help/');
 }
@@ -43,16 +49,16 @@ export function getA3NextPathForUser(user: A3PublicUser) {
   if (user.onboardingStep === 'welcome') return '/a3/welcome';
   if (!user.privacyAccepted) return '/a3/privacy';
   if (!user.profileCompleted) return '/a3/profile-setup';
-  return '/a3/dashboard';
+  return A3_ROLE_HOME[user.role];
 }
 
 function loginReturnPath(currentPath: string, user: A3PublicUser): string | null {
-  if (getA3NextPathForUser(user) !== '/a3/dashboard') return null;
+  if (!isA3OnboardingComplete(user)) return null;
 
   try {
     const parsed = new URL(currentPath, returnPathBase);
     if (parsed.origin !== returnPathBase || parsed.pathname !== '/a3/login') return null;
-    return normalizeA3ReturnPath(parsed.searchParams.get('next'));
+    return getRoleCompatibleA3ReturnPath(parsed.searchParams.get('next'), user.role);
   } catch {
     return null;
   }
@@ -63,8 +69,32 @@ export function resolveA3LoginDestination(
   returnTo?: string | null,
 ): string {
   const nextPath = getA3NextPathForUser(user);
-  const safeReturnTo = normalizeA3ReturnPath(returnTo);
-  return nextPath === '/a3/dashboard' && safeReturnTo ? safeReturnTo : nextPath;
+  if (!isA3OnboardingComplete(user)) return nextPath;
+  return getRoleCompatibleA3ReturnPath(returnTo, user.role) ?? nextPath;
+}
+
+function isA3OnboardingComplete(user: A3PublicUser) {
+  return Boolean(
+    user.role &&
+      user.onboardingStep !== 'role' &&
+      user.phoneBound &&
+      user.onboardingStep !== 'welcome' &&
+      user.privacyAccepted &&
+      user.profileCompleted,
+  );
+}
+
+function getRoleCompatibleA3ReturnPath(value: string | null | undefined, role: A3UserRole) {
+  const returnPath = normalizeA3ReturnPath(value);
+  if (!returnPath) return null;
+
+  const pathname = new URL(returnPath, returnPathBase).pathname.replace(/\/+$/, '') || '/';
+  const isAdminPath = pathname === '/a3/admin' || pathname.startsWith('/a3/admin/');
+  const isTeacherPath = pathname === '/a3/teacher' || pathname.startsWith('/a3/teacher/');
+
+  if (role === 'student') return isAdminPath || isTeacherPath ? null : returnPath;
+  if (role === 'teacher') return isAdminPath ? null : returnPath;
+  return returnPath;
 }
 
 export function getInitialA3Hash(): string {
@@ -134,6 +164,6 @@ export function getA3AuthTarget(
 
   const nextPath = getA3NextPathForUser(user);
   if (pathState.isGuestPath) return loginReturnPath(pathname, user) ?? nextPath;
-  if (!pathState.isFlowPath && nextPath !== '/a3/dashboard') return nextPath;
+  if (!pathState.isFlowPath && !isA3OnboardingComplete(user)) return nextPath;
   return null;
 }

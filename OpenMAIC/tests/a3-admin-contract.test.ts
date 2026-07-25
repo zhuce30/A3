@@ -16,10 +16,10 @@ describe('A3 admin operations contracts', () => {
     expect(api).toContain('/api/admin/users/');
   });
 
-  it('sends bounded presence heartbeats only from the authenticated shell', () => {
-    const shell = read('components/a3/layout/a3-shell.tsx');
-    expect(shell).toContain('/api/auth/presence/heartbeat/');
-    expect(shell).toContain('document.visibilityState');
-    expect(shell).toContain('60_000');
+  it('sends bounded presence heartbeats from the authenticated workspace frame', () => {
+    const frame = read('components/a3/layout/a3-workspace-frame.tsx');
+    expect(frame).toContain('/api/auth/presence/heartbeat/');
+    expect(frame).toContain('document.visibilityState');
+    expect(frame).toContain('60_000');
   });
 });

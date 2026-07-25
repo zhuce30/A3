@@ -94,14 +94,20 @@ describe('A3 guided tour runtime boundary', () => {
     'components/a3/guided-tour/guided-tour-overlay.tsx',
   );
   const layoutSource = fs.readFileSync(path.resolve(process.cwd(), 'app/a3/layout.tsx'), 'utf8');
+  const workspaceFrameSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'components/a3/layout/a3-workspace-frame.tsx'),
+    'utf8',
+  );
 
-  it('mounts one provider inside auth and outside the shell bypass', () => {
-    expect(layoutSource).toContain('<A3GuidedTourProvider>');
-    expect(layoutSource.indexOf('<A3AuthGate>')).toBeLessThan(
-      layoutSource.indexOf('<A3GuidedTourProvider>'),
+  it('mounts one provider inside auth for learning workspaces only', () => {
+    expect(layoutSource).toContain('<A3AuthGate>');
+    expect(layoutSource).toContain('<A3WorkspaceFrame>{children}</A3WorkspaceFrame>');
+    expect(workspaceFrameSource).toContain('<A3GuidedTourProvider>');
+    expect(workspaceFrameSource.indexOf('<A3GuidedTourProvider>')).toBeLessThan(
+      workspaceFrameSource.indexOf('<A3Shell>'),
     );
-    expect(layoutSource.indexOf('<A3GuidedTourProvider>')).toBeLessThan(
-      layoutSource.indexOf('<A3Shell>'),
+    expect(workspaceFrameSource.indexOf('<AdminConsoleLayout>')).toBeLessThan(
+      workspaceFrameSource.indexOf('<A3GuidedTourProvider>'),
     );
   });
 

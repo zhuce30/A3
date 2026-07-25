@@ -104,11 +104,21 @@ async function a3CsrfFetch(url: string, init: RequestInit, retry = true): Promis
       ...(csrfToken ? { 'X-CSRFToken': csrfToken } : {}),
     },
   });
-  if (response.status === 403 && retry) {
+  if (retry && (await isA3CsrfFailure(response))) {
     csrfTokenPromise = null;
     return a3CsrfFetch(url, init, false);
   }
   return response;
+}
+
+async function isA3CsrfFailure(response: Response) {
+  if (response.status !== 403) return false;
+  try {
+    const body = await response.clone().text();
+    return /\bcsrf\b|跨站请求伪造/i.test(body);
+  } catch {
+    return false;
+  }
 }
 
 async function readJsonResponse<T>(response: Response): Promise<T> {

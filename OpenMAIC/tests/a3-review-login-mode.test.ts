@@ -123,7 +123,7 @@ describe('A3 review login mode', () => {
     ).toBe('/a3/coaching');
     expect(
       getA3AuthTarget('/a3/login?next=https%3A%2F%2Fevil.example%2Fa3', completedUser, guestState),
-    ).toBe('/a3/dashboard');
+    ).toBe('/a3/today');
     expect(
       getA3AuthTarget(
         '/a3/login?next=%2Fa3%2Fcoaching',

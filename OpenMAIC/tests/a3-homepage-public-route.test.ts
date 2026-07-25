@@ -134,7 +134,7 @@ describe('A3 product homepage route boundary', () => {
     ).toBe('/a3/coaching?source=review');
     expect(
       getA3AuthTarget('/a3/login?next=https%3A%2F%2Fevil.example%2Fa3', completedUser, guestState),
-    ).toBe('/a3/dashboard');
+    ).toBe('/a3/today');
     expect(getA3AuthTarget('/a3/login?next=%2Fa3%2Fcoaching', onboardingUser, guestState)).toBe(
       '/a3/phone-binding',
     );
@@ -143,7 +143,7 @@ describe('A3 product homepage route boundary', () => {
   it('uses one canonical onboarding order before consuming a safe login return target', () => {
     const returnTo = '/a3/coaching?source=review#citations';
 
-    expect(getA3NextPathForUser(completedUser)).toBe('/a3/dashboard');
+    expect(getA3NextPathForUser(completedUser)).toBe('/a3/today');
     expect(resolveA3LoginDestination(completedUser, returnTo)).toBe(returnTo);
     expect(
       resolveA3LoginDestination({ ...completedUser, role: undefined } as unknown as A3PublicUser, returnTo),
@@ -158,7 +158,7 @@ describe('A3 product homepage route boundary', () => {
       resolveA3LoginDestination({ ...completedUser, profileCompleted: false }, returnTo),
     ).toBe('/a3/profile-setup');
     expect(resolveA3LoginDestination(completedUser, 'https://evil.example/a3')).toBe(
-      '/a3/dashboard',
+      '/a3/today',
     );
   });
 
