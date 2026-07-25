@@ -8,6 +8,7 @@ from . import views
 urlpatterns = [
     path("me/", views.my_profile, name="my-profile"),
     path("options/", views.profile_options, name="profile-options"),
+    path("tutor-preference/", views.tutor_preference, name="tutor-preference"),
     path("learning-profile/", views.learning_profile, name="learning-profile"),
     path("extract/", views.extract_profile, name="profile-extract"),
     path("dynamic-profile/", views.dynamic_profile, name="dynamic-profile"),

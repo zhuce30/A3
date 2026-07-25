@@ -3,6 +3,13 @@ from __future__ import annotations
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
+from backend.apps.learning.tutor_personas import (
+    get_user_tutor_preference,
+    list_public_tutor_personas,
+    public_tutor_persona,
+    resolve_tutor_persona,
+    save_user_tutor_preference,
+)
 from backend.apps.profiles.models import LearnerProfile
 from backend.apps.profiles.profile_updates import confirm_profile_update, dynamic_profile_feed, reject_profile_update
 from backend.apps.profiles.services import get_learning_profile_options, get_profile_payload, save_learning_profile, update_user_profile, extract_and_save_profile
@@ -36,6 +43,44 @@ def profile_options(request):
     if rejected:
         return rejected
     return JsonResponse({"success": True, **get_learning_profile_options()})
+
+
+@require_http_methods(["GET", "PATCH"])
+def tutor_preference(request):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+
+    if request.method == "GET":
+        preference = get_user_tutor_preference(request.user)
+        return JsonResponse(
+            {
+                "success": True,
+                "personas": list_public_tutor_personas(),
+                "preference": preference,
+                "selectedPersona": public_tutor_persona(preference["personaId"]),
+            }
+        )
+
+    try:
+        payload = json_body(request)
+        if not isinstance(payload, dict) or set(payload) != {"personaId"}:
+            raise ValueError("request must contain only personaId")
+        persona_id = payload["personaId"]
+        if not isinstance(persona_id, str) or not persona_id.strip():
+            raise ValueError("personaId must be a non-empty string")
+        if resolve_tutor_persona(persona_id) is None:
+            raise ValueError("personaId is not supported")
+        preference = save_user_tutor_preference(request.user, persona_id.strip())
+        return JsonResponse(
+            {
+                "success": True,
+                "preference": preference,
+                "selectedPersona": public_tutor_persona(preference["personaId"]),
+            }
+        )
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
 
 
 @require_http_methods(["POST"])
