@@ -389,6 +389,7 @@ def coaching_history(request):
                     request.user,
                     payload.get("messages"),
                     summary=str(payload.get("summary") or ""),
+                    tutor_persona_id=payload.get("tutorPersonaId", ""),
                 ),
             },
             status=201,
