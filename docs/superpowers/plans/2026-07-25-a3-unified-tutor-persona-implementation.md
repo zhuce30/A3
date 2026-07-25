@@ -49,7 +49,7 @@
 - Modify `OpenMAIC/components/a3/features/coaching/realtime-coaching-call.tsx` and `use-realtime-coaching.ts`: pass persona into realtime session.
 - Modify `OpenMAIC/components/a3/features/classroom-view-redesign.tsx`: compact selector and persona-aware QA request.
 - Modify `OpenMAIC/app/api/a3/coaching/respond/route.ts`: forward validated `personaId` to Django and return resolved persona.
-- Test `OpenMAIC/tests/a3-tutor-persona-selector.test.tsx`.
+- Test `OpenMAIC/tests/a3-tutor-persona-selector.test.ts`.
 - Test `OpenMAIC/tests/a3-tutor-persona-page-integration.test.ts`.
 
 ### Task 1: Backend Persona Catalog And Preference
@@ -189,13 +189,13 @@ Run Task 4 tests and `node --check OpenMAIC/scripts/a3-dashscope-realtime-proxy.
 
 - [ ] **Step 1: Write failing component tests**
 
-Create `OpenMAIC/tests/a3-tutor-persona-selector.test.tsx` covering loading, four options, selected state, recommended marker, PATCH success, error recovery, and no exposure of private instructions.
+Create `OpenMAIC/tests/a3-tutor-persona-selector.test.ts` covering loading, four options, selected state, recommended marker, PATCH success, error recovery, and no exposure of private instructions.
 
 - [ ] **Step 2: Verify RED**
 
 ```powershell
 cd OpenMAIC
-pnpm.cmd vitest run tests/a3-tutor-persona-selector.test.tsx
+pnpm.cmd vitest run tests/a3-tutor-persona-selector.test.ts
 ```
 
 - [ ] **Step 3: Implement shared hook and selector**
@@ -241,7 +241,7 @@ Run Task 6 tests, all tutor/realtime tests, and TypeScript checking.
 
 ```powershell
 cd OpenMAIC
-pnpm.cmd vitest run tests/a3-digital-human-avatar.test.ts tests/a3-digital-human-runtime.test.ts tests/a3-coaching-digital-human-integration.test.ts tests/a3-realtime-coaching-contract.test.ts tests/a3-tutor-persona-runtime.test.ts tests/a3-tutor-persona-selector.test.tsx tests/a3-tutor-persona-page-integration.test.ts
+pnpm.cmd vitest run tests/a3-digital-human-avatar.test.ts tests/a3-digital-human-runtime.test.ts tests/a3-coaching-digital-human-integration.test.ts tests/a3-realtime-coaching-contract.test.ts tests/a3-tutor-persona-runtime.test.ts tests/a3-tutor-persona-selector.test.ts tests/a3-tutor-persona-page-integration.test.ts
 npx.cmd tsc --noEmit
 ```
 
