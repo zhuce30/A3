@@ -33,6 +33,10 @@ function useAdminModalFocus(
   containerRef: RefObject<HTMLElement | null>,
 ) {
   const modalTokenRef = useRef(Symbol('a3-admin-modal'));
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
   useEffect(() => {
     if (!open) return;
     const modalToken = modalTokenRef.current;
@@ -48,7 +52,7 @@ function useAdminModalFocus(
       if (ADMIN_MODAL_STACK.at(-1) !== modalToken) return;
       if (event.key === 'Escape') {
         event.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (event.key !== 'Tab') return;
@@ -80,7 +84,7 @@ function useAdminModalFocus(
       document.body.style.overflow = previousOverflow;
       previousFocus?.focus();
     };
-  }, [containerRef, onClose, open]);
+  }, [containerRef, open]);
 }
 
 export function AdminPageHeader({
