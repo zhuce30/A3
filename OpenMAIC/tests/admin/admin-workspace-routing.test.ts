@@ -5,6 +5,7 @@ import type { A3PublicUser, A3UserRole } from '@/lib/a3/auth-types';
 import {
   getA3AuthTarget,
   getA3NextPathForUser,
+  normalizeA3WorkspaceRole,
   resolveA3LoginDestination,
 } from '@/lib/a3/auth-navigation';
 
@@ -81,18 +82,26 @@ describe('role-aware A3 login routing', () => {
     expect(resolveA3LoginDestination(admin, '/a3/today')).toBe('/a3/today');
   });
 
-  it('treats workspace query as intent without changing the authenticated role', () => {
+  it('normalizes only supported workspace role intents', () => {
+    expect(normalizeA3WorkspaceRole('student')).toBe('student');
+    expect(normalizeA3WorkspaceRole('teacher')).toBe('teacher');
+    expect(normalizeA3WorkspaceRole('admin')).toBe('admin');
+    expect(normalizeA3WorkspaceRole('owner')).toBeNull();
+    expect(normalizeA3WorkspaceRole(null)).toBeNull();
+  });
+
+  it('reuses a matching session and keeps mismatched workspace intent on login', () => {
     const guestState = { isPublicPath: false, isGuestPath: true, isFlowPath: false };
 
     expect(
-      getA3AuthTarget('/a3/login?workspace=admin', completedUser('student'), guestState),
+      getA3AuthTarget('/a3/login?workspace=student', completedUser('student'), guestState),
     ).toBe('/a3/today');
     expect(
       getA3AuthTarget('/a3/login?workspace=student', completedUser('teacher'), guestState),
-    ).toBe('/a3/teacher');
+    ).toBeNull();
     expect(
       getA3AuthTarget('/a3/login?workspace=teacher', completedUser('admin'), guestState),
-    ).toBe('/a3/admin/overview');
+    ).toBeNull();
   });
 });
 
@@ -132,6 +141,8 @@ describe('independent A3 workspace frame', () => {
     expect(adminLayoutSource).toContain("pathname === item.href || pathname.startsWith");
     expect(adminLayoutSource).toContain('md:hidden');
     expect(adminLayoutSource).toContain('localStorage');
+    expect(adminLayoutSource).toContain("'/api/auth/logout/'");
+    expect(adminLayoutSource).toContain('退出登录');
     expect(adminLayoutSource).not.toContain('返回学习空间');
     expect(adminLayoutSource).not.toContain('href="/a3/today"');
     expect(adminLayoutSource).not.toMatch(/(?:bg|text|border|ring)-blue-/);

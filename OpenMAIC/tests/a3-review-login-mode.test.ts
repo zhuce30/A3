@@ -53,25 +53,37 @@ function findByTestId(node: ReactNode, testId: string): ReactElement<TestElement
 }
 
 describe('A3 review login mode', () => {
-  it('derives review mode and a safe return target from async search params', async () => {
+  it('derives review mode, workspace intent, and a safe return target from async search params', async () => {
     const regular = await A3LoginPage({ searchParams: Promise.resolve({}) });
-    expect(regular.props).toMatchObject({ reviewMode: false, returnTo: null });
+    expect(regular.props).toMatchObject({ reviewMode: false, returnTo: null, workspace: null });
 
     const review = await A3LoginPage({
       searchParams: Promise.resolve({
         mode: 'review',
         next: '/a3/coaching?source=homepage#citations',
+        workspace: 'student',
       }),
     });
     expect(review.props).toMatchObject({
       reviewMode: true,
       returnTo: '/a3/coaching?source=homepage#citations',
+      workspace: 'student',
     });
 
     const unsafe = await A3LoginPage({
       searchParams: Promise.resolve({ mode: 'review', next: 'https://evil.example/a3' }),
     });
     expect(unsafe.props.returnTo).toBeNull();
+  });
+
+  it('labels role-specific login entry without changing account authority', () => {
+    const studentMarkup = renderToStaticMarkup(createElement(LoginPage, { workspace: 'student' }));
+    const teacherMarkup = renderToStaticMarkup(createElement(LoginPage, { workspace: 'teacher' }));
+    const adminMarkup = renderToStaticMarkup(createElement(LoginPage, { workspace: 'admin' }));
+
+    expect(studentMarkup).toContain('学生账号登录');
+    expect(teacherMarkup).toContain('教师账号登录');
+    expect(adminMarkup).toContain('管理员账号登录');
   });
 
   it('shows the review panel only in review mode', async () => {

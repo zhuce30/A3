@@ -352,7 +352,7 @@ function ErrorBox({ message }: { message: string }) {
 
 type ExecuteA3LoginOptions = {
   request: () => Promise<ApiResult>;
-  onSuccess: (result: ApiResult) => void;
+  onSuccess: (result: ApiResult) => void | Promise<void>;
   onError: (message: string) => void;
   onSubmittingChange: (submitting: boolean) => void;
 };
@@ -370,7 +370,7 @@ export async function executeA3Login({
       onError(result.error ?? '登录失败');
       return;
     }
-    onSuccess(result);
+    await onSuccess(result);
   } catch {
     onError('登录请求失败，请检查网络后重试');
   } finally {
@@ -381,17 +381,27 @@ export async function executeA3Login({
 export function LoginPage({
   reviewMode = false,
   returnTo = null,
+  workspace = null,
 }: {
   reviewMode?: boolean;
   returnTo?: string | null;
+  workspace?: A3UserRole | null;
 }) {
   const router = useRouter();
+  const currentUser = useA3CurrentUser();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [reviewAccountFilled, setReviewAccountFilled] = useState(false);
+  const workspaceLabels: Record<A3UserRole, string> = {
+    student: '学生',
+    teacher: '教师',
+    admin: '管理员',
+  };
+  const workspaceLabel = workspace ? workspaceLabels[workspace] : '';
+  const currentRoleLabel = currentUser?.role ? workspaceLabels[currentUser.role] : '';
 
   async function submit() {
     setError('');
@@ -403,13 +413,21 @@ export function LoginPage({
       request: () => postJson('/api/auth/login/', { identifier, password }),
       onSubmittingChange: setSubmitting,
       onError: setError,
-      onSuccess: (result) => {
+      onSuccess: async (result) => {
         if (!result.user) {
           setError('登录状态更新失败，请重新登录');
           return;
         }
-        syncA3User(result.user);
-        router.push(resolveA3LoginDestination(result.user as A3PublicUser, returnTo));
+        const authenticatedUser = result.user as A3PublicUser;
+        if (workspace && authenticatedUser.role !== workspace) {
+          await postJson('/api/auth/logout/', {});
+          window.dispatchEvent(new CustomEvent('a3-auth-user-updated', { detail: null }));
+          const actualRole = authenticatedUser.role ? workspaceLabels[authenticatedUser.role] : '其他身份';
+          setError(`该账号是${actualRole}账号，请从${actualRole}入口登录。`);
+          return;
+        }
+        syncA3User(authenticatedUser);
+        router.push(resolveA3LoginDestination(authenticatedUser, returnTo));
       },
     });
   }
@@ -417,13 +435,20 @@ export function LoginPage({
   return (
     <AuthFrame>
       <FormCard
-        title={reviewMode ? '进入评审体验' : '欢迎回来'}
+        title={reviewMode ? '进入评审体验' : workspace ? `${workspaceLabel}账号登录` : '欢迎回来'}
         subtitle={
           reviewMode
             ? '登录预置学生账号，查看从诊断到反馈的完整学习过程。'
-            : '使用已开通的学生、教师或管理员账号进入对应学习工作区。'
+            : workspace
+              ? `请使用已开通的${workspaceLabel}账号进入对应工作区。`
+              : '使用已开通的学生、教师或管理员账号进入对应学习工作区。'
         }
       >
+        {workspace && currentUser?.role && currentUser.role !== workspace ? (
+          <div data-testid="a3-account-switch-notice" className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
+            当前登录的是{currentRoleLabel}账号，请输入{workspaceLabel}账号完成切换。
+          </div>
+        ) : null}
         {reviewMode ? (
           <A3ReviewLoginPanel
             onFill={({ identifier: nextIdentifier, password: nextPassword }) => {

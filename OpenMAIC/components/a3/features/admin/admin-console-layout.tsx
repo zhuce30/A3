@@ -7,6 +7,7 @@ import {
   BookOpen,
   Database,
   LayoutDashboard,
+  LogOut,
   Menu,
   MessageSquareText,
   PanelLeftClose,
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
+import { a3PostJson } from '@/lib/a3/api-client';
 import { cn } from '@/lib/utils';
 
 const ADMIN_SIDEBAR_STORAGE_KEY = 'a3-admin-sidebar-collapsed';
@@ -40,6 +42,8 @@ export function AdminConsoleLayout({ children }: { children: React.ReactNode }) 
   const user = useA3CurrentUser();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [logoutBusy, setLogoutBusy] = useState(false);
+  const [logoutError, setLogoutError] = useState('');
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -59,6 +63,25 @@ export function AdminConsoleLayout({ children }: { children: React.ReactNode }) 
       window.localStorage.setItem(ADMIN_SIDEBAR_STORAGE_KEY, next ? '1' : '0');
       return next;
     });
+  }
+
+  async function logout() {
+    if (logoutBusy) return;
+    setLogoutBusy(true);
+    setLogoutError('');
+    try {
+      const result = await a3PostJson<{ success: boolean; error?: string }>('/api/auth/logout/', {});
+      if (!result.success) {
+        setLogoutError(result.error || '退出失败，请稍后重试。');
+        return;
+      }
+      window.dispatchEvent(new CustomEvent('a3-auth-user-updated', { detail: null }));
+      window.location.assign('/a3/login?workspace=admin');
+    } catch {
+      setLogoutError('退出失败，请检查网络后重试。');
+    } finally {
+      setLogoutBusy(false);
+    }
   }
 
   const currentItem =
@@ -134,15 +157,32 @@ export function AdminConsoleLayout({ children }: { children: React.ReactNode }) 
         </nav>
 
         <div className={cn('border-t border-[var(--admin-border)] py-4', sidebarCollapsed ? 'md:px-2' : 'px-4')}>
-          <div className={cn('min-w-0', sidebarCollapsed && 'md:text-center')}>
-            <div className={cn('truncate text-sm font-semibold text-[var(--admin-green)]', sidebarCollapsed && 'md:hidden')}>
-              {displayName}
+          <div className={cn('flex items-center gap-2', sidebarCollapsed && 'md:flex-col')}>
+            <div className={cn('min-w-0 flex-1', sidebarCollapsed && 'md:text-center')}>
+              <div className={cn('truncate text-sm font-semibold text-[var(--admin-green)]', sidebarCollapsed && 'md:hidden')}>
+                {displayName}
+              </div>
+              <div className={cn('mt-1 text-xs text-[var(--admin-muted)]', sidebarCollapsed && 'md:hidden')}>管理员会话</div>
+              <div className={cn('hidden size-9 items-center justify-center rounded-md bg-[#e7e1cf] text-sm font-semibold text-[var(--admin-green)]', sidebarCollapsed && 'md:inline-flex')}>
+                {displayName.slice(0, 1)}
+              </div>
             </div>
-            <div className={cn('mt-1 text-xs text-[var(--admin-muted)]', sidebarCollapsed && 'md:hidden')}>管理员会话</div>
-            <div className={cn('hidden size-9 items-center justify-center rounded-md bg-[#e7e1cf] text-sm font-semibold text-[var(--admin-green)]', sidebarCollapsed && 'md:inline-flex')}>
-              {displayName.slice(0, 1)}
-            </div>
+            <button
+              type="button"
+              disabled={logoutBusy}
+              aria-label="退出登录"
+              title="退出登录"
+              onClick={() => void logout()}
+              className={cn(
+                'flex h-9 shrink-0 items-center justify-center rounded-md border border-[var(--admin-border)] text-sm font-medium text-[var(--admin-muted)] transition-colors hover:bg-[#efede4] hover:text-[var(--admin-green)] disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--admin-accent)]',
+                sidebarCollapsed ? 'w-9' : 'gap-2 px-3',
+              )}
+            >
+              <LogOut className="size-4" />
+              <span className={cn(sidebarCollapsed && 'md:hidden')}>{logoutBusy ? '退出中' : '退出'}</span>
+            </button>
           </div>
+          {logoutError && !sidebarCollapsed ? <p role="alert" className="mt-2 text-xs leading-5 text-red-700">{logoutError}</p> : null}
         </div>
       </aside>
 

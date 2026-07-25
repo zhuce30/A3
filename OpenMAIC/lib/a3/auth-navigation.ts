@@ -30,6 +30,10 @@ const A3_ROLE_HOME: Record<A3UserRole, string> = {
   admin: '/a3/admin/overview',
 };
 
+export function normalizeA3WorkspaceRole(value: string | null | undefined): A3UserRole | null {
+  return value === 'student' || value === 'teacher' || value === 'admin' ? value : null;
+}
+
 export function isA3PublicPath(pathname: string) {
   return A3_PUBLIC_PATHS.has(pathname) || pathname === '/a3/help' || pathname.startsWith('/a3/help/');
 }
@@ -59,6 +63,16 @@ function loginReturnPath(currentPath: string, user: A3PublicUser): string | null
     const parsed = new URL(currentPath, returnPathBase);
     if (parsed.origin !== returnPathBase || parsed.pathname !== '/a3/login') return null;
     return getRoleCompatibleA3ReturnPath(parsed.searchParams.get('next'), user.role);
+  } catch {
+    return null;
+  }
+}
+
+function loginWorkspaceRole(currentPath: string): A3UserRole | null {
+  try {
+    const parsed = new URL(currentPath, returnPathBase);
+    if (parsed.origin !== returnPathBase || parsed.pathname !== '/a3/login') return null;
+    return normalizeA3WorkspaceRole(parsed.searchParams.get('workspace'));
   } catch {
     return null;
   }
@@ -163,7 +177,11 @@ export function getA3AuthTarget(
   }
 
   const nextPath = getA3NextPathForUser(user);
-  if (pathState.isGuestPath) return loginReturnPath(pathname, user) ?? nextPath;
+  if (pathState.isGuestPath) {
+    const requestedWorkspace = loginWorkspaceRole(pathname);
+    if (requestedWorkspace && requestedWorkspace !== user.role) return null;
+    return loginReturnPath(pathname, user) ?? nextPath;
+  }
   if (!pathState.isFlowPath && !isA3OnboardingComplete(user)) return nextPath;
   return null;
 }
