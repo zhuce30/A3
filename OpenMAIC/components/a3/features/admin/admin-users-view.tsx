@@ -1,17 +1,32 @@
 'use client';
 
-import { ChevronLeft, ChevronRight, Eye, RefreshCw, Search, UserRound, X } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
-import { Button } from '@/components/ui/button';
+import { Eye, Search } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getA3AdminUser,
   getA3AdminUsers,
   revealA3AdminUserIp,
   updateA3AdminUserStatus,
 } from '@/lib/a3/admin-api';
-import type { A3AdminUser } from '@/lib/a3/admin-types';
-import { cn } from '@/lib/utils';
+import type { A3AdminPagination as PaginationValue, A3AdminUser } from '@/lib/a3/admin-types';
 import { AdminAccessGuard } from './admin-access-guard';
+import {
+  AdminDetailDrawer,
+  AdminEmptyState,
+  AdminErrorState,
+  AdminFilterBar,
+  AdminPageHeader,
+  AdminPagination,
+  AdminReasonDialog,
+  AdminSkeleton,
+  AdminStatusBadge,
+  AdminTable,
+  formatAdminDateTime,
+} from './admin-ui';
+
+type UserAction =
+  | { type: 'status'; user: A3AdminUser }
+  | { type: 'ip'; user: A3AdminUser; field: 'last' | 'registration' };
 
 export function AdminUsersView() {
   return <AdminAccessGuard><AdminUsersContent /></AdminAccessGuard>;
@@ -22,122 +37,162 @@ function AdminUsersContent() {
   const [submittedSearch, setSubmittedSearch] = useState('');
   const [role, setRole] = useState('');
   const [status, setStatus] = useState('');
+  const [presence, setPresence] = useState('');
   const [page, setPage] = useState(1);
   const [items, setItems] = useState<A3AdminUser[]>([]);
-  const [total, setTotal] = useState(0);
+  const [pagination, setPagination] = useState<PaginationValue>({ page: 1, pageSize: 20, total: 0 });
   const [selected, setSelected] = useState<A3AdminUser | null>(null);
+  const [revealedIp, setRevealedIp] = useState<{ last?: string; registration?: string }>({});
+  const [action, setAction] = useState<UserAction | null>(null);
+  const [actionPending, setActionPending] = useState(false);
   const [error, setError] = useState('');
+  const [detailError, setDetailError] = useState('');
   const [loading, setLoading] = useState(true);
+  const inFlight = useRef(false);
 
   const load = useCallback(async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setLoading(true);
     setError('');
-    const result = await getA3AdminUsers({ search: submittedSearch, role, status, page, pageSize: 20 });
-    if (result.success) {
-      setItems(result.items);
-      setTotal(result.pagination.total);
-    } else {
-      setError(result.error || '用户数据加载失败');
+    try {
+      const result = await getA3AdminUsers({ search: submittedSearch, role, status, presence, page, pageSize: 20 });
+      if (result.success) {
+        setItems(result.items);
+        setPagination(result.pagination);
+      } else setError(result.error || '用户数据加载失败');
+    } finally {
+      setLoading(false);
+      inFlight.current = false;
     }
-    setLoading(false);
-  }, [page, role, status, submittedSearch]);
+  }, [page, presence, role, status, submittedSearch]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(timer);
   }, [load]);
 
-  const openDetail = async (user: A3AdminUser) => {
+  async function openDetail(user: A3AdminUser) {
     setSelected(user);
+    setRevealedIp({});
+    setDetailError('');
     const result = await getA3AdminUser(user.id);
     if (result.success && result.user) setSelected(result.user);
-  };
+    else if (!result.success) setDetailError(result.error || '用户详情加载失败');
+  }
+
+  async function executeAction(reason: string) {
+    if (!action) return;
+    setActionPending(true);
+    setDetailError('');
+    try {
+      if (action.type === 'status') {
+        const result = await updateA3AdminUserStatus(action.user.id, !action.user.isActive, reason);
+        if (!result.success || !result.user) {
+          setDetailError(result.error || '账号状态更新失败');
+          return;
+        }
+        setSelected(result.user);
+        setItems((current) => current.map((item) => item.id === result.user?.id ? result.user : item));
+      } else {
+        const result = await revealA3AdminUserIp(action.user.id, action.field, reason);
+        if (!result.success) {
+          setDetailError(result.error || 'IP 查看失败');
+          return;
+        }
+        setRevealedIp((current) => ({ ...current, [action.field]: result.ip || '历史未记录' }));
+      }
+      setAction(null);
+    } finally {
+      setActionPending(false);
+    }
+  }
 
   return (
-    <div className="space-y-6" data-testid="a3-admin-users">
-      <header className="flex flex-wrap items-end justify-between gap-4 border-b border-[var(--a3-border)] pb-5">
-        <div><p className="text-sm font-medium text-emerald-700">系统管理</p><h1 className="mt-1 text-2xl font-semibold">用户管理</h1><p className="mt-2 text-sm text-[var(--a3-text-muted)]">区分账号状态、在线状态与学习活动，IP 默认脱敏。</p></div>
-        <Button variant="outline" onClick={() => void load()}><RefreshCw className={cn('size-4', loading && 'animate-spin')} />刷新</Button>
-      </header>
+    <div className="space-y-5" data-testid="a3-admin-users">
+      <AdminPageHeader title="用户管理" refreshing={loading} onRefresh={() => void load()} />
+      <AdminFilterBar>
+        <form
+          className="flex min-w-[240px] flex-1 items-end gap-2"
+          onSubmit={(event) => { event.preventDefault(); setPage(1); setSubmittedSearch(search.trim()); }}
+        >
+          <label className="min-w-0 flex-1">
+            <span className="mb-1 block text-xs text-[#64736c]">搜索</span>
+            <span className="relative block"><Search className="absolute left-3 top-2.5 size-4 text-[#7c8983]" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="姓名、账号、学号或 IP" className="h-9 w-full rounded-md border border-[#c8c3b4] bg-white pl-9 pr-3 text-sm outline-none focus:border-[#9b7b2f]" /></span>
+          </label>
+          <button type="submit" className="h-9 rounded-md bg-[#143f32] px-3 text-sm font-semibold text-[#fffdf7] hover:bg-[#1d5543]">查询</button>
+        </form>
+        <AdminSelect label="角色" value={role} onChange={(value) => { setRole(value); setPage(1); }} options={[['', '全部角色'], ['student', '学生'], ['teacher', '教师'], ['admin', '管理员']]} />
+        <AdminSelect label="账号" value={status} onChange={(value) => { setStatus(value); setPage(1); }} options={[['', '全部状态'], ['active', '已启用'], ['disabled', '已停用']]} />
+        <AdminSelect label="在线" value={presence} onChange={(value) => { setPresence(value); setPage(1); }} options={[['', '全部状态'], ['online', '在线'], ['idle', '暂离'], ['offline', '离线']]} />
+      </AdminFilterBar>
 
-      <form
-        className="grid gap-3 border-y border-[var(--a3-border)] py-4 md:grid-cols-[minmax(260px,1fr)_180px_180px_auto]"
-        onSubmit={(event) => { event.preventDefault(); setPage(1); setSubmittedSearch(search.trim()); }}
-      >
-        <label className="relative"><Search className="absolute left-3 top-3 size-4 text-slate-400" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="姓名、邮箱、手机号、学号或 IP" className="h-10 w-full rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] pl-9 pr-3 text-sm outline-none focus:border-emerald-500" /></label>
-        <select aria-label="角色" value={role} onChange={(event) => { setRole(event.target.value); setPage(1); }} className="h-10 rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-3 text-sm"><option value="">全部角色</option><option value="student">学生</option><option value="teacher">教师</option><option value="admin">管理员</option></select>
-        <select aria-label="账号状态" value={status} onChange={(event) => { setStatus(event.target.value); setPage(1); }} className="h-10 rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-3 text-sm"><option value="">全部状态</option><option value="active">已启用</option><option value="disabled">已停用</option></select>
-        <Button type="submit" className="bg-emerald-700 hover:bg-emerald-800"><Search className="size-4" />查询</Button>
-      </form>
+      {error ? <AdminErrorState message={error} onRetry={() => void load()} /> : null}
+      {loading && !items.length ? <AdminSkeleton rows={7} /> : null}
+      {!loading && !error && !items.length ? <AdminEmptyState title="没有符合条件的用户" /> : null}
+      {items.length ? (
+        <>
+          <AdminTable>
+            <thead className="bg-[#f0ede3] text-xs text-[#64736c]"><tr><Th>用户</Th><Th>角色</Th><Th>账号</Th><Th>在线</Th><Th>最近 IP</Th><Th>学习活动</Th><Th>最近活跃</Th><Th>操作</Th></tr></thead>
+            <tbody className="divide-y divide-[#e3dfd3]">
+              {items.map((user) => (
+                <tr key={user.id} className="bg-[#fffdf7] hover:bg-[#faf5df]">
+                  <Td><div className="font-medium text-[#244a3d]">{user.displayName || '未命名用户'}</div><div className="mt-1 max-w-52 truncate text-xs text-[#64736c]">{user.email || user.phone || user.studentId || '未填写账号信息'}</div></Td>
+                  <Td>{roleLabel(user.role)}</Td>
+                  <Td><AdminStatusBadge status={user.isActive ? 'active' : 'inactive'} /></Td>
+                  <Td><AdminStatusBadge status={user.presence.status} label={presenceLabel(user.presence.status)} /></Td>
+                  <Td><span className="whitespace-nowrap">{user.lastIp.label}</span>{user.country ? <span className="ml-1 text-xs text-[#64736c]">· {user.country}</span> : null}</Td>
+                  <Td><span className="tabular-nums">{user.activity.learningEvents}</span> 事件 · <span className="tabular-nums">{user.activity.coachingSessions}</span> 辅导</Td>
+                  <Td>{formatAdminDateTime(user.presence.lastSeenAt || user.lastLoginAt)}</Td>
+                  <Td><button type="button" aria-label={`查看 ${user.displayName} 详情`} onClick={() => void openDetail(user)} className="flex size-8 items-center justify-center rounded-md text-[#1f6b53] hover:bg-[#e9f0eb]"><Eye className="size-4" /></button></Td>
+                </tr>
+              ))}
+            </tbody>
+          </AdminTable>
+          <AdminPagination pagination={pagination} onPageChange={setPage} disabled={loading} />
+        </>
+      ) : null}
 
-      {error ? <div className="border-l-4 border-rose-500 bg-rose-50 px-4 py-3 text-sm text-rose-800">{error}</div> : null}
-      <div className="overflow-x-auto border-y border-[var(--a3-border)]">
-        <table className="min-w-[1120px] w-full text-left text-sm">
-          <thead className="sticky top-0 bg-[var(--a3-surface-muted)] text-xs text-[var(--a3-text-muted)]"><tr><Th>用户</Th><Th>角色</Th><Th>账号</Th><Th>在线状态</Th><Th>最近 IP</Th><Th>学习活动</Th><Th>注册时间</Th><Th>操作</Th></tr></thead>
-          <tbody className="divide-y divide-[var(--a3-border)]">
-            {items.map((user) => (
-              <tr key={user.id} className="bg-[var(--a3-surface-solid)] hover:bg-amber-50/50 dark:hover:bg-amber-950/10">
-                <Td><div className="font-medium">{user.displayName}</div><div className="mt-1 text-xs text-[var(--a3-text-muted)]">{user.email || user.phone || '未填写联系方式'}</div></Td>
-                <Td>{roleLabel(user.role)}</Td>
-                <Td><StatusDot active={user.isActive} />{user.isActive ? '已启用' : '已停用'}</Td>
-                <Td><Presence status={user.presence.status} /></Td>
-                <Td>{user.lastIp.label}{user.country ? ` · ${user.country}` : ''}</Td>
-                <Td>{user.activity.learningEvents} 事件 · {user.activity.coachingSessions} 辅导</Td>
-                <Td>{formatDate(user.createdAt)}</Td>
-                <Td><button type="button" onClick={() => void openDetail(user)} className="inline-flex size-9 items-center justify-center rounded-md text-emerald-700 hover:bg-emerald-50" title="查看详情"><Eye className="size-4" /></button></Td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {!loading && !items.length ? <div className="py-16 text-center text-sm text-[var(--a3-text-muted)]">没有符合条件的用户</div> : null}
-        {loading ? <div className="py-16 text-center text-sm text-[var(--a3-text-muted)]">正在读取用户数据...</div> : null}
-      </div>
+      <AdminDetailDrawer open={Boolean(selected)} title="用户详情" onClose={() => { setSelected(null); setAction(null); }}>
+        {selected ? (
+          <div className="space-y-6">
+            {detailError ? <AdminErrorState message={detailError} /> : null}
+            <div className="flex items-start justify-between gap-3 border-b border-[#d9d6c9] pb-4">
+              <div><h3 className="font-semibold text-[#143f32]">{selected.displayName || '未命名用户'}</h3><p className="mt-1 text-sm text-[#64736c]">{roleLabel(selected.role)} · {selected.school || '未填写学校'}</p></div>
+              <AdminStatusBadge status={selected.isActive ? 'active' : 'inactive'} />
+            </div>
+            <DetailSection title="账号信息"><Detail label="邮箱" value={selected.email || '未填写'} /><Detail label="手机号" value={selected.phone || '未填写'} /><Detail label="学号" value={selected.studentId || '未填写'} /><Detail label="注册时间" value={formatAdminDateTime(selected.createdAt)} /></DetailSection>
+            <DetailSection title="访问摘要">
+              <Detail label="在线状态" value={presenceLabel(selected.presence.status)} />
+              <SensitiveDetail label="最近 IP" value={revealedIp.last || selected.lastIp.label} onReveal={() => setAction({ type: 'ip', user: selected, field: 'last' })} />
+              <SensitiveDetail label="注册 IP" value={revealedIp.registration || selected.registrationIp.label} onReveal={() => setAction({ type: 'ip', user: selected, field: 'registration' })} />
+              <Detail label="地区" value={selected.country || '未采集'} />
+            </DetailSection>
+            <DetailSection title="学习使用"><Detail label="学习方向" value={selected.learningProfile.majorDirection || '未填写'} /><Detail label="基础水平" value={selected.learningProfile.foundationLevel || '未填写'} /><Detail label="学习目标" value={selected.learningProfile.primaryGoal || '未填写'} /><Detail label="资源包 / Agent" value={`${selected.activity.resourcePacks} / ${selected.activity.agentRuns}`} /></DetailSection>
+            <button type="button" onClick={() => setAction({ type: 'status', user: selected })} className={selected.isActive ? 'h-10 w-full rounded-md border border-rose-300 text-sm font-semibold text-rose-700 hover:bg-rose-50' : 'h-10 w-full rounded-md bg-[#143f32] text-sm font-semibold text-[#fffdf7] hover:bg-[#1d5543]'}>{selected.isActive ? '停用账号' : '启用账号'}</button>
+          </div>
+        ) : null}
+      </AdminDetailDrawer>
 
-      <div className="flex items-center justify-between text-sm text-[var(--a3-text-muted)]"><span>共 {total} 个账号</span><div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft className="size-4" /></Button><span>第 {page} 页</span><Button size="sm" variant="outline" disabled={page * 20 >= total} onClick={() => setPage((value) => value + 1)}><ChevronRight className="size-4" /></Button></div></div>
-
-      {selected ? <AdminUserDrawer user={selected} onClose={() => setSelected(null)} onChanged={(user) => { setSelected(user); setItems((current) => current.map((item) => item.id === user.id ? user : item)); }} /> : null}
+      <AdminReasonDialog
+        open={Boolean(action)}
+        title={action?.type === 'status' ? `${action.user.isActive ? '停用' : '启用'}账号` : '查看完整 IP'}
+        actionLabel={action?.type === 'status' ? '确认变更' : '确认查看'}
+        pending={actionPending}
+        onClose={() => setAction(null)}
+        onConfirm={executeAction}
+      />
     </div>
   );
 }
 
-function AdminUserDrawer({ user, onClose, onChanged }: { user: A3AdminUser; onClose: () => void; onChanged: (user: A3AdminUser) => void }) {
-  const [error, setError] = useState('');
-  const [revealed, setRevealed] = useState<Record<string, string>>({});
-  const toggleStatus = async () => {
-    const reason = window.prompt(user.isActive ? '请输入停用原因' : '请输入启用原因');
-    if (!reason) return;
-    if (!window.confirm(`确认${user.isActive ? '停用' : '启用'}“${user.displayName}”？`)) return;
-    const result = await updateA3AdminUserStatus(user.id, !user.isActive, reason);
-    if (result.success && result.user) onChanged(result.user);
-    else setError(result.error || '账号状态更新失败');
-  };
-  const reveal = async (field: 'last' | 'registration') => {
-    if (!window.confirm('完整 IP 属于敏感访问数据，本次查看会写入管理员审计日志。确认继续？')) return;
-    const result = await revealA3AdminUserIp(user.id, field, '管理员在用户详情中查看');
-    if (result.success) setRevealed((current) => ({ ...current, [field]: result.ip || '历史未记录' }));
-    else setError(result.error || 'IP 查看失败');
-  };
-  return (
-    <div className="fixed inset-0 z-[80] bg-slate-950/35" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <aside role="dialog" aria-modal="true" aria-label="用户详情" className="absolute inset-y-0 right-0 w-full max-w-[520px] overflow-y-auto border-l border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-6 shadow-2xl">
-        <div className="flex items-start justify-between"><div className="flex gap-3"><div className="flex size-11 items-center justify-center rounded-full bg-amber-100 text-amber-800"><UserRound className="size-5" /></div><div><h2 className="text-lg font-semibold">{user.displayName}</h2><p className="text-sm text-[var(--a3-text-muted)]">{roleLabel(user.role)} · {user.school || '未填写学校'}</p></div></div><button type="button" onClick={onClose} title="关闭"><X className="size-5" /></button></div>
-        {error ? <p className="mt-4 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</p> : null}
-        <Section title="账号信息"><Detail label="邮箱" value={user.email || '未填写'} /><Detail label="手机号" value={user.phone || '未填写'} /><Detail label="学号" value={user.studentId || '未填写'} /><Detail label="账号状态" value={user.isActive ? '已启用' : '已停用'} /></Section>
-        <Section title="访问状态"><Detail label="在线状态" value={presenceLabel(user.presence.status)} /><IpDetail label="最近 IP" value={revealed.last || user.lastIp.label} onReveal={() => void reveal('last')} /><IpDetail label="注册 IP" value={revealed.registration || user.registrationIp.label} onReveal={() => void reveal('registration')} /><Detail label="地区" value={user.country || '未采集'} /></Section>
-        <Section title="学习使用"><Detail label="学习方向" value={user.learningProfile.majorDirection || '未填写'} /><Detail label="首要目标" value={user.learningProfile.primaryGoal || '未填写'} /><Detail label="学习事件" value={`${user.activity.learningEvents}`} /><Detail label="辅导会话" value={`${user.activity.coachingSessions}`} /><Detail label="资源包 / Agent" value={`${user.activity.resourcePacks} / ${user.activity.agentRuns}`} /></Section>
-        <Button type="button" variant="outline" onClick={() => void toggleStatus()} className={cn('mt-8 w-full', user.isActive && 'border-rose-200 text-rose-700 hover:bg-rose-50')}>{user.isActive ? '停用账号' : '启用账号'}</Button>
-      </aside>
-    </div>
-  );
+function AdminSelect({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: Array<[string, string]> }) {
+  return <label><span className="mb-1 block text-xs text-[#64736c]">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="h-9 min-w-32 rounded-md border border-[#c8c3b4] bg-white px-2 text-sm text-[#244a3d] outline-none focus:border-[#9b7b2f]">{options.map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}</select></label>;
 }
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) { return <section className="mt-7 border-t border-[var(--a3-border)] pt-4"><h3 className="text-sm font-semibold">{title}</h3><dl className="mt-3 space-y-3">{children}</dl></section>; }
-function Detail({ label, value }: { label: string; value: string }) { return <div className="grid grid-cols-[100px_1fr] gap-3 text-sm"><dt className="text-[var(--a3-text-muted)]">{label}</dt><dd className="break-all">{value}</dd></div>; }
-function IpDetail({ label, value, onReveal }: { label: string; value: string; onReveal: () => void }) { return <div className="grid grid-cols-[100px_1fr_auto] gap-3 text-sm"><dt className="text-[var(--a3-text-muted)]">{label}</dt><dd>{value}</dd><button type="button" onClick={onReveal} className="text-xs text-emerald-700">查看完整值</button></div>; }
-function Th({ children }: { children: React.ReactNode }) { return <th className="px-4 py-3 font-medium">{children}</th>; }
-function Td({ children }: { children: React.ReactNode }) { return <td className="px-4 py-4">{children}</td>; }
-function StatusDot({ active }: { active: boolean }) { return <span className={cn('mr-2 inline-block size-2 rounded-full', active ? 'bg-emerald-500' : 'bg-slate-400')} />; }
-function Presence({ status }: { status: A3AdminUser['presence']['status'] }) { return <span className="inline-flex items-center"><StatusDot active={status === 'online'} />{presenceLabel(status)}</span>; }
-function presenceLabel(status: A3AdminUser['presence']['status']) { return status === 'online' ? '在线' : status === 'idle' ? '暂离' : '离线'; }
+function DetailSection({ title, children }: { title: string; children: React.ReactNode }) { return <section><h3 className="border-b border-[#e3dfd3] pb-2 text-sm font-semibold text-[#143f32]">{title}</h3><dl className="mt-3 space-y-3">{children}</dl></section>; }
+function Detail({ label, value }: { label: string; value: string }) { return <div className="grid grid-cols-[96px_minmax(0,1fr)] gap-3 text-sm"><dt className="text-[#64736c]">{label}</dt><dd className="break-words text-[#244a3d]">{value}</dd></div>; }
+function SensitiveDetail({ label, value, onReveal }: { label: string; value: string; onReveal: () => void }) { return <div className="grid grid-cols-[96px_minmax(0,1fr)_auto] gap-3 text-sm"><dt className="text-[#64736c]">{label}</dt><dd className="break-words text-[#244a3d]">{value}</dd><button type="button" onClick={onReveal} className="text-xs font-medium text-[#8a651f] hover:text-[#143f32]">查看</button></div>; }
+function Th({ children }: { children: React.ReactNode }) { return <th className="whitespace-nowrap px-3 py-2.5 font-medium">{children}</th>; }
+function Td({ children }: { children: React.ReactNode }) { return <td className="px-3 py-3 text-[#40554c]">{children}</td>; }
 function roleLabel(role: A3AdminUser['role']) { return role === 'admin' ? '管理员' : role === 'teacher' ? '教师' : '学生'; }
-function formatDate(value: string | null) { return value ? new Date(value).toLocaleDateString('zh-CN') : '未记录'; }
+function presenceLabel(status: A3AdminUser['presence']['status']) { return status === 'online' ? '在线' : status === 'idle' ? '暂离' : '离线'; }
