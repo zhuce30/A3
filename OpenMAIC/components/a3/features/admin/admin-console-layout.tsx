@@ -3,7 +3,6 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
-  ArrowLeft,
   Bot,
   BookOpen,
   Database,
@@ -107,20 +106,6 @@ export function AdminConsoleLayout({ children }: { children: React.ReactNode }) 
             <X className="size-5" />
           </button>
           <ShieldCheck className={cn('hidden size-6 text-[var(--admin-accent)]', sidebarCollapsed && 'md:block')} />
-        </div>
-
-        <div className={cn('border-b border-[var(--admin-border)] py-3', sidebarCollapsed ? 'md:px-2' : 'px-3')}>
-          <Link
-            href="/a3/today"
-            title={sidebarCollapsed ? '返回学习空间' : undefined}
-            className={cn(
-              'flex h-10 items-center rounded-md border border-[var(--admin-border)] text-sm font-medium text-[var(--admin-green)] transition-colors hover:border-[#b9ad85] hover:bg-[#f1eee3] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--admin-accent)]',
-              sidebarCollapsed ? 'md:justify-center md:px-0' : 'gap-2 px-3',
-            )}
-          >
-            <ArrowLeft className="size-4 shrink-0" />
-            <span className={cn('truncate', sidebarCollapsed && 'md:hidden')}>返回学习空间</span>
-          </Link>
         </div>
 
         <nav className={cn('min-h-0 flex-1 space-y-1 overflow-y-auto py-3', sidebarCollapsed ? 'md:px-2' : 'px-3')} aria-label="管理后台导航">

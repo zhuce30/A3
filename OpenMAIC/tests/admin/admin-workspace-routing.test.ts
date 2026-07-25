@@ -127,13 +127,13 @@ describe('independent A3 workspace frame', () => {
   it('provides admin-only navigation, active route state, and responsive collapse controls', () => {
     expect(adminLayoutSource).toContain('data-a3-admin-console');
     expect(adminLayoutSource).toContain('智学引擎 · 管理后台');
-    expect(adminLayoutSource).toContain('返回学习空间');
     expect(adminLayoutSource).toContain("href: '/a3/admin/overview'");
     expect(adminLayoutSource).toContain("href: '/a3/admin/audit'");
     expect(adminLayoutSource).toContain("pathname === item.href || pathname.startsWith");
     expect(adminLayoutSource).toContain('md:hidden');
     expect(adminLayoutSource).toContain('localStorage');
-    expect(adminLayoutSource).not.toContain("href: '/a3/today'");
+    expect(adminLayoutSource).not.toContain('返回学习空间');
+    expect(adminLayoutSource).not.toContain('href="/a3/today"');
     expect(adminLayoutSource).not.toMatch(/(?:bg|text|border|ring)-blue-/);
   });
 });
