@@ -46,7 +46,7 @@ _STATUS_ALIASES = {
 _CANCELLABLE_RUNTIME_STATES = {
     "knowledge_index": {"queued", "running"},
     "video_generation": {"queued", "running"},
-    "video_composition": {"generating_narration", "composing"},
+    "video_composition": {"queued", "generating_narration", "composing"},
 }
 
 

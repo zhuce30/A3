@@ -32,6 +32,12 @@ _SENSITIVE_KEY_MARKERS = (
 _HEADER_SECRET_RE = re.compile(
     r"(?im)^(?P<header>(?:proxy-)?authorization|cookie|set-cookie|(?:x-)?api[_-]?key)\s*:\s*[^\r\n]*"
 )
+_PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN (?P<key_type>(?:RSA |EC |OPENSSH )?PRIVATE KEY)-----"
+    r".*?"
+    r"-----END (?P=key_type)-----",
+    re.DOTALL,
+)
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
 _NORMALIZED_ASSIGNMENT_RE = re.compile(
     r"(?i)(?<![a-z0-9_.-])(?P<key_quote>[\"']?)(?P<key>[a-z][a-z0-9_.-]{0,63})"
@@ -56,6 +62,7 @@ def parse_pagination(params) -> tuple[int, int]:
 
 def _redact_unstructured_text(value: Any, *, limit: int) -> str:
     text = str(value or "")[:limit]
+    text = _PRIVATE_KEY_BLOCK_RE.sub("[私钥块已隐藏]", text)
     text = _HEADER_SECRET_RE.sub(lambda match: f'{match.group("header")}: [敏感信息已隐藏]', text)
     text = _NORMALIZED_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, text)
     text = _BEARER_RE.sub("Bearer [敏感信息已隐藏]", text)

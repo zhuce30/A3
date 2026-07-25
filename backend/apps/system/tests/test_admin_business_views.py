@@ -418,6 +418,44 @@ class AdminBusinessViewsTests(TestCase):
         self.assertIn("保留开头的普通学习内容", revealed)
         self.assertIn("保留结尾的普通说明", revealed)
 
+    def test_conversation_reveal_redacts_complete_multiline_private_key_blocks(self):
+        key_types = ("PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY")
+        blocks = []
+        body_markers = []
+        for index, key_type in enumerate(key_types):
+            marker = f"PRIVATE-KEY-BODY-{index}-must-not-leak"
+            body_markers.append(marker)
+            prefix = "privateKey: " if index == 0 else ""
+            blocks.append(
+                f"{prefix}-----BEGIN {key_type}-----\n"
+                f"{marker}\n"
+                "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n"
+                f"-----END {key_type}-----"
+            )
+        session = CoachingSession.objects.create(user=self.student, topic_title="私钥块脱敏")
+        CoachingMessage.objects.create(
+            session=session,
+            role="user",
+            content="保留普通说明\n" + "\n".join(blocks) + "\n保留结束说明",
+        )
+        self._login_admin()
+
+        response = self.client.post(
+            f"/api/admin/conversations/{session.pk}/reveal/",
+            data={"reason": "核对私钥块脱敏"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        revealed = response.json()["messages"][0]["content"]
+        for marker in body_markers:
+            self.assertNotIn(marker, revealed)
+        self.assertNotIn("-----BEGIN", revealed)
+        self.assertNotIn("-----END", revealed)
+        self.assertNotIn("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC", revealed)
+        self.assertIn("保留普通说明", revealed)
+        self.assertIn("保留结束说明", revealed)
+
     def test_catalog_lists_real_counts_without_stored_paths(self):
         self._login_admin()
         courses = self.client.get("/api/admin/courses/?page=1&pageSize=20&active=true")
@@ -466,9 +504,15 @@ class AdminBusinessViewsTests(TestCase):
             "/data/uploads/source.pdf",
             "/workspace/index/store.bin",
             "/mnt/volume/output.mp4",
+            "/root/private/config.json",
+            "/storage/private/archive.zip",
+            "/project/runtime/output.log",
+            "/future-root/private/evidence.bin",
             r"\\fileserver\private\document.pdf",
             "file:///app/private/report.txt",
             "s3://private-bucket/object-key",
+            "gs://private-bucket/object-key",
+            "ftp://provider.example/private/file.bin",
             "https://provider.example/output?X-Amz-Signature=provider-secret",
         )
         for index, error in enumerate(path_errors):
@@ -491,7 +535,22 @@ class AdminBusinessViewsTests(TestCase):
         self.assertEqual(len(path_items), len(path_errors))
         self.assertTrue(all(item["errorSummary"] == "处理失败，详细错误已隐藏" for item in path_items))
         serialized = json.dumps(path_items, ensure_ascii=False).lower()
-        for marker in ("/app/", "/usr/", "/data/", "/workspace/", "/mnt/", "fileserver", "file://", "s3://"):
+        for marker in (
+            "/app/",
+            "/usr/",
+            "/data/",
+            "/workspace/",
+            "/mnt/",
+            "/root/",
+            "/storage/",
+            "/project/",
+            "/future-root/",
+            "fileserver",
+            "file://",
+            "s3://",
+            "gs://",
+            "ftp://",
+        ):
             self.assertNotIn(marker, serialized)
 
     def test_tasks_are_normalized_paginated_and_show_evidence_based_eligibility(self):
@@ -613,6 +672,18 @@ class AdminBusinessViewsTests(TestCase):
                 stage=status,
                 celery_task_id=f"old-composition-task-{index}",
             )
+        queued_job = VideoGenerationJob.objects.create(
+            job_id="queued-composition-job",
+            user=self.student,
+            resource_pack_id="queued-composition-pack",
+            status="succeeded",
+        )
+        VideoComposition.objects.create(
+            job=queued_job,
+            status="queued",
+            stage="queued",
+            celery_task_id="active-queued-composition-task",
+        )
         self._login_admin()
 
         failed_response = self.client.get(
@@ -640,8 +711,11 @@ class AdminBusinessViewsTests(TestCase):
         narration_ready = next(
             item for item in queued_response.json()["items"] if item["stage"] == "narration_ready"
         )
+        raw_queued = next(item for item in queued_response.json()["items"] if item["stage"] == "queued")
         self.assertEqual(narration_ready["status"], "queued")
         self.assertFalse(narration_ready["eligibility"]["cancel"])
+        self.assertEqual(raw_queued["status"], "queued")
+        self.assertTrue(raw_queued["eligibility"]["cancel"])
 
     def test_resource_generation_retry_is_not_advertised_without_a_transition(self):
         self._login_admin()

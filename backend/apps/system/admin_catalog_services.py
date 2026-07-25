@@ -11,8 +11,8 @@ from backend.apps.system.admin_conversation_services import parse_pagination
 
 
 _PATH_OR_URL_RE = re.compile(
-    r"(?i)(?:https?://|(?:file|s3)://|\\\\[^\\\s]+\\|\b[a-z]:\\|"
-    r"/(?:srv|var|home|tmp|opt|etc|app|usr|data|workspace|mnt)(?:/|\b))"
+    r"(?i)(?:[a-z][a-z0-9+.-]*://|\\\\[^\\\s]+\\|"
+    r"(?<!\w)[a-z]:[\\/]|(?<![\w:])/(?!/)[^\s]+)"
 )
 _TRACEBACK_RE = re.compile(
     r"(?im)(?:traceback\s*\(most recent call last\):|"
