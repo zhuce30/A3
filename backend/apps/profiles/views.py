@@ -65,12 +65,12 @@ def tutor_preference(request):
     try:
         payload = json_body(request)
         if not isinstance(payload, dict) or set(payload) != {"personaId"}:
-            raise ValueError("request must contain only personaId")
+            raise ValueError("请求只能包含辅导风格编号")
         persona_id = payload["personaId"]
         if not isinstance(persona_id, str) or not persona_id.strip():
-            raise ValueError("personaId must be a non-empty string")
+            raise ValueError("请选择有效的辅导风格")
         if resolve_tutor_persona(persona_id) is None:
-            raise ValueError("personaId is not supported")
+            raise ValueError("不支持该辅导风格")
         preference = save_user_tutor_preference(request.user, persona_id.strip())
         return JsonResponse(
             {

@@ -143,7 +143,7 @@ def get_user_tutor_preference(user: User) -> dict:
 def save_user_tutor_preference(user: User, persona_id: str) -> dict:
     persona = resolve_tutor_persona(persona_id)
     if persona is None:
-        raise ValueError("personaId is not supported")
+        raise ValueError("不支持该辅导风格")
 
     profile, _created = LearnerProfile.objects.get_or_create(user=user)
     extra_profile = deepcopy(profile.extra_profile) if isinstance(profile.extra_profile, dict) else {}
