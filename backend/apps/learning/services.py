@@ -3014,6 +3014,7 @@ def _serialize_coaching_session_payload(session: CoachingSession | None, message
         "schemaVersion": "a3.coaching-session.v1",
         "id": str(session.id) if session else "",
         "status": session.status if session else "active",
+        "topicTitle": session.topic_title if session else "",
         "messages": [_serialize_coaching_message_record(item) for item in messages],
         "summary": session.summary if session else "",
         "tutorPersona": _coaching_tutor_persona_snapshot(session),

@@ -48,6 +48,8 @@ export type A3RealtimeCoachingSession = {
   model: string;
   connection: A3RealtimeConnection;
   coachingSessionId: string;
+  resolvedPersona: A3TutorPersona;
+  personaFallbackUsed?: boolean;
   fallbackReason?: string;
   instructions: {
     targetTitle: string;
@@ -70,3 +72,4 @@ export type A3RealtimeFramePayload = {
     label?: string;
   };
 };
+import type { A3TutorPersona } from '@/lib/a3/tutor-persona-types';

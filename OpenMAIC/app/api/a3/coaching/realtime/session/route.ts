@@ -5,12 +5,15 @@ import { createA3RealtimeSession } from '@/lib/server/a3-realtime-provider';
 import type { A3RealtimeProvider } from '@/lib/a3/realtime-coaching-types';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
 import type { ClassroomContext } from '@/lib/a3/classroom-types';
+import type { A3TutorPersona } from '@/lib/a3/tutor-persona-types';
+import { resolveA3TutorPersonaRuntime, toPublicTutorPersona } from '@/lib/server/a3-tutor-persona-runtime';
 
 type AuthMeResponse = { user?: A3PublicUser | null };
 type ClassroomResponse = { classroom?: ClassroomContext; error?: string };
 type CoachingSessionResponse = {
   session?: {
     id?: string;
+    tutorPersona?: A3TutorPersona | null;
     messages?: Array<{ role?: string; content?: string }>;
   };
   error?: string;
@@ -25,6 +28,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json().catch(() => ({})) as {
       preferredProvider?: A3RealtimeProvider;
       mode?: string;
+      personaId?: string;
     };
     const classroom = await fetchA3DjangoJson<ClassroomResponse>('/api/learning/classroom/', cookieHeader);
     const targetTitle = classroom.classroom?.target?.title || '面对面辅导';
@@ -38,16 +42,23 @@ export async function POST(request: NextRequest) {
     const session = await postA3DjangoJson<CoachingSessionResponse>(
       '/api/learning/coaching/session/',
       cookieHeader,
-      { messages: [bootstrapMessage], summary: `${targetTitle}：实时面对面辅导已创建` },
+      {
+        messages: [bootstrapMessage],
+        summary: `${targetTitle}：实时面对面辅导已创建`,
+        tutorPersonaId: String(body.personaId || '').trim(),
+      },
     );
     if (!session.success || !session.session?.id) {
       return apiError('UPSTREAM_ERROR', 502, session.error || '创建面对面辅导会话失败');
     }
+    const resolvedPersona = session.session.tutorPersona
+      || toPublicTutorPersona(resolveA3TutorPersonaRuntime('structured-teacher'));
 
     const realtime = await createA3RealtimeSession({
       userId: String(auth.user.id || auth.user.phone || 'a3-user'),
       coachingSessionId: session.session.id,
       targetTitle,
+      resolvedPersona,
       preferredProvider: body.preferredProvider,
     });
     return apiSuccess(realtime);

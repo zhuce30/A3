@@ -95,6 +95,8 @@ describe('A3 realtime coaching contracts', () => {
     expect(read(endRoutePath)).toContain('/api/learning/coaching/sessions/');
     expect(read(sdpRoutePath)).toContain('exchangeRealtimeSdp');
     expect(read(sdpRoutePath)).toContain('offerSdp');
+    expect(read(sdpRoutePath)).toContain('coachingSessionId');
+    expect(read(sdpRoutePath)).toContain('/api/learning/coaching/sessions/');
     expect(read(sdpRoutePath)).toContain('/api/auth/me/');
   });
 

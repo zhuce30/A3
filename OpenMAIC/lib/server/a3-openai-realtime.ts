@@ -1,14 +1,18 @@
 import type { A3RealtimeCoachingSession } from '@/lib/a3/realtime-coaching-types';
+import type { A3TutorPersona } from '@/lib/a3/tutor-persona-types';
+import { resolveA3TutorPersonaRuntime, toPublicTutorPersona } from '@/lib/server/a3-tutor-persona-runtime';
 
 type CreateRealtimeSessionInput = {
   userId: string;
   coachingSessionId: string;
   targetTitle: string;
+  resolvedPersona: A3TutorPersona;
 };
 
 export async function createOpenAIRealtimeSession(input: CreateRealtimeSessionInput): Promise<A3RealtimeCoachingSession> {
   const apiKey = process.env.OPENAI_API_KEY;
   const model = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2';
+  const runtime = resolveA3TutorPersonaRuntime(input.resolvedPersona.id);
   if (!apiKey) return buildOpenAIFallback(input, 'OPENAI_API_KEY 未配置，已降级到录音转写问答');
   return {
     success: true,
@@ -20,17 +24,22 @@ export async function createOpenAIRealtimeSession(input: CreateRealtimeSessionIn
       readyForBrowserMedia: true,
     },
     coachingSessionId: input.coachingSessionId,
+    resolvedPersona: toPublicTutorPersona(runtime),
+    personaFallbackUsed: runtime.fallbackUsed,
     instructions: buildInstructions(input.targetTitle),
   };
 }
 
 function buildOpenAIFallback(input: CreateRealtimeSessionInput, reason: string): A3RealtimeCoachingSession {
+  const runtime = resolveA3TutorPersonaRuntime(input.resolvedPersona.id);
   return {
     success: true,
     provider: 'local_fallback_record_then_respond',
     model: 'a3-local-fallback',
     connection: { type: 'fallback', readyForBrowserMedia: false },
     coachingSessionId: input.coachingSessionId,
+    resolvedPersona: toPublicTutorPersona(runtime),
+    personaFallbackUsed: runtime.fallbackUsed,
     fallbackReason: reason,
     instructions: buildInstructions(input.targetTitle),
   };

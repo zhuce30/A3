@@ -1,4 +1,6 @@
 import type { A3RealtimeCoachingSession, A3RealtimeProvider } from '@/lib/a3/realtime-coaching-types';
+import type { A3TutorPersona } from '@/lib/a3/tutor-persona-types';
+import { resolveA3TutorPersonaRuntime, toPublicTutorPersona } from '@/lib/server/a3-tutor-persona-runtime';
 import { createDashScopeRealtimeSession } from '@/lib/server/a3-dashscope-realtime';
 import { createOpenAIRealtimeSession } from '@/lib/server/a3-openai-realtime';
 
@@ -6,6 +8,7 @@ type CreateRealtimeSessionInput = {
   userId: string;
   coachingSessionId: string;
   targetTitle: string;
+  resolvedPersona: A3TutorPersona;
   preferredProvider?: A3RealtimeProvider;
 };
 
@@ -13,12 +16,15 @@ export async function createA3RealtimeSession(input: CreateRealtimeSessionInput)
   const provider = selectA3RealtimeProvider(input.preferredProvider);
   if (provider === 'openai_realtime_webrtc') return createOpenAIRealtimeSession(input);
   if (provider === 'dashscope_qwen_omni_realtime') return createDashScopeRealtimeSession(input);
+  const runtime = resolveA3TutorPersonaRuntime(input.resolvedPersona.id);
   return {
     success: true,
     provider: 'local_fallback_record_then_respond',
     model: 'a3-local-fallback',
     connection: { type: 'fallback', readyForBrowserMedia: false },
     coachingSessionId: input.coachingSessionId,
+    resolvedPersona: toPublicTutorPersona(runtime),
+    personaFallbackUsed: runtime.fallbackUsed,
     fallbackReason: '实时 provider 未配置，已降级到录音转写和普通问答。',
     instructions: {
       targetTitle: input.targetTitle || '面对面辅导',
