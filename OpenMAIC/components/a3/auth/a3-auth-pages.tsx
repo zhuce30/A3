@@ -234,7 +234,7 @@ function AuthFrame({ children, variant = 'learning' }: { children: React.ReactNo
   return (
     <div className="min-h-screen bg-[#f4f7ff] text-slate-950 [--a3-border:rgba(203,213,225,0.9)] [--a3-surface-solid:#ffffff] [--a3-surface-muted:#f8fafc] [--a3-text:#0f172a] [--a3-text-muted:#64748b]">
       <header className="flex h-[88px] items-center justify-between border-b border-slate-200/80 bg-white/75 px-5 backdrop-blur md:px-10">
-        <Link href="/a3/login" className="flex items-center gap-3">
+        <Link href="/a3" className="flex items-center gap-3" aria-label="返回智学引擎首页">
           <div className="size-12 overflow-hidden rounded-[14px] shadow-[0_10px_22px_rgba(37,99,235,0.22)]">
             <Image src="/a3-brand-icon.png" alt="" width={48} height={48} className="size-full object-cover" priority unoptimized />
           </div>
@@ -345,9 +345,52 @@ function FieldIcon({ icon: Icon }: { icon: LucideIcon }) {
   return <Icon className="absolute left-4 top-1/2 size-5 -translate-y-1/2 text-slate-400" />;
 }
 
-function ErrorBox({ message }: { message: string }) {
+type ErrorAction = {
+  label: string;
+  href: string;
+};
+
+const a3WorkspaceLabels: Record<A3UserRole, string> = {
+  student: '学生',
+  teacher: '教师',
+  admin: '管理员',
+};
+
+export function getA3RoleLoginAction(role: A3UserRole): ErrorAction {
+  const roleLabel = a3WorkspaceLabels[role];
+  return {
+    label: `前往${roleLabel}入口`,
+    href: `/a3/login?workspace=${role}`,
+  };
+}
+
+export function ErrorBox({
+  message,
+  action,
+}: {
+  message: string;
+  action?: ErrorAction | null;
+}) {
   if (!message) return null;
-  return <div role="alert" aria-live="assertive" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{message}</div>;
+  return (
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"
+    >
+      <p>{message}</p>
+      {action ? (
+        <Link
+          href={action.href}
+          data-testid="a3-login-error-action"
+          className="mt-3 inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2 font-semibold text-rose-700 shadow-sm transition hover:border-rose-300 hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400"
+        >
+          {action.label}
+          <ArrowRight className="size-4" />
+        </Link>
+      ) : null}
+    </div>
+  );
 }
 
 type ExecuteA3LoginOptions = {
@@ -393,36 +436,41 @@ export function LoginPage({
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+  const [errorAction, setErrorAction] = useState<ErrorAction | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [reviewAccountFilled, setReviewAccountFilled] = useState(false);
-  const workspaceLabels: Record<A3UserRole, string> = {
-    student: '学生',
-    teacher: '教师',
-    admin: '管理员',
-  };
-  const workspaceLabel = workspace ? workspaceLabels[workspace] : '';
-  const currentRoleLabel = currentUser?.role ? workspaceLabels[currentUser.role] : '';
+  const workspaceLabel = workspace ? a3WorkspaceLabels[workspace] : '';
+  const currentRoleLabel = currentUser?.role ? a3WorkspaceLabels[currentUser.role] : '';
+
+  function showLoginError(message: string) {
+    setErrorAction(null);
+    setError(message);
+  }
 
   async function submit() {
     setError('');
+    setErrorAction(null);
     if (!identifier.trim() || !password.trim()) {
-      setError('请输入账号和密码后再登录');
+      showLoginError('请输入账号和密码后再登录');
       return;
     }
     await executeA3Login({
       request: () => postJson('/api/auth/login/', { identifier, password }),
       onSubmittingChange: setSubmitting,
-      onError: setError,
+      onError: showLoginError,
       onSuccess: async (result) => {
         if (!result.user) {
-          setError('登录状态更新失败，请重新登录');
+          showLoginError('登录状态更新失败，请重新登录');
           return;
         }
         const authenticatedUser = result.user as A3PublicUser;
         if (workspace && authenticatedUser.role !== workspace) {
           await postJson('/api/auth/logout/', {});
           window.dispatchEvent(new CustomEvent('a3-auth-user-updated', { detail: null }));
-          const actualRole = authenticatedUser.role ? workspaceLabels[authenticatedUser.role] : '其他身份';
+          const actualRole = authenticatedUser.role ? a3WorkspaceLabels[authenticatedUser.role] : '其他身份';
+          if (authenticatedUser.role) {
+            setErrorAction(getA3RoleLoginAction(authenticatedUser.role));
+          }
           setError(`该账号是${actualRole}账号，请从${actualRole}入口登录。`);
           return;
         }
@@ -444,6 +492,16 @@ export function LoginPage({
               : '使用已开通的学生、教师或管理员账号进入对应学习工作区。'
         }
       >
+        {workspace ? (
+          <Link
+            href="/a3"
+            data-testid="a3-back-to-role-selection"
+            className="mb-5 inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <ArrowLeft className="size-4" />
+            返回身份选择
+          </Link>
+        ) : null}
         {workspace && currentUser?.role && currentUser.role !== workspace ? (
           <div data-testid="a3-account-switch-notice" className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
             当前登录的是{currentRoleLabel}账号，请输入{workspaceLabel}账号完成切换。
@@ -455,6 +513,7 @@ export function LoginPage({
               setIdentifier(nextIdentifier);
               setPassword(nextPassword);
               setError('');
+              setErrorAction(null);
               setReviewAccountFilled(true);
             }}
           />
@@ -509,7 +568,7 @@ export function LoginPage({
             </label>
             <Link href="/a3/forgot-password" className="font-medium text-blue-600">忘记密码？</Link>
           </div>
-          <ErrorBox message={error} />
+          <ErrorBox message={error} action={errorAction} />
           <Button type="button" disabled={submitting} onClick={() => void submit()} className="h-14 w-full bg-gradient-to-r from-blue-600 to-violet-600 text-lg hover:from-blue-700 hover:to-violet-700">
             {submitting ? <><Loader2 className="size-4 animate-spin" />登录中...</> : '登录'}
           </Button>

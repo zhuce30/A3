@@ -23,7 +23,7 @@ import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { a3PostJson } from '@/lib/a3/api-client';
 import { cn } from '@/lib/utils';
 
-const ADMIN_SIDEBAR_STORAGE_KEY = 'a3-admin-sidebar-collapsed';
+const ADMIN_SIDEBAR_STORAGE_KEY = 'a3-admin-sidebar-collapsed-v2';
 
 const adminNavItems = [
   { href: '/a3/admin/overview', label: '运行总览', icon: LayoutDashboard },
@@ -40,14 +40,15 @@ const adminNavItems = [
 export function AdminConsoleLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const user = useA3CurrentUser();
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState('');
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-      setSidebarCollapsed(window.localStorage.getItem(ADMIN_SIDEBAR_STORAGE_KEY) === '1');
+      const storedPreference = window.localStorage.getItem(ADMIN_SIDEBAR_STORAGE_KEY);
+      setSidebarCollapsed(storedPreference === null ? true : storedPreference === '1');
     });
     return () => window.cancelAnimationFrame(frame);
   }, []);

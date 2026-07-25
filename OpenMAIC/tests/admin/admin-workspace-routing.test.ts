@@ -147,6 +147,19 @@ describe('independent A3 workspace frame', () => {
     expect(adminLayoutSource).not.toContain('href="/a3/today"');
     expect(adminLayoutSource).not.toMatch(/(?:bg|text|border|ring)-blue-/);
   });
+
+  it('starts the desktop admin sidebar collapsed while preserving later user preference', () => {
+    expect(adminLayoutSource).toContain(
+      "const ADMIN_SIDEBAR_STORAGE_KEY = 'a3-admin-sidebar-collapsed-v2'",
+    );
+    expect(adminLayoutSource).toContain('useState(true)');
+    expect(adminLayoutSource).toContain(
+      "storedPreference === null ? true : storedPreference === '1'",
+    );
+    expect(adminLayoutSource).toContain(
+      "window.localStorage.setItem(ADMIN_SIDEBAR_STORAGE_KEY, next ? '1' : '0')",
+    );
+  });
 });
 
 describe('A3 authorization 403 handling', () => {

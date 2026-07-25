@@ -25,6 +25,13 @@ let A3LoginPage: typeof import('@/app/a3/login/page').default;
 let LoginPage: typeof import('@/components/a3/auth/a3-auth-pages').LoginPage;
 let A3ReviewLoginPanel: typeof import('@/components/a3/auth/a3-review-login-panel').A3ReviewLoginPanel;
 let getA3AuthTarget: typeof import('@/lib/a3/auth-navigation').getA3AuthTarget;
+let ErrorBox: ((props: {
+  message: string;
+  action?: { label: string; href: string } | null;
+}) => ReactNode) | undefined;
+let getA3RoleLoginAction:
+  | ((role: A3PublicUser['role']) => { label: string; href: string })
+  | undefined;
 
 beforeAll(async () => {
   const [loginPageModule, authPagesModule, reviewPanelModule, authNavigationModule] =
@@ -36,6 +43,16 @@ beforeAll(async () => {
     ]);
   A3LoginPage = loginPageModule.default;
   LoginPage = authPagesModule.LoginPage;
+  ErrorBox = (
+    authPagesModule as unknown as {
+      ErrorBox?: typeof ErrorBox;
+    }
+  ).ErrorBox;
+  getA3RoleLoginAction = (
+    authPagesModule as unknown as {
+      getA3RoleLoginAction?: typeof getA3RoleLoginAction;
+    }
+  ).getA3RoleLoginAction;
   A3ReviewLoginPanel = reviewPanelModule.A3ReviewLoginPanel;
   getA3AuthTarget = authNavigationModule.getA3AuthTarget;
 }, 20_000);
@@ -84,6 +101,31 @@ describe('A3 review login mode', () => {
     expect(studentMarkup).toContain('学生账号登录');
     expect(teacherMarkup).toContain('教师账号登录');
     expect(adminMarkup).toContain('管理员账号登录');
+    expect(studentMarkup).toContain('返回身份选择');
+    expect(studentMarkup).toContain('href="/a3"');
+    expect(studentMarkup).toContain('data-testid="a3-back-to-role-selection"');
+  });
+
+  it('offers the matching workspace entry after a role mismatch', () => {
+    expect(ErrorBox).toBeTypeOf('function');
+    expect(getA3RoleLoginAction).toBeTypeOf('function');
+
+    const teacherAction = getA3RoleLoginAction?.('teacher');
+    expect(teacherAction).toEqual({
+      label: '前往教师入口',
+      href: '/a3/login?workspace=teacher',
+    });
+
+    const markup = renderToStaticMarkup(
+      createElement(ErrorBox!, {
+        message: '该账号是教师账号，请从教师入口登录。',
+        action: teacherAction,
+      }),
+    );
+    expect(markup).toContain('该账号是教师账号，请从教师入口登录。');
+    expect(markup).toContain('前往教师入口');
+    expect(markup).toContain('href="/a3/login?workspace=teacher"');
+    expect(markup).toContain('data-testid="a3-login-error-action"');
   });
 
   it('shows the review panel only in review mode', async () => {
