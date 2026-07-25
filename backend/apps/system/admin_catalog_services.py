@@ -14,7 +14,11 @@ from backend.apps.knowledge_base.models import (
     ResourceScope,
     ResourceStatus,
 )
-from backend.apps.knowledge_base.services import create_parse_job, dispatch_index_job
+from backend.apps.knowledge_base.services import (
+    create_parse_job,
+    dispatch_index_job,
+    record_index_dispatch_failure,
+)
 from backend.apps.learning.models import Course
 from backend.apps.system.admin_audit import record_admin_audit
 from backend.apps.system.admin_conversation_services import parse_pagination
@@ -58,12 +62,6 @@ def _publication_status(visibility: str) -> str:
     if visibility in PUBLISHED_RESOURCE_VISIBILITIES:
         return "published"
     return "owner_only"
-
-
-def _dispatch_index_job_after_commit(job_id) -> None:
-    job = KnowledgeIndexJob.objects.filter(pk=job_id).first()
-    if job is not None:
-        dispatch_index_job(job)
 
 
 def _error_summary(value: Any) -> str:
@@ -402,26 +400,43 @@ def reindex_resource(
                 job = create_parse_job(resource.owner, [resource], dispatch=False)
             except ValueError as exc:
                 raise AdminActionError(str(exc), status_code=409, error_code="dispatch_rejected") from exc
-            if job.status == IndexJobStatus.FAILED:
-                raise AdminActionError("索引任务调度失败，请稍后重试", status_code=503, error_code="dispatch_failed")
-            record_admin_audit(
-                actor=actor,
-                action="resource.reindex",
-                target_type="knowledge_resource",
-                target_id=resource.pk,
-                summary="重建知识资料索引",
-                reason=normalized_reason,
-                before=before,
-                after={"status": ResourceStatus.INDEXING, "indexJobId": str(job.pk)},
-                before_allowlist=("status", "indexJobId"),
-                after_allowlist=("status", "indexJobId"),
-                actor_ip=actor_ip,
+        job = KnowledgeIndexJob.objects.get(pk=job.pk)
+        try:
+            dispatch_index_job(job)
+        except Exception as exc:
+            record_index_dispatch_failure(job)
+            raise AdminActionError(
+                "索引任务调度失败，请稍后重试",
+                status_code=503,
+                error_code="dispatch_failed",
+            ) from exc
+        job.refresh_from_db()
+        if job.status == IndexJobStatus.FAILED:
+            record_index_dispatch_failure(job)
+            raise AdminActionError(
+                "索引任务调度失败，请稍后重试",
+                status_code=503,
+                error_code="dispatch_failed",
             )
-            transaction.on_commit(lambda job_id=job.pk: _dispatch_index_job_after_commit(job_id))
-        return {
-            "resource": {"id": str(resource.pk), "status": ResourceStatus.INDEXING},
+        resource.refresh_from_db()
+        response = {
+            "resource": {"id": str(resource.pk), "status": resource.status},
             "job": {"id": str(job.pk), "kind": "knowledge_index", "status": job.status},
         }
+        record_admin_audit(
+            actor=actor,
+            action="resource.reindex",
+            target_type="knowledge_resource",
+            target_id=resource.pk,
+            summary="重建知识资料索引",
+            reason=normalized_reason,
+            before=before,
+            after={"status": resource.status, "indexJobId": str(job.pk)},
+            before_allowlist=("status", "indexJobId"),
+            after_allowlist=("status", "indexJobId"),
+            actor_ip=actor_ip,
+        )
+        return response
     except AdminActionError as exc:
         _catalog_failure_audit(
             actor=actor,

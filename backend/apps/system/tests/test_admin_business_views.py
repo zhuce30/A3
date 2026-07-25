@@ -497,8 +497,8 @@ class AdminBusinessViewsTests(TestCase):
         self.assertEqual(resources.status_code, 200)
         payload = resources.json()
         self.assertEqual(payload["pagination"]["total"], 3)
-        self.assertEqual(payload["items"][0]["chunkCount"], 30)
-        self.assertIn("indexJob", payload["items"][0])
+        self.assertEqual({item["chunkCount"] for item in payload["items"]}, {10, 20, 30})
+        self.assertTrue(all("indexJob" in item for item in payload["items"]))
         self._assert_no_sensitive_values(payload)
 
     def test_catalog_hides_tracebacks_but_preserves_ordinary_short_errors(self):

@@ -43,6 +43,7 @@ ProgressCallback = Callable[[dict], None]
 
 STALE_INDEX_JOB_MESSAGE = "后台索引任务在服务重启或队列中断后停止，请点击“重新解析”继续。"
 DELETE_CANCELLED_INDEX_JOB_MESSAGE = "用户删除资料时取消了未完成的索引任务。"
+INDEX_DISPATCH_FAILURE_MESSAGE = "索引任务调度失败，请稍后重试。"
 
 
 def serialize_resource(resource: KnowledgeResource) -> dict:
@@ -504,15 +505,31 @@ def dispatch_index_job(job: KnowledgeIndexJob) -> KnowledgeIndexJob:
         async_result = run_index_job.delay(str(job.id))
         job.celery_task_id = async_result.id or ""
         job.save(update_fields=["celery_task_id", "updated_at"])
-    except Exception as exc:
+    except Exception:
         if getattr(settings, "DEBUG", False) and job.job_type in {IndexJobType.UPLOAD, IndexJobType.PARSE, IndexJobType.WIKI}:
             run_index_job.run(str(job.id))
             job.refresh_from_db()
             return job
-        job.status = IndexJobStatus.FAILED
-        job.error_message = f"任务队列不可用：{exc}"
-        job.save(update_fields=["status", "error_message", "updated_at"])
+        return record_index_dispatch_failure(job)
     return job
+
+
+def record_index_dispatch_failure(
+    job: KnowledgeIndexJob,
+) -> KnowledgeIndexJob:
+    with transaction.atomic():
+        persisted_job = KnowledgeIndexJob.objects.select_for_update().get(pk=job.pk)
+        persisted_job.status = IndexJobStatus.FAILED
+        persisted_job.error_message = INDEX_DISPATCH_FAILURE_MESSAGE
+        persisted_job.save(update_fields=["status", "error_message", "updated_at"])
+        if persisted_job.job_type in {IndexJobType.UPLOAD, IndexJobType.PARSE}:
+            persisted_job.resources.filter(
+                status__in=[ResourceStatus.UPLOADED, ResourceStatus.INDEXING],
+            ).update(
+                status=ResourceStatus.FAILED,
+                error_message=INDEX_DISPATCH_FAILURE_MESSAGE,
+            )
+    return persisted_job
 
 
 def _should_run_upload_index_synchronously(job: KnowledgeIndexJob) -> bool:
@@ -535,11 +552,12 @@ def retry_index_job(job: KnowledgeIndexJob, *, dispatch: bool = True) -> Knowled
     job.progress_detail = {}
     job.result = {}
     job.error_message = ""
+    job.celery_task_id = ""
     job.started_at = None
     job.finished_at = None
     job.save(update_fields=[
         "status", "progress", "processed_files", "current_file", "progress_detail", "result",
-        "error_message", "started_at", "finished_at", "updated_at",
+        "error_message", "celery_task_id", "started_at", "finished_at", "updated_at",
     ])
     if job.job_type in {IndexJobType.UPLOAD, IndexJobType.PARSE}:
         job.resources.filter(status=ResourceStatus.FAILED).update(

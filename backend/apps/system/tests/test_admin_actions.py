@@ -1,6 +1,7 @@
 import json
 from unittest.mock import patch
 
+from django.db import connection
 from django.test import Client, TestCase, override_settings
 
 from backend.apps.accounts.models import User, UserRole
@@ -180,26 +181,31 @@ class AdminActionApiTests(TestCase):
 
     @patch("backend.apps.knowledge_base.tasks.run_index_job.delay")
     def test_resource_reindex_reuses_real_dispatch_and_audits(self, delay):
-        delay.return_value.id = "reindex-task-id"
+        atomic_depth = len(connection.atomic_blocks)
 
-        with self.captureOnCommitCallbacks(execute=False) as callbacks:
-            response = self.post_json(
-                f"/api/admin/catalog/resources/{self.resource.pk}/reindex/",
-                {"reason": "索引版本已升级"},
-            )
-            delay.assert_not_called()
+        def assert_state_committed(job_id):
+            self.assertEqual(len(connection.atomic_blocks), atomic_depth)
+            job = KnowledgeIndexJob.objects.get(pk=job_id)
+            self.resource.refresh_from_db()
+            self.assertEqual(job.status, IndexJobStatus.QUEUED)
+            self.assertEqual(self.resource.status, ResourceStatus.INDEXING)
+            delay.return_value.id = "reindex-task-id"
+            return delay.return_value
+
+        delay.side_effect = assert_state_committed
+
+        response = self.post_json(
+            f"/api/admin/catalog/resources/{self.resource.pk}/reindex/",
+            {"reason": "索引版本已升级"},
+        )
 
         self.assertEqual(response.status_code, 202)
         self.resource.refresh_from_db()
         job = KnowledgeIndexJob.objects.get(pk=self.resource.index_job_id)
         self.assertEqual(job.job_type, IndexJobType.PARSE)
         self.assertEqual(job.status, IndexJobStatus.QUEUED)
-        self.assertEqual(job.celery_task_id, "")
-        self.assertEqual(self.resource.status, ResourceStatus.INDEXING)
-        self.assertEqual(len(callbacks), 1)
-        callbacks[0]()
-        job.refresh_from_db()
         self.assertEqual(job.celery_task_id, "reindex-task-id")
+        self.assertEqual(self.resource.status, ResourceStatus.INDEXING)
         delay.assert_called_once_with(str(job.pk))
         self.assert_audit(
             action="resource.reindex",
@@ -214,20 +220,22 @@ class AdminActionApiTests(TestCase):
         side_effect=RuntimeError("broker token=queue-secret D:\\private\\broker.ini"),
     )
     def test_resource_reindex_records_post_commit_dispatch_failure_without_leaking_error(self, delay):
-        with self.captureOnCommitCallbacks(execute=False) as callbacks:
-            response = self.post_json(
-                f"/api/admin/catalog/resources/{self.resource.pk}/reindex/",
-                {"reason": "验证队列故障处理"},
-            )
-            delay.assert_not_called()
+        response = self.post_json(
+            f"/api/admin/catalog/resources/{self.resource.pk}/reindex/",
+            {"reason": "验证队列故障处理"},
+        )
 
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(len(callbacks), 1)
-        callbacks[0]()
-
-        self.resource.refresh_from_db()
-        job = KnowledgeIndexJob.objects.get(pk=self.resource.index_job_id)
+        self.assertEqual(response.status_code, 503)
+        resource = KnowledgeResource.objects.get(pk=self.resource.pk)
+        self.assertEqual(resource.status, ResourceStatus.FAILED)
+        self.assertTrue(resource.error_message)
+        job = KnowledgeIndexJob.objects.get(pk=resource.index_job_id)
         self.assertEqual(job.status, IndexJobStatus.FAILED)
+        self.assertEqual(job.error_message, "索引任务调度失败，请稍后重试。")
+        audits = AdminAuditLog.objects.filter(action="resource.reindex", target_id=str(self.resource.pk))
+        self.assertEqual(audits.count(), 1)
+        self.assertFalse(audits.get().success)
+        self.assertEqual(audits.get().metadata, {"errorCode": "dispatch_failed"})
         catalog = self.client.get("/api/admin/catalog/resources/?page=1&pageSize=20")
         payload = json.dumps(catalog.json(), ensure_ascii=False).lower()
         self.assertNotIn("queue-secret", payload)
@@ -236,31 +244,38 @@ class AdminActionApiTests(TestCase):
 
     @patch("backend.apps.knowledge_base.tasks.run_index_job.delay")
     def test_failed_supported_job_retries_but_resource_generation_does_not(self, delay):
-        delay.return_value.id = "retry-task-id"
         index_job = KnowledgeIndexJob.objects.create(
             owner=self.teacher,
             job_type=IndexJobType.PARSE,
             status=IndexJobStatus.FAILED,
             error_message="provider token=must-not-be-audited",
+            celery_task_id="old-retry-task-id",
         )
         self.resource.index_job = index_job
         self.resource.status = ResourceStatus.FAILED
         self.resource.save(update_fields=["index_job", "status", "updated_at"])
+        atomic_depth = len(connection.atomic_blocks)
 
-        with self.captureOnCommitCallbacks(execute=False) as callbacks:
-            response = self.post_json(
-                f"/api/admin/tasks/knowledge_index/{index_job.pk}/retry/",
-                {"reason": "修复解析依赖后重试"},
-            )
-            delay.assert_not_called()
+        def assert_state_committed(job_id):
+            self.assertEqual(len(connection.atomic_blocks), atomic_depth)
+            queued_job = KnowledgeIndexJob.objects.get(pk=job_id)
+            self.resource.refresh_from_db()
+            self.assertEqual(queued_job.status, IndexJobStatus.QUEUED)
+            self.assertEqual(queued_job.celery_task_id, "")
+            self.assertEqual(self.resource.status, ResourceStatus.UPLOADED)
+            delay.return_value.id = "retry-task-id"
+            return delay.return_value
+
+        delay.side_effect = assert_state_committed
+
+        response = self.post_json(
+            f"/api/admin/tasks/knowledge_index/{index_job.pk}/retry/",
+            {"reason": "修复解析依赖后重试"},
+        )
 
         self.assertEqual(response.status_code, 202)
         index_job.refresh_from_db()
         self.assertEqual(index_job.status, IndexJobStatus.QUEUED)
-        self.assertEqual(index_job.celery_task_id, "")
-        self.assertEqual(len(callbacks), 1)
-        callbacks[0]()
-        index_job.refresh_from_db()
         self.assertEqual(index_job.celery_task_id, "retry-task-id")
         self.assert_audit(
             action="task.retry",
@@ -287,6 +302,60 @@ class AdminActionApiTests(TestCase):
             reason="尝试重试",
             success=False,
         )
+
+    @override_settings(DEBUG=False)
+    @patch(
+        "backend.apps.knowledge_base.tasks.run_index_job.delay",
+        side_effect=RuntimeError("broker token=retry-secret D:\\private\\retry.ini"),
+    )
+    def test_failed_knowledge_retry_dispatch_writes_only_failure_audit(self, delay):
+        index_job = KnowledgeIndexJob.objects.create(
+            owner=self.teacher,
+            job_type=IndexJobType.PARSE,
+            status=IndexJobStatus.FAILED,
+            error_message="previous failure",
+            celery_task_id="stale-celery-task-id",
+        )
+        self.resource.index_job = index_job
+        self.resource.status = ResourceStatus.FAILED
+        self.resource.save(update_fields=["index_job", "status", "updated_at"])
+        indexed_resource = KnowledgeResource.objects.create(
+            owner=self.teacher,
+            index_job=index_job,
+            original_name="already-indexed.pdf",
+            stored_path="D:\\fixtures\\already-indexed.pdf",
+            file_type=".pdf",
+            file_size=64,
+            resource_scope=ResourceScope.TEACHER,
+            status=ResourceStatus.INDEXED,
+        )
+
+        response = self.post_json(
+            f"/api/admin/tasks/knowledge_index/{index_job.pk}/retry/",
+            {"reason": "验证重试队列故障"},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        index_job.refresh_from_db()
+        self.resource.refresh_from_db()
+        self.assertEqual(index_job.status, IndexJobStatus.FAILED)
+        self.assertEqual(index_job.celery_task_id, "")
+        self.assertEqual(index_job.error_message, "索引任务调度失败，请稍后重试。")
+        self.assertEqual(self.resource.status, ResourceStatus.FAILED)
+        self.assertTrue(self.resource.error_message)
+        indexed_resource.refresh_from_db()
+        self.assertEqual(indexed_resource.status, ResourceStatus.INDEXED)
+        audits = AdminAuditLog.objects.filter(action="task.retry", target_id=str(index_job.pk))
+        self.assertEqual(audits.count(), 1)
+        audit = audits.get()
+        self.assertFalse(audit.success)
+        self.assertEqual(audit.metadata, {"errorCode": "dispatch_failed", "kind": "knowledge_index"})
+        serialized = json.dumps(
+            {"before": audit.before, "after": audit.after, "metadata": audit.metadata},
+            ensure_ascii=False,
+        ).lower()
+        self.assertNotIn("retry-secret", serialized)
+        self.assertNotIn("retry.ini", serialized)
 
     @patch("backend.apps.compat.video_jobs.dispatch_video_job")
     def test_failed_video_retry_uses_existing_failed_segment_transition(self, dispatch):

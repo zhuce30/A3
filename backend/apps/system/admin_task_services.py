@@ -18,7 +18,11 @@ from backend.apps.compat.models import (
 from backend.apps.compat.video_compositions import dispatch_compose, dispatch_narration
 from backend.apps.compat.video_jobs import retry_failed_video_segments
 from backend.apps.knowledge_base.models import IndexJobStatus, KnowledgeIndexJob
-from backend.apps.knowledge_base.services import dispatch_index_job, retry_index_job
+from backend.apps.knowledge_base.services import (
+    dispatch_index_job,
+    record_index_dispatch_failure,
+    retry_index_job,
+)
 from backend.apps.system.admin_audit import record_admin_audit
 from backend.apps.system.admin_catalog_services import (
     AdminActionError,
@@ -59,12 +63,6 @@ _CANCELLABLE_RUNTIME_STATES = {
     "knowledge_index": {"queued", "running"},
     "video_composition": {"queued", "generating_narration", "composing"},
 }
-
-
-def _dispatch_index_job_after_commit(job_id) -> None:
-    job = KnowledgeIndexJob.objects.filter(pk=job_id).first()
-    if job is not None:
-        dispatch_index_job(job)
 
 
 def _normalized_status(status: str) -> str:
@@ -344,9 +342,6 @@ def retry_task(
             try:
                 if kind == "knowledge_index":
                     retry_index_job(task, dispatch=False)
-                    transaction.on_commit(
-                        lambda job_id=task.pk: _dispatch_index_job_after_commit(job_id)
-                    )
                 elif kind == "video_generation":
                     retry_failed_video_segments(task)
                 elif kind == "video_composition":
@@ -364,7 +359,43 @@ def retry_task(
                 raise
             except ValueError as exc:
                 raise AdminActionError(str(exc), status_code=409, error_code="retry_rejected") from exc
+            if kind != "knowledge_index":
+                task.refresh_from_db()
+                record_admin_audit(
+                    actor=actor,
+                    action="task.retry",
+                    target_type=kind,
+                    target_id=item_id,
+                    summary="重试后台任务",
+                    reason=normalized_reason,
+                    before=before,
+                    after={"status": task.status, "stage": _task_stage(kind, task), "progress": task.progress},
+                    metadata={"kind": kind},
+                    before_allowlist=("status", "stage", "progress"),
+                    after_allowlist=("status", "stage", "progress"),
+                    metadata_allowlist=("kind",),
+                    actor_ip=actor_ip,
+                )
+        if kind == "knowledge_index":
+            task = KnowledgeIndexJob.objects.get(pk=task.pk)
+            try:
+                dispatch_index_job(task)
+            except Exception as exc:
+                record_index_dispatch_failure(task)
+                raise AdminActionError(
+                    "索引任务调度失败，请稍后重试",
+                    status_code=503,
+                    error_code="dispatch_failed",
+                ) from exc
             task.refresh_from_db()
+            if task.status == IndexJobStatus.FAILED:
+                record_index_dispatch_failure(task)
+                raise AdminActionError(
+                    "索引任务调度失败，请稍后重试",
+                    status_code=503,
+                    error_code="dispatch_failed",
+                )
+            response = {"task": _serialize_task(kind, task)}
             record_admin_audit(
                 actor=actor,
                 action="task.retry",
@@ -380,6 +411,7 @@ def retry_task(
                 metadata_allowlist=("kind",),
                 actor_ip=actor_ip,
             )
+            return response
         return {"task": get_task(kind, item_id)}
     except (TypeError, ValueError) as exc:
         error = exc if isinstance(exc, AdminActionError) else AdminActionError(str(exc), error_code="invalid_identifier")
