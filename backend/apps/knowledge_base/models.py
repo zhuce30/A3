@@ -57,6 +57,7 @@ class IndexJobStatus(models.TextChoices):
     RUNNING = "running", "running"
     SUCCEEDED = "succeeded", "succeeded"
     FAILED = "failed", "failed"
+    CANCELLED = "cancelled", "cancelled"
 
 
 class KnowledgeIndexJob(models.Model):

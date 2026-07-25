@@ -318,15 +318,24 @@ def _build_report_skipped_items(raw_skipped) -> list[dict]:
 
 
 def accessible_resources_for_user(user):
-    queryset = KnowledgeResource.objects.all()
+    queryset = KnowledgeResource.objects.exclude(visibility="offline")
+    published_visibility = {"shared", "teacher", "course", "class", "global", "public"}
     if getattr(user, "role", "") in {"teacher", "admin"}:
         return queryset.filter(
             models.Q(owner=user) & ~models.Q(resource_scope=ResourceScope.PERSONAL)
-            | models.Q(resource_scope__in=[ResourceScope.CLASS, ResourceScope.GLOBAL])
+            | models.Q(resource_scope=ResourceScope.GLOBAL)
+            | models.Q(
+                resource_scope__in=[ResourceScope.CLASS, "course"],
+                visibility__in=published_visibility,
+            )
         )
     return queryset.filter(
         models.Q(owner=user, resource_scope=ResourceScope.PERSONAL)
-        | models.Q(resource_scope__in=[ResourceScope.TEACHER, ResourceScope.CLASS, ResourceScope.GLOBAL])
+        | models.Q(resource_scope=ResourceScope.GLOBAL)
+        | models.Q(
+            resource_scope__in=[ResourceScope.TEACHER, ResourceScope.CLASS, "course"],
+            visibility__in=published_visibility,
+        )
     )
 
 

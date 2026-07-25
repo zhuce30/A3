@@ -3,10 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from django.db import transaction
 from django.db.models import Count, Q
 
-from backend.apps.knowledge_base.models import KnowledgeResource, ResourceScope, ResourceStatus
+from backend.apps.knowledge_base.models import IndexJobStatus, KnowledgeResource, ResourceScope, ResourceStatus
+from backend.apps.knowledge_base.services import create_parse_job
 from backend.apps.learning.models import Course
+from backend.apps.system.admin_audit import record_admin_audit
 from backend.apps.system.admin_conversation_services import parse_pagination
 
 
@@ -19,6 +22,27 @@ _TRACEBACK_RE = re.compile(
     r"^\s*file\s+[\"'][^\"']+[\"'],\s*line\s+\d+|"
     r"^\s*at\s+(?:[\w.$<>]+\s+\()?[^\r\n]*:\d+(?::\d+)?\)?)"
 )
+
+
+class AdminActionError(ValueError):
+    def __init__(self, message: str, *, status_code: int = 400, error_code: str = "invalid_request"):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+
+
+_REINDEXABLE_RESOURCE_STATUSES = {
+    ResourceStatus.FAILED,
+    ResourceStatus.INDEXED,
+    ResourceStatus.INDEXED_WITH_WARNINGS,
+}
+_PUBLISHED_VISIBILITY = {
+    ResourceScope.PERSONAL: "owner",
+    ResourceScope.TEACHER: "shared",
+    ResourceScope.CLASS: "class",
+    ResourceScope.GLOBAL: "global",
+    "course": "course",
+}
 
 
 def _error_summary(value: Any) -> str:
@@ -82,11 +106,18 @@ def list_resources(params) -> dict[str, Any]:
     page, page_size = parse_pagination(params)
     queryset = KnowledgeResource.objects.select_related("owner", "index_job").order_by("-created_at", "-id")
     status = str(params.get("status", "")).strip()
-    known_statuses = {choice for choice, _ in ResourceStatus.choices} | {"ready", "offline"}
+    known_statuses = {choice for choice, _ in ResourceStatus.choices} | {"ready", "published", "offline"}
     if status:
         if status not in known_statuses:
             raise ValueError("资料状态无效")
-        queryset = queryset.filter(status=status)
+        if status == "ready":
+            queryset = queryset.filter(status__in=[ResourceStatus.INDEXED, ResourceStatus.INDEXED_WITH_WARNINGS])
+        elif status == "published":
+            queryset = queryset.exclude(visibility="offline")
+        elif status == "offline":
+            queryset = queryset.filter(visibility="offline")
+        else:
+            queryset = queryset.filter(status=status)
     scope = str(params.get("scope", "")).strip()
     known_scopes = {choice for choice, _ in ResourceScope.choices} | {"course"}
     if scope:
@@ -115,6 +146,7 @@ def list_resources(params) -> dict[str, Any]:
                 "scope": resource.resource_scope,
                 "courseKey": resource.course_key,
                 "visibility": resource.visibility,
+                "publicationStatus": "offline" if resource.visibility == "offline" else "published",
                 "status": resource.status,
                 "documentCount": resource.document_count,
                 "chunkCount": resource.chunk_count,
@@ -139,3 +171,255 @@ def list_resources(params) -> dict[str, Any]:
             }
         )
     return {"items": items, "pagination": {"page": page, "pageSize": page_size, "total": total}}
+
+
+def _catalog_failure_audit(
+    *,
+    actor,
+    action: str,
+    target_type: str,
+    target_id: Any,
+    reason: str,
+    error: AdminActionError,
+    actor_ip: str | None,
+) -> None:
+    record_admin_audit(
+        actor=actor,
+        action=action,
+        target_type=target_type,
+        target_id=str(target_id),
+        summary=str(error),
+        reason=reason,
+        metadata={"errorCode": error.error_code},
+        metadata_allowlist=("errorCode",),
+        actor_ip=actor_ip,
+        success=False,
+    )
+
+
+def _require_reason(reason: Any) -> str:
+    if not isinstance(reason, str) or not reason.strip():
+        raise AdminActionError("请填写操作原因", error_code="reason_required")
+    normalized = reason.strip()
+    if len(normalized) > 255:
+        raise AdminActionError("操作原因不能超过 255 个字符", error_code="reason_too_long")
+    if _error_summary(normalized) != normalized[:200]:
+        raise AdminActionError(
+            "操作原因不能包含密钥、链接或本地路径",
+            error_code="sensitive_reason",
+        )
+    return normalized
+
+
+def _safe_audit_reason(reason: Any) -> str:
+    normalized = str(reason or "").strip()[:255]
+    if not normalized:
+        return ""
+    return normalized if _error_summary(normalized) == normalized[:200] else "敏感内容已隐藏"
+
+
+def set_course_status(
+    *,
+    actor,
+    course_id,
+    is_active: Any,
+    reason: Any,
+    actor_ip: str | None = None,
+) -> dict[str, Any]:
+    normalized_reason = str(reason or "").strip()[:255]
+    try:
+        normalized_reason = _require_reason(reason)
+        if not isinstance(is_active, bool):
+            raise AdminActionError("课程状态必须是布尔值", error_code="invalid_status")
+        with transaction.atomic():
+            course = Course.objects.select_for_update().filter(pk=course_id).first()
+            if course is None:
+                raise AdminActionError("课程不存在", status_code=404, error_code="not_found")
+            if course.is_active == is_active:
+                raise AdminActionError("课程已处于目标状态", status_code=409, error_code="invalid_transition")
+            before = {"isActive": course.is_active}
+            course.is_active = is_active
+            course.save(update_fields=["is_active", "updated_at"])
+            record_admin_audit(
+                actor=actor,
+                action="course.activate" if is_active else "course.deactivate",
+                target_type="course",
+                target_id=course.pk,
+                summary="启用课程" if is_active else "下线课程",
+                reason=normalized_reason,
+                before=before,
+                after={"isActive": is_active},
+                before_allowlist=("isActive",),
+                after_allowlist=("isActive",),
+                actor_ip=actor_ip,
+            )
+        return {"course": {"id": str(course.pk), "isActive": course.is_active}}
+    except AdminActionError as exc:
+        _catalog_failure_audit(
+            actor=actor,
+            action="course.status",
+            target_type="course",
+            target_id=course_id,
+            reason=_safe_audit_reason(normalized_reason),
+            error=exc,
+            actor_ip=actor_ip,
+        )
+        raise
+    except Exception as exc:
+        error = AdminActionError("课程状态更新失败，请稍后重试", status_code=500, error_code="operation_failed")
+        _catalog_failure_audit(
+            actor=actor,
+            action="course.status",
+            target_type="course",
+            target_id=course_id,
+            reason=_safe_audit_reason(normalized_reason),
+            error=error,
+            actor_ip=actor_ip,
+        )
+        raise error from exc
+
+
+def set_resource_status(
+    *,
+    actor,
+    resource_id,
+    status: Any,
+    reason: Any,
+    actor_ip: str | None = None,
+) -> dict[str, Any]:
+    normalized_reason = str(reason or "").strip()[:255]
+    try:
+        normalized_reason = _require_reason(reason)
+        if status not in {"published", "offline"}:
+            raise AdminActionError("资料状态仅支持 published 或 offline", error_code="invalid_status")
+        with transaction.atomic():
+            resource = KnowledgeResource.objects.select_for_update().filter(pk=resource_id).first()
+            if resource is None:
+                raise AdminActionError("资料不存在", status_code=404, error_code="not_found")
+            if status == "published" and resource.status not in {
+                ResourceStatus.INDEXED,
+                ResourceStatus.INDEXED_WITH_WARNINGS,
+            }:
+                raise AdminActionError("只有已完成索引的资料可以发布", status_code=409, error_code="invalid_transition")
+            visibility = (
+                _PUBLISHED_VISIBILITY.get(resource.resource_scope, "shared")
+                if status == "published"
+                else "offline"
+            )
+            if resource.visibility == visibility:
+                raise AdminActionError("资料已处于目标状态", status_code=409, error_code="invalid_transition")
+            before = {
+                "visibility": resource.visibility,
+                "publicationStatus": "offline" if resource.visibility == "offline" else "published",
+            }
+            resource.visibility = visibility
+            resource.save(update_fields=["visibility", "updated_at"])
+            record_admin_audit(
+                actor=actor,
+                action="resource.publish" if status == "published" else "resource.offline",
+                target_type="knowledge_resource",
+                target_id=resource.pk,
+                summary="发布知识资料" if status == "published" else "下线知识资料",
+                reason=normalized_reason,
+                before=before,
+                after={"visibility": visibility, "publicationStatus": status},
+                before_allowlist=("visibility", "publicationStatus"),
+                after_allowlist=("visibility", "publicationStatus"),
+                actor_ip=actor_ip,
+            )
+        return {
+            "resource": {
+                "id": str(resource.pk),
+                "visibility": resource.visibility,
+                "publicationStatus": status,
+                "status": resource.status,
+            }
+        }
+    except AdminActionError as exc:
+        _catalog_failure_audit(
+            actor=actor,
+            action="resource.status",
+            target_type="knowledge_resource",
+            target_id=resource_id,
+            reason=_safe_audit_reason(normalized_reason),
+            error=exc,
+            actor_ip=actor_ip,
+        )
+        raise
+    except Exception as exc:
+        error = AdminActionError("资料状态更新失败，请稍后重试", status_code=500, error_code="operation_failed")
+        _catalog_failure_audit(
+            actor=actor,
+            action="resource.status",
+            target_type="knowledge_resource",
+            target_id=resource_id,
+            reason=_safe_audit_reason(normalized_reason),
+            error=error,
+            actor_ip=actor_ip,
+        )
+        raise error from exc
+
+
+def reindex_resource(
+    *,
+    actor,
+    resource_id,
+    reason: Any,
+    actor_ip: str | None = None,
+) -> dict[str, Any]:
+    normalized_reason = str(reason or "").strip()[:255]
+    try:
+        normalized_reason = _require_reason(reason)
+        with transaction.atomic():
+            resource = KnowledgeResource.objects.select_for_update().filter(pk=resource_id).first()
+            if resource is None:
+                raise AdminActionError("资料不存在", status_code=404, error_code="not_found")
+            if resource.status not in _REINDEXABLE_RESOURCE_STATUSES:
+                raise AdminActionError("只有失败或已完成的资料可以重建索引", status_code=409, error_code="invalid_transition")
+            before = {"status": resource.status, "indexJobId": str(resource.index_job_id or "")}
+            try:
+                job = create_parse_job(resource.owner, [resource])
+            except ValueError as exc:
+                raise AdminActionError(str(exc), status_code=409, error_code="dispatch_rejected") from exc
+            if job.status == IndexJobStatus.FAILED:
+                raise AdminActionError("索引任务调度失败，请稍后重试", status_code=503, error_code="dispatch_failed")
+            record_admin_audit(
+                actor=actor,
+                action="resource.reindex",
+                target_type="knowledge_resource",
+                target_id=resource.pk,
+                summary="重建知识资料索引",
+                reason=normalized_reason,
+                before=before,
+                after={"status": ResourceStatus.INDEXING, "indexJobId": str(job.pk)},
+                before_allowlist=("status", "indexJobId"),
+                after_allowlist=("status", "indexJobId"),
+                actor_ip=actor_ip,
+            )
+        return {
+            "resource": {"id": str(resource.pk), "status": ResourceStatus.INDEXING},
+            "job": {"id": str(job.pk), "kind": "knowledge_index", "status": job.status},
+        }
+    except AdminActionError as exc:
+        _catalog_failure_audit(
+            actor=actor,
+            action="resource.reindex",
+            target_type="knowledge_resource",
+            target_id=resource_id,
+            reason=_safe_audit_reason(normalized_reason),
+            error=exc,
+            actor_ip=actor_ip,
+        )
+        raise
+    except Exception as exc:
+        error = AdminActionError("索引任务创建失败，请稍后重试", status_code=500, error_code="operation_failed")
+        _catalog_failure_audit(
+            actor=actor,
+            action="resource.reindex",
+            target_type="knowledge_resource",
+            target_id=resource_id,
+            reason=_safe_audit_reason(normalized_reason),
+            error=error,
+            actor_ip=actor_ip,
+        )
+        raise error from exc

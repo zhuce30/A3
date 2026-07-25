@@ -4,7 +4,10 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from celery import current_app
+from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
+from django.utils import timezone
 
 from backend.apps.compat.models import (
     ResourceGenerationJob,
@@ -12,8 +15,17 @@ from backend.apps.compat.models import (
     VideoGenerationJob,
     VideoGenerationSegment,
 )
-from backend.apps.knowledge_base.models import KnowledgeIndexJob
-from backend.apps.system.admin_catalog_services import _error_summary
+from backend.apps.compat.video_compositions import dispatch_compose, dispatch_narration
+from backend.apps.compat.video_jobs import retry_failed_video_segments
+from backend.apps.knowledge_base.models import IndexJobStatus, KnowledgeIndexJob
+from backend.apps.knowledge_base.services import retry_index_job
+from backend.apps.system.admin_audit import record_admin_audit
+from backend.apps.system.admin_catalog_services import (
+    AdminActionError,
+    _error_summary,
+    _require_reason,
+    _safe_audit_reason,
+)
 from backend.apps.system.admin_conversation_services import parse_pagination
 
 
@@ -260,3 +272,219 @@ def get_task(kind: str, item_id: str) -> dict[str, Any] | None:
     lookup = _native_task_lookup(kind, item_id)
     task = _QUERY_BUILDERS[kind](status="", user_id=None, search="").filter(**lookup).first()
     return _serialize_task(kind, task) if task else None
+
+
+def _locked_task(kind: str, item_id: str):
+    lookup = _native_task_lookup(kind, item_id)
+    queryset = TASK_KINDS[kind].objects.select_for_update()
+    if kind == "knowledge_index":
+        queryset = queryset.select_related("owner")
+    elif kind == "video_composition":
+        queryset = queryset.select_related("job__user")
+    else:
+        queryset = queryset.select_related("user")
+    task = queryset.filter(**lookup).first()
+    if task is None:
+        raise AdminActionError("任务不存在", status_code=404, error_code="not_found")
+    if kind == "video_generation":
+        task.has_failed_segment = task.segments.filter(status="failed").exists()
+    return task
+
+
+def _task_failure_audit(
+    *,
+    actor,
+    action: str,
+    kind: str,
+    item_id: str,
+    reason: str,
+    error: AdminActionError,
+    actor_ip: str | None,
+) -> None:
+    record_admin_audit(
+        actor=actor,
+        action=action,
+        target_type=str(kind)[:64],
+        target_id=str(item_id)[:128],
+        summary=str(error),
+        reason=reason,
+        metadata={"errorCode": error.error_code, "kind": str(kind)[:64]},
+        metadata_allowlist=("errorCode", "kind"),
+        actor_ip=actor_ip,
+        success=False,
+    )
+
+
+def retry_task(
+    *,
+    actor,
+    kind: str,
+    item_id: str,
+    reason: Any,
+    actor_ip: str | None = None,
+) -> dict[str, Any]:
+    normalized_reason = str(reason or "").strip()[:255]
+    try:
+        normalized_reason = _require_reason(reason)
+        with transaction.atomic():
+            task = _locked_task(kind, item_id)
+            eligible, eligibility_reason, _ = _retry_evidence(kind, task)
+            if not eligible:
+                raise AdminActionError(
+                    "当前任务不支持重试",
+                    status_code=409,
+                    error_code=eligibility_reason,
+                )
+            before = {"status": task.status, "stage": _task_stage(kind, task), "progress": task.progress}
+            try:
+                if kind == "knowledge_index":
+                    retry_index_job(task)
+                elif kind == "video_generation":
+                    retry_failed_video_segments(task)
+                elif kind == "video_composition":
+                    if task.stage == "compose":
+                        dispatch_compose(task.job)
+                    else:
+                        dispatch_narration(task.job)
+                else:
+                    raise AdminActionError(
+                        "当前任务不支持重试",
+                        status_code=409,
+                        error_code="retry_transition_not_supported",
+                    )
+            except AdminActionError:
+                raise
+            except ValueError as exc:
+                raise AdminActionError(str(exc), status_code=409, error_code="retry_rejected") from exc
+            task.refresh_from_db()
+            record_admin_audit(
+                actor=actor,
+                action="task.retry",
+                target_type=kind,
+                target_id=item_id,
+                summary="重试后台任务",
+                reason=normalized_reason,
+                before=before,
+                after={"status": task.status, "stage": _task_stage(kind, task), "progress": task.progress},
+                metadata={"kind": kind},
+                before_allowlist=("status", "stage", "progress"),
+                after_allowlist=("status", "stage", "progress"),
+                metadata_allowlist=("kind",),
+                actor_ip=actor_ip,
+            )
+        return {"task": get_task(kind, item_id)}
+    except (TypeError, ValueError) as exc:
+        error = exc if isinstance(exc, AdminActionError) else AdminActionError(str(exc), error_code="invalid_identifier")
+        _task_failure_audit(
+            actor=actor,
+            action="task.retry",
+            kind=kind,
+            item_id=item_id,
+            reason=_safe_audit_reason(normalized_reason),
+            error=error,
+            actor_ip=actor_ip,
+        )
+        raise error
+    except Exception as exc:
+        error = AdminActionError("任务重试失败，请稍后重试", status_code=500, error_code="operation_failed")
+        _task_failure_audit(
+            actor=actor,
+            action="task.retry",
+            kind=kind,
+            item_id=item_id,
+            reason=_safe_audit_reason(normalized_reason),
+            error=error,
+            actor_ip=actor_ip,
+        )
+        raise error from exc
+
+
+def _mark_task_cancelled(kind: str, task) -> None:
+    now = timezone.now()
+    if kind == "knowledge_index":
+        detail = dict(task.progress_detail) if isinstance(task.progress_detail, dict) else {}
+        detail.update({"phase": "cancelled", "phaseLabel": "任务已取消"})
+        task.status = IndexJobStatus.CANCELLED
+        task.finished_at = now
+        task.current_file = ""
+        task.progress_detail = detail
+        task.save(update_fields=["status", "finished_at", "current_file", "progress_detail", "updated_at"])
+        return
+    task.status = "cancelled"
+    task.stage = "cancelled"
+    task.finished_at = now
+    task.message = "任务已由管理员取消"
+    update_fields = ["status", "stage", "finished_at", "message", "updated_at"]
+    task.save(update_fields=update_fields)
+
+
+def cancel_task(
+    *,
+    actor,
+    kind: str,
+    item_id: str,
+    reason: Any,
+    actor_ip: str | None = None,
+) -> dict[str, Any]:
+    normalized_reason = str(reason or "").strip()[:255]
+    try:
+        normalized_reason = _require_reason(reason)
+        with transaction.atomic():
+            task = _locked_task(kind, item_id)
+            if not _eligibility(kind, task)["cancel"]:
+                raise AdminActionError(
+                    "当前任务不支持取消，或缺少可撤销的任务编号",
+                    status_code=409,
+                    error_code="cancel_not_supported",
+                )
+            task_id = _task_celery_id(kind, task)
+            before = {"status": task.status, "stage": _task_stage(kind, task), "progress": task.progress}
+            try:
+                current_app.control.revoke(task_id, terminate=True)
+            except Exception as exc:
+                raise AdminActionError(
+                    "任务撤销请求失败，请稍后重试",
+                    status_code=503,
+                    error_code="revoke_failed",
+                ) from exc
+            _mark_task_cancelled(kind, task)
+            record_admin_audit(
+                actor=actor,
+                action="task.cancel",
+                target_type=kind,
+                target_id=item_id,
+                summary="取消后台任务",
+                reason=normalized_reason,
+                before=before,
+                after={"status": "cancelled", "stage": "cancelled", "progress": task.progress},
+                metadata={"kind": kind},
+                before_allowlist=("status", "stage", "progress"),
+                after_allowlist=("status", "stage", "progress"),
+                metadata_allowlist=("kind",),
+                actor_ip=actor_ip,
+            )
+        return {"task": get_task(kind, item_id)}
+    except (TypeError, ValueError) as exc:
+        error = exc if isinstance(exc, AdminActionError) else AdminActionError(str(exc), error_code="invalid_identifier")
+        _task_failure_audit(
+            actor=actor,
+            action="task.cancel",
+            kind=kind,
+            item_id=item_id,
+            reason=_safe_audit_reason(normalized_reason),
+            error=error,
+            actor_ip=actor_ip,
+        )
+        raise error
+    except Exception as exc:
+        error = AdminActionError("任务取消失败，请稍后重试", status_code=500, error_code="operation_failed")
+        _task_failure_audit(
+            actor=actor,
+            action="task.cancel",
+            kind=kind,
+            item_id=item_id,
+            reason=_safe_audit_reason(normalized_reason),
+            error=error,
+            actor_ip=actor_ip,
+        )
+        raise error from exc
