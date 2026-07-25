@@ -12,13 +12,11 @@ from backend.apps.system.admin_audit import record_admin_audit
 
 
 PAGE_SIZES = {20, 50, 100}
+MAX_RESULT_WINDOW = 5000
 _SAFE_SESSION_METADATA = {"traceId", "learningGoal", "goal", "workflow", "source"}
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _WINDOWS_PATH_RE = re.compile(r"(?i)\b[a-z]:\\[^\s]+")
 _UNIX_PATH_RE = re.compile(r"(?<!\w)/(?:srv|var|home|tmp|opt|etc)/[^\s]+")
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|cookie|secret)\s*[:=]\s*\S+"
-)
 _SENSITIVE_KEY_MARKERS = (
     "password",
     "passwd",
@@ -35,10 +33,9 @@ _HEADER_SECRET_RE = re.compile(
     r"(?im)^(?P<header>(?:proxy-)?authorization|cookie|set-cookie|(?:x-)?api[_-]?key)\s*:\s*[^\r\n]*"
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
-_JSON_SECRET_VALUE_RE = re.compile(
-    r"(?i)(?P<prefix>[\"'](?:authorization|proxy[_-]?authorization|cookie|set[_-]?cookie|"
-    r"api[_-]?key|x[_-]?api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd)"
-    r"[\"']\s*:\s*)(?P<quote>[\"'])(?P<value>.*?)(?P=quote)"
+_NORMALIZED_ASSIGNMENT_RE = re.compile(
+    r"(?i)(?<![a-z0-9_.-])(?P<key_quote>[\"']?)(?P<key>[a-z][a-z0-9_.-]{0,63})"
+    r"(?P=key_quote)\s*[:=]\s*(?P<value>[^\r\n,;}]+)"
 )
 
 
@@ -52,21 +49,26 @@ def parse_pagination(params) -> tuple[int, int]:
         raise ValueError("页码必须大于等于 1")
     if page_size not in PAGE_SIZES:
         raise ValueError("每页条数仅支持 20、50 或 100")
+    if (page - 1) * page_size >= MAX_RESULT_WINDOW:
+        raise ValueError("分页范围过深，请缩小筛选条件后重试")
     return page, page_size
 
 
 def _redact_unstructured_text(value: Any, *, limit: int) -> str:
     text = str(value or "")[:limit]
     text = _HEADER_SECRET_RE.sub(lambda match: f'{match.group("header")}: [敏感信息已隐藏]', text)
+    text = _NORMALIZED_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, text)
     text = _BEARER_RE.sub("Bearer [敏感信息已隐藏]", text)
-    text = _JSON_SECRET_VALUE_RE.sub(
-        lambda match: f'{match.group("prefix")}{match.group("quote")}[敏感信息已隐藏]{match.group("quote")}',
-        text,
-    )
     text = _URL_RE.sub("[链接已隐藏]", text)
     text = _WINDOWS_PATH_RE.sub("[路径已隐藏]", text)
     text = _UNIX_PATH_RE.sub("[路径已隐藏]", text)
-    return _SECRET_ASSIGNMENT_RE.sub("[敏感信息已隐藏]", text)
+    return text
+
+
+def _redact_sensitive_assignment(match: re.Match[str]) -> str:
+    if not _is_sensitive_content_key(match.group("key")):
+        return match.group(0)
+    return f'{match.group("key_quote")}{match.group("key")}{match.group("key_quote")}: [敏感信息已隐藏]'
 
 
 def _redact_structured_content(value: Any) -> Any:

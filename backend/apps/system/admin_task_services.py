@@ -34,7 +34,7 @@ _STATUS_ALIASES = {
     "retrying": "running",
     "generating": "running",
     "generating_narration": "running",
-    "narration_ready": "running",
+    "narration_ready": "queued",
     "composing": "running",
     "completed": "succeeded",
     "ready": "succeeded",
@@ -42,6 +42,11 @@ _STATUS_ALIASES = {
     "indexed_with_warnings": "succeeded",
     "partial": "failed",
     "error": "failed",
+}
+_CANCELLABLE_RUNTIME_STATES = {
+    "knowledge_index": {"queued", "running"},
+    "video_generation": {"queued", "running"},
+    "video_composition": {"generating_narration", "composing"},
 }
 
 
@@ -140,11 +145,11 @@ def _duration_ms(started_at: datetime | None, finished_at: datetime | None) -> i
 
 def _task_identity(kind: str, task) -> tuple[str, str]:
     if kind == "resource_generation":
-        return task.job_id, task.job_id
+        return str(task.pk), task.job_id
     if kind == "knowledge_index":
         return str(task.pk), str(task.pk)
     if kind == "video_generation":
-        return task.job_id, task.job_id
+        return str(task.pk), task.job_id
     return str(task.pk), task.job.job_id
 
 
@@ -180,12 +185,10 @@ def _retry_evidence(kind: str, task) -> tuple[bool, str, dict[str, bool]]:
 
 
 def _eligibility(kind: str, task) -> dict[str, Any]:
-    normalized = _normalized_status(task.status)
     retry, retry_reason, retry_evidence = _retry_evidence(kind, task)
     cancel = (
-        normalized in {"queued", "running"}
+        task.status in _CANCELLABLE_RUNTIME_STATES.get(kind, set())
         and bool(_task_celery_id(kind, task))
-        and kind in {"knowledge_index", "video_generation", "video_composition"}
     )
     return {
         "retry": retry,
@@ -239,10 +242,6 @@ def list_tasks(params) -> dict[str, Any]:
 def _native_task_lookup(kind: str, item_id: str) -> dict[str, Any]:
     if kind not in TASK_KINDS:
         raise ValueError("任务类型无效")
-    if kind in {"resource_generation", "video_generation"}:
-        if not item_id or len(item_id) > 120:
-            raise ValueError("任务编号无效")
-        return {"job_id": item_id}
     if kind == "knowledge_index":
         try:
             return {"pk": UUID(item_id)}

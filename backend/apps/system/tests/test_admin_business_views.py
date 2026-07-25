@@ -378,6 +378,46 @@ class AdminBusinessViewsTests(TestCase):
         self.assertIn("请保留普通解释", text_content)
         self.assertIn("保留内容", text_content)
 
+    def test_conversation_reveal_redacts_normalized_keys_in_truncated_non_json_text(self):
+        secrets = {
+            "clientSecret": "TEXT-CLIENT-SECRET-a101",
+            "private.key": "TEXT-PRIVATE-KEY-b202",
+            "session-Cookie": "TEXT-SESSION-COOKIE-c303",
+            "credentials": "TEXT-CREDENTIAL-d404",
+            "Authorization": "Bearer TEXT-AUTH-e505",
+            "api.key": "TEXT-API-KEY-f606",
+            "access-token": "TEXT-ACCESS-TOKEN-a707",
+            "refreshToken": "TEXT-REFRESH-TOKEN-b808",
+        }
+        content = (
+            "保留开头的普通学习内容\n"
+            f"clientSecret: {secrets['clientSecret']}\n"
+            f'"private.key": "{secrets["private.key"]}\n'
+            f"session-Cookie={secrets['session-Cookie']}\n"
+            f'credentials: {{"value":"{secrets["credentials"]}\n'
+            f"Authorization: {secrets['Authorization']}\n"
+            f"api.key: {secrets['api.key']}\n"
+            f"access-token={secrets['access-token']}\n"
+            f'"refreshToken": "{secrets["refreshToken"]}\n'
+            "保留结尾的普通说明"
+        )
+        session = CoachingSession.objects.create(user=self.student, topic_title="截断正文脱敏")
+        CoachingMessage.objects.create(session=session, role="user", content=content)
+        self._login_admin()
+
+        response = self.client.post(
+            f"/api/admin/conversations/{session.pk}/reveal/",
+            data={"reason": "验证截断正文脱敏"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        revealed = response.json()["messages"][0]["content"]
+        for secret in secrets.values():
+            self.assertNotIn(secret, revealed)
+        self.assertIn("保留开头的普通学习内容", revealed)
+        self.assertIn("保留结尾的普通说明", revealed)
+
     def test_catalog_lists_real_counts_without_stored_paths(self):
         self._login_admin()
         courses = self.client.get("/api/admin/courses/?page=1&pageSize=20&active=true")
@@ -529,10 +569,10 @@ class AdminBusinessViewsTests(TestCase):
         self.assertTrue(items[with_segment.job_id]["eligibility"]["retry"])
 
         without_detail = self.client.get(
-            f"/api/admin/tasks/video_generation/{without_segment.job_id}/"
+            f"/api/admin/tasks/video_generation/{without_segment.pk}/"
         ).json()["task"]
         with_detail = self.client.get(
-            f"/api/admin/tasks/video_generation/{with_segment.job_id}/"
+            f"/api/admin/tasks/video_generation/{with_segment.pk}/"
         ).json()["task"]
         self.assertFalse(without_detail["eligibility"]["retry"])
         self.assertTrue(with_detail["eligibility"]["retry"])
@@ -567,7 +607,12 @@ class AdminBusinessViewsTests(TestCase):
                 resource_pack_id=f"active-composition-pack-{index}",
                 status="succeeded",
             )
-            VideoComposition.objects.create(job=job, status=status, stage=status)
+            VideoComposition.objects.create(
+                job=job,
+                status=status,
+                stage=status,
+                celery_task_id=f"old-composition-task-{index}",
+            )
         self._login_admin()
 
         failed_response = self.client.get(
@@ -575,6 +620,9 @@ class AdminBusinessViewsTests(TestCase):
         )
         running_response = self.client.get(
             "/api/admin/tasks/?page=1&pageSize=20&kind=video_composition&status=running"
+        )
+        queued_response = self.client.get(
+            "/api/admin/tasks/?page=1&pageSize=20&kind=video_composition&status=queued"
         )
 
         self.assertEqual(failed_response.status_code, 200)
@@ -585,8 +633,15 @@ class AdminBusinessViewsTests(TestCase):
         self.assertTrue(failed_items[partial_with_segment.job_id]["eligibility"]["retry"])
         self.assertEqual(running_response.status_code, 200)
         running_items = running_response.json()["items"]
-        self.assertEqual({item["stage"] for item in running_items}, set(composition_states))
+        self.assertEqual({item["stage"] for item in running_items}, {"generating_narration", "composing"})
         self.assertTrue(all(item["status"] == "running" for item in running_items))
+        self.assertTrue(all(item["eligibility"]["cancel"] for item in running_items))
+        self.assertEqual(queued_response.status_code, 200)
+        narration_ready = next(
+            item for item in queued_response.json()["items"] if item["stage"] == "narration_ready"
+        )
+        self.assertEqual(narration_ready["status"], "queued")
+        self.assertFalse(narration_ready["eligibility"]["cancel"])
 
     def test_resource_generation_retry_is_not_advertised_without_a_transition(self):
         self._login_admin()
@@ -607,8 +662,8 @@ class AdminBusinessViewsTests(TestCase):
         composition = VideoComposition.objects.get(job=video_job)
         self._login_admin()
         routes = (
-            ("resource_generation", resource_job.job_id, resource_job.job_id),
-            ("video_generation", video_job.job_id, video_job.job_id),
+            ("resource_generation", str(resource_job.pk), str(resource_job.pk)),
+            ("video_generation", str(video_job.pk), str(video_job.pk)),
             ("knowledge_index", str(index_job.pk), str(index_job.pk)),
             ("video_composition", str(composition.pk), str(composition.pk)),
         )
@@ -623,14 +678,36 @@ class AdminBusinessViewsTests(TestCase):
         malformed_routes = (
             "/api/admin/tasks/knowledge_index/not-a-uuid/",
             "/api/admin/tasks/video_composition/not-an-integer/",
-            f"/api/admin/tasks/resource_generation/{'x' * 121}/",
-            f"/api/admin/tasks/video_generation/{'x' * 121}/",
+            "/api/admin/tasks/resource_generation/not-an-integer/",
+            "/api/admin/tasks/video_generation/not-an-integer/",
         )
         for route in malformed_routes:
             with self.subTest(route=route):
                 response = self.client.get(route)
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(response.json()["error"], "任务编号无效")
+
+    def test_task_list_uses_route_safe_primary_id_when_job_id_contains_slash(self):
+        unsafe_job_id = "provider/folder/job-unsafe"
+        job = ResourceGenerationJob.objects.create(
+            job_id=unsafe_job_id,
+            user=self.student,
+            status="failed",
+            stage="failed",
+        )
+        self._login_admin()
+
+        response = self.client.get(
+            "/api/admin/tasks/?page=1&pageSize=20&kind=resource_generation&status=failed"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        item = next(item for item in response.json()["items"] if item["jobId"] == unsafe_job_id)
+        self.assertEqual(item["id"], str(job.pk))
+        self.assertNotIn("/", item["id"])
+        detail = self.client.get(f"/api/admin/tasks/resource_generation/{item['id']}/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["task"]["jobId"], unsafe_job_id)
 
     def test_task_list_avoids_text_casts_for_native_identifiers(self):
         self._login_admin()
@@ -688,6 +765,17 @@ class AdminBusinessViewsTests(TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertFalse(response.json()["success"])
                 self.assertTrue(response.json()["error"])
+
+    def test_deep_pagination_requires_narrower_filters(self):
+        self._login_admin()
+
+        response = self.client.get("/api/admin/tasks/?page=251&pageSize=20")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json(),
+            {"success": False, "error": "分页范围过深，请缩小筛选条件后重试"},
+        )
 
     def test_conversation_reveal_rejects_non_object_and_malformed_json_with_chinese_errors(self):
         self._login_admin()
