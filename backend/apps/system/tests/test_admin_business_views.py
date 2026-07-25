@@ -309,6 +309,14 @@ class AdminBusinessViewsTests(TestCase):
         cookie_secret = "COOKIE-SECRET-9b5f"
         inline_secret = "INLINE-TOKEN-0c6a"
         header_api_key = "HEADER-API-KEY-1d7b"
+        normalized_secrets = {
+            "clientSecret": "CLIENT-SECRET-3f9d",
+            "private.key": "PRIVATE-KEY-4a0e",
+            "session-Cookie": "SESSION-COOKIE-5b1f",
+            "credentials": {"value": "CREDENTIAL-VALUE-6c2a", "safeLooking": "DROP-SUBTREE"},
+            "refresh.token": "REFRESH-TOKEN-7d3b",
+            "access_token": "ACCESS-TOKEN-8e4c",
+        }
         session = CoachingSession.objects.create(user=self.student, topic_title="敏感信息脱敏测试")
         CoachingMessage.objects.create(
             session=session,
@@ -320,6 +328,7 @@ class AdminBusinessViewsTests(TestCase):
                     "nested": {
                         "Authorization": f"Bearer {bearer_secret}",
                         "safe": "保留嵌套字段",
+                        **normalized_secrets,
                     },
                 },
                 ensure_ascii=False,
@@ -347,7 +356,20 @@ class AdminBusinessViewsTests(TestCase):
         self.assertEqual(response.status_code, 200)
         contents = [item["content"] for item in response.json()["messages"]]
         serialized = json.dumps(contents, ensure_ascii=False)
-        for secret in (structured_secret, bearer_secret, cookie_secret, inline_secret, header_api_key):
+        for secret in (
+            structured_secret,
+            bearer_secret,
+            cookie_secret,
+            inline_secret,
+            header_api_key,
+            "CLIENT-SECRET-3f9d",
+            "PRIVATE-KEY-4a0e",
+            "SESSION-COOKIE-5b1f",
+            "CREDENTIAL-VALUE-6c2a",
+            "DROP-SUBTREE",
+            "REFRESH-TOKEN-7d3b",
+            "ACCESS-TOKEN-8e4c",
+        ):
             self.assertNotIn(secret, serialized)
         structured_content = next(content for content in contents if content.startswith("{"))
         text_content = next(content for content in contents if content.startswith("请保留"))
@@ -396,6 +418,41 @@ class AdminBusinessViewsTests(TestCase):
         self.assertEqual(items[traceback_resource.original_name]["errorSummary"], "处理失败，详细错误已隐藏")
         self.assertNotIn(traceback_marker, json.dumps(response.json(), ensure_ascii=False))
         self.assertEqual(items[ordinary_resource.original_name]["errorSummary"], ordinary_error)
+
+    def test_catalog_hides_extended_local_object_and_provider_paths(self):
+        path_errors = (
+            "/app/private/error.log",
+            "/usr/local/bin/worker",
+            "/data/uploads/source.pdf",
+            "/workspace/index/store.bin",
+            "/mnt/volume/output.mp4",
+            r"\\fileserver\private\document.pdf",
+            "file:///app/private/report.txt",
+            "s3://private-bucket/object-key",
+            "https://provider.example/output?X-Amz-Signature=provider-secret",
+        )
+        for index, error in enumerate(path_errors):
+            KnowledgeResource.objects.create(
+                owner=self.teacher,
+                original_name=f"路径错误 {index}.pdf",
+                stored_path=f"D:\\private\\path-{index}.pdf",
+                file_type="pdf",
+                resource_scope="course",
+                course_key=self.course.code,
+                status="failed",
+                error_message=error,
+            )
+        self._login_admin()
+
+        response = self.client.get("/api/admin/resources/?page=1&pageSize=20&scope=course")
+
+        self.assertEqual(response.status_code, 200)
+        path_items = [item for item in response.json()["items"] if item["name"].startswith("路径错误")]
+        self.assertEqual(len(path_items), len(path_errors))
+        self.assertTrue(all(item["errorSummary"] == "处理失败，详细错误已隐藏" for item in path_items))
+        serialized = json.dumps(path_items, ensure_ascii=False).lower()
+        for marker in ("/app/", "/usr/", "/data/", "/workspace/", "/mnt/", "fileserver", "file://", "s3://"):
+            self.assertNotIn(marker, serialized)
 
     def test_tasks_are_normalized_paginated_and_show_evidence_based_eligibility(self):
         self._login_admin()
@@ -472,13 +529,117 @@ class AdminBusinessViewsTests(TestCase):
         self.assertTrue(items[with_segment.job_id]["eligibility"]["retry"])
 
         without_detail = self.client.get(
-            f"/api/admin/tasks/video_generation/{without_segment.pk}/"
+            f"/api/admin/tasks/video_generation/{without_segment.job_id}/"
         ).json()["task"]
         with_detail = self.client.get(
-            f"/api/admin/tasks/video_generation/{with_segment.pk}/"
+            f"/api/admin/tasks/video_generation/{with_segment.job_id}/"
         ).json()["task"]
         self.assertFalse(without_detail["eligibility"]["retry"])
         self.assertTrue(with_detail["eligibility"]["retry"])
+
+    def test_task_normalization_matches_real_video_and_composition_states(self):
+        partial_without_segment = VideoGenerationJob.objects.create(
+            job_id="partial-video-without-segment",
+            user=self.student,
+            resource_pack_id="partial-pack-without",
+            status="partial",
+            stage="complete",
+        )
+        partial_with_segment = VideoGenerationJob.objects.create(
+            job_id="partial-video-with-segment",
+            user=self.student,
+            resource_pack_id="partial-pack-with",
+            status="partial",
+            stage="complete",
+        )
+        VideoGenerationSegment.objects.create(
+            job=partial_with_segment,
+            index=0,
+            title="部分失败片段",
+            prompt="部分失败测试",
+            status="failed",
+        )
+        composition_states = ("generating_narration", "narration_ready", "composing")
+        for index, status in enumerate(composition_states):
+            job = VideoGenerationJob.objects.create(
+                job_id=f"active-composition-job-{index}",
+                user=self.student,
+                resource_pack_id=f"active-composition-pack-{index}",
+                status="succeeded",
+            )
+            VideoComposition.objects.create(job=job, status=status, stage=status)
+        self._login_admin()
+
+        failed_response = self.client.get(
+            "/api/admin/tasks/?page=1&pageSize=20&kind=video_generation&status=failed"
+        )
+        running_response = self.client.get(
+            "/api/admin/tasks/?page=1&pageSize=20&kind=video_composition&status=running"
+        )
+
+        self.assertEqual(failed_response.status_code, 200)
+        failed_items = {item["jobId"]: item for item in failed_response.json()["items"]}
+        self.assertEqual(failed_items[partial_without_segment.job_id]["status"], "failed")
+        self.assertFalse(failed_items[partial_without_segment.job_id]["eligibility"]["retry"])
+        self.assertEqual(failed_items[partial_with_segment.job_id]["status"], "failed")
+        self.assertTrue(failed_items[partial_with_segment.job_id]["eligibility"]["retry"])
+        self.assertEqual(running_response.status_code, 200)
+        running_items = running_response.json()["items"]
+        self.assertEqual({item["stage"] for item in running_items}, set(composition_states))
+        self.assertTrue(all(item["status"] == "running" for item in running_items))
+
+    def test_resource_generation_retry_is_not_advertised_without_a_transition(self):
+        self._login_admin()
+
+        response = self.client.get(
+            "/api/admin/tasks/?page=1&pageSize=20&kind=resource_generation&status=failed"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["items"][0]
+        self.assertFalse(item["eligibility"]["retry"])
+        self.assertEqual(item["eligibility"]["retryReason"], "retry_transition_not_supported")
+
+    def test_task_detail_uses_kind_specific_native_ids_without_casts(self):
+        resource_job = ResourceGenerationJob.objects.get(job_id="resource-job-0")
+        video_job = VideoGenerationJob.objects.get(job_id="video-job-0")
+        index_job = self.index_jobs[0]
+        composition = VideoComposition.objects.get(job=video_job)
+        self._login_admin()
+        routes = (
+            ("resource_generation", resource_job.job_id, resource_job.job_id),
+            ("video_generation", video_job.job_id, video_job.job_id),
+            ("knowledge_index", str(index_job.pk), str(index_job.pk)),
+            ("video_composition", str(composition.pk), str(composition.pk)),
+        )
+
+        for kind, item_id, expected_id in routes:
+            with self.subTest(kind=kind), CaptureQueriesContext(connection) as captured:
+                response = self.client.get(f"/api/admin/tasks/{kind}/{item_id}/")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["task"]["id"], expected_id)
+            self.assertNotIn("CAST(", "\n".join(query["sql"].upper() for query in captured.captured_queries))
+
+        malformed_routes = (
+            "/api/admin/tasks/knowledge_index/not-a-uuid/",
+            "/api/admin/tasks/video_composition/not-an-integer/",
+            f"/api/admin/tasks/resource_generation/{'x' * 121}/",
+            f"/api/admin/tasks/video_generation/{'x' * 121}/",
+        )
+        for route in malformed_routes:
+            with self.subTest(route=route):
+                response = self.client.get(route)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["error"], "任务编号无效")
+
+    def test_task_list_avoids_text_casts_for_native_identifiers(self):
+        self._login_admin()
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.get("/api/admin/tasks/?page=1&pageSize=20")
+
+        self.assertEqual(response.status_code, 200)
+        sql = "\n".join(query["sql"].upper() for query in captured.captured_queries)
+        self.assertNotIn("CAST(", sql)
 
     def test_agent_detail_uses_explicit_operational_metadata_allowlist(self):
         prompt_secret = "AGENT-GOAL-PROMPT-SECRET-2e8c"
@@ -528,13 +689,30 @@ class AdminBusinessViewsTests(TestCase):
                 self.assertFalse(response.json()["success"])
                 self.assertTrue(response.json()["error"])
 
+    def test_conversation_reveal_rejects_non_object_and_malformed_json_with_chinese_errors(self):
+        self._login_admin()
+        route = f"/api/admin/conversations/{self.sessions[0].pk}/reveal/"
+        cases = (
+            ("[]", "请求体必须是 JSON 对象"),
+            ('"reason"', "请求体必须是 JSON 对象"),
+            ("null", "请求体必须是 JSON 对象"),
+            ("123", "请求体必须是 JSON 对象"),
+            ('{"reason":', "请求 JSON 格式无效"),
+        )
+        self.client.raise_request_exception = False
+        for body, expected_error in cases:
+            with self.subTest(body=body):
+                response = self.client.post(route, data=body, content_type="application/json")
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json(), {"success": False, "error": expected_error})
+
     def test_multi_row_lists_have_bounded_query_counts(self):
         self._login_admin()
         bounds = (
             ("/api/admin/conversations/?pageSize=20", 6),
             ("/api/admin/courses/?pageSize=20", 4),
             ("/api/admin/resources/?pageSize=20", 4),
-            ("/api/admin/tasks/?pageSize=20", 5),
+            ("/api/admin/tasks/?pageSize=20", 10),
             ("/api/admin/agent-runs/?pageSize=20", 4),
         )
         for route, maximum in bounds:

@@ -19,9 +19,17 @@ _UNIX_PATH_RE = re.compile(r"(?<!\w)/(?:srv|var|home|tmp|opt|etc)/[^\s]+")
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|cookie|secret)\s*[:=]\s*\S+"
 )
-_SENSITIVE_JSON_KEY_RE = re.compile(
-    r"(?i)^(?:authorization|proxy[_-]?authorization|cookie|set[_-]?cookie|"
-    r"api[_-]?key|x[_-]?api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd)$"
+_SENSITIVE_KEY_MARKERS = (
+    "password",
+    "passwd",
+    "token",
+    "cookie",
+    "secret",
+    "authorization",
+    "apikey",
+    "accesskey",
+    "privatekey",
+    "credential",
 )
 _HEADER_SECRET_RE = re.compile(
     r"(?im)^(?P<header>(?:proxy-)?authorization|cookie|set-cookie|(?:x-)?api[_-]?key)\s*:\s*[^\r\n]*"
@@ -66,7 +74,7 @@ def _redact_structured_content(value: Any) -> Any:
         return {
             str(key): _redact_structured_content(item)
             for key, item in value.items()
-            if not _SENSITIVE_JSON_KEY_RE.fullmatch(str(key).strip())
+            if not _is_sensitive_content_key(key)
         }
     if isinstance(value, list):
         return [_redact_structured_content(item) for item in value]
@@ -75,6 +83,11 @@ def _redact_structured_content(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return str(value)
+
+
+def _is_sensitive_content_key(key: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+    return any(marker in normalized for marker in _SENSITIVE_KEY_MARKERS)
 
 
 def _safe_text(value: Any, *, limit: int = 500, parse_json: bool = False) -> str:

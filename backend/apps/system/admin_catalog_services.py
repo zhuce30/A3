@@ -10,7 +10,10 @@ from backend.apps.learning.models import Course
 from backend.apps.system.admin_conversation_services import parse_pagination
 
 
-_PATH_OR_URL_RE = re.compile(r"(?i)(?:https?://|\b[a-z]:\\|/(?:srv|var|home|tmp|opt|etc)/)")
+_PATH_OR_URL_RE = re.compile(
+    r"(?i)(?:https?://|(?:file|s3)://|\\\\[^\\\s]+\\|\b[a-z]:\\|"
+    r"/(?:srv|var|home|tmp|opt|etc|app|usr|data|workspace|mnt)(?:/|\b))"
+)
 _TRACEBACK_RE = re.compile(
     r"(?im)(?:traceback\s*\(most recent call last\):|"
     r"^\s*file\s+[\"'][^\"']+[\"'],\s*line\s+\d+|"

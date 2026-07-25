@@ -199,13 +199,18 @@ def conversation_reveal(request, session_id):
         return rejected
     try:
         body = json_body(request)
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"success": False, "error": "请求 JSON 格式无效"}, status=400)
+    if not isinstance(body, dict):
+        return JsonResponse({"success": False, "error": "请求体必须是 JSON 对象"}, status=400)
+    try:
         payload = reveal_conversation_messages(
             request=request,
             session_id=session_id,
             reason=body.get("reason", ""),
             params=request.GET,
         )
-    except (ValueError, UnicodeDecodeError) as exc:
+    except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
     if payload is None:
         return JsonResponse({"success": False, "error": "辅导会话不存在"}, status=404)
@@ -243,8 +248,8 @@ def task_detail(request, kind: str, item_id: str):
         return rejected
     try:
         payload = get_task(kind, item_id)
-    except (TypeError, ValueError):
-        return JsonResponse({"success": False, "error": "任务类型或编号无效"}, status=400)
+    except (TypeError, ValueError) as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
     if payload is None:
         return JsonResponse({"success": False, "error": "任务不存在"}, status=404)
     return JsonResponse({"success": True, "task": payload})
