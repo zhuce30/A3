@@ -39,7 +39,10 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     : new Set([...navDisclosure.expanded, activeNavHref]);
 
   useEffect(() => {
-    setSidebarCollapsed(window.localStorage.getItem(A3_SIDEBAR_STORAGE_KEY) === '1');
+    const frame = window.requestAnimationFrame(() => {
+      setSidebarCollapsed(window.localStorage.getItem(A3_SIDEBAR_STORAGE_KEY) === '1');
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   if (A3_SHELL_BYPASS_PATHS.has(pathname) || isA3PublicPath(pathname)) return <>{children}</>;

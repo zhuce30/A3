@@ -356,10 +356,12 @@ export function AdminReasonDialog({
   useAdminModalFocus(open, onClose, dialogRef);
 
   useEffect(() => {
-    if (open) {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => {
       setReason('');
       setError('');
-    }
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [open]);
 
   if (!open) return null;
