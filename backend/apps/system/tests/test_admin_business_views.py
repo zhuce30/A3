@@ -456,6 +456,33 @@ class AdminBusinessViewsTests(TestCase):
         self.assertIn("保留普通说明", revealed)
         self.assertIn("保留结束说明", revealed)
 
+    def test_conversation_reveal_redacts_incomplete_private_key_before_output_truncation(self):
+        body_marker = "BOUNDARY-PRIVATE-KEY-BASE64-must-not-leak"
+        prefix = "保留边界前缀" + ("A" * 19880)
+        content = (
+            f"{prefix}\n"
+            "-----BEGIN PRIVATE KEY-----\n"
+            f"{body_marker}\n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC-TRUNCATED-WITHOUT-END"
+        )
+        session = CoachingSession.objects.create(user=self.student, topic_title="边界私钥脱敏")
+        CoachingMessage.objects.create(session=session, role="user", content=content)
+        self._login_admin()
+
+        response = self.client.post(
+            f"/api/admin/conversations/{session.pk}/reveal/",
+            data={"reason": "核对边界私钥脱敏"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        revealed = response.json()["messages"][0]["content"]
+        self.assertLessEqual(len(revealed), 20000)
+        self.assertIn("保留边界前缀", revealed)
+        self.assertNotIn("-----BEGIN PRIVATE KEY-----", revealed)
+        self.assertNotIn(body_marker, revealed)
+        self.assertNotIn("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC", revealed)
+
     def test_catalog_lists_real_counts_without_stored_paths(self):
         self._login_admin()
         courses = self.client.get("/api/admin/courses/?page=1&pageSize=20&active=true")

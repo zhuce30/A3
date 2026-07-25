@@ -13,6 +13,7 @@ from backend.apps.system.admin_audit import record_admin_audit
 
 PAGE_SIZES = {20, 50, 100}
 MAX_RESULT_WINDOW = 5000
+MAX_REDACTION_INPUT_CHARS = 1_000_000
 _SAFE_SESSION_METADATA = {"traceId", "learningGoal", "goal", "workflow", "source"}
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _WINDOWS_PATH_RE = re.compile(r"(?i)\b[a-z]:\\[^\s]+")
@@ -35,7 +36,7 @@ _HEADER_SECRET_RE = re.compile(
 _PRIVATE_KEY_BLOCK_RE = re.compile(
     r"-----BEGIN (?P<key_type>(?:RSA |EC |OPENSSH )?PRIVATE KEY)-----"
     r".*?"
-    r"-----END (?P=key_type)-----",
+    r"(?:-----END (?P=key_type)-----|\Z)",
     re.DOTALL,
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
@@ -60,8 +61,8 @@ def parse_pagination(params) -> tuple[int, int]:
     return page, page_size
 
 
-def _redact_unstructured_text(value: Any, *, limit: int) -> str:
-    text = str(value or "")[:limit]
+def _redact_unstructured_text(value: Any) -> str:
+    text = str(value or "")
     text = _PRIVATE_KEY_BLOCK_RE.sub("[私钥块已隐藏]", text)
     text = _HEADER_SECRET_RE.sub(lambda match: f'{match.group("header")}: [敏感信息已隐藏]', text)
     text = _NORMALIZED_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, text)
@@ -88,7 +89,7 @@ def _redact_structured_content(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_structured_content(item) for item in value]
     if isinstance(value, str):
-        return _redact_unstructured_text(value, limit=20000)
+        return _redact_unstructured_text(value)
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return str(value)
@@ -100,15 +101,20 @@ def _is_sensitive_content_key(key: Any) -> bool:
 
 
 def _safe_text(value: Any, *, limit: int = 500, parse_json: bool = False) -> str:
-    text = str(value or "")[:limit]
+    text = str(value or "")[:MAX_REDACTION_INPUT_CHARS]
     if parse_json:
         try:
             structured = json.loads(text)
         except (TypeError, ValueError):
             pass
         else:
-            return json.dumps(_redact_structured_content(structured), ensure_ascii=False, separators=(",", ":"))
-    return _redact_unstructured_text(text, limit=limit)
+            redacted = json.dumps(
+                _redact_structured_content(structured),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return redacted[:limit]
+    return _redact_unstructured_text(text)[:limit]
 
 
 def _safe_session_metadata(metadata: Any) -> dict[str, Any]:
