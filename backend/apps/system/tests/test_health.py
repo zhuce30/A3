@@ -6,6 +6,7 @@ from django.test import Client, TestCase, override_settings
 
 from backend.apps.accounts.models import User
 from backend.apps.system import views
+from backend.apps.system.services import build_system_health
 
 
 class SystemHealthTests(TestCase):
@@ -155,3 +156,34 @@ class SystemHealthTests(TestCase):
         self.assertEqual(checks["celeryBeat"]["detail"]["task"], "learning.evaluate_optimization_policy_outcomes")
         self.assertEqual(checks["celeryBeat"]["detail"]["kwargs"], {"days": 7})
         self.assertNotIn("SMS_WEBHOOK_TOKEN", str(data))
+
+    def test_health_isolates_one_probe_failure_without_leaking_exception(self):
+        secret_error = "smtp://admin:private-password@example.test"
+        with patch(
+            "backend.apps.system.services._course_check",
+            side_effect=RuntimeError(secret_error),
+        ):
+            result = build_system_health()
+
+        checks = {item["name"]: item for item in result["checks"]}
+        self.assertEqual(len(checks), 9)
+        self.assertIn("database", checks)
+        self.assertIn("redis", checks)
+        self.assertEqual(checks["defaultCourse"]["status"], "error")
+        self.assertEqual(checks["defaultCourse"]["dataStatus"], "partial")
+        self.assertEqual(checks["defaultCourse"]["detail"], {})
+        self.assertNotIn(secret_error, str(result))
+        self.assertNotIn("private-password", str(result))
+
+    def test_health_database_probe_does_not_expose_connection_exception(self):
+        secret_error = "mysql://admin:private-password@database.test/a3"
+        with patch(
+            "backend.apps.system.services.connection.ensure_connection",
+            side_effect=RuntimeError(secret_error),
+        ):
+            result = build_system_health()
+
+        database = next(item for item in result["checks"] if item["name"] == "database")
+        self.assertEqual(database["status"], "error")
+        self.assertNotIn(secret_error, str(result))
+        self.assertNotIn("private-password", str(result))

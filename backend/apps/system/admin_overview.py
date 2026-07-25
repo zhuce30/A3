@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db.models import Count, Q
@@ -52,7 +53,7 @@ STATUS_ALIASES = {
         "ended",
         "archived",
     },
-    "failed": {"failed", "error", "errored", "rejected", "timed_out", "timeout"},
+    "failed": {"failed", "error", "errored", "rejected", "timed_out", "timeout", "partial"},
     "cancelled": {"cancelled", "canceled", "revoked", "aborted"},
     "stale": {"stale"},
 }
@@ -85,11 +86,11 @@ def _collect_overview(range_value: str) -> dict:
 
     user_total = User.objects.count()
     new_users = User.objects.filter(created_at__gte=since, created_at__lte=now).count()
-    active_users = UserAccessState.objects.filter(last_seen_at__gte=since, last_seen_at__lte=now).count()
+    active_users, active_user_trends = _active_user_evidence(period, now)
     coaching_sessions = CoachingSession.objects.filter(created_at__gte=since, created_at__lte=now).count()
     learning_events = LearningEvent.objects.filter(created_at__gte=since, created_at__lte=now).count()
-    resource_packs = ResourcePackLog.objects.filter(created_at__gte=since, created_at__lte=now).count()
-    agent_stats = AgentRun.objects.filter(created_at__gte=since, created_at__lte=now).aggregate(
+    resource_packs = ResourcePackLog.objects.filter(completed_at__gte=since, completed_at__lte=now).count()
+    agent_stats = AgentRun.objects.filter(started_at__gte=since, started_at__lte=now).aggregate(
         total=Count("pk"),
         failed=Count("pk", filter=Q(status__in=STATUS_ALIASES["failed"])),
     )
@@ -107,11 +108,16 @@ def _collect_overview(range_value: str) -> dict:
     metrics = {
         "users": _metric(user_total, "注册账号总数", "accounts.User", "all_time"),
         "newUsers": _metric(new_users, "所选周期内新增账号", "accounts.User.created_at", range_value),
-        "activeUsers": _metric(active_users, "所选周期内有可信访问心跳的账号", "accounts.UserAccessState.last_seen_at", range_value),
+        "activeUsers": _metric(
+            active_users,
+            "所选周期内有访问心跳或学习事件证据的账号（去重）",
+            "accounts.UserAccessState.last_seen_at|learning.LearningEvent.created_at",
+            range_value,
+        ),
         "coachingSessions": _metric(coaching_sessions, "所选周期内创建的辅导会话", "learning.CoachingSession.created_at", range_value),
         "learningEvents": _metric(learning_events, "所选周期内写入的学习事件", "learning.LearningEvent.created_at", range_value),
-        "resourcePacks": _metric(resource_packs, "所选周期内完成写回的资源包", "learning.ResourcePackLog.created_at", range_value),
-        "agentRuns": _metric(agent_total, "所选周期内创建的 Agent 工作流", "compat.AgentRun.created_at", range_value),
+        "resourcePacks": _metric(resource_packs, "所选周期内完成写回的资源包", "learning.ResourcePackLog.completed_at", range_value),
+        "agentRuns": _metric(agent_total, "所选周期内启动的 Agent 工作流", "compat.AgentRun.started_at", range_value),
         "agentFailureRate": _metric(
             round(agent_failed * 100 / agent_total, 2) if agent_total else 0.0,
             "所选周期内失败 Agent 工作流占比（%）",
@@ -131,7 +137,7 @@ def _collect_overview(range_value: str) -> dict:
             }
         )
 
-    trends = _build_trends(period, now)
+    trends = _build_trends(period, now, active_user_trends)
     task_groups = {
         "resource": _task_counts(ResourceGenerationJob, now),
         "video": _task_counts(VideoGenerationJob, now),
@@ -227,32 +233,58 @@ def _metric(value: int | float, definition: str, source: str, window: str) -> di
 def _build_period(now: datetime, range_value: str) -> dict:
     local_now = now.astimezone(SHANGHAI)
     if range_value == "24h":
-        first_bucket = local_now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=23)
-        bucket_starts = [first_bucket + timedelta(hours=offset) for offset in range(24)]
+        filter_start = local_now - timedelta(hours=24)
+        first_bucket = filter_start.replace(minute=0, second=0, microsecond=0)
+        current_bucket = local_now.replace(minute=0, second=0, microsecond=0)
+        bucket_count = int((current_bucket - first_bucket).total_seconds() // 3600) + 1
+        bucket_starts = [first_bucket + timedelta(hours=offset) for offset in range(bucket_count)]
         bucket_unit = "hour"
     else:
         days = 7 if range_value == "7d" else 30
         first_date = local_now.date() - timedelta(days=days - 1)
         first_bucket = datetime.combine(first_date, datetime.min.time(), SHANGHAI)
+        filter_start = first_bucket
         bucket_starts = [first_bucket + timedelta(days=offset) for offset in range(days)]
         bucket_unit = "day"
     return {
-        "start_at": first_bucket,
-        "start_date": first_bucket.date(),
+        "start_at": filter_start,
+        "start_date": filter_start.date(),
         "end_date": local_now.date(),
         "bucket_starts": bucket_starts,
         "bucket_unit": bucket_unit,
     }
 
 
-def _build_trends(period: dict, now: datetime) -> list[dict]:
+def _active_user_evidence(period: dict, now: datetime) -> tuple[int, dict[str, int]]:
+    truncation = TruncHour if period["bucket_unit"] == "hour" else TruncDay
+    start_at = period["start_at"]
+    users_by_bucket: dict[str, set[int]] = {}
+    all_users: set[int] = set()
+    for model, field in (
+        (UserAccessState, "last_seen_at"),
+        (LearningEvent, "created_at"),
+    ):
+        rows = (
+            model.objects.filter(**{f"{field}__gte": start_at, f"{field}__lte": now})
+            .annotate(bucket=truncation(field, tzinfo=SHANGHAI))
+            .values_list("bucket", "user_id")
+            .distinct()
+        )
+        for bucket, user_id in rows:
+            key = _bucket_key(bucket, period["bucket_unit"])
+            users_by_bucket.setdefault(key, set()).add(user_id)
+            all_users.add(user_id)
+    return len(all_users), {key: len(user_ids) for key, user_ids in users_by_bucket.items()}
+
+
+def _build_trends(period: dict, now: datetime, active_user_trends: dict[str, int]) -> list[dict]:
     truncation = TruncHour if period["bucket_unit"] == "hour" else TruncDay
     start_at = period["start_at"]
     counts = {
-        "activeUsers": _trend_counts(UserAccessState, "last_seen_at", start_at, now, truncation),
+        "activeUsers": active_user_trends,
         "coachingSessions": _trend_counts(CoachingSession, "created_at", start_at, now, truncation),
-        "resourcePacks": _trend_counts(ResourcePackLog, "created_at", start_at, now, truncation),
-        "agentRuns": _trend_counts(AgentRun, "created_at", start_at, now, truncation),
+        "resourcePacks": _trend_counts(ResourcePackLog, "completed_at", start_at, now, truncation),
+        "agentRuns": _trend_counts(AgentRun, "started_at", start_at, now, truncation),
     }
     trends = []
     for bucket_start in period["bucket_starts"]:
@@ -288,26 +320,98 @@ def _bucket_key(value: datetime, bucket_unit: str) -> str:
 
 
 def _task_counts(model, now: datetime | None = None) -> dict:
-    stale_cutoff = (now or timezone.now()) - STALE_AFTER
+    current_time = now or timezone.now()
+    if model is ResourceGenerationJob:
+        filters = _resource_task_filters(current_time)
+    elif model is KnowledgeIndexJob:
+        filters = _knowledge_task_filters(current_time)
+    elif model is VideoGenerationJob:
+        filters = _video_task_filters(current_time)
+    elif model is AgentRun:
+        filters = _agent_task_filters(current_time)
+    else:  # pragma: no cover - only the four operational models are supported
+        raise ValueError(f"Unsupported admin task model: {model.__name__}")
     counts = model.objects.aggregate(
         **{
-            state: Count("pk", filter=_task_state_filter(state, stale_cutoff))
+            state: Count("pk", filter=filters[state])
             for state in TASK_STATES
         }
     )
     return {state: counts[state] or 0 for state in TASK_STATES}
 
 
-def _task_state_filter(state: str, stale_cutoff: datetime) -> Q:
+def _terminal_task_filters() -> dict[str, Q]:
+    return {
+        "succeeded": Q(status__in=STATUS_ALIASES["succeeded"]),
+        "failed": Q(status__in=STATUS_ALIASES["failed"]),
+        "cancelled": Q(status__in=STATUS_ALIASES["cancelled"]),
+    }
+
+
+def _resource_task_filters(now: datetime) -> dict[str, Q]:
+    normal_cutoff = now - timedelta(minutes=_setting_minutes("RESOURCE_GENERATION_JOB_STALE_MINUTES", 15))
+    celery_cutoff = now - timedelta(minutes=_setting_minutes("RESOURCE_GENERATION_CELERY_STALE_MINUTES", 240))
     active_statuses = STATUS_ALIASES["queued"] | STATUS_ALIASES["running"]
-    if state == "stale":
-        return Q(status__in=STATUS_ALIASES["stale"]) | (
-            Q(status__in=active_statuses) & Q(updated_at__lt=stale_cutoff)
-        )
-    status_filter = Q(status__in=STATUS_ALIASES[state])
-    if state in {"queued", "running"}:
-        status_filter &= Q(updated_at__gte=stale_cutoff)
-    return status_filter
+    celery = Q(metadata__executionBackend="celery")
+    non_celery = Q(metadata__executionBackend__isnull=True) | ~celery
+    stale_active = Q(status__in=active_statuses) & (
+        (celery & Q(updated_at__lt=celery_cutoff))
+        | (non_celery & Q(updated_at__lt=normal_cutoff))
+    )
+    fresh_backend = (
+        (celery & Q(updated_at__gte=celery_cutoff))
+        | (non_celery & Q(updated_at__gte=normal_cutoff))
+    )
+    return {
+        "queued": Q(status__in=STATUS_ALIASES["queued"]) & fresh_backend,
+        "running": Q(status__in=STATUS_ALIASES["running"]) & fresh_backend,
+        **_terminal_task_filters(),
+        "stale": Q(status__in=STATUS_ALIASES["stale"]) | stale_active,
+    }
+
+
+def _knowledge_task_filters(now: datetime) -> dict[str, Q]:
+    cutoff = now - timedelta(minutes=_setting_minutes("KNOWLEDGE_INDEX_JOB_STALE_MINUTES", 10))
+    stale_running = Q(status="running", updated_at__lt=cutoff)
+    return {
+        "queued": Q(status__in=STATUS_ALIASES["queued"]),
+        "running": Q(status__in=STATUS_ALIASES["running"]) & ~stale_running,
+        **_terminal_task_filters(),
+        "stale": Q(status__in=STATUS_ALIASES["stale"]) | stale_running,
+    }
+
+
+def _video_task_filters(now: datetime) -> dict[str, Q]:
+    cutoff = now - timedelta(minutes=_setting_minutes("VIDEO_GENERATION_JOB_STALE_MINUTES", 5))
+    active_statuses = STATUS_ALIASES["queued"] | STATUS_ALIASES["running"]
+    stale_active = Q(status__in=active_statuses, updated_at__lt=cutoff)
+    fresh_active = Q(updated_at__gte=cutoff)
+    return {
+        "queued": Q(status__in=STATUS_ALIASES["queued"]) & fresh_active,
+        "running": Q(status__in=STATUS_ALIASES["running"]) & fresh_active,
+        **_terminal_task_filters(),
+        "stale": Q(status__in=STATUS_ALIASES["stale"]) | stale_active,
+    }
+
+
+def _agent_task_filters(now: datetime) -> dict[str, Q]:
+    # Running AgentRun rows have no recovery command, so admin overview uses this configurable evidence threshold.
+    cutoff = now - timedelta(minutes=_setting_minutes("ADMIN_AGENT_RUN_STALE_MINUTES", 30))
+    stale_running = Q(status__in=STATUS_ALIASES["running"], updated_at__lt=cutoff)
+    return {
+        "queued": Q(status__in=STATUS_ALIASES["queued"]),
+        "running": Q(status__in=STATUS_ALIASES["running"]) & Q(updated_at__gte=cutoff),
+        **_terminal_task_filters(),
+        "stale": Q(status__in=STATUS_ALIASES["stale"]) | stale_running,
+    }
+
+
+def _setting_minutes(name: str, default: int) -> int:
+    try:
+        value = int(getattr(settings, name, default) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(value, 1)
 
 
 def _build_services(now: datetime) -> tuple[list[dict], bool]:
@@ -336,8 +440,12 @@ def _build_services(now: datetime) -> tuple[list[dict], bool]:
                 "evidence": {"source": "admin_overview_request"},
             }
         ]
-        services.extend(
-            {
+        for item in health["checks"]:
+            item_data_status = item.get("dataStatus", "collected")
+            if item_data_status == "partial":
+                partial = True
+            services.append(
+                {
                 "key": item["name"],
                 "name": service_labels.get(item["name"], item["name"]),
                 "status": (
@@ -346,11 +454,10 @@ def _build_services(now: datetime) -> tuple[list[dict], bool]:
                     else status_map.get(item["status"], "unknown")
                 ),
                 "message": item["message"],
-                "dataStatus": "collected",
+                "dataStatus": item_data_status,
                 "evidence": {"source": "system_health", "probe": item["name"]},
-            }
-            for item in health["checks"]
-        )
+                }
+            )
     except Exception:
         partial = True
         services = [
@@ -519,9 +626,11 @@ def _alert(alert_id: str, alert_type: str, severity: str, title: str, count: int
 
 def _build_activity(since: datetime, now: datetime) -> list[dict]:
     items = []
-    for row in AdminAuditLog.objects.filter(created_at__gte=since, created_at__lte=now).values(
-        "id", "action", "summary", "success", "created_at"
-    )[:ACTIVITY_LIMIT]:
+    for row in (
+        AdminAuditLog.objects.filter(created_at__gte=since, created_at__lte=now)
+        .order_by("-created_at")
+        .values("id", "action", "summary", "success", "created_at")[:ACTIVITY_LIMIT]
+    ):
         items.append(
             _activity_item(
                 f"audit:{row['id']}",
@@ -532,9 +641,11 @@ def _build_activity(since: datetime, now: datetime) -> list[dict]:
                 "system.AdminAuditLog",
             )
         )
-    for row in CoachingSession.objects.filter(created_at__gte=since, created_at__lte=now).values(
-        "id", "topic_title", "status", "created_at"
-    )[:ACTIVITY_LIMIT]:
+    for row in (
+        CoachingSession.objects.filter(created_at__gte=since, created_at__lte=now)
+        .order_by("-created_at")
+        .values("id", "topic_title", "status", "created_at")[:ACTIVITY_LIMIT]
+    ):
         items.append(
             _activity_item(
                 f"coaching:{row['id']}",
@@ -545,29 +656,33 @@ def _build_activity(since: datetime, now: datetime) -> list[dict]:
                 "learning.CoachingSession",
             )
         )
-    for row in ResourcePackLog.objects.filter(created_at__gte=since, created_at__lte=now).values(
-        "id", "task_title", "learning_goal", "created_at"
-    )[:ACTIVITY_LIMIT]:
+    for row in (
+        ResourcePackLog.objects.filter(completed_at__gte=since, completed_at__lte=now)
+        .order_by("-completed_at")
+        .values("id", "task_title", "learning_goal", "completed_at")[:ACTIVITY_LIMIT]
+    ):
         items.append(
             _activity_item(
                 f"resource:{row['id']}",
                 "resource_pack",
                 row["task_title"] or row["learning_goal"],
                 "succeeded",
-                row["created_at"],
+                row["completed_at"],
                 "learning.ResourcePackLog",
             )
         )
-    for row in AgentRun.objects.filter(created_at__gte=since, created_at__lte=now).values(
-        "id", "workflow", "status", "created_at"
-    )[:ACTIVITY_LIMIT]:
+    for row in (
+        AgentRun.objects.filter(started_at__gte=since, started_at__lte=now)
+        .order_by("-started_at")
+        .values("id", "workflow", "status", "started_at")[:ACTIVITY_LIMIT]
+    ):
         items.append(
             _activity_item(
                 f"agent:{row['id']}",
                 "agent_run",
                 row["workflow"],
                 _normalized_status(row["status"]),
-                row["created_at"],
+                row["started_at"],
                 "compat.AgentRun",
             )
         )

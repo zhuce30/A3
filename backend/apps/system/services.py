@@ -35,23 +35,34 @@ def _path_writable(path: Path) -> bool:
 
 
 def build_system_health() -> dict:
-    checks = [
-        _database_check(),
-        _cache_check(),
-        _course_check(),
-        _knowledge_upload_check(),
-        _vector_index_check(),
-        _verification_code_check(),
-        _celery_check(),
-        _celery_beat_check(),
-        _security_check(),
+    probes = [
+        ("database", _database_check),
+        ("redis", _cache_check),
+        ("defaultCourse", _course_check),
+        ("knowledgeUpload", _knowledge_upload_check),
+        ("vectorIndex", _vector_index_check),
+        ("smsVerification", _verification_code_check),
+        ("celery", _celery_check),
+        ("celeryBeat", _celery_beat_check),
+        ("security", _security_check),
     ]
+    checks = [_safe_probe(name, probe) for name, probe in probes]
     statuses = {item["status"] for item in checks}
     overall: CheckStatus = "error" if "error" in statuses else "warning" if "warning" in statuses else "ok"
     return {
         "overallStatus": overall,
         "checks": checks,
     }
+
+
+def _safe_probe(name: str, probe) -> dict:
+    try:
+        return probe()
+    except Exception:
+        return {
+            **_check(name, "error", "Health probe could not complete"),
+            "dataStatus": "partial",
+        }
 
 
 def _database_check() -> dict:
@@ -72,8 +83,8 @@ def _database_check() -> dict:
                 "name": database.get("NAME", ""),
             },
         )
-    except Exception as exc:  # pragma: no cover - depends on local database availability
-        return _check("database", "error", "Database connection failed", {"error": str(exc)})
+    except Exception:  # pragma: no cover - depends on local database availability
+        return _check("database", "error", "Database connection failed")
 
 
 def _cache_check() -> dict:
