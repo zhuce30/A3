@@ -25,14 +25,18 @@ const ADMIN_MODAL_FOCUSABLE = [
   'select:not([disabled])',
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
+const ADMIN_MODAL_STACK: symbol[] = [];
 
 function useAdminModalFocus(
   open: boolean,
   onClose: () => void,
   containerRef: RefObject<HTMLElement | null>,
 ) {
+  const modalTokenRef = useRef(Symbol('a3-admin-modal'));
   useEffect(() => {
     if (!open) return;
+    const modalToken = modalTokenRef.current;
+    ADMIN_MODAL_STACK.push(modalToken);
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const previousOverflow = document.body.style.overflow;
     const frame = window.requestAnimationFrame(() => {
@@ -41,6 +45,7 @@ function useAdminModalFocus(
       (firstFocusable ?? container)?.focus();
     });
     const onKeyDown = (event: KeyboardEvent) => {
+      if (ADMIN_MODAL_STACK.at(-1) !== modalToken) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         onClose();
@@ -70,6 +75,8 @@ function useAdminModalFocus(
     return () => {
       window.cancelAnimationFrame(frame);
       window.removeEventListener('keydown', onKeyDown);
+      const stackIndex = ADMIN_MODAL_STACK.lastIndexOf(modalToken);
+      if (stackIndex >= 0) ADMIN_MODAL_STACK.splice(stackIndex, 1);
       document.body.style.overflow = previousOverflow;
       previousFocus?.focus();
     };
