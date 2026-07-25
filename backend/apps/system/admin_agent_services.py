@@ -140,7 +140,6 @@ def _serialize_run(run: AgentRun) -> dict[str, Any]:
         "user": {"id": str(run.user_id), "displayName": run.user.display_name},
         "schemaVersion": run.schema_version,
         "workflow": run.workflow,
-        "goal": run.goal[:255],
         "status": run.status,
         "fallbackStrategy": run.fallback_strategy,
         "latencyMs": run.latency_ms,

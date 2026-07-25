@@ -14,6 +14,7 @@ from backend.apps.compat.models import (
     ResourceGenerationJob,
     VideoComposition,
     VideoGenerationJob,
+    VideoGenerationSegment,
 )
 from backend.apps.knowledge_base.models import KnowledgeIndexJob, KnowledgeResource
 from backend.apps.learning.models import (
@@ -302,6 +303,59 @@ class AdminBusinessViewsTests(TestCase):
         self.assertEqual(audit.metadata, {"page": 2, "pageSize": 20, "messageCount": 2})
         self._assert_no_sensitive_values({"before": audit.before, "after": audit.after, "metadata": audit.metadata})
 
+    def test_conversation_reveal_redacts_structured_and_header_style_secrets(self):
+        structured_secret = "JSON-API-KEY-7f3d"
+        bearer_secret = "BEARER-TOKEN-8a4e"
+        cookie_secret = "COOKIE-SECRET-9b5f"
+        inline_secret = "INLINE-TOKEN-0c6a"
+        header_api_key = "HEADER-API-KEY-1d7b"
+        session = CoachingSession.objects.create(user=self.student, topic_title="敏感信息脱敏测试")
+        CoachingMessage.objects.create(
+            session=session,
+            role="user",
+            content=json.dumps(
+                {
+                    "question": "保留这个正常问题",
+                    "apiKey": structured_secret,
+                    "nested": {
+                        "Authorization": f"Bearer {bearer_secret}",
+                        "safe": "保留嵌套字段",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        )
+        CoachingMessage.objects.create(
+            session=session,
+            role="assistant",
+            content=(
+                "请保留普通解释\n"
+                f"Authorization: Bearer {bearer_secret}\n"
+                f"Cookie: sid={cookie_secret}; theme=dark\n"
+                f"X-API-Key: {header_api_key}\n"
+                f'调试数据 {{"token": "{inline_secret}", "question": "保留内容"}}'
+            ),
+        )
+        self._login_admin()
+
+        response = self.client.post(
+            f"/api/admin/conversations/{session.pk}/reveal/",
+            data={"reason": "核对敏感信息脱敏"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        contents = [item["content"] for item in response.json()["messages"]]
+        serialized = json.dumps(contents, ensure_ascii=False)
+        for secret in (structured_secret, bearer_secret, cookie_secret, inline_secret, header_api_key):
+            self.assertNotIn(secret, serialized)
+        structured_content = next(content for content in contents if content.startswith("{"))
+        text_content = next(content for content in contents if content.startswith("请保留"))
+        structured = json.loads(structured_content)
+        self.assertEqual(structured, {"question": "保留这个正常问题", "nested": {"safe": "保留嵌套字段"}})
+        self.assertIn("请保留普通解释", text_content)
+        self.assertIn("保留内容", text_content)
+
     def test_catalog_lists_real_counts_without_stored_paths(self):
         self._login_admin()
         courses = self.client.get("/api/admin/courses/?page=1&pageSize=20&active=true")
@@ -319,6 +373,29 @@ class AdminBusinessViewsTests(TestCase):
         self.assertEqual(payload["items"][0]["chunkCount"], 30)
         self.assertIn("indexJob", payload["items"][0])
         self._assert_no_sensitive_values(payload)
+
+    def test_catalog_hides_tracebacks_but_preserves_ordinary_short_errors(self):
+        traceback_marker = "TRACEBACK-PRIVATE-MARKER"
+        ordinary_error = "文件格式暂不支持"
+        traceback_resource = KnowledgeResource.objects.get(original_name="控制原理资料 0.pdf")
+        ordinary_resource = KnowledgeResource.objects.get(original_name="控制原理资料 1.pdf")
+        traceback_resource.error_message = (
+            "Traceback (most recent call last):\n"
+            '  File "worker.py", line 17, in index\n'
+            f"ValueError: {traceback_marker}"
+        )
+        traceback_resource.save(update_fields=["error_message"])
+        ordinary_resource.error_message = ordinary_error
+        ordinary_resource.save(update_fields=["error_message"])
+        self._login_admin()
+
+        response = self.client.get("/api/admin/resources/?page=1&pageSize=20&scope=course")
+
+        self.assertEqual(response.status_code, 200)
+        items = {item["name"]: item for item in response.json()["items"]}
+        self.assertEqual(items[traceback_resource.original_name]["errorSummary"], "处理失败，详细错误已隐藏")
+        self.assertNotIn(traceback_marker, json.dumps(response.json(), ensure_ascii=False))
+        self.assertEqual(items[ordinary_resource.original_name]["errorSummary"], ordinary_error)
 
     def test_tasks_are_normalized_paginated_and_show_evidence_based_eligibility(self):
         self._login_admin()
@@ -359,7 +436,54 @@ class AdminBusinessViewsTests(TestCase):
         self.assertEqual(detail.json()["task"]["id"], first["id"])
         self._assert_no_sensitive_values(detail.json())
 
+    def test_failed_video_retry_requires_a_persisted_failed_segment_without_n_plus_one(self):
+        without_segment = VideoGenerationJob.objects.create(
+            job_id="failed-video-without-segment",
+            user=self.student,
+            resource_pack_id="pack-without-segment",
+            status="failed",
+            stage="failed",
+        )
+        with_segment = VideoGenerationJob.objects.create(
+            job_id="failed-video-with-segment",
+            user=self.student,
+            resource_pack_id="pack-with-segment",
+            status="failed",
+            stage="failed",
+        )
+        VideoGenerationSegment.objects.create(
+            job=with_segment,
+            index=0,
+            title="失败片段",
+            prompt="安全测试提示",
+            status="failed",
+        )
+        self._login_admin()
+
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.get(
+                "/api/admin/tasks/?page=1&pageSize=20&kind=video_generation&status=failed"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLessEqual(len(captured), 4, [query["sql"] for query in captured.captured_queries])
+        items = {item["jobId"]: item for item in response.json()["items"]}
+        self.assertFalse(items[without_segment.job_id]["eligibility"]["retry"])
+        self.assertTrue(items[with_segment.job_id]["eligibility"]["retry"])
+
+        without_detail = self.client.get(
+            f"/api/admin/tasks/video_generation/{without_segment.pk}/"
+        ).json()["task"]
+        with_detail = self.client.get(
+            f"/api/admin/tasks/video_generation/{with_segment.pk}/"
+        ).json()["task"]
+        self.assertFalse(without_detail["eligibility"]["retry"])
+        self.assertTrue(with_detail["eligibility"]["retry"])
+
     def test_agent_detail_uses_explicit_operational_metadata_allowlist(self):
+        prompt_secret = "AGENT-GOAL-PROMPT-SECRET-2e8c"
+        self.runs[0].goal = f"用户完整提示词：{prompt_secret}"
+        self.runs[0].save(update_fields=["goal"])
         self._login_admin()
         response = self.client.get("/api/admin/agent-runs/?page=1&pageSize=20&workflow=recommend")
         self.assertEqual(response.status_code, 200)
@@ -367,6 +491,8 @@ class AdminBusinessViewsTests(TestCase):
         self.assertEqual(payload["pagination"]["total"], 3)
         self.assertEqual(payload["items"][0]["stepCount"], 1)
         self.assertEqual(payload["items"][0]["spanCount"], 1)
+        self.assertNotIn(prompt_secret, json.dumps(payload, ensure_ascii=False))
+        self.assertTrue(all("goal" not in item for item in payload["items"]))
         self._assert_no_sensitive_values(payload)
 
         response = self.client.get(f"/api/admin/agent-runs/{self.runs[0].trace_id}/")
@@ -382,6 +508,8 @@ class AdminBusinessViewsTests(TestCase):
             {"provider": "local", "model": "bge-small", "latencyMs": 40},
         )
         self.assertNotIn("detail", run["steps"][0])
+        self.assertNotIn("goal", run)
+        self.assertNotIn(prompt_secret, json.dumps(run, ensure_ascii=False))
         self._assert_no_sensitive_values(run)
 
     def test_invalid_pagination_and_filters_return_readable_chinese_errors(self):

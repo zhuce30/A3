@@ -11,13 +11,22 @@ from backend.apps.system.admin_conversation_services import parse_pagination
 
 
 _PATH_OR_URL_RE = re.compile(r"(?i)(?:https?://|\b[a-z]:\\|/(?:srv|var|home|tmp|opt|etc)/)")
+_TRACEBACK_RE = re.compile(
+    r"(?im)(?:traceback\s*\(most recent call last\):|"
+    r"^\s*file\s+[\"'][^\"']+[\"'],\s*line\s+\d+|"
+    r"^\s*at\s+(?:[\w.$<>]+\s+\()?[^\r\n]*:\d+(?::\d+)?\)?)"
+)
 
 
 def _error_summary(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    if _PATH_OR_URL_RE.search(text) or re.search(r"(?i)\b(?:token|cookie|secret|api[_-]?key)\b", text):
+    if (
+        _PATH_OR_URL_RE.search(text)
+        or _TRACEBACK_RE.search(text)
+        or re.search(r"(?i)\b(?:token|cookie|secret|api[_-]?key)\b", text)
+    ):
         return "处理失败，详细错误已隐藏"
     return text[:200]
 

@@ -3,10 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from django.db.models import CharField, DateTimeField, F, Q, TextField, Value
+from django.db.models import BooleanField, CharField, Exists, F, OuterRef, Q, TextField, Value
 from django.db.models.functions import Cast
 
-from backend.apps.compat.models import ResourceGenerationJob, VideoComposition, VideoGenerationJob
+from backend.apps.compat.models import (
+    ResourceGenerationJob,
+    VideoComposition,
+    VideoGenerationJob,
+    VideoGenerationSegment,
+)
 from backend.apps.knowledge_base.models import KnowledgeIndexJob
 from backend.apps.system.admin_catalog_services import _error_summary
 from backend.apps.system.admin_conversation_services import parse_pagination
@@ -82,6 +87,7 @@ def _resource_query(*, status: str, user_id: int | None, search: str):
             admin_error=F("error_message"),
             admin_trace=F("trace_id"),
             admin_celery=Value("", output_field=CharField()),
+            admin_retry_evidence=Value(True, output_field=BooleanField()),
         )
         .values(*_TASK_VALUE_FIELDS)
     )
@@ -113,13 +119,18 @@ def _index_query(*, status: str, user_id: int | None, search: str):
             admin_error=F("error_message"),
             admin_trace=Value("", output_field=CharField()),
             admin_celery=F("celery_task_id"),
+            admin_retry_evidence=Value(True, output_field=BooleanField()),
         )
         .values(*_TASK_VALUE_FIELDS)
     )
 
 
 def _video_query(*, status: str, user_id: int | None, search: str):
-    queryset = VideoGenerationJob.objects.all()
+    queryset = VideoGenerationJob.objects.annotate(
+        has_failed_segment=Exists(
+            VideoGenerationSegment.objects.filter(job_id=OuterRef("pk"), status="failed")
+        )
+    )
     if status:
         queryset = queryset.filter(status__in=_source_statuses(status))
     if user_id is not None:
@@ -144,6 +155,7 @@ def _video_query(*, status: str, user_id: int | None, search: str):
             admin_error=F("error_message"),
             admin_trace=F("trace_id"),
             admin_celery=F("celery_task_id"),
+            admin_retry_evidence=F("has_failed_segment"),
         )
         .values(*_TASK_VALUE_FIELDS)
     )
@@ -175,6 +187,7 @@ def _composition_query(*, status: str, user_id: int | None, search: str):
             admin_error=F("error_message"),
             admin_trace=F("job__trace_id"),
             admin_celery=F("celery_task_id"),
+            admin_retry_evidence=Value(True, output_field=BooleanField()),
         )
         .values(*_TASK_VALUE_FIELDS)
     )
@@ -196,6 +209,7 @@ _TASK_VALUE_FIELDS = (
     "admin_error",
     "admin_trace",
     "admin_celery",
+    "admin_retry_evidence",
 )
 _QUERY_BUILDERS = {
     "resource_generation": _resource_query,
@@ -212,9 +226,9 @@ def _duration_ms(started_at: datetime | None, finished_at: datetime | None) -> i
     return max(0, int((end - started_at).total_seconds() * 1000)) if end else None
 
 
-def _eligibility(kind: str, status: str, celery_task_id: str) -> dict[str, bool]:
+def _eligibility(kind: str, status: str, celery_task_id: str, retry_evidence: bool) -> dict[str, bool]:
     normalized = _normalized_status(status)
-    retry = normalized == "failed" and kind in TASK_KINDS
+    retry = normalized == "failed" and kind in TASK_KINDS and bool(retry_evidence)
     cancel = (
         normalized in {"queued", "running"}
         and bool(celery_task_id)
@@ -239,7 +253,12 @@ def _serialize_row(row: dict[str, Any]) -> dict[str, Any]:
         "durationMs": _duration_ms(row["admin_started"], row["admin_finished"]),
         "errorSummary": _error_summary(row["admin_error"]),
         "traceId": row["admin_trace"],
-        "eligibility": _eligibility(row["admin_kind"], row["admin_status"], row["admin_celery"]),
+        "eligibility": _eligibility(
+            row["admin_kind"],
+            row["admin_status"],
+            row["admin_celery"],
+            row["admin_retry_evidence"],
+        ),
     }
 
 
