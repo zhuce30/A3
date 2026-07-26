@@ -31,6 +31,7 @@ urlpatterns = [
     path("coaching/sessions/", views.coaching_sessions, name="learning-coaching-sessions"),
     path("coaching/sessions/<uuid:session_id>/", views.coaching_session_by_id, name="learning-coaching-session-detail"),
     path("coaching/sessions/<uuid:session_id>/summary/", views.coaching_session_summary, name="learning-coaching-session-summary"),
+    path("coaching/sessions/<uuid:session_id>/tutor-feedback/", views.coaching_session_tutor_feedback, name="learning-coaching-session-tutor-feedback"),
     path("coaching/session/", views.coaching_history, name="learning-coaching-session"),
     path("coaching/session/end/", views.coaching_end, name="learning-coaching-session-end"),
     path("teacher/workbench/", views.teacher, name="learning-teacher-workbench"),

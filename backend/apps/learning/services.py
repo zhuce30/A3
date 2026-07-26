@@ -2758,12 +2758,21 @@ def coaching_session_detail(user, session_id) -> dict:
     return {"session": _serialize_coaching_session_payload(session, messages)}
 
 
+@transaction.atomic
 def summarize_coaching_session(user, session_id) -> dict:
     session = get_object_or_404(
-        CoachingSession.objects.prefetch_related("messages"),
+        CoachingSession.objects.select_for_update().prefetch_related("messages"),
         id=session_id,
         user=user,
     )
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    existing_summary = metadata.get("summary") if isinstance(metadata.get("summary"), dict) else None
+    if existing_summary is not None and metadata.get("summaryCompletedAt"):
+        session.refresh_from_db()
+        return {"summary": existing_summary, "session": _serialize_coaching_session_row(session)}
+    if session.status == CoachingSessionStatus.ARCHIVED:
+        raise ValueError("已归档的辅导会话不能重新生成总结")
+
     messages = list(session.messages.order_by("created_at", "id"))
     user_questions = [message for message in messages if message.role == CoachingMessageRole.USER]
     assistant_replies = [message for message in messages if message.role == CoachingMessageRole.ASSISTANT]
@@ -2807,10 +2816,16 @@ def summarize_coaching_session(user, session_id) -> dict:
         "nextAction": next_action,
         "generatedAt": timezone.now().isoformat(),
     }
+    completed_at = timezone.now()
     session.summary = _coaching_summary_sentence(session.topic_title, summary)
-    metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    session.metadata = {**metadata, "summary": summary}
-    session.save(update_fields=["summary", "metadata", "updated_at"])
+    session.metadata = {
+        **metadata,
+        "summary": summary,
+        "summaryCompletedAt": completed_at.isoformat(),
+    }
+    session.status = CoachingSessionStatus.ENDED
+    session.ended_at = session.ended_at or completed_at
+    session.save(update_fields=["summary", "metadata", "status", "ended_at", "updated_at"])
     create_notification(
         title="面对面辅导总结已生成",
         user=user,
@@ -2819,6 +2834,7 @@ def summarize_coaching_session(user, session_id) -> dict:
         action_url=next_action["href"],
         payload={"coachingSessionId": str(session.id), "summary": summary},
     )
+    session.refresh_from_db()
     return {"summary": summary, "session": _serialize_coaching_session_row(session)}
 
 
@@ -2831,8 +2847,9 @@ def append_coaching_messages(
 ) -> dict:
     if not isinstance(raw_messages, list) or not raw_messages:
         raise ValueError("请提供面对面辅导消息")
+    user = user.__class__.objects.select_for_update().get(pk=user.pk)
     profile, _ = LearnerProfile.objects.get_or_create(user=user)
-    session = _latest_active_coaching_session(user)
+    session = _latest_active_coaching_session(user, lock=True)
     session_metadata = session.metadata if session is not None and isinstance(session.metadata, dict) else {}
     stored_snapshot = _coaching_tutor_persona_snapshot(session)
     requested_id = tutor_persona_id.strip() if isinstance(tutor_persona_id, str) else ""
@@ -2936,8 +2953,9 @@ def append_coaching_messages(
     return {"session": persisted}
 
 
+@transaction.atomic
 def end_coaching_session(user) -> dict:
-    session = _latest_active_coaching_session(user)
+    session = _latest_active_coaching_session(user, lock=True)
     if session is None:
         return {"session": _serialize_coaching_session_payload(None, [])}
     session.status = CoachingSessionStatus.ENDED
@@ -2947,9 +2965,10 @@ def end_coaching_session(user) -> dict:
     return {"session": _serialize_coaching_session_payload(session, messages)}
 
 
-def _latest_active_coaching_session(user) -> CoachingSession | None:
+def _latest_active_coaching_session(user, *, lock: bool = False) -> CoachingSession | None:
+    sessions = CoachingSession.objects.select_for_update() if lock else CoachingSession.objects
     return (
-        CoachingSession.objects.filter(user=user, status=CoachingSessionStatus.ACTIVE)
+        sessions.filter(user=user, status=CoachingSessionStatus.ACTIVE)
         .order_by("-updated_at", "-created_at")
         .first()
     )

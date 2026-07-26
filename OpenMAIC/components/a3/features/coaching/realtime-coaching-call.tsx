@@ -1,7 +1,7 @@
 'use client';
 
 import { Camera, FileSearch, Focus, Loader2, Mic, MonitorUp, Phone, PhoneOff, Radio, ShieldCheck, VolumeX } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { resolveA3Endpoint } from '@/lib/a3/api-client';
 import type { A3DigitalHumanAvatarState } from '@/lib/a3/digital-human-types';
@@ -32,6 +32,7 @@ const panelTabs = [
 type PanelTabKey = (typeof panelTabs)[number]['key'];
 
 type RealtimeCoachingCallProps = {
+  onSessionEnded?: (sessionId: string) => void;
   rightRail?: ReactNode;
   tutorPersonaId?: string;
 };
@@ -62,7 +63,7 @@ export function mapRealtimeStatusToAvatarState(
   return resolveRealtimeAvatarState(status, assistantSpeaking);
 }
 
-export function RealtimeCoachingCall({ rightRail, tutorPersonaId = '' }: RealtimeCoachingCallProps = {}) {
+export function RealtimeCoachingCall({ onSessionEnded, rightRail, tutorPersonaId = '' }: RealtimeCoachingCallProps = {}) {
   const [activePanelTab, setActivePanelTab] = useState<PanelTabKey>('dialogue');
   const [avatarCovered, setAvatarCovered] = useState(false);
   const realtime = useRealtimeCoaching(tutorPersonaId);
@@ -97,6 +98,12 @@ export function RealtimeCoachingCall({ rightRail, tutorPersonaId = '' }: Realtim
   const provider = session?.provider || 'local_fallback_record_then_respond';
   const fallbackReason = session?.fallbackReason;
   const avatarState = mapRealtimeStatusToAvatarState(status, assistantSpeaking);
+
+  useEffect(() => {
+    if (status === 'ended' && summary && session?.coachingSessionId) {
+      onSessionEnded?.(session.coachingSessionId);
+    }
+  }, [onSessionEnded, session?.coachingSessionId, status, summary]);
 
   const evidenceQueryFallback = session?.instructions.targetTitle || '当前知识点';
 

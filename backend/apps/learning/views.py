@@ -14,6 +14,7 @@ from backend.apps.learning.models import Course, CourseEnrollment, LearningPath,
 from backend.apps.accounts.permissions import require_teacher_role
 from backend.apps.compat.agent_kernel import run_admission_diagnostic_workflow, run_path_generate_workflow, run_teacher_task_workflow
 from backend.apps.learning.services import admission_diagnostic_blueprint, append_classroom_chat_messages, append_coaching_messages, assign_resource_pack_to_today, classroom_chat_history, classroom_context, clear_classroom_chat_messages, coaching_session, coaching_session_detail, complete_study_plan_task, course_materials, current_study_plan, dashboard_summary, end_coaching_session, generate_learning_path, generate_study_plan, knowledge_graph, list_coaching_sessions, serialize_course, serialize_path, submit_daily_reflection, summarize_coaching_session, teacher_workbench, update_path_item_progress
+from backend.apps.learning.tutor_feedback import TutorFeedbackError, get_tutor_feedback, upsert_tutor_feedback
 from backend.apps.learning.tutor_personas import TutorPersonaUnavailableError
 
 
@@ -426,7 +427,31 @@ def coaching_session_summary(request, session_id):
     rejected = _require_login(request)
     if rejected:
         return rejected
-    return JsonResponse({"success": True, **summarize_coaching_session(request.user, session_id)}, status=201)
+    return JsonResponse(
+        {"success": True, **summarize_coaching_session(request.user, session_id)},
+        status=201,
+    )
+
+
+@require_http_methods(["GET", "POST"])
+def coaching_session_tutor_feedback(request, session_id):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    try:
+        if request.method == "GET":
+            return JsonResponse(
+                {"success": True, "feedback": get_tutor_feedback(request.user, session_id)}
+            )
+        feedback, created = upsert_tutor_feedback(request.user, session_id, _body(request))
+        return JsonResponse(
+            {"success": True, "feedback": feedback},
+            status=201 if created else 200,
+        )
+    except TutorFeedbackError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=exc.status_code)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
 
 
 @require_http_methods(["POST"])

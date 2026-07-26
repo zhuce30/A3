@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Camera,
   CheckCircle2,
@@ -22,7 +22,9 @@ import { useBrowserASR } from '@/lib/hooks/use-browser-asr';
 import { cn } from '@/lib/utils';
 import { A3Card, A3Pill } from '../ui/a3-card';
 import { A3Markdown } from '../ui/a3-markdown';
+import { commitRealtimeEndedSession, createCoachingSessionLoader } from './coaching/coaching-session-loader';
 import { RealtimeCoachingCall } from './coaching/realtime-coaching-call';
+import { isTutorFeedbackVisible, TutorFeedbackPanel } from './coaching/tutor-feedback-panel';
 import { TutorPersonaSelector } from './tutor-persona/tutor-persona-selector';
 import { useTutorPersona } from './tutor-persona/use-tutor-persona';
 import type { A3TutorPersonaId } from '@/lib/a3/tutor-persona-types';
@@ -91,6 +93,7 @@ export function CoachingView() {
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [coachingSessions, setCoachingSessions] = useState<CoachingSessionRow[]>([]);
   const [viewingSessionId, setViewingSessionId] = useState('');
+  const [feedbackSession, setFeedbackSession] = useState<CoachingSessionRow | null>(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState('');
   const [savingSourceId, setSavingSourceId] = useState('');
   const [sourceFavoriteMessage, setSourceFavoriteMessage] = useState('');
@@ -102,6 +105,12 @@ export function CoachingView() {
   const [quizSubmitting, setQuizSubmitting] = useState(false);
   const [quizError, setQuizError] = useState('');
   const [lastQuizAnswer, setLastQuizAnswer] = useState('');
+  const sessionLoaderRef = useRef<ReturnType<typeof createCoachingSessionLoader<CoachingSessionResponse>> | null>(null);
+  if (!sessionLoaderRef.current) {
+    sessionLoaderRef.current = createCoachingSessionLoader((sessionId) => (
+      a3GetJson<CoachingSessionResponse>(`/api/learning/coaching/sessions/${encodeURIComponent(sessionId)}/`)
+    ));
+  }
 
   useEffect(() => {
     let mounted = true;
@@ -128,10 +137,13 @@ export function CoachingView() {
       setMessages(persisted.length ? persisted : [welcomeMessage]);
       setCoachingSessions(sessionsResult.success ? sessionsResult.sessions : []);
       setViewingSessionId('');
+      const currentSession = sessionResult.success ? sessionResult.session : undefined;
+      setFeedbackSession(currentSession?.id ? { id: currentSession.id, status: currentSession.status ?? 'active' } : null);
     }
     load();
     return () => {
       mounted = false;
+      sessionLoaderRef.current?.dispose();
     };
   }, []);
 
@@ -139,14 +151,30 @@ export function CoachingView() {
 
   async function viewCoachingSession(sessionId: string) {
     window.speechSynthesis?.cancel();
-    const result = await a3GetJson<CoachingSessionResponse>(`/api/learning/coaching/sessions/${encodeURIComponent(sessionId)}/`);
-    if (!result.success || !result.session) {
-      return;
-    }
-    setViewingSessionId(sessionId);
-    setMessages(result.session.messages.length ? result.session.messages : [buildWelcomeMessage(classroom)]);
-    setSessionUpdatedAt(result.session.updatedAt ?? '');
+    await sessionLoaderRef.current?.load(sessionId, (result) => {
+      if (!result.success || !result.session) return;
+      setViewingSessionId(sessionId);
+      setFeedbackSession({ id: sessionId, status: result.session.status ?? 'active' });
+      setMessages(result.session.messages.length ? result.session.messages : [buildWelcomeMessage(classroom)]);
+      setSessionUpdatedAt(result.session.updatedAt ?? '');
+    });
   }
+
+  const handleRealtimeSessionEnded = useCallback((sessionId: string) => {
+    commitRealtimeEndedSession(sessionLoaderRef.current, sessionId, (endedSessionId) => {
+      setViewingSessionId(endedSessionId);
+      setFeedbackSession({ id: endedSessionId, status: 'ended' });
+      setCoachingSessions((sessions) => {
+        const matched = sessions.some((session) => session.id === endedSessionId);
+        if (matched) {
+          return sessions.map((session) => (
+            session.id === endedSessionId ? { ...session, status: 'ended' } : session
+          ));
+        }
+        return [{ id: endedSessionId, status: 'ended', topicTitle: target?.title }, ...sessions];
+      });
+    });
+  }, [target?.title]);
 
   async function saveSourceFavorite(source: Citation) {
     const sourceId = source.id || source.title || source.location || 'source';
@@ -207,6 +235,7 @@ export function CoachingView() {
         </div>
         <RealtimeCoachingCall
           tutorPersonaId={tutorPersona.selectedPersonaId}
+          onSessionEnded={handleRealtimeSessionEnded}
           rightRail={(
             <div className="space-y-4">
         <CoachingHistoryCard sessions={coachingSessions} activeId={viewingSessionId} onOpen={viewCoachingSession} />
@@ -224,6 +253,9 @@ export function CoachingView() {
             </div>
           )}
         />
+        {isTutorFeedbackVisible(feedbackSession) && (
+          <TutorFeedbackPanel key={feedbackSession?.id} sessionId={feedbackSession?.id ?? ''} />
+        )}
         <CoachingTextWorkspace target={target} personaId={tutorPersona.selectedPersonaId} />
       </div>
     </div>
