@@ -7,6 +7,9 @@ from backend.apps.learning.models import (
     CoachingSessionStatus,
     TutorPersonaFeedback,
 )
+from backend.apps.system.admin_tutor_cache import (
+    schedule_admin_tutor_analytics_invalidation,
+)
 
 
 TUTOR_FEEDBACK_TAGS = (
@@ -50,6 +53,7 @@ def upsert_tutor_feedback(user, session_id, payload: dict) -> tuple[dict, bool]:
             "tags": tags,
         },
     )
+    schedule_admin_tutor_analytics_invalidation()
     return serialize_tutor_feedback(feedback), created
 
 

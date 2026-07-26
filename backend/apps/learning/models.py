@@ -243,6 +243,7 @@ class CoachingSession(models.Model):
         indexes = [
             models.Index(fields=["user", "status", "-updated_at"], name="idx_coach_user_status"),
             models.Index(fields=["knowledge_point", "-updated_at"], name="idx_coach_point_time"),
+            models.Index(fields=["started_at"], name="idx_coach_started_at"),
         ]
 
 

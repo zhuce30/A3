@@ -1,10 +1,11 @@
 import json
 from unittest.mock import patch
 
+from django.core.cache import cache
 from django.test import Client, TestCase, TransactionTestCase
 
 from backend.apps.learning import services as learning_services
-from backend.apps.accounts.models import User
+from backend.apps.accounts.models import User, UserRole
 from backend.apps.engagement.models import UserNotification
 from backend.apps.learning.models import (
     CoachingMessage,
@@ -181,6 +182,34 @@ class TutorPersonaFeedbackApiTests(TestCase):
         self.assertEqual(updated_payload["rating"], 5)
         self.assertEqual(updated_payload["tags"], ["讲解清楚", "帮助理解"])
         self.assertEqual(updated_payload["createdAt"], created_payload["createdAt"])
+
+    def test_create_and_update_feedback_invalidate_admin_tutor_analytics_cache(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        admin = User.objects.create_user(
+            phone="13800007103",
+            password="TestPassword123",
+            role=UserRole.ADMIN,
+        )
+        admin_client = Client()
+        admin_client.force_login(admin)
+        initial = admin_client.get("/api/admin/tutors/", {"range": "7d"})
+        self.assertIsNone(initial.json()["kpis"]["satisfaction"]["value"])
+        self.client.force_login(self.user)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            created = self.post_feedback({"rating": 2, "tags": []})
+
+        self.assertEqual(created.status_code, 201)
+        after_create = admin_client.get("/api/admin/tutors/", {"range": "7d"})
+        self.assertEqual(after_create.json()["kpis"]["satisfaction"]["value"], 2.0)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            updated = self.post_feedback({"rating": 5, "tags": []})
+
+        self.assertEqual(updated.status_code, 200)
+        after_update = admin_client.get("/api/admin/tutors/", {"range": "7d"})
+        self.assertEqual(after_update.json()["kpis"]["satisfaction"]["value"], 5.0)
 
     def test_get_returns_empty_then_existing_feedback(self):
         self.client.force_login(self.user)

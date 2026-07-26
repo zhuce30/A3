@@ -31,6 +31,9 @@ from backend.apps.learning.tutor_personas import (
     tutor_persona_configuration_fallback_used,
 )
 from backend.apps.profiles.models import LearnerProfile, LearningPace
+from backend.apps.system.admin_tutor_cache import (
+    schedule_admin_tutor_analytics_invalidation,
+)
 
 
 DEFAULT_COURSE_CODE = "OS-001"
@@ -2834,6 +2837,7 @@ def summarize_coaching_session(user, session_id) -> dict:
         action_url=next_action["href"],
         payload={"coachingSessionId": str(session.id), "summary": summary},
     )
+    schedule_admin_tutor_analytics_invalidation()
     session.refresh_from_db()
     return {"summary": summary, "session": _serialize_coaching_session_row(session)}
 
@@ -2950,6 +2954,7 @@ def append_coaching_messages(
         raw_preview=(latest_user_messages[-1].get("content") if latest_user_messages else ""),
         save=True,
     )
+    schedule_admin_tutor_analytics_invalidation()
     return {"session": persisted}
 
 
@@ -2961,6 +2966,7 @@ def end_coaching_session(user) -> dict:
     session.status = CoachingSessionStatus.ENDED
     session.ended_at = timezone.now()
     session.save(update_fields=["status", "ended_at", "updated_at"])
+    schedule_admin_tutor_analytics_invalidation()
     messages = list(session.messages.order_by("created_at", "id")[:60])
     return {"session": _serialize_coaching_session_payload(session, messages)}
 
@@ -3017,6 +3023,7 @@ def _import_legacy_coaching_session(profile: LearnerProfile) -> CoachingSession 
             message = _serialize_coaching_message(item)
             if message["content"]:
                 _create_coaching_message(session, message)
+    schedule_admin_tutor_analytics_invalidation()
     return session
 
 

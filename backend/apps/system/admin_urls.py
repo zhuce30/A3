@@ -9,6 +9,8 @@ urlpatterns = [
     path("users/<int:user_id>/", admin_views.user_detail),
     path("users/<int:user_id>/status/", admin_views.user_status),
     path("users/<int:user_id>/reveal-ip/", admin_views.reveal_ip),
+    path("tutors/", admin_views.tutors),
+    path("tutors/personas/<str:persona_id>/", admin_views.tutor_persona_detail),
     path("activity/", admin_views.activity),
     path("security-events/", admin_views.security_events),
     path("security-events/<int:event_id>/review/", admin_views.security_event_review),
