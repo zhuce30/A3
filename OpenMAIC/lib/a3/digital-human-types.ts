@@ -35,6 +35,11 @@ export type A3DigitalHumanSpeechCue = {
   weights?: Partial<Record<A3DigitalHumanSpeechViseme, number>>;
 };
 
+export type AvatarAssetSelection = {
+  assetId: string;
+  publicPath: string;
+};
+
 export type A3DigitalHumanAvatarProps = {
   state: A3DigitalHumanAvatarState;
   mode?: A3DigitalHumanAvatarMode;
@@ -45,4 +50,5 @@ export type A3DigitalHumanAvatarProps = {
   fallbackReason?: string;
   speechCues?: A3DigitalHumanSpeechCue[];
   renderSuspended?: boolean;
+  avatarAsset?: AvatarAssetSelection;
 };

@@ -35,6 +35,10 @@ type RealtimeCoachingCallProps = {
   onSessionEnded?: (sessionId: string) => void;
   rightRail?: ReactNode;
   tutorPersonaId?: string;
+  tutorAvatarAsset?: {
+    assetId: string;
+    publicPath: string;
+  };
 };
 
 const realtimeAvatarState: Record<Exclude<A3RealtimeStatus, 'live'>, A3DigitalHumanAvatarState> = {
@@ -63,7 +67,7 @@ export function mapRealtimeStatusToAvatarState(
   return resolveRealtimeAvatarState(status, assistantSpeaking);
 }
 
-export function RealtimeCoachingCall({ onSessionEnded, rightRail, tutorPersonaId = '' }: RealtimeCoachingCallProps = {}) {
+export function RealtimeCoachingCall({ onSessionEnded, rightRail, tutorPersonaId = '', tutorAvatarAsset }: RealtimeCoachingCallProps = {}) {
   const [activePanelTab, setActivePanelTab] = useState<PanelTabKey>('dialogue');
   const [avatarCovered, setAvatarCovered] = useState(false);
   const realtime = useRealtimeCoaching(tutorPersonaId);
@@ -208,6 +212,7 @@ export function RealtimeCoachingCall({ onSessionEnded, rightRail, tutorPersonaId
                   modelLabel={session?.model || '未连接'}
                   fallbackReason={fallbackReason}
                   renderSuspended={avatarCovered}
+                  avatarAsset={tutorAvatarAsset}
                 />
               </RealtimeMediaStage>
             </div>

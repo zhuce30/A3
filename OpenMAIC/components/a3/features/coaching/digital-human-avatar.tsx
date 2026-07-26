@@ -50,6 +50,7 @@ export function DigitalHumanAvatar({
   fallbackReason,
   speechCues,
   renderSuspended = false,
+  avatarAsset,
 }: A3DigitalHumanAvatarProps) {
   const displayState = stateCopy[state] || stateCopy.idle;
 
@@ -84,6 +85,7 @@ export function DigitalHumanAvatar({
         assistantSpeaking={assistantSpeaking}
         speechCues={speechCues}
         renderSuspended={renderSuspended}
+        avatarAsset={avatarAsset}
       />
 
       <div className="sr-only">

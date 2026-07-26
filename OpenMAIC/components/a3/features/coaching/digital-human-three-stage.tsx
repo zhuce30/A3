@@ -10,11 +10,17 @@ import type {
 } from '@/lib/a3/digital-human-types';
 import { cn } from '@/lib/utils';
 import {
+  A3_DEFAULT_AVATAR_ASSET,
+  AvatarAssetLoadCoordinator,
   advanceAvatarFrame,
+  disposeAvatarModelResources,
   resolveTeacherActionTransition,
+  resolveControlledAvatarAssetSelection,
   retainResourceUnlessDisposed,
   shouldStartAvatarAssetLoad,
   shouldRunAvatarAnimation,
+  type AvatarAssetSelection,
+  type AvatarLoadResult,
   type TeacherVrmActionKey,
 } from './digital-human-runtime';
 
@@ -74,6 +80,7 @@ type DigitalHumanThreeStageProps = {
   assistantSpeaking: boolean;
   speechCues?: A3DigitalHumanSpeechCue[];
   renderSuspended?: boolean;
+  avatarAsset?: AvatarAssetSelection;
 };
 
 type ActiveAvatarRenderer = 'vrm' | 'vrm_idle_animation' | 'primitive' | 'static_fallback';
@@ -85,6 +92,15 @@ type PrimitiveAvatar = {
   head: THREE.Mesh;
   mouth: THREE.Mesh;
   halo: THREE.Mesh;
+};
+
+type LoadedAvatarModel = {
+  vrm: VRM;
+  scene: THREE.Object3D;
+  mixer: THREE.AnimationMixer;
+  actions: Map<TeacherVrmActionKey, THREE.AnimationAction>;
+  listenerCleanups: Array<() => void>;
+  disposed: boolean;
 };
 
 type AvatarSignal = {
@@ -407,13 +423,7 @@ function resolveHaloColor(state: A3DigitalHumanAvatarState) {
 }
 
 function disposeObject(object: THREE.Object3D) {
-  object.traverse((item) => {
-    if (item instanceof THREE.Mesh) {
-      item.geometry.dispose();
-      const materials = Array.isArray(item.material) ? item.material : [item.material];
-      materials.forEach((material) => material.dispose());
-    }
-  });
+  disposeAvatarModelResources({ scene: object });
 }
 
 function updatePrimitiveAvatar(
@@ -603,9 +613,21 @@ export function DigitalHumanThreeStage({
   assistantSpeaking,
   speechCues = [],
   renderSuspended = false,
+  avatarAsset = A3_DEFAULT_AVATAR_ASSET,
 }: DigitalHumanThreeStageProps) {
+  const controlledAvatarAsset = resolveControlledAvatarAssetSelection(avatarAsset);
+  const canonicalAvatarAsset = controlledAvatarAsset.selection;
+  const canonicalAvatarAssetId = canonicalAvatarAsset.assetId;
+  const canonicalAvatarAssetPath = canonicalAvatarAsset.publicPath;
+  const canonicalAvatarFallbackUsed = controlledAvatarAsset.fallbackUsed;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const signalRef = useRef<AvatarSignal>({ state, audioLevel, assistantSpeaking, speechCues });
+  const avatarAssetRef = useRef<AvatarAssetSelection>(canonicalAvatarAsset);
+  const avatarAssetFallbackUsedRef = useRef(canonicalAvatarFallbackUsed);
+  const requestAvatarAssetRef = useRef<
+    (selection: AvatarAssetSelection, fallbackUsed: boolean) => void
+  >(() => undefined);
+  const avatarRequestVersionRef = useRef(0);
   const renderSuspendedRef = useRef(renderSuspended);
   const syncAnimationRef = useRef<() => void>(() => undefined);
   const [activeRenderer, setActiveRenderer] = useState<ActiveAvatarRenderer>('primitive');
@@ -613,6 +635,12 @@ export function DigitalHumanThreeStage({
   const [activeAction, setActiveAction] = useState<TeacherVrmActionKey>('idle');
   const [activeActionState, setActiveActionState] = useState<TeacherActionState>('pending');
   const [webglUnavailable, setWebglUnavailable] = useState(false);
+  const [avatarLoading, setAvatarLoading] = useState(true);
+  const [avatarLoadError, setAvatarLoadError] = useState('');
+  const [avatarLoadResult, setAvatarLoadResult] = useState<Pick<Extract<AvatarLoadResult, { status: 'active' }>, 'activeAssetId' | 'fallbackUsed'>>({
+    activeAssetId: '',
+    fallbackUsed: false,
+  });
   const normalizedLevel = clampAudioLevel(audioLevel);
   const mouthScale = assistantSpeaking ? 1 + normalizedLevel : 0.35;
 
@@ -626,6 +654,21 @@ export function DigitalHumanThreeStage({
   }, [renderSuspended]);
 
   useEffect(() => {
+    avatarAssetRef.current = {
+      assetId: canonicalAvatarAssetId,
+      publicPath: canonicalAvatarAssetPath,
+    };
+    avatarAssetFallbackUsedRef.current = canonicalAvatarFallbackUsed;
+  }, [canonicalAvatarAssetId, canonicalAvatarAssetPath, canonicalAvatarFallbackUsed]);
+
+  useEffect(() => {
+    requestAvatarAssetRef.current(
+      avatarAssetRef.current,
+      avatarAssetFallbackUsedRef.current,
+    );
+  }, [canonicalAvatarAssetId, canonicalAvatarAssetPath, canonicalAvatarFallbackUsed]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -635,8 +678,7 @@ export function DigitalHumanThreeStage({
     let activeMixer: THREE.AnimationMixer | null = null;
     let activeTeacherActionKey: TeacherVrmActionKey | null = null;
     let avatarLoadStarted = false;
-    const teacherActions = new Map<TeacherVrmActionKey, THREE.AnimationAction>();
-    let vrmUtils: typeof import('@pixiv/three-vrm').VRMUtils | null = null;
+    let teacherActions = new Map<TeacherVrmActionKey, THREE.AnimationAction>();
     setIdleAnimationState('pending');
     setActiveActionState('pending');
 
@@ -665,89 +707,139 @@ export function DigitalHumanThreeStage({
     const primitiveAvatar = createPrimitiveAvatar(signalRef.current);
     scene.add(primitiveAvatar.root);
 
-    async function loadVrmAvatar() {
+    async function loadVrmModel(selection: AvatarAssetSelection): Promise<LoadedAvatarModel> {
       const [{ GLTFLoader }, { VRMLoaderPlugin, VRMUtils }] = await Promise.all([
         import('three/examples/jsm/loaders/GLTFLoader.js'),
         import('@pixiv/three-vrm'),
       ]);
-      if (disposed) return;
-      vrmUtils = VRMUtils;
       const loader = new GLTFLoader();
       loader.register((parser) => new VRMLoaderPlugin(parser));
-      loader.load(
-        A3_DEFAULT_TEACHER_VRM_PATH,
-        async (gltf) => {
-          const loadedVrm = gltf.userData.vrm as VRM | undefined;
-          if (!loadedVrm) {
-            if (disposed) disposeObject(gltf.scene);
-            return;
-          }
-          const vrm = retainResourceUnlessDisposed(loadedVrm, disposed, (lateVrm) =>
-            VRMUtils.deepDispose(lateVrm.scene),
-          );
-          if (!vrm) return;
-          VRMUtils.rotateVRM0(vrm);
-          VRMUtils.removeUnnecessaryVertices(vrm.scene);
-          applyVrmTeacherRestPose(vrm);
-          warmUpVrmSpringBones(vrm);
-          primitiveAvatar.root.removeFromParent();
-          disposeObject(primitiveAvatar.root);
-          vrm.scene.position.copy(A3_VRM_CAMERA_PROFILE.modelPosition);
-          vrm.scene.scale.setScalar(A3_VRM_CAMERA_PROFILE.modelScale);
-          scene.add(vrm.scene);
-          activeVrm = vrm;
-          activeMixer = new THREE.AnimationMixer(vrm.scene);
-          setActiveRenderer('vrm');
-          const idleAction = await loadTeacherVrmAction(
-            vrm,
-            activeMixer,
+      const gltf = await loader.loadAsync(selection.publicPath);
+      const vrm = gltf.userData.vrm as VRM | undefined;
+      if (!vrm) {
+        disposeObject(gltf.scene);
+        throw new Error('VRM model data is missing');
+      }
+      VRMUtils.rotateVRM0(vrm);
+      VRMUtils.removeUnnecessaryVertices(vrm.scene);
+      applyVrmTeacherRestPose(vrm);
+      warmUpVrmSpringBones(vrm);
+      vrm.scene.position.copy(A3_VRM_CAMERA_PROFILE.modelPosition);
+      vrm.scene.scale.setScalar(A3_VRM_CAMERA_PROFILE.modelScale);
+      return {
+        vrm,
+        scene: vrm.scene,
+        mixer: new THREE.AnimationMixer(vrm.scene),
+        actions: new Map<TeacherVrmActionKey, THREE.AnimationAction>(),
+        listenerCleanups: [],
+        disposed: false,
+      };
+    }
+
+    function disposeVrmModel(model: LoadedAvatarModel) {
+      model.disposed = true;
+      if (activeVrm === model.vrm) {
+        activeVrm = null;
+        activeMixer = null;
+        activeTeacherActionKey = null;
+        teacherActions = new Map();
+        if (!primitiveAvatar.root.parent) scene.add(primitiveAvatar.root);
+        if (!disposed) setActiveRenderer('primitive');
+      }
+      disposeAvatarModelResources(model);
+    }
+
+    function loadTeacherActions(model: LoadedAvatarModel) {
+      const isDisposed = () => disposed || model.disposed || activeVrm !== model.vrm;
+      void loadTeacherVrmAction(model.vrm, model.mixer, 'idle', isDisposed)
+        .then((idleAction) => {
+          if (!idleAction || isDisposed()) return;
+          model.actions.set('idle', idleAction);
+          activeTeacherActionKey = crossFadeTeacherAction(
+            model.actions,
+            activeTeacherActionKey,
             'idle',
-            () => disposed,
-          ).catch(() => null);
-          if (disposed) {
-            if (idleAction) disposeTeacherAction(activeMixer, idleAction);
-            return;
-          }
-          if (idleAction) {
-            teacherActions.set('idle', idleAction);
-            activeTeacherActionKey = crossFadeTeacherAction(
-              teacherActions,
-              activeTeacherActionKey,
-              'idle',
-            );
-            setActiveAction('idle');
-            setActiveActionState('loaded');
-            setIdleAnimationState('loaded');
-            setActiveRenderer('vrm_idle_animation');
-          } else {
+          );
+          setActiveAction('idle');
+          setActiveActionState('loaded');
+          setIdleAnimationState('loaded');
+          setActiveRenderer('vrm_idle_animation');
+        })
+        .catch(() => {
+          if (!isDisposed()) {
             setActiveActionState('missing');
             setIdleAnimationState('missing');
           }
-          void Promise.all(
-            (['wait', 'explain', 'nod'] as TeacherVrmActionKey[]).map(async (actionKey) => {
-              const mixer = activeMixer as THREE.AnimationMixer;
-              const action = await loadTeacherVrmAction(
-                vrm,
-                mixer,
-                actionKey,
-                () => disposed,
-              ).catch(() => null);
-              if (!action) return;
-              const retainedAction = retainResourceUnlessDisposed(action, disposed, (lateAction) =>
-                disposeTeacherAction(mixer, lateAction),
-              );
-              if (retainedAction) teacherActions.set(actionKey, retainedAction);
-            }),
-          );
-        },
-        undefined,
-        () => {
-          if (!disposed) {
-            setActiveRenderer('primitive');
-            setIdleAnimationState('unavailable');
-          }
-        },
+        });
+      void Promise.all(
+        (['wait', 'explain', 'nod'] as TeacherVrmActionKey[]).map(async (actionKey) => {
+          const action = await loadTeacherVrmAction(
+            model.vrm,
+            model.mixer,
+            actionKey,
+            isDisposed,
+          ).catch(() => null);
+          if (action && !isDisposed()) model.actions.set(actionKey, action);
+        }),
       );
+    }
+
+    const assetCoordinator = new AvatarAssetLoadCoordinator<LoadedAvatarModel>({
+      load: loadVrmModel,
+      dispose: disposeVrmModel,
+      activate: (model) => {
+        primitiveAvatar.root.removeFromParent();
+        scene.add(model.scene);
+        activeVrm = model.vrm;
+        activeMixer = model.mixer;
+        activeTeacherActionKey = null;
+        teacherActions = model.actions;
+        setActiveRenderer('vrm');
+        loadTeacherActions(model);
+      },
+    });
+
+    async function selectAvatarAsset(
+      selection: AvatarAssetSelection,
+      selectionFallbackUsed: boolean,
+    ) {
+      if (assetCoordinator.isActiveSelection(selection)) {
+        setAvatarLoadResult({ activeAssetId: selection.assetId, fallbackUsed: selectionFallbackUsed });
+        setAvatarLoadError(
+          selectionFallbackUsed ? '导师形象加载失败，已切换为默认形象' : '',
+        );
+        return;
+      }
+      const requestVersion = avatarRequestVersionRef.current + 1;
+      avatarRequestVersionRef.current = requestVersion;
+      setAvatarLoading(true);
+      setAvatarLoadError('');
+      setIdleAnimationState('pending');
+      setActiveActionState('pending');
+      try {
+        const result = await assetCoordinator.select(selection);
+        if (
+          disposed ||
+          requestVersion !== avatarRequestVersionRef.current ||
+          result.status !== 'active'
+        ) return;
+        setAvatarLoadResult({
+          activeAssetId: result.activeAssetId,
+          fallbackUsed: selectionFallbackUsed || result.fallbackUsed,
+        });
+        setAvatarLoading(false);
+        if (selectionFallbackUsed || result.fallbackUsed) {
+          setAvatarLoadError('导师形象加载失败，已切换为默认形象');
+        }
+      } catch {
+        if (disposed || requestVersion !== avatarRequestVersionRef.current) return;
+        setAvatarLoadResult({ activeAssetId: '', fallbackUsed: true });
+        setAvatarLoading(false);
+        setAvatarLoadError('导师形象暂时无法加载');
+        setActiveRenderer('primitive');
+        setIdleAnimationState('unavailable');
+        setActiveActionState('unavailable');
+      }
     }
 
     const resize = () => {
@@ -813,12 +905,10 @@ export function DigitalHumanThreeStage({
         })
       ) {
         avatarLoadStarted = true;
-        void loadVrmAvatar().catch(() => {
-          if (!disposed) {
-            setActiveRenderer('primitive');
-            setIdleAnimationState('unavailable');
-          }
-        });
+        void selectAvatarAsset(
+          avatarAssetRef.current,
+          avatarAssetFallbackUsedRef.current,
+        );
       }
       if (!raf) {
         timer.reset();
@@ -826,6 +916,12 @@ export function DigitalHumanThreeStage({
       }
     };
     syncAnimationRef.current = syncAnimation;
+    requestAvatarAssetRef.current = (selection, fallbackUsed) => {
+      avatarAssetRef.current = selection;
+      avatarAssetFallbackUsedRef.current = fallbackUsed;
+      avatarLoadStarted = false;
+      syncAnimation();
+    };
     const handleVisibilityChange = () => {
       documentVisible = document.visibilityState === 'visible';
       syncAnimation();
@@ -847,20 +943,15 @@ export function DigitalHumanThreeStage({
 
     return () => {
       disposed = true;
+      avatarRequestVersionRef.current += 1;
       syncAnimationRef.current = () => undefined;
+      requestAvatarAssetRef.current = () => undefined;
       stopAnimation();
       intersectionObserver?.disconnect();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('resize', resize);
       timer.dispose();
-      if (activeMixer) {
-        const mixer = activeMixer;
-        mixer.stopAllAction();
-        teacherActions.forEach((action) => disposeTeacherAction(mixer, action));
-        teacherActions.clear();
-        mixer.uncacheRoot(mixer.getRoot());
-      }
-      if (activeVrm && vrmUtils) vrmUtils.deepDispose(activeVrm.scene);
+      assetCoordinator.dispose();
       disposeObject(primitiveAvatar.root);
       renderer.dispose();
     };
@@ -870,7 +961,9 @@ export function DigitalHumanThreeStage({
     <div
       data-testid="a3-digital-human-three-stage"
       data-avatar-renderer={activeRenderer}
-      data-avatar-asset={A3_DEFAULT_TEACHER_VRM_PATH}
+      data-avatar-asset={canonicalAvatarAssetPath}
+      data-avatar-active-asset-id={avatarLoadResult.activeAssetId}
+      data-avatar-fallback-used={avatarLoadResult.fallbackUsed}
       data-avatar-idle-animation={A3_DEFAULT_TEACHER_IDLE_VRMA_PATH}
       data-avatar-idle-animation-state={idleAnimationState}
       data-avatar-action={activeAction}
@@ -899,6 +992,27 @@ export function DigitalHumanThreeStage({
           aria-label="3D 数字助教"
         />
       )}
+      {avatarLoading && !webglUnavailable ? (
+        <div
+          data-testid="a3-avatar-loading-overlay"
+          role="status"
+          aria-label="导师形象加载中"
+          className="pointer-events-none absolute inset-0 flex items-end justify-center pb-16"
+        >
+          <span className="rounded-full border border-white/20 bg-slate-950/55 px-3 py-1.5 text-xs text-white backdrop-blur-lg">
+            导师形象加载中
+          </span>
+        </div>
+      ) : null}
+      {avatarLoadError ? (
+        <div
+          data-testid="a3-avatar-load-error"
+          role="alert"
+          className="pointer-events-none absolute inset-x-4 bottom-4 z-20 rounded-lg border border-amber-200/40 bg-amber-950/70 px-3 py-2 text-xs text-amber-50 backdrop-blur-lg"
+        >
+          {avatarLoadError}
+        </div>
+      ) : null}
       <div className="pointer-events-none absolute left-4 top-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-slate-950/55 px-3 py-1.5 text-xs text-slate-200 shadow-lg shadow-slate-950/20">
         <span
           className={cn(

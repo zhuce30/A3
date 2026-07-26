@@ -106,7 +106,7 @@ export function CoachingView() {
   const [quizError, setQuizError] = useState('');
   const [lastQuizAnswer, setLastQuizAnswer] = useState('');
   const sessionLoaderRef = useRef<ReturnType<typeof createCoachingSessionLoader<CoachingSessionResponse>> | null>(null);
-  if (!sessionLoaderRef.current) {
+  if (sessionLoaderRef.current == null) {
     sessionLoaderRef.current = createCoachingSessionLoader((sessionId) => (
       a3GetJson<CoachingSessionResponse>(`/api/learning/coaching/sessions/${encodeURIComponent(sessionId)}/`)
     ));
@@ -235,6 +235,10 @@ export function CoachingView() {
         </div>
         <RealtimeCoachingCall
           tutorPersonaId={tutorPersona.selectedPersonaId}
+          tutorAvatarAsset={tutorPersona.selectedPersona ? {
+            assetId: tutorPersona.selectedPersona.avatarAssetId,
+            publicPath: tutorPersona.selectedPersona.avatarPublicPath,
+          } : undefined}
           onSessionEnded={handleRealtimeSessionEnded}
           rightRail={(
             <div className="space-y-4">
