@@ -9,7 +9,7 @@ export type A3AdminTaskKind =
   | 'knowledge_index';
 
 export type A3AdminPagination = { page: number; pageSize: number; total: number };
-export type A3AdminApiResponse = { success: boolean; error?: string };
+export type A3AdminApiResponse = { success: boolean; error?: string; errorCode?: string; status?: number };
 export type A3AdminPersonRef = { id: string; displayName: string };
 
 export type A3JsonValue = string | number | boolean | null | A3JsonValue[] | A3JsonObject;
@@ -334,3 +334,97 @@ export type A3AdminAuditLog = {
   createdAt: string;
 };
 export type A3AdminAuditLogsResponse = A3AdminApiResponse & { items: A3AdminAuditLog[]; pagination: A3AdminPagination };
+
+export type A3AdminTutorRange = '7d' | '30d' | '90d';
+export type A3AdminTutorDataStatus =
+  | 'collected'
+  | 'partial'
+  | 'not_collected'
+  | 'insufficient_sample';
+
+export type A3TutorMetric<T> = {
+  value: T | null;
+  dataStatus: A3AdminTutorDataStatus;
+  sampleCount?: number;
+  numerator?: number;
+  denominator?: number;
+  evidenceCount?: number;
+};
+
+export type A3AdminTutorPersona = {
+  id: string;
+  name: string;
+  shortDescription: string;
+  teachingStyle: string;
+  allowedWorkflows: string[];
+  schemaVersion: string;
+  enabled: boolean | null;
+  avatarAssetId: string | null;
+  voicePreviewEnabled: boolean | null;
+  configurationDataStatus: 'collected' | 'not_collected';
+  updatedAt: string | null;
+};
+
+export type A3AdminTutorAsset = {
+  assetId: string;
+  displayName: string;
+  fileSizeBytes: number;
+  status: string;
+  isDefault: boolean;
+  licenseComplete: boolean | null;
+};
+
+export type A3AdminTutorProviderStatus = {
+  id: string;
+  status: A3AdminServiceStatus | string;
+  dataStatus: A3AdminTutorDataStatus;
+};
+
+export type A3AdminTutorMetricRow = A3TutorMetric<number> & {
+  metric: string;
+  values?: Array<{ personaId: string; sessionCount: number }>;
+};
+
+export type A3AdminTutorAssessmentAssociation = {
+  averageDelta: number | null;
+  positiveCount: number;
+  flatCount: number;
+  negativeCount: number;
+  pairCount: number;
+  coverage: A3TutorMetric<number>;
+  observedAssociation: boolean;
+  note: string;
+  dataStatus: A3AdminTutorDataStatus;
+};
+
+export type A3AdminTutorsResponse = A3AdminApiResponse & {
+  range: A3AdminTutorRange;
+  dataStatus: A3AdminTutorDataStatus;
+  kpis: {
+    enabledPersonaCount: number;
+    sessionCount: number;
+    verifiedResponseRate: A3TutorMetric<number>;
+    satisfaction: A3TutorMetric<number>;
+  };
+  personas: A3AdminTutorPersona[];
+  assets: A3AdminTutorAsset[];
+  providerStatus: A3AdminTutorProviderStatus[];
+  analytics: {
+    adoption: Array<A3TutorMetric<number> & { date: string }>;
+    sessionQuality: A3AdminTutorMetricRow[];
+    feedback: A3AdminTutorMetricRow[];
+    assessmentAssociation: A3AdminTutorAssessmentAssociation;
+  };
+};
+
+export type A3AdminTutorUpdateRequest = {
+  enabled?: boolean;
+  avatarAssetId?: string;
+  voicePreviewEnabled?: boolean;
+  reason: string;
+  expectedUpdatedAt: string;
+};
+
+export type A3AdminTutorUpdateResponse = A3AdminApiResponse & {
+  persona?: A3AdminTutorPersona;
+};

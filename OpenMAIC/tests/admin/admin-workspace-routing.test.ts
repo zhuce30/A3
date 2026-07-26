@@ -192,7 +192,7 @@ describe('A3 authorization 403 handling', () => {
       { isActive: false },
     );
 
-    expect(result).toEqual({ success: false, error: '当前账号无系统管理权限' });
+    expect(result).toEqual({ success: false, error: '当前账号无系统管理权限', status: 403 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,

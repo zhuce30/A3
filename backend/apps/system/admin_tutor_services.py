@@ -49,9 +49,16 @@ AUDIT_FIELDS = ("enabled", "avatarAssetId", "voicePreviewEnabled")
 
 
 class AdminTutorError(ValueError):
-    def __init__(self, message: str, *, status_code: int = 400):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 400,
+        error_code: str | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
+        self.error_code = error_code
 
 
 def list_admin_tutors(range_value: Any = "30d") -> dict[str, Any]:
@@ -104,7 +111,11 @@ def update_tutor_persona(
         if target is None:
             raise AdminTutorError("导师人格配置不存在", status_code=409)
         if target.updated_at != expected_updated_at:
-            raise AdminTutorError("导师人格配置已被其他管理员更新，请刷新后重试", status_code=409)
+            raise AdminTutorError(
+                "导师人格配置已被其他管理员更新，请刷新后重试",
+                status_code=409,
+                error_code="stale_update",
+            )
 
         assets = list(TutorAvatarAsset.objects.select_for_update().all())
         assets_by_id = {asset.pk: asset for asset in assets}
@@ -113,7 +124,11 @@ def update_tutor_persona(
             and _is_usable_avatar_asset(asset)
             for asset in assets
         ):
-            raise AdminTutorError("至少需要保留一个可用的默认导师资产", status_code=409)
+            raise AdminTutorError(
+                "至少需要保留一个可用的默认导师资产",
+                status_code=409,
+                error_code="default_asset_required",
+            )
 
         selected_asset = assets_by_id.get(target.avatar_asset_id)
         if "avatarAssetId" in changes:
@@ -140,7 +155,11 @@ def update_tutor_persona(
             )
             for row in configurations
         ):
-            raise AdminTutorError("不能停用最后一个可用导师人格", status_code=409)
+            raise AdminTutorError(
+                "不能停用最后一个可用导师人格",
+                status_code=409,
+                error_code="last_enabled_persona",
+            )
 
         before = _configuration_state(target)
         target.enabled = next_enabled

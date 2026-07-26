@@ -1,4 +1,4 @@
-import { a3GetJson, a3PostJson } from './api-client';
+import { a3GetJson, a3PatchJson, a3PostJson } from './api-client';
 import type {
   A3AdminAgentRunDetail,
   A3AdminAgentRunsResponse,
@@ -20,6 +20,10 @@ import type {
   A3AdminTask,
   A3AdminTaskKind,
   A3AdminTasksResponse,
+  A3AdminTutorRange,
+  A3AdminTutorsResponse,
+  A3AdminTutorUpdateRequest,
+  A3AdminTutorUpdateResponse,
   A3AdminUser,
   A3AdminUsersResponse,
 } from './admin-types';
@@ -231,4 +235,21 @@ export function getA3AdminAuditLogs(
     params,
   );
   return a3GetJson<A3AdminAuditLogsResponse>(`/api/admin/audit-logs/?${query}`);
+}
+
+export function getA3AdminTutors(range: A3AdminTutorRange, options: { signal?: AbortSignal } = {}) {
+  return a3GetJson<A3AdminTutorsResponse>(`/api/admin/tutors/?range=${range}`, options);
+}
+
+export function updateA3AdminTutor(personaId: string, payload: A3AdminTutorUpdateRequest) {
+  const expectedUpdatedAt = payload.expectedUpdatedAt.trim();
+  if (!expectedUpdatedAt) throw new Error('请先刷新导师配置后再操作');
+  return a3PatchJson<A3AdminTutorUpdateResponse>(
+    `/api/admin/tutors/personas/${detailPathPart(personaId)}/`,
+    {
+      ...payload,
+      reason: requireReason(payload.reason),
+      expectedUpdatedAt,
+    },
+  );
 }

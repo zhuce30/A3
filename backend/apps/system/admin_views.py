@@ -41,6 +41,13 @@ from backend.apps.system.models import AdminAuditLog, SecurityEvent
 from backend.utils.http import json_body
 
 
+def _admin_tutor_error_response(exc: AdminTutorError) -> JsonResponse:
+    payload = {"success": False, "error": str(exc)}
+    if exc.error_code:
+        payload["errorCode"] = exc.error_code
+    return JsonResponse(payload, status=exc.status_code)
+
+
 User = get_user_model()
 
 
@@ -148,7 +155,7 @@ def tutors(request):
     try:
         payload = list_admin_tutors(request.GET.get("range", "30d"))
     except AdminTutorError as exc:
-        return JsonResponse({"success": False, "error": str(exc)}, status=exc.status_code)
+        return _admin_tutor_error_response(exc)
     return JsonResponse({"success": True, **payload})
 
 
@@ -169,7 +176,7 @@ def tutor_persona_detail(request, persona_id: str):
             actor_ip=get_client_ip(request) or None,
         )
     except AdminTutorError as exc:
-        return JsonResponse({"success": False, "error": str(exc)}, status=exc.status_code)
+        return _admin_tutor_error_response(exc)
     return JsonResponse({"success": True, **payload})
 
 

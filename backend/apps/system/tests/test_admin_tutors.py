@@ -1007,6 +1007,7 @@ class AdminTutorApiTests(TestCase):
         self.assertNotEqual(first.json()["persona"]["updatedAt"], persona["updatedAt"])
         self.assertEqual(stale.status_code, 409)
         self.assertIn("刷新", stale.json()["error"])
+        self.assertEqual(stale.json()["errorCode"], "stale_update")
         configuration = TutorPersonaConfiguration.objects.get(persona_id="structured-teacher")
         self.assertFalse(configuration.voice_preview_enabled)
         self.assertEqual(AdminAuditLog.objects.filter(action="tutor.persona.update").count(), 1)
@@ -1098,6 +1099,8 @@ class AdminTutorApiTests(TestCase):
         response = self.patch_persona(enabled=False, reason="maintenance")
 
         self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json().get("errorCode"), "last_enabled_persona")
+        self.assertNotEqual(response.json().get("errorCode"), "stale_update")
         self.assertTrue(TutorPersonaConfiguration.objects.get(persona_id="structured-teacher").enabled)
         self.assertFalse(AdminAuditLog.objects.filter(action="tutor.persona.update").exists())
 
@@ -1204,6 +1207,8 @@ class AdminTutorApiTests(TestCase):
         response = self.patch_persona(voicePreviewEnabled=False, reason="maintenance")
 
         self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json().get("errorCode"), "default_asset_required")
+        self.assertNotEqual(response.json().get("errorCode"), "stale_update")
         self.assertTrue(
             TutorPersonaConfiguration.objects.get(persona_id="structured-teacher").voice_preview_enabled
         )
