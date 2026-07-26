@@ -1,4 +1,6 @@
 import type { A3ResourcePackV2Citation } from './recommendation-types';
+import type { A3TutorPersona } from './tutor-persona-types';
+import type { A3ClassroomTutorContext } from '@/lib/types/stage';
 
 type BridgeProfile = Record<string, unknown>;
 
@@ -17,6 +19,7 @@ export type OpenMAICClassroomJobResult = {
     scenesCount?: number;
   };
   error?: string;
+  a3Context?: A3ClassroomTutorContext;
 };
 
 export type A3OpenMAICArtifactPayload = {
@@ -29,6 +32,8 @@ export type A3OpenMAICArtifactPayload = {
   provider: 'openmaic-generate-classroom';
   elapsedMs: number;
   degradedReason: string;
+  tutorPersona?: A3TutorPersona;
+  fallbackUsed?: boolean;
 };
 
 export type OpenMAICVideoBridgeInput = {
@@ -149,7 +154,17 @@ export function buildA3OpenMAICArtifactPayload(
     provider: 'openmaic-generate-classroom',
     elapsedMs,
     degradedReason: succeeded ? '' : (job.error || ''),
+    ...(job.a3Context
+      ? {
+          tutorPersona: cloneTutorPersona(job.a3Context.tutorPersona),
+          fallbackUsed: job.a3Context.fallbackUsed,
+        }
+      : {}),
   };
+}
+
+function cloneTutorPersona(persona: A3TutorPersona): A3TutorPersona {
+  return { ...persona, allowedWorkflows: [...persona.allowedWorkflows] };
 }
 
 export function buildA3OpenMAICVideoPayload(

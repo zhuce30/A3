@@ -33,6 +33,47 @@ _PUBLIC_PERSONA_FIELDS = (
 )
 
 
+def normalize_public_tutor_persona_snapshot(value) -> dict:
+    if not isinstance(value, dict) or set(value) != set(_PUBLIC_PERSONA_FIELDS):
+        raise ValueError("tutorPersona 只能包含公开字段")
+    persona_id = value.get("id")
+    if persona_id not in _TUTOR_PERSONAS:
+        raise ValueError("不支持该辅导风格")
+    catalog_persona = _TUTOR_PERSONAS[persona_id]
+    string_fields = (
+        "name",
+        "shortDescription",
+        "teachingStyle",
+        "avatarAssetId",
+        "avatarPublicPath",
+        "voiceProfileId",
+        "schemaVersion",
+    )
+    if any(not isinstance(value.get(field), str) or not value[field].strip() for field in string_fields):
+        raise ValueError("tutorPersona 公开字段无效")
+    if value["schemaVersion"] != TUTOR_PERSONA_SCHEMA_VERSION:
+        raise ValueError("tutorPersona schemaVersion 无效")
+    for field in ("name", "shortDescription", "teachingStyle", "voiceProfileId"):
+        if value[field] != catalog_persona[field]:
+            raise ValueError(f"tutorPersona {field} 不在白名单中")
+    avatar_asset_id = value["avatarAssetId"]
+    avatar_public_path = value["avatarPublicPath"]
+    if not avatar_asset_id.replace("-", "").replace("_", "").isalnum():
+        raise ValueError("tutorPersona avatarAssetId 无效")
+    if not avatar_public_path.startswith("/a3/assets/teacher-avatar/") or not avatar_public_path.endswith(".vrm"):
+        raise ValueError("tutorPersona avatarPublicPath 无效")
+    if not isinstance(value.get("voicePreviewEnabled"), bool):
+        raise ValueError("tutorPersona voicePreviewEnabled 无效")
+    workflows = value.get("allowedWorkflows")
+    if not isinstance(workflows, list) or not workflows or any(not isinstance(item, str) for item in workflows):
+        raise ValueError("tutorPersona allowedWorkflows 无效")
+    if "classroom" not in workflows:
+        raise ValueError("当前辅导风格暂不可用于课堂")
+    if any(item not in catalog_persona["allowedWorkflows"] for item in workflows):
+        raise ValueError("tutorPersona allowedWorkflows 不在白名单中")
+    return {field: deepcopy(value[field]) for field in _PUBLIC_PERSONA_FIELDS}
+
+
 _TUTOR_PERSONAS = {
     "structured-teacher": {
         "id": "structured-teacher",

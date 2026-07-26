@@ -5,9 +5,9 @@ from django.views.decorators.http import require_http_methods
 
 from backend.apps.learning.tutor_personas import (
     TutorPersonaUnavailableError,
-    get_user_tutor_preference,
     list_public_tutor_personas,
     public_tutor_persona,
+    resolve_user_tutor_preference,
     resolve_tutor_persona,
     save_user_tutor_preference,
 )
@@ -54,13 +54,14 @@ def tutor_preference(request):
 
     try:
         if request.method == "GET":
-            preference = get_user_tutor_preference(request.user)
+            preference, fallback_used = resolve_user_tutor_preference(request.user)
             return JsonResponse(
                 {
                     "success": True,
                     "personas": list_public_tutor_personas(),
                     "preference": preference,
                     "selectedPersona": public_tutor_persona(preference["personaId"]),
+                    "fallbackUsed": fallback_used,
                 }
             )
 
@@ -72,12 +73,14 @@ def tutor_preference(request):
             raise ValueError("请选择有效的辅导风格")
         if resolve_tutor_persona(persona_id) is None:
             raise ValueError("不支持该辅导风格")
-        preference = save_user_tutor_preference(request.user, persona_id.strip())
+        save_user_tutor_preference(request.user, persona_id.strip())
+        preference, fallback_used = resolve_user_tutor_preference(request.user)
         return JsonResponse(
             {
                 "success": True,
                 "preference": preference,
                 "selectedPersona": public_tutor_persona(preference["personaId"]),
+                "fallbackUsed": fallback_used,
             }
         )
     except TutorPersonaUnavailableError as exc:

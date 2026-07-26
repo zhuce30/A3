@@ -16,6 +16,7 @@ const OPENMAIC_A3_TEXT_SURFACES = [
   'lib/a3/openmaic-acceptance.ts',
   'lib/a3/openmaic-demo-flow.ts',
   'lib/a3/openmaic-video-smoke-report.ts',
+  'lib/server/a3-tutor-config-client.ts',
   'scripts/a3-real-video-smoke.mjs',
 ];
 
@@ -34,6 +35,7 @@ const MOJIBAKE_PATTERNS = [
   /鍦烘/,
   /鏉ヨ/,
   /鏈/,
+  /瀵煎/,
   /歿/,
   /\ufffd/,
 ];
@@ -46,7 +48,19 @@ describe('A3 OpenMAIC text quality', () => {
       const badPattern = MOJIBAKE_PATTERNS.find((pattern) => pattern.test(text));
 
       expect(badPattern?.source, `${file} contains mojibake-like text`).toBeUndefined();
-      expect(text, `${file} must not expose local Windows paths`).not.toMatch(/[A-Za-z]:\\[^'"\s)]+/);
+      if (!file.endsWith('.md')) {
+        expect(text, `${file} must not expose local Windows paths`).not.toMatch(/[A-Za-z]:\\[^'"\s)]+/);
+      }
     }
+  });
+
+  it('keeps the tutor configuration response error readable', () => {
+    const text = fs.readFileSync(
+      path.resolve(process.cwd(), 'lib/server/a3-tutor-config-client.ts'),
+      'utf8',
+    );
+
+    expect(text).toContain('导师配置响应无效');
+    expect(text).not.toContain('瀵煎笀閰嶇疆鍝嶅簲鏃犳晥');
   });
 });

@@ -4,11 +4,12 @@ export type A3TutorPersonaRuntime = {
   persona: A3TutorPersona;
   openaiVoice: string;
   dashscopeVoice: string;
+  teachingDirective: string;
   fallbackUsed: boolean;
   instructions: (targetTitle: string) => string;
 };
 
-type RuntimePolicy = Omit<A3TutorPersonaRuntime, 'fallbackUsed' | 'instructions'> & {
+type RuntimePolicy = Omit<A3TutorPersonaRuntime, 'fallbackUsed' | 'instructions' | 'teachingDirective'> & {
   strategyInstruction: string;
 };
 
@@ -49,9 +50,14 @@ export function resolveA3TutorPersonaRuntime(personaId: string | null | undefine
     persona: clonePersona(policy.persona),
     openaiVoice: policy.openaiVoice,
     dashscopeVoice: policy.dashscopeVoice,
+    teachingDirective: policy.strategyInstruction,
     fallbackUsed,
     instructions: (targetTitle: string) => buildInstructions(targetTitle, policy.strategyInstruction),
   };
+}
+
+export function isA3TutorPersonaId(value: unknown): value is A3TutorPersonaId {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(RUNTIME_POLICIES, value);
 }
 
 export function toPublicTutorPersona(runtime: A3TutorPersonaRuntime): A3TutorPersona {

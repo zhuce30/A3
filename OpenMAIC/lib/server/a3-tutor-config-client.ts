@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import Redis, { type RedisOptions } from 'ioredis';
 
-import type { A3TutorPersonaId } from '@/lib/a3/tutor-persona-types';
+import type { A3TutorPersona, A3TutorPersonaId } from '@/lib/a3/tutor-persona-types';
 import { fetchA3DjangoJson } from '@/lib/server/a3-django-api';
 
 type TutorPreviewPersona = {
@@ -12,6 +12,24 @@ type TutorPreviewPersona = {
 type TutorPreferenceResponse = {
   personas?: TutorPreviewPersona[];
 };
+
+type AuthenticatedTutorPreferenceResponse = {
+  selectedPersona?: unknown;
+  fallbackUsed?: unknown;
+};
+
+const PUBLIC_PERSONA_FIELDS = new Set([
+  'id',
+  'name',
+  'shortDescription',
+  'teachingStyle',
+  'avatarAssetId',
+  'avatarPublicPath',
+  'voiceProfileId',
+  'voicePreviewEnabled',
+  'allowedWorkflows',
+  'schemaVersion',
+]);
 
 const PERSONA_IDS = new Set<A3TutorPersonaId>([
   'structured-teacher',
@@ -39,6 +57,79 @@ export class TutorVoicePreviewRequestError extends Error {
     super(message);
     this.name = 'TutorVoicePreviewRequestError';
   }
+}
+
+export class A3TutorConfigRequestError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'A3TutorConfigRequestError';
+  }
+}
+
+export async function fetchAuthenticatedA3ClassroomTutor(
+  cookieHeader: string | null,
+): Promise<{ tutorPersona: A3TutorPersona; fallbackUsed: boolean }> {
+  if (!cookieHeader) throw new A3TutorConfigRequestError(401, '请先登录');
+  const response = await fetchA3DjangoJson<AuthenticatedTutorPreferenceResponse>(
+    '/api/profiles/tutor-preference/',
+    cookieHeader,
+  );
+  if (!response.success) {
+    const message = response.error || '导师配置暂时不可用';
+    const status = message === '请先登录' ? 401 : message === '当前没有可用的辅导风格' ? 503 : 502;
+    throw new A3TutorConfigRequestError(status, message);
+  }
+  if (typeof response.fallbackUsed !== 'boolean') {
+    throw new A3TutorConfigRequestError(502, '导师配置响应无效');
+  }
+  const tutorPersona = parsePublicClassroomTutorPersona(response.selectedPersona);
+  return {
+    tutorPersona,
+    fallbackUsed: response.fallbackUsed,
+  };
+}
+
+function parsePublicClassroomTutorPersona(value: unknown): A3TutorPersona {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new A3TutorConfigRequestError(502, '导师配置响应无效');
+  }
+  const row = value as Record<string, unknown>;
+  if (Object.keys(row).some((field) => !PUBLIC_PERSONA_FIELDS.has(field))) {
+    throw new A3TutorConfigRequestError(502, '导师配置响应包含非公开字段');
+  }
+  if (!PERSONA_IDS.has(row.id as A3TutorPersonaId)) {
+    throw new A3TutorConfigRequestError(502, '导师配置响应无效');
+  }
+  const allowedWorkflows = Array.isArray(row.allowedWorkflows)
+    ? row.allowedWorkflows.filter((item): item is string => typeof item === 'string')
+    : [];
+  if (!allowedWorkflows.includes('classroom')) {
+    throw new A3TutorConfigRequestError(503, '当前辅导风格暂不可用于课堂');
+  }
+  const stringFields = [
+    'name',
+    'shortDescription',
+    'teachingStyle',
+    'avatarAssetId',
+    'avatarPublicPath',
+    'voiceProfileId',
+    'schemaVersion',
+  ] as const;
+  if (stringFields.some((field) => typeof row[field] !== 'string')) {
+    throw new A3TutorConfigRequestError(502, '导师配置响应无效');
+  }
+  return {
+    id: row.id as A3TutorPersonaId,
+    name: row.name as string,
+    shortDescription: row.shortDescription as string,
+    teachingStyle: row.teachingStyle as string,
+    avatarAssetId: row.avatarAssetId as string,
+    avatarPublicPath: row.avatarPublicPath as string,
+    voiceProfileId: row.voiceProfileId as string,
+    voicePreviewEnabled: row.voicePreviewEnabled !== false,
+    allowedWorkflows,
+    schemaVersion: row.schemaVersion as string,
+  };
 }
 
 export async function validateTutorVoicePreviewPersona(

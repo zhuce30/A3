@@ -101,6 +101,7 @@ class TutorPreferenceTests(TestCase):
         self.assertEqual(data["preference"]["personaId"], "structured-teacher")
         self.assertEqual(data["preference"]["source"], "default")
         self.assertEqual(data["selectedPersona"]["id"], "structured-teacher")
+        self.assertFalse(data["fallbackUsed"])
 
         serialized = json.dumps(data, ensure_ascii=False)
         self.assertNotIn("systemInstruction", serialized)
@@ -138,6 +139,7 @@ class TutorPreferenceTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json()["preference"]["personaId"], "structured-teacher")
         self.assertEqual(response.json()["preference"]["source"], "runtime_fallback")
+        self.assertTrue(response.json()["fallbackUsed"])
         profile.refresh_from_db()
         self.assertEqual(profile.extra_profile["tutorPreference"]["personaId"], "practice-coach")
 
@@ -275,6 +277,7 @@ class TutorPreferenceTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(len(response.json()["personas"]), 4)
         self.assertEqual(response.json()["preference"]["source"], "default")
+        self.assertTrue(response.json()["fallbackUsed"])
         self.assertEqual(
             response.json()["selectedPersona"]["avatarAssetId"],
             "teacher-default-v1",
@@ -448,6 +451,7 @@ class TutorPreferenceTests(TestCase):
         self.assertTrue(data["success"])
         self.assertEqual(data["preference"]["personaId"], "practice-coach")
         self.assertEqual(data["preference"]["source"], "saved")
+        self.assertFalse(data["fallbackUsed"])
         self.assertEqual(data["preference"]["schemaVersion"], "a3.tutor-preference.v1")
         self.assertTrue(data["preference"]["updatedAt"])
         self.assertEqual(data["selectedPersona"]["id"], "practice-coach")

@@ -166,6 +166,8 @@ export type A3OpenMAICClassroomArtifact = {
   elapsedMs: number;
   degradedReason?: string;
   createdAt?: string;
+  tutorPersona?: import('./tutor-persona-types').A3TutorPersona;
+  fallbackUsed?: boolean;
 };
 
 export type A3OpenMAICVideoArtifact = {

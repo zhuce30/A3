@@ -18,6 +18,12 @@ from backend.apps.learning.effect_metrics import build_learning_effect_metrics
 from backend.apps.learning.models import ResourcePackLog
 from backend.apps.learning.plan_policy import apply_plan_adjustment_to_study_plan, build_plan_adjustment_from_analysis
 from backend.apps.learning.services import classroom_context, current_study_plan, generate_study_plan
+from backend.apps.learning.tutor_personas import (
+    normalize_public_tutor_persona_snapshot,
+    public_tutor_persona,
+    resolve_tutor_persona,
+    resolve_user_tutor_preference,
+)
 from backend.apps.profiles.models import LearnerProfile
 from backend.domains.knowledge_base.retriever import search_knowledge_base
 
@@ -940,6 +946,8 @@ class OpenMAICClassroomBridgeAgent(BaseAgent):
             "provider": str(payload.get("provider") or "openmaic-generate-classroom"),
             "elapsedMs": _safe_int(payload.get("elapsedMs"), 0),
             "degradedReason": str(payload.get("degradedReason") or ""),
+            "tutorPersona": normalize_public_tutor_persona_snapshot(payload.get("tutorPersona")),
+            "fallbackUsed": bool(payload.get("fallbackUsed")),
             "createdAt": timezone.now().isoformat(),
         }
         return AgentResult(
@@ -1200,10 +1208,55 @@ def record_openmaic_classroom_artifact(user, pack_id: str, payload: dict) -> dic
     status = str(payload.get("status") or "queued").strip().lower()
     if status not in {"queued", "running", "succeeded", "failed"}:
         raise ValueError("status 必须是 queued/running/succeeded/failed")
-    result = run_openmaic_classroom_bridge_workflow(user, {"packId": pack_id, **payload, "jobId": job_id, "status": status})
+    existing = OpenMAICArtifact.objects.filter(
+        user=user,
+        resource_pack_id=str(pack_id),
+        artifact_type="openmaic_classroom",
+        job_id=job_id,
+    ).first()
+    existing_payload = dict(existing.payload or {}) if existing else {}
+    if existing_payload.get("tutorPersona") is not None:
+        generation_snapshot = normalize_public_tutor_persona_snapshot(existing_payload["tutorPersona"])
+        fallback_used = bool(existing_payload.get("fallbackUsed"))
+        if payload.get("tutorPersona") is not None:
+            incoming_snapshot = normalize_public_tutor_persona_snapshot(payload["tutorPersona"])
+            if incoming_snapshot != generation_snapshot:
+                raise ValueError("后续状态不能改写 tutorPersona")
+        if "fallbackUsed" in payload:
+            if not isinstance(payload["fallbackUsed"], bool) or payload["fallbackUsed"] != fallback_used:
+                raise ValueError("后续状态不能改写 fallbackUsed")
+    else:
+        generation_snapshot, fallback_used = _canonical_openmaic_tutor_context(user)
+        if payload.get("tutorPersona") is None:
+            raise ValueError("tutorPersona 不能为空")
+        incoming_snapshot = normalize_public_tutor_persona_snapshot(payload["tutorPersona"])
+        if incoming_snapshot != generation_snapshot:
+            raise ValueError("tutorPersona 与当前导师配置不一致")
+        if not isinstance(payload.get("fallbackUsed"), bool):
+            raise ValueError("fallbackUsed 必须是布尔值")
+        if payload["fallbackUsed"] != fallback_used:
+            raise ValueError("fallbackUsed 与当前导师配置不一致")
+    sanitized_payload = {
+        **payload,
+        "tutorPersona": generation_snapshot,
+        "fallbackUsed": fallback_used,
+    }
+    result = run_openmaic_classroom_bridge_workflow(
+        user,
+        {"packId": pack_id, **sanitized_payload, "jobId": job_id, "status": status},
+    )
     if not result.success:
         raise RuntimeError(str(result.output.get("error") or "openmaic classroom bridge failed"))
     return {"artifact": result.output.get("artifact") or {}, "resourcePack": result.output.get("resourcePack") or {}, "traceId": result.trace["traceId"]}
+
+
+def _canonical_openmaic_tutor_context(user) -> tuple[dict, bool]:
+    preference, fallback_used = resolve_user_tutor_preference(user)
+    resolved = resolve_tutor_persona(preference["personaId"])
+    snapshot = public_tutor_persona(resolved)
+    if snapshot is None:
+        raise ValueError("当前没有可用于课堂的辅导风格")
+    return snapshot, bool(fallback_used)
 
 
 def record_openmaic_video_artifact(user, pack_id: str, payload: dict) -> dict:
