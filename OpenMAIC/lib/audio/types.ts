@@ -140,6 +140,7 @@ export interface TTSModelConfig {
   speed?: number;
   format?: string;
   providerOptions?: Record<string, unknown>;
+  signal?: AbortSignal;
 }
 
 // ============================================================================
