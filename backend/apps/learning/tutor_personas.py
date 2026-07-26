@@ -6,11 +6,18 @@ from django.db import transaction
 from django.utils import timezone
 
 from backend.apps.accounts.models import User
+from backend.apps.learning.tutor_persona_operations import get_tutor_persona_overlay_catalog
 from backend.apps.profiles.models import LearnerProfile
 
 
 TUTOR_PERSONA_SCHEMA_VERSION = "a3.tutor-persona.v1"
 TUTOR_PREFERENCE_SCHEMA_VERSION = "a3.tutor-preference.v1"
+TUTOR_PERSONA_UNAVAILABLE_MESSAGE = "\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u7684\u8f85\u5bfc\u98ce\u683c"
+
+
+class TutorPersonaUnavailableError(RuntimeError):
+    def __init__(self):
+        super().__init__(TUTOR_PERSONA_UNAVAILABLE_MESSAGE)
 
 _PUBLIC_PERSONA_FIELDS = (
     "id",
@@ -18,7 +25,9 @@ _PUBLIC_PERSONA_FIELDS = (
     "shortDescription",
     "teachingStyle",
     "avatarAssetId",
+    "avatarPublicPath",
     "voiceProfileId",
+    "voicePreviewEnabled",
     "allowedWorkflows",
     "schemaVersion",
 )
@@ -89,14 +98,28 @@ _TUTOR_PERSONAS = {
 
 
 def list_public_tutor_personas() -> list[dict]:
-    return [public_tutor_persona(persona) for persona in _TUTOR_PERSONAS.values()]
+    catalog = _overlay_catalog()
+    _require_available_persona(catalog)
+    return [
+        public_tutor_persona(_merge_persona_overlay(persona, catalog["overlays"][persona_id], catalog))
+        for persona_id, persona in _TUTOR_PERSONAS.items()
+        if catalog["overlays"].get(persona_id, {}).get("enabled")
+    ]
 
 
 def resolve_tutor_persona(persona_id: str | None) -> dict | None:
     if not isinstance(persona_id, str):
         return None
-    persona = _TUTOR_PERSONAS.get(persona_id.strip())
-    return deepcopy(persona) if persona else None
+    normalized_id = persona_id.strip()
+    persona = _TUTOR_PERSONAS.get(normalized_id)
+    if persona is None:
+        return None
+    catalog = _overlay_catalog()
+    _require_available_persona(catalog)
+    overlay = catalog["overlays"].get(normalized_id)
+    if not overlay or not overlay.get("enabled"):
+        return None
+    return _merge_persona_overlay(persona, overlay, catalog)
 
 
 def public_tutor_persona(persona: dict | str | None) -> dict | None:
@@ -104,7 +127,43 @@ def public_tutor_persona(persona: dict | str | None) -> dict | None:
         persona = resolve_tutor_persona(persona)
     if not isinstance(persona, dict):
         return None
-    return {field: deepcopy(persona[field]) for field in _PUBLIC_PERSONA_FIELDS}
+    return {field: deepcopy(persona[field]) for field in _PUBLIC_PERSONA_FIELDS if field in persona}
+
+
+def tutor_persona_configuration_fallback_used(persona: dict | None = None) -> bool:
+    if isinstance(persona, dict) and "_configurationFallbackUsed" in persona:
+        return bool(persona["_configurationFallbackUsed"])
+    return bool(_overlay_catalog()["fallbackUsed"])
+
+
+def _overlay_catalog() -> dict:
+    return get_tutor_persona_overlay_catalog(_TUTOR_PERSONAS)
+
+
+def _require_available_persona(catalog: dict) -> None:
+    if not any(overlay.get("enabled") for overlay in catalog["overlays"].values()):
+        raise TutorPersonaUnavailableError()
+
+
+def _merge_persona_overlay(persona: dict, overlay: dict, catalog: dict) -> dict:
+    resolved = deepcopy(persona)
+    resolved.update(
+        {
+            "avatarAssetId": overlay["avatarAssetId"],
+            "avatarPublicPath": overlay["avatarPublicPath"],
+            "voicePreviewEnabled": bool(overlay["voicePreviewEnabled"]),
+            "_configurationFallbackUsed": bool(catalog["fallbackUsed"]),
+        }
+    )
+    return resolved
+
+
+def _fallback_preference(source: str, updated_at: str = "") -> dict:
+    for persona_id in _TUTOR_PERSONAS:
+        persona = resolve_tutor_persona(persona_id)
+        if persona is not None:
+            return _preference(persona_id, source, updated_at)
+    raise TutorPersonaUnavailableError()
 
 
 def _is_weak_foundation(profile: LearnerProfile | None) -> bool:
@@ -122,21 +181,43 @@ def _preference(persona_id: str, source: str, updated_at: str = "") -> dict:
 
 
 def get_user_tutor_preference(user: User) -> dict:
+    preference, _fallback_used = resolve_user_tutor_preference(user)
+    return preference
+
+
+def resolve_user_tutor_preference(user: User) -> tuple[dict, bool]:
     profile = LearnerProfile.objects.filter(user=user).first()
     extra_profile = profile.extra_profile if profile and isinstance(profile.extra_profile, dict) else {}
     saved = extra_profile.get("tutorPreference")
     if isinstance(saved, dict):
         saved_persona_id = saved.get("personaId")
-        if resolve_tutor_persona(saved_persona_id):
-            return _preference(
-                saved_persona_id,
-                "saved",
-                str(saved.get("updatedAt") or ""),
+        saved_persona = resolve_tutor_persona(saved_persona_id)
+        if saved_persona:
+            return (
+                _preference(
+                    saved_persona["id"],
+                    "saved",
+                    str(saved.get("updatedAt") or ""),
+                ),
+                tutor_persona_configuration_fallback_used(saved_persona),
             )
+        return _fallback_preference("runtime_fallback", str(saved.get("updatedAt") or "")), True
 
     if _is_weak_foundation(profile):
-        return _preference("foundation-coach", "profile_recommendation")
-    return _preference("structured-teacher", "default")
+        recommended = resolve_tutor_persona("foundation-coach")
+        if recommended:
+            return (
+                _preference("foundation-coach", "profile_recommendation"),
+                tutor_persona_configuration_fallback_used(recommended),
+            )
+        return _fallback_preference("profile_recommendation"), True
+    default_persona = resolve_tutor_persona("structured-teacher")
+    if default_persona:
+        return (
+            _preference("structured-teacher", "default"),
+            tutor_persona_configuration_fallback_used(default_persona),
+        )
+    return _fallback_preference("default"), True
 
 
 @transaction.atomic

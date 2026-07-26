@@ -79,6 +79,7 @@ from backend.apps.engagement.models import UserNotification
 from backend.apps.knowledge_base.models import KnowledgeGraphClaim, KnowledgeGraphEntity, KnowledgeGraphRelation, KnowledgeParseRun
 from backend.apps.knowledge_base.services import accessible_resources_for_user
 from backend.apps.learning.tutor_personas import (
+    TutorPersonaUnavailableError,
     get_user_tutor_preference,
     public_tutor_persona,
     resolve_tutor_persona,
@@ -1053,11 +1054,14 @@ def qa_interact(request):
     scope = str(request.GET.get("scope") or "all").strip().lower()
     resource_id = str(request.GET.get("resourceId") or request.GET.get("resource_id") or "").strip()
     requested_persona_id = str(request.GET.get("persona_id") or "").strip()
-    if requested_persona_id:
-        tutor_persona = resolve_tutor_persona(requested_persona_id)
-    else:
-        preference = get_user_tutor_preference(request.user)
-        tutor_persona = resolve_tutor_persona(preference["personaId"])
+    try:
+        if requested_persona_id:
+            tutor_persona = resolve_tutor_persona(requested_persona_id)
+        else:
+            preference = get_user_tutor_preference(request.user)
+            tutor_persona = resolve_tutor_persona(preference["personaId"])
+    except TutorPersonaUnavailableError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=503)
     if tutor_persona is None or "coaching" not in tutor_persona.get("allowedWorkflows", []):
         return JsonResponse({"success": False, "error": "不支持该辅导风格"}, status=400)
     resolved_persona = public_tutor_persona(tutor_persona)

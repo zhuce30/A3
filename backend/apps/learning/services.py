@@ -25,9 +25,10 @@ from backend.domains.knowledge_base.retriever import search_knowledge_base
 from backend.apps.learning.effect_events import record_learning_event
 from backend.apps.learning.models import CoachingMessage, CoachingMessageRole, CoachingSession, CoachingSessionStatus, Course, CourseEnrollment, CourseTeachingAssignment, Chapter, KnowledgePoint, KnowledgePrerequisite, LearningPath, LearningPathItem, LearningPathStatus, PathItemStatus, ResourcePackLog
 from backend.apps.learning.tutor_personas import (
-    get_user_tutor_preference,
     public_tutor_persona,
     resolve_tutor_persona,
+    resolve_user_tutor_preference,
+    tutor_persona_configuration_fallback_used,
 )
 from backend.apps.profiles.models import LearnerProfile, LearningPace
 
@@ -2831,23 +2832,34 @@ def append_coaching_messages(
     if not isinstance(raw_messages, list) or not raw_messages:
         raise ValueError("请提供面对面辅导消息")
     profile, _ = LearnerProfile.objects.get_or_create(user=user)
-    tutor_persona = _resolve_coaching_tutor_persona(user, tutor_persona_id)
-    persona_snapshot = public_tutor_persona(tutor_persona)
     session = _latest_active_coaching_session(user)
-    if session is not None:
-        current_persona = _coaching_tutor_persona_snapshot(session)
-        current_persona_id = str((current_persona or {}).get("id") or "")
-        if current_persona_id and current_persona_id != persona_snapshot["id"]:
-            if session.messages.filter(role=CoachingMessageRole.USER).exists():
-                session.status = CoachingSessionStatus.ENDED
-                session.ended_at = timezone.now()
-                session.save(update_fields=["status", "ended_at", "updated_at"])
-                session = None
+    session_metadata = session.metadata if session is not None and isinstance(session.metadata, dict) else {}
+    stored_snapshot = _coaching_tutor_persona_snapshot(session)
+    requested_id = tutor_persona_id.strip() if isinstance(tutor_persona_id, str) else ""
+    explicit_request = bool(requested_id) or tutor_persona_id not in ("", None)
+
+    if stored_snapshot is not None and (
+        not explicit_request or requested_id == stored_snapshot.get("id")
+    ):
+        persona_snapshot = stored_snapshot
+        fallback_used = bool(session_metadata.get("fallbackUsed"))
+    else:
+        tutor_persona, fallback_used = _resolve_coaching_tutor_persona(user, tutor_persona_id)
+        persona_snapshot = public_tutor_persona(tutor_persona)
+        if session is not None and stored_snapshot is not None and explicit_request:
+            session.status = CoachingSessionStatus.ENDED
+            session.ended_at = timezone.now()
+            session.save(update_fields=["status", "ended_at", "updated_at"])
+            session = None
     if session is None:
         session = _create_coaching_session(user)
     metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    if metadata.get("tutorPersona") != persona_snapshot:
-        session.metadata = {**metadata, "tutorPersona": persona_snapshot}
+    if "tutorPersona" not in metadata:
+        session.metadata = {
+            **metadata,
+            "tutorPersona": persona_snapshot,
+            "fallbackUsed": fallback_used,
+        }
         session.save(update_fields=["metadata", "updated_at"])
     created_messages = []
     saw_valid_message = False
@@ -3051,18 +3063,24 @@ def _serialize_coaching_session_row(session: CoachingSession) -> dict:
     }
 
 
-def _resolve_coaching_tutor_persona(user, tutor_persona_id: str = "") -> dict:
+def _resolve_coaching_tutor_persona(user, tutor_persona_id: str = "") -> tuple[dict, bool]:
     requested_id = tutor_persona_id.strip() if isinstance(tutor_persona_id, str) else ""
     if requested_id:
         tutor_persona = resolve_tutor_persona(requested_id)
+        fallback_used = tutor_persona_configuration_fallback_used(tutor_persona)
     elif tutor_persona_id not in ("", None):
         tutor_persona = None
+        fallback_used = False
     else:
-        preference = get_user_tutor_preference(user)
+        preference, preference_fallback_used = resolve_user_tutor_preference(user)
         tutor_persona = resolve_tutor_persona(preference["personaId"])
+        fallback_used = (
+            preference_fallback_used
+            or tutor_persona_configuration_fallback_used(tutor_persona)
+        )
     if tutor_persona is None or "coaching" not in tutor_persona.get("allowedWorkflows", []):
         raise ValueError("不支持该辅导风格")
-    return tutor_persona
+    return tutor_persona, fallback_used
 
 
 def _coaching_tutor_persona_snapshot(session: CoachingSession | None) -> dict | None:

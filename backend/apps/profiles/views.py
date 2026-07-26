@@ -4,6 +4,7 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from backend.apps.learning.tutor_personas import (
+    TutorPersonaUnavailableError,
     get_user_tutor_preference,
     list_public_tutor_personas,
     public_tutor_persona,
@@ -51,18 +52,18 @@ def tutor_preference(request):
     if rejected:
         return rejected
 
-    if request.method == "GET":
-        preference = get_user_tutor_preference(request.user)
-        return JsonResponse(
-            {
-                "success": True,
-                "personas": list_public_tutor_personas(),
-                "preference": preference,
-                "selectedPersona": public_tutor_persona(preference["personaId"]),
-            }
-        )
-
     try:
+        if request.method == "GET":
+            preference = get_user_tutor_preference(request.user)
+            return JsonResponse(
+                {
+                    "success": True,
+                    "personas": list_public_tutor_personas(),
+                    "preference": preference,
+                    "selectedPersona": public_tutor_persona(preference["personaId"]),
+                }
+            )
+
         payload = json_body(request)
         if not isinstance(payload, dict) or set(payload) != {"personaId"}:
             raise ValueError("请求只能包含辅导风格编号")
@@ -79,6 +80,8 @@ def tutor_preference(request):
                 "selectedPersona": public_tutor_persona(preference["personaId"]),
             }
         )
+    except TutorPersonaUnavailableError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=503)
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
 

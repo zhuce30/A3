@@ -14,6 +14,7 @@ from backend.apps.learning.models import Course, CourseEnrollment, LearningPath,
 from backend.apps.accounts.permissions import require_teacher_role
 from backend.apps.compat.agent_kernel import run_admission_diagnostic_workflow, run_path_generate_workflow, run_teacher_task_workflow
 from backend.apps.learning.services import admission_diagnostic_blueprint, append_classroom_chat_messages, append_coaching_messages, assign_resource_pack_to_today, classroom_chat_history, classroom_context, clear_classroom_chat_messages, coaching_session, coaching_session_detail, complete_study_plan_task, course_materials, current_study_plan, dashboard_summary, end_coaching_session, generate_learning_path, generate_study_plan, knowledge_graph, list_coaching_sessions, serialize_course, serialize_path, submit_daily_reflection, summarize_coaching_session, teacher_workbench, update_path_item_progress
+from backend.apps.learning.tutor_personas import TutorPersonaUnavailableError
 
 
 def _require_login(request):
@@ -394,6 +395,8 @@ def coaching_history(request):
             },
             status=201,
         )
+    except TutorPersonaUnavailableError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=503)
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
 

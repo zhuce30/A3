@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from backend.apps.learning.models import TutorPersonaConfiguration
+from backend.apps.learning.tutor_persona_operations import invalidate_tutor_persona_overlay_cache
+
 from .common import CompatApiTestCase
 
 
@@ -77,3 +80,20 @@ class TutorPersonaQATests(CompatApiTestCase):
         self.assertEqual(response.json(), {"success": False, "error": "不支持该辅导风格"})
         chat_completion.assert_not_called()
 
+    @patch("backend.apps.compat.llm.chat_completion")
+    def test_all_disabled_personas_return_controlled_unavailable_response(self, chat_completion):
+        self.addCleanup(invalidate_tutor_persona_overlay_cache)
+        TutorPersonaConfiguration.objects.update(enabled=False)
+        invalidate_tutor_persona_overlay_cache()
+
+        response = self.client.get(
+            "/api/v1/qa/interact/",
+            {"q": "什么是进程调度？", "persona_id": "structured-teacher"},
+        )
+
+        self.assertEqual(response.status_code, 503, response.content)
+        self.assertEqual(
+            response.json(),
+            {"success": False, "error": "当前没有可用的辅导风格"},
+        )
+        chat_completion.assert_not_called()
