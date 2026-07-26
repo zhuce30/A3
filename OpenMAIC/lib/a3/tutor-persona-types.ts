@@ -10,9 +10,17 @@ export type A3TutorPersona = {
   shortDescription: string;
   teachingStyle: string;
   avatarAssetId: string;
+  avatarPublicPath: string;
   voiceProfileId: string;
+  voicePreviewEnabled: boolean;
   allowedWorkflows: string[];
   schemaVersion: string;
+};
+
+export type A3TutorVoicePreviewState = {
+  personaId: A3TutorPersonaId | null;
+  status: 'idle' | 'loading' | 'playing' | 'error';
+  error: string;
 };
 
 export type A3TutorPreference = {
@@ -29,4 +37,3 @@ export type A3TutorPreferenceResponse = {
   preference: A3TutorPreference;
   selectedPersona: A3TutorPersona;
 };
-

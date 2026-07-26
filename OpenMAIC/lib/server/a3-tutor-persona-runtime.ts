@@ -71,7 +71,9 @@ function persona(
     shortDescription,
     teachingStyle,
     avatarAssetId: 'teacher-default-v1',
+    avatarPublicPath: '/a3/assets/teacher-avatar/teacher.vrm',
     voiceProfileId,
+    voicePreviewEnabled: true,
     allowedWorkflows: ['coaching', 'classroom'],
     schemaVersion: SCHEMA_VERSION,
   };
