@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type {
   ClassroomGenerationProgress,
   ClassroomGenerationStep,
@@ -11,6 +12,7 @@ import {
   ensureClassroomJobsDir,
   writeJsonFileAtomic,
 } from '@/lib/server/classroom-storage';
+import type { A3ClassroomTutorContext } from '@/lib/types/stage';
 
 export type ClassroomGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
@@ -32,6 +34,11 @@ export interface ClassroomGenerationJob {
   };
   scenesGenerated: number;
   totalScenes?: number;
+  a3Context?: A3ClassroomTutorContext;
+  a3Binding?: {
+    ownerFingerprint: string;
+    resourcePackId: string;
+  };
   result?: {
     classroomId: string;
     url: string;
@@ -100,8 +107,10 @@ export function isValidClassroomJobId(jobId: string): boolean {
 export async function createClassroomGenerationJob(
   jobId: string,
   input: GenerateClassroomInput,
+  a3Access?: { cookieHeader: string | null; resourcePackId: string },
 ): Promise<ClassroomGenerationJob> {
   const now = new Date().toISOString();
+  const a3Binding = input.a3Context ? buildA3JobBinding(a3Access) : undefined;
   const job: ClassroomGenerationJob = {
     id: jobId,
     status: 'queued',
@@ -112,11 +121,84 @@ export async function createClassroomGenerationJob(
     updatedAt: now,
     inputSummary: buildInputSummary(input),
     scenesGenerated: 0,
+    ...(input.a3Context ? { a3Context: cloneTutorContext(input.a3Context) } : {}),
+    ...(a3Binding ? { a3Binding } : {}),
   };
 
   await ensureClassroomJobsDir();
   await writeJsonFileAtomic(jobFilePath(jobId), job);
   return job;
+}
+
+function buildA3JobBinding(
+  access: { cookieHeader: string | null; resourcePackId: string } | undefined,
+): NonNullable<ClassroomGenerationJob['a3Binding']> {
+  const ownerFingerprint = resolveDjangoSessionIdentity(access?.cookieHeader || null)?.fingerprint;
+  const resourcePackId = String(access?.resourcePackId || '').trim();
+  if (!ownerFingerprint || !resourcePackId) {
+    throw new Error('Authenticated owner and resource pack are required for A3 classroom jobs');
+  }
+  return { ownerFingerprint, resourcePackId };
+}
+
+export class InvalidDjangoSessionCookieError extends Error {
+  constructor() {
+    super('Ambiguous Django session cookie');
+    this.name = 'InvalidDjangoSessionCookieError';
+  }
+}
+
+export function resolveDjangoSessionIdentity(
+  cookieHeader: string | null,
+): { fingerprint: string } | null {
+  const cookieName = process.env.DJANGO_SESSION_COOKIE_NAME?.trim() || 'sessionid';
+  const values: string[] = [];
+  for (const rawPart of (cookieHeader || '').split(';')) {
+    const part = rawPart.trim();
+    const separator = part.indexOf('=');
+    if (separator < 0 || part.slice(0, separator).trim() !== cookieName) continue;
+    values.push(part.slice(separator + 1).trim());
+  }
+  if (values.length > 1) throw new InvalidDjangoSessionCookieError();
+  const sessionValue = values[0];
+  if (!sessionValue) return null;
+  return { fingerprint: createHash('sha256').update(sessionValue).digest('hex') };
+}
+
+export function isAuthorizedForClassroomJob(
+  job: ClassroomGenerationJob,
+  cookieHeader: string | null,
+  resourcePackId?: string,
+): boolean {
+  if (!job.a3Context) return true;
+  if (!job.a3Binding) return false;
+  let candidate: string | undefined;
+  try {
+    candidate = resolveDjangoSessionIdentity(cookieHeader)?.fingerprint;
+  } catch (error) {
+    if (error instanceof InvalidDjangoSessionCookieError) return false;
+    throw error;
+  }
+  if (!candidate) return false;
+  const expectedBuffer = Buffer.from(job.a3Binding.ownerFingerprint, 'hex');
+  const candidateBuffer = Buffer.from(candidate, 'hex');
+  if (
+    expectedBuffer.length !== candidateBuffer.length
+    || !timingSafeEqual(expectedBuffer, candidateBuffer)
+  ) {
+    return false;
+  }
+  return resourcePackId === undefined || job.a3Binding.resourcePackId === resourcePackId;
+}
+
+function cloneTutorContext(context: A3ClassroomTutorContext): A3ClassroomTutorContext {
+  return {
+    tutorPersona: {
+      ...context.tutorPersona,
+      allowedWorkflows: [...context.tutorPersona.allowedWorkflows],
+    },
+    fallbackUsed: context.fallbackUsed,
+  };
 }
 
 export async function readClassroomGenerationJob(
@@ -147,6 +229,9 @@ export async function updateClassroomGenerationJob(
     const updated: ClassroomGenerationJob = {
       ...existing,
       ...patch,
+      ...(existing.a3Context
+        ? { a3Context: existing.a3Context, a3Binding: existing.a3Binding }
+        : {}),
       updatedAt: new Date().toISOString(),
     };
 

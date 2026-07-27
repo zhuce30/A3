@@ -24,7 +24,16 @@ from backend.domains.knowledge_base.lexical_retriever import search_lexical_know
 from backend.domains.knowledge_base.retriever import search_knowledge_base
 from backend.apps.learning.effect_events import record_learning_event
 from backend.apps.learning.models import CoachingMessage, CoachingMessageRole, CoachingSession, CoachingSessionStatus, Course, CourseEnrollment, CourseTeachingAssignment, Chapter, KnowledgePoint, KnowledgePrerequisite, LearningPath, LearningPathItem, LearningPathStatus, PathItemStatus, ResourcePackLog
+from backend.apps.learning.tutor_personas import (
+    public_tutor_persona,
+    resolve_tutor_persona,
+    resolve_user_tutor_preference,
+    tutor_persona_configuration_fallback_used,
+)
 from backend.apps.profiles.models import LearnerProfile, LearningPace
+from backend.apps.system.admin_tutor_cache import (
+    schedule_admin_tutor_analytics_invalidation,
+)
 
 
 DEFAULT_COURSE_CODE = "OS-001"
@@ -2752,12 +2761,21 @@ def coaching_session_detail(user, session_id) -> dict:
     return {"session": _serialize_coaching_session_payload(session, messages)}
 
 
+@transaction.atomic
 def summarize_coaching_session(user, session_id) -> dict:
     session = get_object_or_404(
-        CoachingSession.objects.prefetch_related("messages"),
+        CoachingSession.objects.select_for_update().prefetch_related("messages"),
         id=session_id,
         user=user,
     )
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    existing_summary = metadata.get("summary") if isinstance(metadata.get("summary"), dict) else None
+    if existing_summary is not None and metadata.get("summaryCompletedAt"):
+        session.refresh_from_db()
+        return {"summary": existing_summary, "session": _serialize_coaching_session_row(session)}
+    if session.status == CoachingSessionStatus.ARCHIVED:
+        raise ValueError("已归档的辅导会话不能重新生成总结")
+
     messages = list(session.messages.order_by("created_at", "id"))
     user_questions = [message for message in messages if message.role == CoachingMessageRole.USER]
     assistant_replies = [message for message in messages if message.role == CoachingMessageRole.ASSISTANT]
@@ -2801,10 +2819,16 @@ def summarize_coaching_session(user, session_id) -> dict:
         "nextAction": next_action,
         "generatedAt": timezone.now().isoformat(),
     }
+    completed_at = timezone.now()
     session.summary = _coaching_summary_sentence(session.topic_title, summary)
-    metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    session.metadata = {**metadata, "summary": summary}
-    session.save(update_fields=["summary", "metadata", "updated_at"])
+    session.metadata = {
+        **metadata,
+        "summary": summary,
+        "summaryCompletedAt": completed_at.isoformat(),
+    }
+    session.status = CoachingSessionStatus.ENDED
+    session.ended_at = session.ended_at or completed_at
+    session.save(update_fields=["summary", "metadata", "status", "ended_at", "updated_at"])
     create_notification(
         title="面对面辅导总结已生成",
         user=user,
@@ -2813,14 +2837,51 @@ def summarize_coaching_session(user, session_id) -> dict:
         action_url=next_action["href"],
         payload={"coachingSessionId": str(session.id), "summary": summary},
     )
+    schedule_admin_tutor_analytics_invalidation()
+    session.refresh_from_db()
     return {"summary": summary, "session": _serialize_coaching_session_row(session)}
 
 
-def append_coaching_messages(user, raw_messages: list, summary: str = "") -> dict:
+@transaction.atomic
+def append_coaching_messages(
+    user,
+    raw_messages: list,
+    summary: str = "",
+    tutor_persona_id: str = "",
+) -> dict:
     if not isinstance(raw_messages, list) or not raw_messages:
         raise ValueError("请提供面对面辅导消息")
+    user = user.__class__.objects.select_for_update().get(pk=user.pk)
     profile, _ = LearnerProfile.objects.get_or_create(user=user)
-    session = _latest_active_coaching_session(user) or _create_coaching_session(user)
+    session = _latest_active_coaching_session(user, lock=True)
+    session_metadata = session.metadata if session is not None and isinstance(session.metadata, dict) else {}
+    stored_snapshot = _coaching_tutor_persona_snapshot(session)
+    requested_id = tutor_persona_id.strip() if isinstance(tutor_persona_id, str) else ""
+    explicit_request = bool(requested_id) or tutor_persona_id not in ("", None)
+
+    if stored_snapshot is not None and (
+        not explicit_request or requested_id == stored_snapshot.get("id")
+    ):
+        persona_snapshot = stored_snapshot
+        fallback_used = bool(session_metadata.get("fallbackUsed"))
+    else:
+        tutor_persona, fallback_used = _resolve_coaching_tutor_persona(user, tutor_persona_id)
+        persona_snapshot = public_tutor_persona(tutor_persona)
+        if session is not None and stored_snapshot is not None and explicit_request:
+            session.status = CoachingSessionStatus.ENDED
+            session.ended_at = timezone.now()
+            session.save(update_fields=["status", "ended_at", "updated_at"])
+            session = None
+    if session is None:
+        session = _create_coaching_session(user)
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    if "tutorPersona" not in metadata:
+        session.metadata = {
+            **metadata,
+            "tutorPersona": persona_snapshot,
+            "fallbackUsed": fallback_used,
+        }
+        session.save(update_fields=["metadata", "updated_at"])
     created_messages = []
     saw_valid_message = False
     existing_client_ids = {
@@ -2893,23 +2954,27 @@ def append_coaching_messages(user, raw_messages: list, summary: str = "") -> dic
         raw_preview=(latest_user_messages[-1].get("content") if latest_user_messages else ""),
         save=True,
     )
+    schedule_admin_tutor_analytics_invalidation()
     return {"session": persisted}
 
 
+@transaction.atomic
 def end_coaching_session(user) -> dict:
-    session = _latest_active_coaching_session(user)
+    session = _latest_active_coaching_session(user, lock=True)
     if session is None:
         return {"session": _serialize_coaching_session_payload(None, [])}
     session.status = CoachingSessionStatus.ENDED
     session.ended_at = timezone.now()
     session.save(update_fields=["status", "ended_at", "updated_at"])
+    schedule_admin_tutor_analytics_invalidation()
     messages = list(session.messages.order_by("created_at", "id")[:60])
     return {"session": _serialize_coaching_session_payload(session, messages)}
 
 
-def _latest_active_coaching_session(user) -> CoachingSession | None:
+def _latest_active_coaching_session(user, *, lock: bool = False) -> CoachingSession | None:
+    sessions = CoachingSession.objects.select_for_update() if lock else CoachingSession.objects
     return (
-        CoachingSession.objects.filter(user=user, status=CoachingSessionStatus.ACTIVE)
+        sessions.filter(user=user, status=CoachingSessionStatus.ACTIVE)
         .order_by("-updated_at", "-created_at")
         .first()
     )
@@ -2958,6 +3023,7 @@ def _import_legacy_coaching_session(profile: LearnerProfile) -> CoachingSession 
             message = _serialize_coaching_message(item)
             if message["content"]:
                 _create_coaching_message(session, message)
+    schedule_admin_tutor_analytics_invalidation()
     return session
 
 
@@ -2986,8 +3052,10 @@ def _serialize_coaching_session_payload(session: CoachingSession | None, message
         "schemaVersion": "a3.coaching-session.v1",
         "id": str(session.id) if session else "",
         "status": session.status if session else "active",
+        "topicTitle": session.topic_title if session else "",
         "messages": [_serialize_coaching_message_record(item) for item in messages],
         "summary": session.summary if session else "",
+        "tutorPersona": _coaching_tutor_persona_snapshot(session),
         "updatedAt": session.updated_at.isoformat() if session else "",
     }
 
@@ -3011,6 +3079,7 @@ def _serialize_coaching_session_row(session: CoachingSession) -> dict:
         "status": session.status,
         "topicTitle": session.topic_title,
         "summary": session.summary,
+        "tutorPersona": _coaching_tutor_persona_snapshot(session),
         "questionCount": len(user_questions),
         "verifiedReplyCount": len(verified_replies),
         "citationCount": citation_count,
@@ -3018,6 +3087,38 @@ def _serialize_coaching_session_row(session: CoachingSession) -> dict:
         "endedAt": session.ended_at.isoformat() if session.ended_at else None,
         "updatedAt": session.updated_at.isoformat(),
     }
+
+
+def _resolve_coaching_tutor_persona(user, tutor_persona_id: str = "") -> tuple[dict, bool]:
+    requested_id = tutor_persona_id.strip() if isinstance(tutor_persona_id, str) else ""
+    if requested_id:
+        tutor_persona = resolve_tutor_persona(requested_id)
+        fallback_used = tutor_persona_configuration_fallback_used(tutor_persona)
+    elif tutor_persona_id not in ("", None):
+        tutor_persona = None
+        fallback_used = False
+    else:
+        preference, preference_fallback_used = resolve_user_tutor_preference(user)
+        tutor_persona = resolve_tutor_persona(preference["personaId"])
+        fallback_used = (
+            preference_fallback_used
+            or tutor_persona_configuration_fallback_used(tutor_persona)
+        )
+    if tutor_persona is None or "coaching" not in tutor_persona.get("allowedWorkflows", []):
+        raise ValueError("不支持该辅导风格")
+    return tutor_persona, fallback_used
+
+
+def _coaching_tutor_persona_snapshot(session: CoachingSession | None) -> dict | None:
+    if session is None or not isinstance(session.metadata, dict):
+        return None
+    snapshot = session.metadata.get("tutorPersona")
+    if not isinstance(snapshot, dict):
+        return None
+    try:
+        return public_tutor_persona(snapshot)
+    except KeyError:
+        return None
 
 
 def _coaching_weak_point_signals(questions: list[str]) -> list[str]:

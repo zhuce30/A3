@@ -6,12 +6,13 @@ const SESSION_MUTATION_PATHS = new Set([
   '/api/auth/logout/',
 ]);
 
-export async function a3GetJson<T>(url: string): Promise<T> {
+export async function a3GetJson<T>(url: string, options: { signal?: AbortSignal } = {}): Promise<T> {
   try {
     const response = await fetch(resolveA3Endpoint(url), {
       method: 'GET',
       credentials: 'include',
       cache: 'no-store',
+      signal: options.signal,
     });
     return readJsonResponse<T>(response);
   } catch (error) {
@@ -123,10 +124,17 @@ async function isA3CsrfFailure(response: Response) {
 
 async function readJsonResponse<T>(response: Response): Promise<T> {
   const contentType = response.headers.get('content-type') ?? '';
-  if (contentType.includes('application/json')) return response.json();
+  if (contentType.includes('application/json')) {
+    const payload = await response.json() as T;
+    if (!response.ok && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      return { ...payload, status: response.status } as T;
+    }
+    return payload;
+  }
   return {
     success: false,
     error: response.ok ? '请求返回了无法识别的数据' : `请求失败（${response.status}）`,
+    ...(!response.ok ? { status: response.status } : {}),
   } as T;
 }
 

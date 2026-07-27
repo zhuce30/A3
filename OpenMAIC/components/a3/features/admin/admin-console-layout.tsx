@@ -15,6 +15,7 @@ import {
   ScrollText,
   Settings,
   ShieldCheck,
+  GraduationCap,
   Users,
   X,
 } from 'lucide-react';
@@ -32,6 +33,7 @@ const adminNavItems = [
   { href: '/a3/admin/catalog', label: '课程与知识库', icon: BookOpen },
   { href: '/a3/admin/tasks', label: '资源任务', icon: Database },
   { href: '/a3/admin/agents', label: 'Agent 运行', icon: Bot },
+  { href: '/a3/admin/tutors', label: '导师管理', icon: GraduationCap },
   { href: '/a3/admin/safety', label: '内容安全', icon: ShieldCheck },
   { href: '/a3/admin/settings', label: '系统配置', icon: Settings },
   { href: '/a3/admin/audit', label: '审计日志', icon: ScrollText },

@@ -25,6 +25,9 @@ from backend.apps.assessments.personal_question_llm import generate_grounded_per
 from backend.apps.knowledge_base.models import KnowledgeBlock, ResourceScope, ResourceStatus
 from backend.apps.learning.effect_events import record_learning_event
 from backend.apps.learning.models import KnowledgePoint, LearningPath, LearningPathStatus, PathItemStatus, ResourcePackLog
+from backend.apps.system.admin_tutor_cache import (
+    schedule_admin_tutor_analytics_invalidation,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1024,6 +1027,7 @@ def create_assessment(
         current.status = SessionStatus.COMPLETED
         current.completed_at = timezone.now()
         current.save(update_fields=["status", "completed_at"])
+        schedule_admin_tutor_analytics_invalidation()
 
     practice_point = None
     base_queryset = _selectable_question_queryset(user, mode=mode)
@@ -1196,6 +1200,8 @@ def answer_assessment_question(user, session: AssessmentSession, selected_answer
         session.status = SessionStatus.COMPLETED
         session.completed_at = timezone.now()
     session.save(update_fields=["current_index", "score", "status", "completed_at"])
+    if session.status == SessionStatus.COMPLETED:
+        schedule_admin_tutor_analytics_invalidation()
     question_metadata = question.metadata if isinstance(question.metadata, dict) else {}
     if question.owner_id == user.id and question_metadata.get("generatedBy") == "assessment_practice_supply":
         _schedule_personal_pool_refill(user, question.knowledge_point)

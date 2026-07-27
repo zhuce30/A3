@@ -1,27 +1,34 @@
 import type { A3RealtimeProvider } from '@/lib/a3/realtime-coaching-types';
+import type { A3TutorPersonaRuntime } from '@/lib/server/a3-tutor-persona-runtime';
 
 type ExchangeRealtimeSdpInput = {
   provider: A3RealtimeProvider;
   model: string;
   offerSdp: string;
+  runtime: A3TutorPersonaRuntime;
+  targetTitle: string;
   safetyIdentifier?: string;
 };
 
-export async function exchangeRealtimeSdp({ provider, model, offerSdp, safetyIdentifier }: ExchangeRealtimeSdpInput) {
-  if (provider === 'openai_realtime_webrtc') return exchangeOpenAIRealtimeSdp(model, offerSdp, safetyIdentifier);
-  if (provider === 'dashscope_qwen_omni_realtime') return exchangeDashScopeRealtimeSdp(model, offerSdp);
+export async function exchangeRealtimeSdp({ provider, model, offerSdp, runtime, targetTitle, safetyIdentifier }: ExchangeRealtimeSdpInput) {
+  if (provider === 'openai_realtime_webrtc') {
+    return exchangeOpenAIRealtimeSdp(model, offerSdp, runtime, targetTitle, safetyIdentifier);
+  }
+  if (provider === 'dashscope_qwen_omni_realtime') return exchangeDashScopeRealtimeSdp(model, offerSdp, runtime);
   return { success: false, error: '当前 provider 不支持实时 WebRTC SDP 交换' };
 }
 
-async function exchangeOpenAIRealtimeSdp(model: string, offerSdp: string, safetyIdentifier?: string) {
+async function exchangeOpenAIRealtimeSdp(
+  model: string,
+  offerSdp: string,
+  runtime: A3TutorPersonaRuntime,
+  targetTitle: string,
+  safetyIdentifier?: string,
+) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return { success: false, error: 'OPENAI_API_KEY 未配置' };
   const endpoint = process.env.OPENAI_REALTIME_SDP_ENDPOINT || 'https://api.openai.com/v1/realtime/calls';
-  const sessionConfig = {
-    type: 'realtime',
-    model: model || process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2',
-    audio: { output: { voice: process.env.OPENAI_REALTIME_VOICE || 'marin' } },
-  };
+  const sessionConfig = buildOpenAIRealtimeSessionConfig(model, runtime, targetTitle);
   const formData = new FormData();
   formData.set('sdp', offerSdp);
   formData.set('session', JSON.stringify(sessionConfig));
@@ -38,7 +45,7 @@ async function exchangeOpenAIRealtimeSdp(model: string, offerSdp: string, safety
   return { success: true, answerSdp };
 }
 
-async function exchangeDashScopeRealtimeSdp(model: string, offerSdp: string) {
+async function exchangeDashScopeRealtimeSdp(model: string, offerSdp: string, _runtime: A3TutorPersonaRuntime) {
   const apiKey = process.env.DASHSCOPE_API_KEY
     || process.env.A3_COACHING_API_KEY
     || process.env.QWEN_API_KEY
@@ -62,4 +69,17 @@ async function exchangeDashScopeRealtimeSdp(model: string, offerSdp: string) {
   const answerSdp = await response.text();
   if (!response.ok) return { success: false, error: answerSdp || `DashScope SDP 交换失败：${response.status}` };
   return { success: true, answerSdp };
+}
+
+export function buildOpenAIRealtimeSessionConfig(
+  model: string,
+  runtime: A3TutorPersonaRuntime,
+  targetTitle: string,
+) {
+  return {
+    type: 'realtime' as const,
+    model: model || process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2',
+    instructions: runtime.instructions(targetTitle),
+    audio: { output: { voice: runtime.openaiVoice } },
+  };
 }

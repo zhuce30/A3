@@ -3,6 +3,7 @@ import type { Slide } from '@/lib/types/slides';
 import type { Action } from '@/lib/types/action';
 import type { PBLProjectConfig } from '@/lib/pbl/types';
 import type { WidgetType, WidgetConfig, TeacherAction } from '@/lib/types/widgets';
+import type { A3TutorPersona } from '@/lib/a3/tutor-persona-types';
 
 export type SceneType = 'slide' | 'quiz' | 'interactive' | 'pbl';
 
@@ -18,6 +19,11 @@ export interface VideoManifestEntry {
 
 export type VideoManifest = Record<string, VideoManifestEntry>;
 
+export type A3ClassroomTutorContext = {
+  tutorPersona: A3TutorPersona;
+  fallbackUsed: boolean;
+};
+
 /**
  * Stage - Represents the entire classroom/course
  */
@@ -27,6 +33,7 @@ export interface Stage {
   description?: string;
   createdAt: number;
   updatedAt: number;
+  a3Context?: A3ClassroomTutorContext;
   // Stage metadata
   languageDirective?: string;
   style?: string;

@@ -243,6 +243,12 @@ class AssessmentSession(models.Model):
     class Meta:
         db_table = "a3_assessment_sessions"
         ordering = ["-started_at"]
+        indexes = [
+            models.Index(
+                fields=["user", "status", "completed_at"],
+                name="a3_asmt_user_stat_done_idx",
+            )
+        ]
 
 
 class AssessmentAnswer(models.Model):

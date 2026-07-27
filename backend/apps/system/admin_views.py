@@ -31,9 +31,21 @@ from backend.apps.system.admin_conversation_services import (
 )
 from backend.apps.system.admin_overview import build_admin_overview
 from backend.apps.system.admin_task_services import cancel_task, get_task, list_tasks, retry_task
+from backend.apps.system.admin_tutor_services import (
+    AdminTutorError,
+    list_admin_tutors,
+    update_tutor_persona,
+)
 from backend.apps.system.admin_user_services import admin_user_queryset, list_admin_users, serialize_admin_user
 from backend.apps.system.models import AdminAuditLog, SecurityEvent
 from backend.utils.http import json_body
+
+
+def _admin_tutor_error_response(exc: AdminTutorError) -> JsonResponse:
+    payload = {"success": False, "error": str(exc)}
+    if exc.error_code:
+        payload["errorCode"] = exc.error_code
+    return JsonResponse(payload, status=exc.status_code)
 
 
 User = get_user_model()
@@ -133,6 +145,39 @@ def users(request):
         return JsonResponse({"success": True, **list_admin_users(request.GET)})
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["GET"])
+def tutors(request):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    try:
+        payload = list_admin_tutors(request.GET.get("range", "30d"))
+    except AdminTutorError as exc:
+        return _admin_tutor_error_response(exc)
+    return JsonResponse({"success": True, **payload})
+
+
+@require_http_methods(["PATCH"])
+def tutor_persona_detail(request, persona_id: str):
+    rejected = _admin_rejection(request)
+    if rejected:
+        return rejected
+    try:
+        body = json_body(request)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return JsonResponse({"success": False, "error": "请求 JSON 格式无效"}, status=400)
+    try:
+        payload = update_tutor_persona(
+            actor=request.user,
+            persona_id=persona_id,
+            payload=body,
+            actor_ip=get_client_ip(request) or None,
+        )
+    except AdminTutorError as exc:
+        return _admin_tutor_error_response(exc)
+    return JsonResponse({"success": True, **payload})
 
 
 @require_http_methods(["GET"])

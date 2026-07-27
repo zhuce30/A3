@@ -176,6 +176,7 @@ services:
       NODE_ENV: production
       NEXT_PUBLIC_A3_API_BASE_URL: http://localhost:8000
       A3_API_BASE_URL: http://backend:8000
+      A3_TUTOR_PREVIEW_REDIS_URL: redis://redis:6379/3
       A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:-a3-docker-dev-video-worker-token}
       A3_COACHING_BASE_URL: ${A3_COACHING_BASE_URL:-}
       A3_COACHING_API_KEY: ${A3_COACHING_API_KEY:-}
@@ -185,7 +186,10 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
 
 volumes:
   a3-mysql-data:

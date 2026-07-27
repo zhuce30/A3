@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -241,6 +243,7 @@ class CoachingSession(models.Model):
         indexes = [
             models.Index(fields=["user", "status", "-updated_at"], name="idx_coach_user_status"),
             models.Index(fields=["knowledge_point", "-updated_at"], name="idx_coach_point_time"),
+            models.Index(fields=["started_at"], name="idx_coach_started_at"),
         ]
 
 
@@ -270,3 +273,101 @@ class CoachingMessage(models.Model):
             models.Index(fields=["session", "created_at"], name="idx_coach_msg_session"),
             models.Index(fields=["role", "verified"], name="idx_coach_msg_role_verified"),
         ]
+
+
+class TutorAvatarAsset(models.Model):
+    asset_id = models.CharField(max_length=64, unique=True)
+    display_name = models.CharField(max_length=120)
+    public_path = models.CharField(max_length=255)
+    thumbnail_path = models.CharField(max_length=255, blank=True)
+    author = models.CharField(max_length=120, blank=True)
+    source_name = models.CharField(max_length=120, blank=True)
+    source_url = models.URLField(blank=True)
+    license_name = models.CharField(max_length=120, blank=True)
+    license_url = models.URLField(blank=True)
+    usage_scope = models.JSONField(default=list, blank=True)
+    sha256 = models.CharField(max_length=64)
+    file_size_bytes = models.PositiveBigIntegerField()
+    status = models.CharField(
+        max_length=16,
+        choices=(("draft", "草稿"), ("enabled", "启用"), ("disabled", "停用")),
+        default="draft",
+    )
+    is_default = models.BooleanField(default=False)
+    default_slot = models.CharField(max_length=7, null=True, unique=True, editable=False)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        self.default_slot = "default" if self.is_default else None
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "is_default" in update_fields:
+            kwargs["update_fields"] = set(update_fields) | {"default_slot"}
+        return super().save(*args, **kwargs)
+
+    class Meta:
+        db_table = "a3_tutor_avatar_assets"
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(is_default=True, default_slot="default", default_slot__isnull=False)
+                    | models.Q(is_default=False, default_slot__isnull=True)
+                ),
+                name="tutor_avatar_default_slot_consistent",
+            )
+        ]
+
+
+class TutorPersonaConfiguration(models.Model):
+    persona_id = models.CharField(max_length=64, unique=True)
+    enabled = models.BooleanField(default=True)
+    avatar_asset = models.ForeignKey(TutorAvatarAsset, on_delete=models.PROTECT, related_name="persona_configurations")
+    voice_preview_enabled = models.BooleanField(default=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="updated_tutor_personas",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_tutor_persona_configurations"
+
+
+class TutorPersonaFeedback(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="tutor_persona_feedback")
+    session = models.ForeignKey(CoachingSession, on_delete=models.CASCADE, related_name="tutor_feedback")
+    persona_id = models.CharField(max_length=64)
+    rating = models.PositiveSmallIntegerField(validators=[MinValueValidator(1), MaxValueValidator(5)])
+    tags = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        super().clean()
+        if not self.user_id or not self.session_id:
+            return
+        session_user_id = (
+            CoachingSession.objects.filter(pk=self.session_id).values_list("user_id", flat=True).first()
+        )
+        if session_user_id is not None and self.user_id != session_user_id:
+            raise ValidationError({"user": "反馈用户必须与辅导会话用户一致。"})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
+
+    class Meta:
+        db_table = "a3_tutor_persona_feedback"
+        constraints = [
+            models.UniqueConstraint(fields=["user", "session"], name="unique_user_session_tutor_feedback"),
+            models.CheckConstraint(
+                condition=models.Q(rating__gte=1, rating__lte=5),
+                name="tutor_feedback_rating_1_5",
+            ),
+        ]
+        indexes = [models.Index(fields=["persona_id", "-created_at"], name="idx_tutor_feedback_persona")]

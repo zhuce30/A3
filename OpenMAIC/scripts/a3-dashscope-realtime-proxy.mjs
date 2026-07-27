@@ -48,6 +48,19 @@ server.on('upgrade', async (request, socket, head) => {
       sendUpgradeError(socket, '请先登录后使用实时辅导');
       return;
     }
+    const requestUrl = new URL(request.url, 'http://a3-realtime.local');
+    const coachingSessionId = String(requestUrl.searchParams.get('coachingSessionId') || '').trim();
+    if (!coachingSessionId) {
+      sendUpgradeError(socket, '缺少面对面辅导会话 ID');
+      return;
+    }
+    const sessionBinding = await resolveA3CoachingSession(request.headers.cookie || '', coachingSessionId);
+    if (!sessionBinding.success) {
+      sendUpgradeError(socket, sessionBinding.error || '面对面辅导会话不存在或无权访问');
+      return;
+    }
+    request.a3TutorRuntime = sessionBinding.runtime;
+    request.a3CoachingSessionId = coachingSessionId;
     wss.handleUpgrade(request, socket, head, (client) => {
       wss.emit('connection', client, request);
     });
@@ -56,7 +69,8 @@ server.on('upgrade', async (request, socket, head) => {
   }
 });
 
-wss.on('connection', (client) => {
+wss.on('connection', (client, request) => {
+  const runtime = request.a3TutorRuntime || resolveTutorRuntime('structured-teacher');
   const upstreamUrl = withModel(dashScopeUrl, dashScopeModel);
   const upstream = new WebSocket(upstreamUrl, {
     headers: {
@@ -70,13 +84,16 @@ wss.on('connection', (client) => {
       type: 'a3.proxy.ready',
       provider: 'dashscope_qwen_omni_realtime',
       model: dashScopeModel,
+      coachingSessionId: request.a3CoachingSessionId || '',
+      resolvedPersonaId: runtime.id,
+      personaFallbackUsed: runtime.fallbackUsed,
     }));
     upstream.send(JSON.stringify({
       event_id: `a3_session_${Date.now()}`,
       type: 'session.update',
       session: {
         modalities: ['text', 'audio'],
-        voice: process.env.DASHSCOPE_REALTIME_VOICE || 'Tina',
+        voice: runtime.voice,
         input_audio_format: 'pcm',
         output_audio_format: 'pcm',
         turn_detection: {
@@ -84,7 +101,7 @@ wss.on('connection', (client) => {
           threshold: Number(process.env.DASHSCOPE_REALTIME_VAD_THRESHOLD || 0.5),
           silence_duration_ms: Number(process.env.DASHSCOPE_REALTIME_SILENCE_MS || 800),
         },
-        instructions: '你是 A3 智学引擎的实时面对面辅导 Agent，请使用简体中文，回答要结合本地知识库证据。',
+        instructions: runtime.instructions,
       },
     }));
     while (pendingMessages.length) upstream.send(pendingMessages.shift());
@@ -149,6 +166,64 @@ async function validateA3Cookie(cookie) {
   } catch {
     return { success: false };
   }
+}
+
+async function resolveA3CoachingSession(cookie, coachingSessionId) {
+  try {
+    const response = await fetch(
+      `${djangoBaseUrl}/api/learning/coaching/sessions/${encodeURIComponent(coachingSessionId)}/`,
+      { headers: { cookie, Accept: 'application/json' } },
+    );
+    if (!response.ok) {
+      return { success: false, error: '面对面辅导会话不存在或无权访问' };
+    }
+    const payload = await response.json();
+    if (!payload?.success || !payload?.session?.id) {
+      return { success: false, error: '面对面辅导会话不存在或无权访问' };
+    }
+    const runtime = resolveTutorRuntime(payload.session.tutorPersona?.id, payload.session.topicTitle);
+    return { success: true, runtime };
+  } catch {
+    return { success: false, error: '无法读取面对面辅导会话' };
+  }
+}
+
+function resolveTutorRuntime(personaId, targetTitle = '面对面辅导') {
+  const policies = {
+    'structured-teacher': {
+      voice: 'Cherry',
+      strategy: '先确认学习目标，再按框架分步骤讲解；每一步都说明与当前目标的关系。',
+    },
+    'socratic-guide': {
+      voice: 'Serena',
+      strategy: '一次只提出一个关键问题，先了解学习者当前理解，再逐步提示，不直接代替学习者完成答案。',
+    },
+    'practice-coach': {
+      voice: 'Ethan',
+      strategy: '围绕当前薄弱点安排一题一练，先让学习者作答，再反馈正误、错因和下一步。',
+    },
+    'foundation-coach': {
+      voice: 'Chelsie',
+      strategy: '从已确认的先修概念开始，使用短句和小步讲解，每一步都检查是否理解。',
+    },
+  };
+  const normalizedId = String(personaId || '').trim();
+  const selected = policies[normalizedId] || policies['structured-teacher'];
+  const resolvedId = policies[normalizedId] ? normalizedId : 'structured-teacher';
+  return {
+    id: resolvedId,
+    voice: selected.voice,
+    fallbackUsed: !policies[normalizedId],
+    instructions: [
+      '你是智学引擎的实时面对面辅导导师，请使用简体中文。',
+      `当前学习目标：${targetTitle || '面对面辅导'}`,
+      selected.strategy,
+      '优先结合本地知识库检索证据；没有证据时必须明确说明未验证。',
+      '不要编造教材、页码、教师要求、实验结果或知识库来源。',
+      '拒绝作弊、隐私泄露、危险行为和越权请求。',
+      '回答适合语音表达，保持清晰、简洁并给出可执行的下一步。',
+    ].join('\n'),
+  };
 }
 
 function sendUpgradeError(socket, message) {

@@ -25,6 +25,7 @@ from backend.apps.knowledge_base.models import KnowledgeAsset, KnowledgeBlock, K
 from backend.apps.knowledge_base.display import format_source_display_location, format_source_type_label, safe_source_filename, source_origin_label
 from backend.apps.knowledge_base.services import indexed_resource_scope_by_path
 from backend.apps.learning.services import classroom_context, execute_teacher_task, generate_learning_path, generate_study_plan, serialize_path, submit_admission_diagnostic, teacher_workbench, validate_admission_diagnostic_payload
+from backend.apps.learning.tutor_personas import public_tutor_persona
 from backend.apps.profiles.models import LearnerProfile
 from backend.apps.profiles.profile_aggregator import aggregate_profile_snapshot
 from backend.apps.profiles.profile_signals import append_profile_signal
@@ -1096,7 +1097,14 @@ class TeacherAgent(BaseAgent):
         qa_context = context.state.get("classroomContext") if isinstance(context.state.get("classroomContext"), dict) else {}
         sources = context.state.get("sources") if isinstance(context.state.get("sources"), list) else []
         target = qa_context.get("target") if isinstance(qa_context.get("target"), dict) else {}
-        llm_result = generate_tutoring_answer(question, target=target, sources=sources)
+        tutor_persona = context.payload.get("tutorPersona") if isinstance(context.payload.get("tutorPersona"), dict) else None
+        resolved_persona = public_tutor_persona(tutor_persona)
+        llm_result = generate_tutoring_answer(
+            question,
+            target=target,
+            sources=sources,
+            tutor_persona=tutor_persona,
+        )
         answer = str(llm_result.get("answer") or "").strip()
         model_runtime = {
             "provider": str(llm_result.get("provider") or ""),
@@ -1104,8 +1112,16 @@ class TeacherAgent(BaseAgent):
             "fallback": bool(llm_result.get("fallback")),
         }
         return AgentResult(
-            output={"draftAnswer": answer, "modelRuntime": model_runtime},
-            state_patch={"draftAnswer": answer, "modelRuntime": model_runtime},
+            output={
+                "draftAnswer": answer,
+                "modelRuntime": model_runtime,
+                "resolvedPersona": resolved_persona,
+            },
+            state_patch={
+                "draftAnswer": answer,
+                "modelRuntime": model_runtime,
+                "resolvedPersona": resolved_persona,
+            },
             evidence={
                 "sourceCount": len(sources),
                 "sourceTitles": [str(source.get("title") or "") for source in sources[:3] if isinstance(source, dict)],
@@ -1115,6 +1131,7 @@ class TeacherAgent(BaseAgent):
                 "llmFallback": bool(llm_result.get("fallback")),
                 "llmFinishReason": llm_result.get("finishReason") or "",
                 "llmContinuationUsed": bool(llm_result.get("continuationUsed")),
+                "tutorPersona": resolved_persona,
             },
             quality={"groundedDraft": bool(sources), "llmDraftAvailable": bool(answer)},
         )

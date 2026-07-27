@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Camera,
   CheckCircle2,
@@ -22,7 +22,12 @@ import { useBrowserASR } from '@/lib/hooks/use-browser-asr';
 import { cn } from '@/lib/utils';
 import { A3Card, A3Pill } from '../ui/a3-card';
 import { A3Markdown } from '../ui/a3-markdown';
+import { commitRealtimeEndedSession, createCoachingSessionLoader } from './coaching/coaching-session-loader';
 import { RealtimeCoachingCall } from './coaching/realtime-coaching-call';
+import { isTutorFeedbackVisible, TutorFeedbackPanel } from './coaching/tutor-feedback-panel';
+import { TutorPersonaSelector } from './tutor-persona/tutor-persona-selector';
+import { useTutorPersona } from './tutor-persona/use-tutor-persona';
+import type { A3TutorPersonaId } from '@/lib/a3/tutor-persona-types';
 
 type TranscriptMessage = {
   id: string;
@@ -82,11 +87,13 @@ type CoachingNotice = {
 const tabs = ['知识溯源', '推荐资源', '随堂测验', '课堂总结'] as const;
 
 export function CoachingView() {
+  const tutorPersona = useTutorPersona();
   const [classroom, setClassroom] = useState<ClassroomContext | null>(null);
   const [activeTab, setActiveTab] = useState<(typeof tabs)[number]>('知识溯源');
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [coachingSessions, setCoachingSessions] = useState<CoachingSessionRow[]>([]);
   const [viewingSessionId, setViewingSessionId] = useState('');
+  const [feedbackSession, setFeedbackSession] = useState<CoachingSessionRow | null>(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState('');
   const [savingSourceId, setSavingSourceId] = useState('');
   const [sourceFavoriteMessage, setSourceFavoriteMessage] = useState('');
@@ -98,6 +105,12 @@ export function CoachingView() {
   const [quizSubmitting, setQuizSubmitting] = useState(false);
   const [quizError, setQuizError] = useState('');
   const [lastQuizAnswer, setLastQuizAnswer] = useState('');
+  const sessionLoaderRef = useRef<ReturnType<typeof createCoachingSessionLoader<CoachingSessionResponse>> | null>(null);
+  if (sessionLoaderRef.current == null) {
+    sessionLoaderRef.current = createCoachingSessionLoader((sessionId) => (
+      a3GetJson<CoachingSessionResponse>(`/api/learning/coaching/sessions/${encodeURIComponent(sessionId)}/`)
+    ));
+  }
 
   useEffect(() => {
     let mounted = true;
@@ -124,10 +137,13 @@ export function CoachingView() {
       setMessages(persisted.length ? persisted : [welcomeMessage]);
       setCoachingSessions(sessionsResult.success ? sessionsResult.sessions : []);
       setViewingSessionId('');
+      const currentSession = sessionResult.success ? sessionResult.session : undefined;
+      setFeedbackSession(currentSession?.id ? { id: currentSession.id, status: currentSession.status ?? 'active' } : null);
     }
     load();
     return () => {
       mounted = false;
+      sessionLoaderRef.current?.dispose();
     };
   }, []);
 
@@ -135,14 +151,30 @@ export function CoachingView() {
 
   async function viewCoachingSession(sessionId: string) {
     window.speechSynthesis?.cancel();
-    const result = await a3GetJson<CoachingSessionResponse>(`/api/learning/coaching/sessions/${encodeURIComponent(sessionId)}/`);
-    if (!result.success || !result.session) {
-      return;
-    }
-    setViewingSessionId(sessionId);
-    setMessages(result.session.messages.length ? result.session.messages : [buildWelcomeMessage(classroom)]);
-    setSessionUpdatedAt(result.session.updatedAt ?? '');
+    await sessionLoaderRef.current?.load(sessionId, (result) => {
+      if (!result.success || !result.session) return;
+      setViewingSessionId(sessionId);
+      setFeedbackSession({ id: sessionId, status: result.session.status ?? 'active' });
+      setMessages(result.session.messages.length ? result.session.messages : [buildWelcomeMessage(classroom)]);
+      setSessionUpdatedAt(result.session.updatedAt ?? '');
+    });
   }
+
+  const handleRealtimeSessionEnded = useCallback((sessionId: string) => {
+    commitRealtimeEndedSession(sessionLoaderRef.current, sessionId, (endedSessionId) => {
+      setViewingSessionId(endedSessionId);
+      setFeedbackSession({ id: endedSessionId, status: 'ended' });
+      setCoachingSessions((sessions) => {
+        const matched = sessions.some((session) => session.id === endedSessionId);
+        if (matched) {
+          return sessions.map((session) => (
+            session.id === endedSessionId ? { ...session, status: 'ended' } : session
+          ));
+        }
+        return [{ id: endedSessionId, status: 'ended', topicTitle: target?.title }, ...sessions];
+      });
+    });
+  }, [target?.title]);
 
   async function saveSourceFavorite(source: Citation) {
     const sourceId = source.id || source.title || source.location || 'source';
@@ -189,7 +221,25 @@ export function CoachingView() {
   return (
     <div className="grid gap-5" data-testid="a3-coaching-view">
       <div className="min-w-0">
+        <div className="mb-4">
+          <TutorPersonaSelector
+            personas={tutorPersona.personas}
+            selectedPersonaId={tutorPersona.selectedPersonaId}
+            recommendedPersonaId={tutorPersona.recommendedPersonaId}
+            loading={tutorPersona.loading}
+            saving={tutorPersona.saving}
+            error={tutorPersona.error}
+            onSelect={tutorPersona.selectPersona}
+            onRetry={tutorPersona.reload}
+          />
+        </div>
         <RealtimeCoachingCall
+          tutorPersonaId={tutorPersona.selectedPersonaId}
+          tutorAvatarAsset={tutorPersona.selectedPersona ? {
+            assetId: tutorPersona.selectedPersona.avatarAssetId,
+            publicPath: tutorPersona.selectedPersona.avatarPublicPath,
+          } : undefined}
+          onSessionEnded={handleRealtimeSessionEnded}
           rightRail={(
             <div className="space-y-4">
         <CoachingHistoryCard sessions={coachingSessions} activeId={viewingSessionId} onOpen={viewCoachingSession} />
@@ -207,7 +257,10 @@ export function CoachingView() {
             </div>
           )}
         />
-        <CoachingTextWorkspace target={target} />
+        {isTutorFeedbackVisible(feedbackSession) && (
+          <TutorFeedbackPanel key={feedbackSession?.id} sessionId={feedbackSession?.id ?? ''} />
+        )}
+        <CoachingTextWorkspace target={target} personaId={tutorPersona.selectedPersonaId} />
       </div>
     </div>
   );
@@ -219,7 +272,13 @@ const coachingSuggestions = [
   { label: '常见考法', question: '请说明这个知识点的常见考法和易错点。' },
 ] as const;
 
-function CoachingTextWorkspace({ target }: { target?: ClassroomContext['target'] }) {
+function CoachingTextWorkspace({
+  target,
+  personaId,
+}: {
+  target?: ClassroomContext['target'];
+  personaId: A3TutorPersonaId | '';
+}) {
   const [messages, setMessages] = useState<TranscriptMessage[]>([]);
   const [input, setInput] = useState('');
   const [asking, setAsking] = useState(false);
@@ -310,6 +369,7 @@ function CoachingTextWorkspace({ target }: { target?: ClassroomContext['target']
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: normalized,
+          personaId,
           history: messages.map(({ role, content }) => ({ role, content })),
         }),
       });
@@ -332,6 +392,7 @@ function CoachingTextWorkspace({ target }: { target?: ClassroomContext['target']
       void a3PostJson('/api/learning/coaching/session/', {
         messages: [userMessage, assistantMessage],
         summary: `围绕${target?.title ? `“${target.title}”` : '当前目标'}完成文字辅导。`,
+        tutorPersonaId: personaId,
       });
     } catch (error) {
       setNotice({
@@ -372,7 +433,10 @@ function CoachingTextWorkspace({ target }: { target?: ClassroomContext['target']
         citations: result.citations ?? [], claims: result.claims ?? [], safety: result.safety, refusalReason: result.refusalReason ?? '',
       };
       setMessages((current) => [...current, userMessage, assistantMessage]);
-      void a3PostJson('/api/learning/coaching/session/', { messages: [userMessage, assistantMessage] });
+      void a3PostJson('/api/learning/coaching/session/', {
+        messages: [userMessage, assistantMessage],
+        tutorPersonaId: personaId,
+      });
     } catch (error) {
       setNotice({ text: error instanceof Error ? error.message : '视觉辅导服务暂时不可用', tone: 'error', recovery: 'vision' });
     } finally {

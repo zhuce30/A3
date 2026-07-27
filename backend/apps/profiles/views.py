@@ -3,6 +3,14 @@ from __future__ import annotations
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 
+from backend.apps.learning.tutor_personas import (
+    TutorPersonaUnavailableError,
+    list_public_tutor_personas,
+    public_tutor_persona,
+    resolve_user_tutor_preference,
+    resolve_tutor_persona,
+    save_user_tutor_preference,
+)
 from backend.apps.profiles.models import LearnerProfile
 from backend.apps.profiles.profile_updates import confirm_profile_update, dynamic_profile_feed, reject_profile_update
 from backend.apps.profiles.services import get_learning_profile_options, get_profile_payload, save_learning_profile, update_user_profile, extract_and_save_profile
@@ -36,6 +44,49 @@ def profile_options(request):
     if rejected:
         return rejected
     return JsonResponse({"success": True, **get_learning_profile_options()})
+
+
+@require_http_methods(["GET", "PATCH"])
+def tutor_preference(request):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+
+    try:
+        if request.method == "GET":
+            preference, fallback_used = resolve_user_tutor_preference(request.user)
+            return JsonResponse(
+                {
+                    "success": True,
+                    "personas": list_public_tutor_personas(),
+                    "preference": preference,
+                    "selectedPersona": public_tutor_persona(preference["personaId"]),
+                    "fallbackUsed": fallback_used,
+                }
+            )
+
+        payload = json_body(request)
+        if not isinstance(payload, dict) or set(payload) != {"personaId"}:
+            raise ValueError("请求只能包含辅导风格编号")
+        persona_id = payload["personaId"]
+        if not isinstance(persona_id, str) or not persona_id.strip():
+            raise ValueError("请选择有效的辅导风格")
+        if resolve_tutor_persona(persona_id) is None:
+            raise ValueError("不支持该辅导风格")
+        save_user_tutor_preference(request.user, persona_id.strip())
+        preference, fallback_used = resolve_user_tutor_preference(request.user)
+        return JsonResponse(
+            {
+                "success": True,
+                "preference": preference,
+                "selectedPersona": public_tutor_persona(preference["personaId"]),
+                "fallbackUsed": fallback_used,
+            }
+        )
+    except TutorPersonaUnavailableError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=503)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
 
 
 @require_http_methods(["POST"])

@@ -110,6 +110,16 @@ export interface TTSGenerationResult {
   format: string;
 }
 
+export const TTS_MAX_AUDIO_BYTES = 5 * 1024 * 1024;
+export const QWEN_TTS_MAX_AUDIO_BYTES = TTS_MAX_AUDIO_BYTES;
+const TTS_MAX_ERROR_BYTES = 64 * 1024;
+const QWEN_TTS_AUDIO_HOSTS = new Set([
+  'dashscope-result-bj.oss-cn-beijing.aliyuncs.com',
+  'dashscope-result-hz.oss-cn-hangzhou.aliyuncs.com',
+  'dashscope-result-sh.oss-cn-shanghai.aliyuncs.com',
+  'dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com',
+]);
+
 /**
  * Thrown when a TTS provider returns a rate-limit / concurrency-quota error.
  * Allows downstream consumers to distinguish rate-limit errors from other TTS failures.
@@ -188,34 +198,39 @@ async function generateOpenAITTS(
   text: string,
 ): Promise<TTSGenerationResult> {
   const baseUrl = config.baseUrl || TTS_PROVIDERS['openai-tts'].defaultBaseUrl;
+  const linked = linkedAbortController(config.signal);
 
-  // Use gpt-4o-mini-tts for best quality and intelligent realtime applications
-  const response = await fetch(`${baseUrl}/audio/speech`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json; charset=utf-8',
-    },
-    body: JSON.stringify({
-      model: config.modelId || 'gpt-4o-mini-tts',
-      input: text,
-      voice: config.voice,
-      speed: config.speed || 1.0,
-    }),
-  });
+  try {
+    // Use gpt-4o-mini-tts for best quality and intelligent realtime applications
+    const response = await fetch(`${baseUrl}/audio/speech`, {
+      method: 'POST',
+      signal: linked.controller.signal,
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({
+        model: config.modelId || 'gpt-4o-mini-tts',
+        input: text,
+        voice: config.voice,
+        speed: config.speed || 1.0,
+      }),
+    });
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(`OpenAI TTS API error: ${error.error?.message || response.statusText}`);
+    if (!response.ok) {
+      const message = await readBoundedOpenAIError(response, linked.controller);
+      throw new Error(`OpenAI TTS API error: ${message}`);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    const format = getAudioResponseFormat(contentType);
+    return {
+      audio: await readBoundedTTSResponse(response, linked.controller),
+      format,
+    };
+  } finally {
+    linked.cleanup();
   }
-
-  const arrayBuffer = await response.arrayBuffer();
-  const contentType = response.headers.get('content-type') || '';
-  const format = getAudioResponseFormat(contentType);
-  return {
-    audio: new Uint8Array(arrayBuffer),
-    format,
-  };
 }
 
 /**
@@ -624,6 +639,7 @@ async function generateQwenTTS(config: TTSModelConfig, text: string): Promise<TT
 
   const response = await fetch(`${baseUrl}/services/aigc/multimodal-generation/generation`, {
     method: 'POST',
+    signal: config.signal,
     headers: {
       Authorization: `Bearer ${config.apiKey}`,
       'Content-Type': 'application/json; charset=utf-8',
@@ -653,20 +669,130 @@ async function generateQwenTTS(config: TTSModelConfig, text: string): Promise<TT
     throw new Error(`Qwen TTS error: No audio URL in response. Response: ${JSON.stringify(data)}`);
   }
 
-  // Download audio from URL
-  const audioUrl = data.output.audio.url;
-  const audioResponse = await fetch(audioUrl);
-
-  if (!audioResponse.ok) {
-    throw new Error(`Failed to download audio from URL: ${audioResponse.statusText}`);
-  }
-
-  const arrayBuffer = await audioResponse.arrayBuffer();
+  const audioUrl = validateQwenAudioUrl(data.output.audio.url);
+  const audio = await downloadQwenAudio(audioUrl, config.signal);
 
   return {
-    audio: new Uint8Array(arrayBuffer),
+    audio,
     format: 'wav', // Qwen3 TTS returns WAV format
   };
+}
+
+function validateQwenAudioUrl(value: unknown): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(value || ''));
+  } catch {
+    throw new Error('Qwen TTS audio URL is invalid');
+  }
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username ||
+    parsed.password ||
+    (parsed.port && parsed.port !== '443') ||
+    !QWEN_TTS_AUDIO_HOSTS.has(parsed.hostname.toLowerCase())
+  ) {
+    throw new Error('Qwen TTS audio URL is not trusted');
+  }
+  return parsed;
+}
+
+async function downloadQwenAudio(url: URL, parentSignal?: AbortSignal): Promise<Uint8Array> {
+  const linked = linkedAbortController(parentSignal);
+
+  try {
+    const response = await fetch(url, {
+      signal: linked.controller.signal,
+      redirect: 'manual',
+    });
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error('Qwen TTS audio redirect is not allowed');
+    }
+    if (!response.ok) throw new Error('Qwen TTS audio download failed');
+
+    return await readBoundedTTSResponse(response, linked.controller, 'Qwen TTS audio');
+  } finally {
+    linked.cleanup();
+  }
+}
+
+function linkedAbortController(parentSignal?: AbortSignal) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) abortFromParent();
+  else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+  return {
+    controller,
+    cleanup: () => parentSignal?.removeEventListener('abort', abortFromParent),
+  };
+}
+
+async function readBoundedTTSResponse(
+  response: Response,
+  controller: AbortController,
+  label = 'TTS audio',
+): Promise<Uint8Array> {
+  return readBoundedResponse(response, controller, TTS_MAX_AUDIO_BYTES, label);
+}
+
+async function readBoundedOpenAIError(
+  response: Response,
+  controller: AbortController,
+): Promise<string> {
+  if (!response.body) return response.statusText || 'request failed';
+  const bytes = await readBoundedResponse(
+    response,
+    controller,
+    TTS_MAX_ERROR_BYTES,
+    'OpenAI TTS error response',
+  );
+  const text = new TextDecoder().decode(bytes);
+  try {
+    const parsed = JSON.parse(text) as { error?: { message?: unknown } | string };
+    if (typeof parsed.error === 'string') return parsed.error;
+    if (typeof parsed.error?.message === 'string') return parsed.error.message;
+  } catch {
+    // Use the HTTP status below for malformed provider errors.
+  }
+  return response.statusText || 'request failed';
+}
+
+async function readBoundedResponse(
+  response: Response,
+  controller: AbortController,
+  maxBytes: number,
+  label: string,
+): Promise<Uint8Array> {
+  const declaredLength = Number.parseInt(response.headers.get('content-length') || '', 10);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    controller.abort();
+    throw new Error(`${label} is too large`);
+  }
+  if (!response.body) throw new Error(`${label} response is empty`);
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      controller.abort();
+      throw new Error(`${label} is too large`);
+    }
+    chunks.push(value);
+  }
+  const audio = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    audio.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return audio;
 }
 
 /**

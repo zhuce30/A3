@@ -71,9 +71,18 @@ def chat_completion(
     }
 
 
-def generate_tutoring_answer(question: str, *, target: dict, sources: list[dict]) -> dict:
+def generate_tutoring_answer(
+    question: str,
+    *,
+    target: dict,
+    sources: list[dict],
+    tutor_persona: dict | None = None,
+) -> dict:
     evidence = _format_sources(sources)
     target_title = str(target.get("title") or "当前知识点")
+    persona_instruction = ""
+    if isinstance(tutor_persona, dict):
+        persona_instruction = str(tutor_persona.get("instruction") or "").strip()
     try:
         messages = [
                 {
@@ -89,6 +98,7 @@ def generate_tutoring_answer(question: str, *, target: dict, sources: list[dict]
                         "结构化对比、考查点说明或评分维度必须使用标准 Markdown 表格，"
                         "例如 | 列名 | 列名 |，下一行使用 | --- | --- |；每一行必须单独换行，不要把竖线表格写成普通段落。"
                         "推导题必须完整收尾：给出最终表达式、关键结论和下一步练习建议，不能在公式或等号处结束。"
+                        + (f"\n本次辅导方式：{persona_instruction}" if persona_instruction else "")
                     ),
                 },
                 {

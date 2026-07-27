@@ -1,9 +1,11 @@
 import { type NextRequest } from 'next/server';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import {
+  isAuthorizedForClassroomJob,
   isValidClassroomJobId,
   readClassroomGenerationJob,
 } from '@/lib/server/classroom-job-store';
+import { fetchA3DjangoJson } from '@/lib/server/a3-django-api';
 import { buildRequestOrigin } from '@/lib/server/classroom-storage';
 import { createLogger } from '@/lib/logger';
 
@@ -25,6 +27,16 @@ export async function GET(req: NextRequest, context: { params: Promise<{ jobId: 
     if (!job) {
       return apiError('INVALID_REQUEST', 404, 'Classroom generation job not found');
     }
+    if (job.a3Context) {
+      const cookieHeader = req.headers.get('cookie');
+      if (!isAuthorizedForClassroomJob(job, cookieHeader)) {
+        return apiError('INVALID_REQUEST', 404, 'Classroom generation job not found');
+      }
+      const auth = await fetchA3DjangoJson<{ user?: unknown }>('/api/auth/me/', cookieHeader);
+      if (!auth.success || !auth.user) {
+        return apiError('INVALID_REQUEST', 404, 'Classroom generation job not found');
+      }
+    }
 
     const pollUrl = `${buildRequestOrigin(req)}/api/generate-classroom/${jobId}`;
 
@@ -40,6 +52,7 @@ export async function GET(req: NextRequest, context: { params: Promise<{ jobId: 
       totalScenes: job.totalScenes,
       result: job.result,
       error: job.error,
+      a3Context: job.a3Context,
       done: job.status === 'succeeded' || job.status === 'failed',
     });
   } catch (error) {

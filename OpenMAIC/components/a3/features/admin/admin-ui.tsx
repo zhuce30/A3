@@ -45,8 +45,9 @@ function useAdminModalFocus(
     const previousOverflow = document.body.style.overflow;
     const frame = window.requestAnimationFrame(() => {
       const container = containerRef.current;
+      const preferredFocusable = container?.querySelector<HTMLElement>('[data-admin-initial-focus]');
       const firstFocusable = container?.querySelector<HTMLElement>(ADMIN_MODAL_FOCUSABLE);
-      (firstFocusable ?? container)?.focus();
+      (preferredFocusable ?? firstFocusable ?? container)?.focus();
     });
     const onKeyDown = (event: KeyboardEvent) => {
       if (ADMIN_MODAL_STACK.at(-1) !== modalToken) return;
@@ -403,6 +404,7 @@ export function AdminReasonDialog({
           maxLength={255}
           rows={4}
           autoFocus
+          data-admin-initial-focus="true"
           className="mt-2 w-full resize-none rounded-md border border-[#c8c3b4] bg-white px-3 py-2 text-sm text-[#183229] outline-none focus:border-[#9b7b2f] focus:ring-2 focus:ring-[#9b7b2f]/20"
         />
         {error ? <p className="mt-2 text-sm text-rose-700" role="alert">{error}</p> : null}
