@@ -1,6 +1,7 @@
 ﻿'use client';
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
@@ -42,7 +43,10 @@ import type { ClassroomContext } from '@/lib/a3/classroom-types';
 import type { A3ApiResponse, StudyPlan, StudyPlanTaskFeedback } from '@/lib/a3/learning-types';
 import { useA3Locale, type A3Locale } from '@/lib/a3/i18n';
 import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
-import type { A3OpenMAICClassroomArtifact, A3ResourcePacksResponse } from '@/lib/a3/recommendation-types';
+import type { A3OpenMAICClassroomArtifact, A3ResourcePacksResponse, A3ResourcePackV2, A3ResourcePackV2ResourceType } from '@/lib/a3/recommendation-types';
+import { useResourceGeneration } from '@/lib/a3/use-resource-generation';
+import { classifyIntent } from '@/lib/a3/intent-router';
+import { ResourceInlineBody } from './resource-standalone-view';
 import { normalizeASRUploadAudio } from '@/lib/audio/wav-utils';
 import { cn } from '@/lib/utils';
 import { A3Pill } from '../ui/a3-card';
@@ -74,6 +78,10 @@ type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  // kind 区分普通文本回答与对话内生成的资源卡片；缺省视为 'text'。
+  kind?: 'text' | 'resource';
+  resourcePack?: A3ResourcePackV2;
+  resourceType?: A3ResourcePackV2ResourceType;
   verified?: boolean;
   citations?: Citation[];
   claims?: Claim[];
@@ -143,6 +151,20 @@ const CLASSROOM_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', '
 const CLASSROOM_ASR_PROVIDER_ID = 'qwen-asr';
 const CLASSROOM_ASR_MODEL_ID = 'qwen3-asr-flash';
 const CLASSROOM_OUTLINE_BUTTON_CLASS = 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:text-slate-950 dark:border-slate-200 dark:bg-white dark:text-slate-700 dark:hover:bg-slate-50 dark:hover:text-slate-950 dark:disabled:border-slate-200 dark:disabled:bg-slate-100 dark:disabled:text-slate-500 dark:disabled:opacity-100';
+
+const CLASSROOM_RESOURCE_LABELS: Record<A3ResourcePackV2ResourceType, string> = {
+  lecture_doc: '讲解文档',
+  knowledge_card: '速记卡片',
+  mind_map: '思维导图',
+  practice_set: '专项练习',
+  case_study: '实践案例',
+  code_lab: '代码实验',
+  micro_video_script: '视频脚本',
+};
+
+function classroomResourceLabel(resourceType: A3ResourcePackV2ResourceType): string {
+  return CLASSROOM_RESOURCE_LABELS[resourceType] ?? '学习资源';
+}
 
 const classroomCopy = {
   'zh-CN': {
@@ -512,6 +534,8 @@ function resolveClassroomBubbleWidthClass(historyOpen: boolean, drawerOpen: bool
 export function ClassroomViewRedesign() {
   const { copy } = useClassroomCopy();
   const tutorPersona = useTutorPersona();
+  const resourceGen = useResourceGeneration();
+  const router = useRouter();
   const [classroom, setClassroom] = useState<ClassroomContext | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
@@ -645,9 +669,67 @@ export function ClassroomViewRedesign() {
     return () => window.clearTimeout(timer);
   }, [loadClassroom]);
 
+  // 课堂内直接生成资源（A：显式 chip / B：对话触发共用）。生成结果作为一条 resource 消息进对话流。
+  async function generateResourceInClassroom(resourceType: A3ResourcePackV2ResourceType, goalOverride?: string) {
+    if (asking || resourceGen.generating) return;
+    const goal = (goalOverride || target?.title || '').trim();
+    if (!goal) {
+      setMessage('请先确定课堂学习目标再生成资源。');
+      return;
+    }
+    setInput('');
+    setAsking(true);
+    setMessage('');
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: `生成${classroomResourceLabel(resourceType)}：${goal}`,
+      createdAt: new Date().toISOString(),
+    };
+    setChat((current) => [...current, userMessage]);
+    try {
+      const pack = await resourceGen.generate(resourceType, goal);
+      if (!pack) {
+        setChat((current) => [...current, {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: resourceGen.error || '资源生成失败，请稍后重试，或到资源推荐页生成。',
+          createdAt: new Date().toISOString(),
+        }]);
+        return;
+      }
+      const generated = pack.resources.find((item) => item.type === resourceType) ?? pack.resources[0];
+      setChat((current) => [...current, {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        kind: 'resource',
+        content: `已生成${classroomResourceLabel(resourceType)}`,
+        resourcePack: pack,
+        resourceType: generated?.type as A3ResourcePackV2ResourceType,
+        verified: Boolean(generated?.verified),
+        createdAt: new Date().toISOString(),
+      }]);
+    } finally {
+      setAsking(false);
+    }
+  }
+
   async function askQuestion(question = input) {
     const normalized = question.trim() || (imageAttachment ? '请解答图片里的题目，并说明关键步骤。' : '');
     if (!normalized || asking) return;
+    // B：先过意图识别。generate_resource / navigate 走各自分支，其余（含 explain/兜底）继续问答。
+    if (!imageAttachment) {
+      const intent = await classifyIntent(normalized, { goal: target?.title ?? '', surface: 'classroom' });
+      if (intent.intent === 'generate_resource' && intent.params.resourceType) {
+        await generateResourceInClassroom(intent.params.resourceType, intent.params.goal || target?.title || '');
+        return;
+      }
+      if (intent.intent === 'navigate' && intent.params.route) {
+        setInput('');
+        router.push(intent.params.route);
+        return;
+      }
+    }
     const attachmentForRequest = imageAttachment;
     setInput('');
     setAsking(true);
@@ -1055,24 +1137,31 @@ export function ClassroomViewRedesign() {
           onToggleHistory={() => setHistoryOpen((value) => !value)}
           onToggleDrawer={() => setDrawerOpen((value) => !value)}
         />
-        <div className="border-b border-slate-200 bg-[#fbfaf5] px-4 py-2 md:px-6">
-          <TutorPersonaSelector
-            compact
-            personas={tutorPersona.personas}
-            selectedPersonaId={tutorPersona.selectedPersonaId}
-            recommendedPersonaId={tutorPersona.recommendedPersonaId}
-            loading={tutorPersona.loading}
-            saving={tutorPersona.saving}
-            error={tutorPersona.error}
-            onSelect={tutorPersona.selectPersona}
-            onRetry={tutorPersona.reload}
-          />
-        </div>
-        <OpenMAICInlineBar copy={copy} artifact={openmaicClassroomArtifact} />
-
         <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]">
-          <div className="min-h-0 overflow-y-auto px-4 py-5 md:px-7" data-testid="a3-classroom-dialogue">
-            <div className={cn('mx-auto flex w-full flex-col gap-5 transition-[max-width] duration-200 ease-out', contentWidthClass)}>
+          <div className="min-h-0 overflow-y-auto" data-testid="a3-classroom-dialogue">
+            {/* 辅导方式选择器与 OpenMAIC 条移入滚动区：它们占约 150px，固定时会把对话区压到只剩几行。
+                随对话一起滚动后，对话区能占满可用高度，往下看内容时顶部块自然让位。 */}
+            <div className="border-b border-slate-200 bg-[#fbfaf5] px-4 py-2 md:px-6">
+              <TutorPersonaSelector
+                compact
+                personas={tutorPersona.personas}
+                selectedPersonaId={tutorPersona.selectedPersonaId}
+                recommendedPersonaId={tutorPersona.recommendedPersonaId}
+                loading={tutorPersona.loading}
+                saving={tutorPersona.saving}
+                error={tutorPersona.error}
+                onSelect={tutorPersona.selectPersona}
+                onRetry={tutorPersona.reload}
+              />
+            </div>
+            <OpenMAICInlineBar copy={copy} artifact={openmaicClassroomArtifact} />
+            <div className={cn('mx-auto flex w-full flex-col gap-5 px-4 py-5 md:px-7 transition-[max-width] duration-200 ease-out', contentWidthClass)}>
+              <ClassroomResourceChips
+                disabled={asking || resourceGen.generating}
+                activeType={resourceGen.activeType}
+                hasTarget={Boolean(target?.title)}
+                onGenerate={(resourceType) => void generateResourceInClassroom(resourceType)}
+              />
               {showLessonRunway && (
                 <LessonRunway
                   copy={copy}
@@ -2184,6 +2273,46 @@ function HistoryPanel({
   );
 }
 
+function ClassroomResourceChips({
+  disabled,
+  activeType,
+  hasTarget,
+  onGenerate,
+}: {
+  disabled: boolean;
+  activeType: A3ResourcePackV2ResourceType | null;
+  hasTarget: boolean;
+  onGenerate: (resourceType: A3ResourcePackV2ResourceType) => void;
+}) {
+  const types: A3ResourcePackV2ResourceType[] = ['lecture_doc', 'knowledge_card', 'mind_map', 'practice_set', 'case_study', 'code_lab', 'micro_video_script'];
+  return (
+    <div className="rounded-xl border border-slate-200 bg-[#fbfaf5] p-3" data-testid="a3-classroom-resource-chips">
+      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-500">
+        <Sparkles className="size-3.5 text-blue-600" />
+        围绕当前目标一键生成资源，结果直接展示在下方对话里
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {types.map((resourceType) => {
+          const isActive = activeType === resourceType;
+          return (
+            <button
+              key={resourceType}
+              type="button"
+              disabled={disabled || !hasTarget}
+              onClick={() => onGenerate(resourceType)}
+              className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-blue-300 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            >
+              {isActive ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              {classroomResourceLabel(resourceType)}
+            </button>
+          );
+        })}
+      </div>
+      {!hasTarget && <p className="mt-2 text-xs text-slate-400">待课堂目标加载后可用。</p>}
+    </div>
+  );
+}
+
 function ChatBubble({
   item,
   widthClassName,
@@ -2203,6 +2332,29 @@ function ChatBubble({
 }) {
   const { copy } = useClassroomCopy();
   const assistant = item.role === 'assistant';
+  // 对话内生成的资源：用内联渲染组件展示（讲义/卡片/导图直接看，练习/代码/视频给打开完整页入口）。
+  if (assistant && item.kind === 'resource' && item.resourcePack) {
+    const resource = item.resourcePack.resources.find((res) => res.type === item.resourceType) ?? item.resourcePack.resources[0];
+    return (
+      <div className="flex gap-3" data-testid="a3-classroom-message-resource">
+        <Avatar />
+        <div className={cn('flex flex-col', widthClassName)}>
+          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-500">
+              <Sparkles className="size-3.5 text-blue-600" />
+              {item.content}
+              {item.verified && <A3Pill tone="green">已验证</A3Pill>}
+            </div>
+            {resource ? (
+              <ResourceInlineBody resource={resource} pack={item.resourcePack} />
+            ) : (
+              <p className="text-sm text-slate-500">资源已生成，但内容为空，请到资源推荐页查看。</p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className={cn('flex gap-3', !assistant && 'justify-end')} data-testid={`a3-classroom-message-${item.role}`}>
       {assistant && <Avatar />}

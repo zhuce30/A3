@@ -46,6 +46,14 @@ describe('A3 platform-managed system resource library', () => {
     expect(view).toContain('资料加载失败');
   });
 
+  it('keeps URL initialization independent from mutable filter state', () => {
+    const view = source('components/a3/features/system-library-view.tsx');
+
+    expect(view).toContain('void loadLibrary(resourceType, difficulty, query)');
+    expect(view).not.toContain('onClick={() => void loadLibrary()}');
+    expect(view).not.toContain('event.preventDefault(); void loadLibrary();');
+  });
+
   it('shows explainable recommendation evidence and never renders storage paths', () => {
     const view = source('components/a3/features/system-library-view.tsx');
     expect(view).toContain('personalization.reason');

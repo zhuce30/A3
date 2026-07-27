@@ -51,4 +51,5 @@ urlpatterns = [
     path("demo/evaluate/", views.demo_evaluate, name="compat-demo-evaluate"),
     path("v1/qa/interact/", views.qa_interact, name="compat-v1-qa-interact"),
     path("v1/progress/track/", views.progress_track, name="compat-v1-progress-track"),
+    path("intent/classify/", views.intent_classify, name="compat-intent-classify"),
 ]

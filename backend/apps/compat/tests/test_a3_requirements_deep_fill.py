@@ -1079,6 +1079,33 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertIn("先判断", _resource_specialist_instructions("case_study"))
         self.assertIn("真实 runner", _resource_specialist_instructions("code_lab"))
 
+    def test_all_resource_types_have_dedicated_specialist_persona(self):
+        """锁住第 4 项：7 类资源都应有专属 Specialist 人设，不再回退到通用 default，
+        且四个原本较弱的类型人设里显式要求围绕 weakPoints 组织内容。"""
+        from backend.apps.compat.resource_generation import (
+            RESOURCE_TYPES,
+            _resource_specialist_instructions,
+        )
+
+        default_text = _resource_specialist_instructions("__nonexistent__")
+        specialist_names = {
+            "lecture_doc": "LectureDocSpecialist",
+            "knowledge_card": "KnowledgeCardSpecialist",
+            "mind_map": "MindMapSpecialist",
+            "micro_video_script": "MicroVideoSpecialist",
+            "practice_set": "PracticeSetSpecialist",
+            "case_study": "CaseStudySpecialist",
+            "code_lab": "CodeLabSpecialist",
+        }
+        for resource_type in RESOURCE_TYPES:
+            persona = _resource_specialist_instructions(resource_type)
+            self.assertNotEqual(persona, default_text, resource_type)
+            self.assertIn(specialist_names[resource_type], persona)
+
+        # 四个新补的弱类型人设必须显式引用 weakPoints，使个性化落到生成契约里。
+        for resource_type in ("lecture_doc", "knowledge_card", "mind_map", "micro_video_script"):
+            self.assertIn("weakPoints", _resource_specialist_instructions(resource_type), resource_type)
+
     def test_specialist_repair_completes_partial_resource_content(self):
         from backend.apps.compat.resource_generation import _repair_llm_resource_content
 
@@ -1208,6 +1235,11 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
             "practice_set": {"questions": [{"stem": "什么是调度？", "answer": "调度"}]},
             "case_study": {"scenario": "一个案例", "steps": ["分析"], "analysis": "结论"},
             "code_lab": {"starterCode": "print(1)", "steps": ["运行"], "checkpoints": ["完成"]},
+            # 以下 4 类原先走宽松 legacy 门禁，现已收紧为与专家类同构的严格门禁。
+            "lecture_doc": {"sections": [{"heading": "目标", "body": "学会调度"}]},
+            "knowledge_card": {"cards": [{"front": "什么是调度？", "back": "切换进程"}]},
+            "mind_map": {"nodes": [{"label": "条件", "children": ["互斥"]}], "markdown": "# 调度"},
+            "micro_video_script": {"shots": [{"scene": "开场", "narration": "讲调度"}]},
         }
 
         for resource_type, content in shallow.items():
@@ -1232,23 +1264,104 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
             "practice_set": "grounding",
             "case_study": "rubric_grounding",
             "code_lab": "test_contract",
+            "lecture_doc": "grounding",
+            "knowledge_card": "grounding",
+            "mind_map": "grounding",
+            "micro_video_script": "grounding",
         }
 
-        for resource_type, required_check in required_fields.items():
-            content = _fallback_resource_content(resource_type, "进程调度", sources, None)
+        def _strip_grounding(resource_type, content):
+            """把 required 接地字段清空，验证门禁会因此拒绝（其余检查仍通过）。"""
             if resource_type == "practice_set":
                 for question in content["questions"]:
                     question["sourceIds"] = []
             elif resource_type == "case_study":
                 content["sourceIds"] = []
-            else:
+            elif resource_type == "code_lab":
                 content["testCases"] = []
+            elif resource_type == "lecture_doc":
+                for section in content["sections"]:
+                    section["sourceIds"] = []
+            elif resource_type == "knowledge_card":
+                for card in content["cards"]:
+                    card["sourceIds"] = []
+            elif resource_type == "mind_map":
+                for node in content["nodes"]:
+                    node["sourceIds"] = []
+            elif resource_type == "micro_video_script":
+                for shot in content["shots"]:
+                    shot["sourceIds"] = []
+
+        for resource_type, required_check in required_fields.items():
+            content = _fallback_resource_content(resource_type, "进程调度", sources, None)
+            _strip_grounding(resource_type, content)
 
             report = _resource_content_quality(resource_type, content)
-            self.assertGreaterEqual(report["score"], 80)
             self.assertFalse(report["passed"], (resource_type, report))
             failed_names = {item["name"] for item in report["checks"] if not item["passed"]}
-            self.assertIn(required_check, failed_names)
+            # 只有 required 接地检查失败，其余检查仍应全部通过——证明是接地门禁而非整体浅薄导致拒绝。
+            self.assertEqual(failed_names, {required_check}, (resource_type, report))
+
+    def test_resource_verified_reflects_claim_grounding_not_mere_citation(self):
+        """verified 必须反映内容是否真被证据支撑，而不是"挂了引用就为真"。
+
+        锁住第 3 项修复。分两层验证：
+        1) 端到端：相关证据下 7 类资源都应 verified=True 且至少 1 条 claim 被支撑。
+        2) 判定函数 _resource_grounding：直接喂构造的 verification，验证三条核心分支
+           （无引用→False、有引用但零 claim 支撑→False、有支撑→True），
+           这样不受 verify_answer 的 token 重叠噪声干扰，干净地锁住"不再恒真"。
+        """
+        from backend.apps.compat.resource_generation import (
+            RESOURCE_TYPES,
+            _build_resource_item,
+            _resource_grounding,
+        )
+
+        relevant = [
+            {"id": "S1", "sourceId": "S1", "type": "RAG", "score": 0.9,
+             "title": "根轨迹讲义", "location": "第1章",
+             "snippet": "根轨迹描述闭环极点随系统参数变化在复平面上的运动轨迹，用于分析稳定性。"},
+        ]
+        for resource_type in RESOURCE_TYPES:
+            grounded = _build_resource_item(resource_type, "根轨迹基本概念", None, relevant, allow_llm=False)
+            self.assertTrue(grounded["verified"], (resource_type, grounded["grounding"]))
+            self.assertGreaterEqual(grounded["grounding"]["supportedClaims"], 1, (resource_type, grounded["grounding"]))
+
+        class _V:
+            def __init__(self, claims, citations, verified):
+                self.claims = claims
+                self.citations = citations
+                self.verified = verified
+
+        cite = [{"title": "根轨迹讲义", "snippet": "根轨迹描述闭环极点轨迹。", "type": "RAG", "score": 0.9}]
+
+        # 有引用 + 至少 1 条 claim 被支撑 → verified=True
+        supported = _resource_grounding(_V(
+            claims=[{"verified": True}, {"verified": False}, {"verified": False}],
+            citations=cite, verified=True,
+        ))
+        self.assertTrue(supported["verified"])
+        self.assertEqual(supported["supportedClaims"], 1)
+
+        # 有引用但零 claim 被支撑 → verified=False（旧逻辑此处会因"有 citation"恒真）
+        unsupported = _resource_grounding(_V(
+            claims=[{"verified": False}, {"verified": False}],
+            citations=cite, verified=True,
+        ))
+        self.assertFalse(unsupported["verified"])
+
+        # 完全没有可引用证据 → verified=False
+        no_citation = _resource_grounding(_V(
+            claims=[{"verified": True}], citations=[], verified=True,
+        ))
+        self.assertFalse(no_citation["verified"])
+
+        # 支撑率高 → confidence 升级为 high
+        high_conf = _resource_grounding(_V(
+            claims=[{"verified": True}, {"verified": True}, {"verified": True}, {"verified": False}],
+            citations=cite, verified=True,
+        ))
+        self.assertEqual(high_conf["confidence"], "high")
 
     @patch.dict("os.environ", {"A3_RESOURCE_LLM_ENABLED": "1", "A3_LLM_API_KEY": "test-key"})
     def test_mind_map_llm_generation_has_explicit_schema_requirements(self):

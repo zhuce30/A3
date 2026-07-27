@@ -189,6 +189,8 @@ function QuestionNavigator({
               key={questionIds[index]}
               type="button"
               onClick={() => onSelect(index)}
+              aria-current={active ? 'true' : undefined}
+              aria-label={`第 ${index + 1} 题${submitted ? '，已作答' : '，未作答'}${active ? '，当前题' : ''}`}
               className={`flex aspect-square items-center justify-center rounded-md text-xs font-semibold transition ${active ? 'bg-blue-600 text-white' : submitted ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
             >
               {index + 1}

@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
+import { hasMojibake } from '@/lib/a3/mojibake';
 import { Archive, ArrowRight, CheckCircle2, Clock3, FileText, GitBranch, Loader2, MonitorPlay, Play, Plus, Video } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson } from '@/lib/a3/api-client';
@@ -278,6 +279,4 @@ function cleanText(value: unknown, fallback: string) {
   return text;
 }
 
-function hasMojibake(text: string) {
-  return ['�', '锛', '涓', '璧', '鎺', '鐢', '瑙', '鏁', '瀛', '€'].some((marker) => text.includes(marker));
-}
+// hasMojibake 已抽到 '@/lib/a3/mojibake'（见文件顶部 import）。

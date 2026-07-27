@@ -1,4 +1,5 @@
-import { CheckCircle2, Circle, Loader2, ShieldCheck, Star, XCircle } from 'lucide-react';
+import Link from 'next/link';
+import { CheckCircle2, Circle, ExternalLink, Loader2, ShieldCheck, Star, XCircle } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import type { A3ResourcePackV2Resource } from '@/lib/a3/recommendation-types';
@@ -84,13 +85,19 @@ export function ResourceLearningRail({
       <RailSection title="资料证据">
         <div className="space-y-3">
           {resource.citations.slice(0, 4).map((citation, index) => (
-            <div key={`${citation.id ?? citation.title}-${index}`} className="border-b border-slate-100 pb-3 last:border-0 last:pb-0">
+            <Link
+              key={`${citation.id ?? citation.title}-${index}`}
+              href={`/a3/library?q=${encodeURIComponent(citation.title || citation.location || '')}`}
+              className="group block border-b border-slate-100 pb-3 last:border-0 last:pb-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              title="在知识库中查看该来源"
+            >
               <div className="flex items-start gap-2 text-sm font-medium text-slate-900">
                 <ShieldCheck className="mt-0.5 size-4 shrink-0 text-blue-600" />
-                <span>{citation.title || `资料 ${index + 1}`}</span>
+                <span className="flex-1 group-hover:text-blue-700 group-hover:underline">{citation.title || `资料 ${index + 1}`}</span>
+                <ExternalLink className="mt-0.5 size-3.5 shrink-0 text-slate-400 group-hover:text-blue-600" />
               </div>
               {citation.snippet && <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{citation.snippet}</p>}
-            </div>
+            </Link>
           ))}
           {!resource.citations.length && <p className="text-sm leading-6 text-slate-500">当前资源没有可展示的资料证据。</p>}
         </div>

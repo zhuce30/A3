@@ -1,10 +1,11 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { CheckCircle2, CheckSquare2, Copy, Download, Loader2, Play, RotateCcw, TerminalSquare, XCircle } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { CheckCircle2, CheckSquare2, Code2, Copy, Download, Loader2, Pencil, Play, RotateCcw, TerminalSquare, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3PostJson } from '@/lib/a3/api-client';
 import type { A3ResourcePackV2Resource } from '@/lib/a3/recommendation-types';
+import { highlightCode } from '@/components/ai-elements/code-block';
 import { RailSection, ResourceLearningRail } from './resource-learning-rail';
 import { ResourceWorkbenchShell } from './resource-workbench-shell';
 import { normalizeCodeLab } from './resource-workbench-utils';
@@ -59,6 +60,8 @@ export function CodeLabWorkbench({
   const [runError, setRunError] = useState('');
   const [checked, setChecked] = useState<Set<number>>(() => new Set());
   const [copyMessage, setCopyMessage] = useState('');
+  // 默认展示高亮预览（学生读起始代码是主要场景），点"编辑"切到可写 textarea。
+  const [editing, setEditing] = useState(false);
   const completion = lab.checkpoints.length ? Math.round((checked.size / lab.checkpoints.length) * 100) : 0;
   const executionPassed = runResult?.status === 'passed' && (lab.testCases.length === 0 || runResult.mode === 'judge');
   const checkpointsComplete = lab.checkpoints.length === 0 || checked.size === lab.checkpoints.length;
@@ -136,18 +139,17 @@ export function CodeLabWorkbench({
               <div className="mt-1 font-mono text-xs text-slate-400">{fileName}</div>
             </div>
             <div className="flex flex-wrap gap-2">
-              <IconButton label="恢复" onClick={() => setCode(lab.starterCode)} icon={<RotateCcw className="size-4" />} />
+              <IconButton
+                label={editing ? '预览' : '编辑'}
+                onClick={() => setEditing((value) => !value)}
+                icon={editing ? <Code2 className="size-4" /> : <Pencil className="size-4" />}
+              />
+              <IconButton label="恢复" onClick={() => { setCode(lab.starterCode); }} icon={<RotateCcw className="size-4" />} />
               <IconButton label="复制" onClick={() => void copyCode()} icon={<Copy className="size-4" />} />
               <IconButton label="下载" onClick={downloadCode} icon={<Download className="size-4" />} />
             </div>
           </div>
-          <textarea
-            value={code}
-            onChange={(event) => setCode(event.target.value)}
-            spellCheck={false}
-            aria-label="代码编辑器"
-            className="min-h-[360px] w-full resize-y bg-slate-950 p-5 font-mono text-sm leading-6 text-slate-100 outline-none lg:min-h-[520px]"
-          />
+          <CodeEditor code={code} editing={editing} onChange={setCode} onRequestEdit={() => setEditing(true)} />
         </div>
 
         <div className="min-w-0 overflow-hidden rounded-lg border border-slate-800 bg-slate-950">
@@ -222,6 +224,74 @@ export function CodeLabWorkbench({
         />
       )}
     />
+  );
+}
+
+function CodeEditor({
+  code,
+  editing,
+  onChange,
+  onRequestEdit,
+}: {
+  code: string;
+  editing: boolean;
+  onChange: (value: string) => void;
+  onRequestEdit: () => void;
+}) {
+  const [highlighted, setHighlighted] = useState('');
+
+  // Shiki 高亮是异步的，仅在预览态按当前代码渲染；编辑态直接用 textarea，避免逐字符高亮的抖动。
+  useEffect(() => {
+    if (editing) return;
+    let active = true;
+    highlightCode(code || '# 空代码', 'python')
+      .then(([, dark]) => {
+        if (active) setHighlighted(dark);
+      })
+      .catch(() => {
+        if (active) setHighlighted('');
+      });
+    return () => {
+      active = false;
+    };
+  }, [code, editing]);
+
+  if (editing) {
+    return (
+      <textarea
+        value={code}
+        onChange={(event) => onChange(event.target.value)}
+        spellCheck={false}
+        aria-label="代码编辑器"
+        className="min-h-[360px] w-full resize-y bg-slate-950 p-5 font-mono text-sm leading-6 text-slate-100 outline-none lg:min-h-[520px]"
+      />
+    );
+  }
+
+  if (highlighted) {
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        onDoubleClick={onRequestEdit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onRequestEdit();
+          }
+        }}
+        title="双击进入编辑"
+        aria-label="代码预览，双击进入编辑"
+        className="min-h-[360px] w-full overflow-auto p-1 text-sm leading-6 lg:min-h-[520px] [&>pre]:m-0 [&>pre]:bg-transparent! [&>pre]:p-4 [&_code]:font-mono"
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: Shiki 输出，代码来自本系统生成
+        dangerouslySetInnerHTML={{ __html: highlighted }}
+      />
+    );
+  }
+
+  // 高亮尚未就绪时的降级：纯文本只读展示，保证内容始终可见。
+  return (
+    <pre className="min-h-[360px] w-full overflow-auto bg-slate-950 p-5 font-mono text-sm leading-6 text-slate-100 lg:min-h-[520px]">{code}</pre>
   );
 }
 

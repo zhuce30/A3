@@ -1,4 +1,5 @@
 import type { A3ResourcePackV2Resource } from '@/lib/a3/recommendation-types';
+import { hasMojibake } from './mojibake';
 
 export function buildA3VideoPrompt(goal: string, resource: A3ResourcePackV2Resource): string {
   const content = resource.content ?? {};
@@ -79,7 +80,4 @@ function sanitizeText(value: unknown, fallback: string): string {
   return text;
 }
 
-function hasMojibake(text: string): boolean {
-  const markerCodePoints = [0xfffd, 0x951b, 0x7ee1, 0x93ba, 0x74a7, 0x938d, 0x9422, 0x7470, 0x93c1, 0x701b, 0x94d6, 0x95c5, 0x68f0, 0x9352, 0x935b, 0x942d, 0x95bf, 0x7f01, 0x93cc, 0x6fb6, 0x9369, 0x59e3, 0x52ec, 0x9301, 0x20ac];
-  return [...text].some((char) => markerCodePoints.includes(char.codePointAt(0) ?? 0));
-}
+// hasMojibake 已抽到 './mojibake'（见文件顶部 import）。

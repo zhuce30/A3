@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
+import { hasMojibake } from '@/lib/a3/mojibake';
 import {
   Archive,
   ArrowRight,
@@ -143,6 +144,16 @@ const resourceEntries: ResourceEntry[] = [
     icon: MonitorPlay,
     tone: 'violet',
     productNote: 'PPT 不由 Django 伪造，必须由 OpenMAIC 课堂导出并写回 artifact。',
+  },
+  {
+    key: 'cards',
+    title: '速记卡片',
+    subtitle: '把要点做成可翻面的问答卡，课后快速回忆。',
+    route: 'cards',
+    resourceType: 'knowledge_card',
+    icon: BookOpenText,
+    tone: 'green',
+    productNote: '点击卡片翻面看答案，适合考前快速自测。',
   },
   {
     key: 'mind-map',
@@ -1607,7 +1618,4 @@ function sanitizeA3Text(value: unknown, fallback: string) {
   return text;
 }
 
-function hasMojibake(text: string) {
-  const markerCodePoints = [0xfffd, 0x951b, 0x7ee1, 0x93ba, 0x74a7, 0x938d, 0x9422, 0x7470, 0x93c1, 0x701b, 0x94d6, 0x95c5, 0x68f0, 0x9352, 0x935b, 0x942d, 0x95bf, 0x7f01, 0x93cc, 0x6fb6, 0x9369, 0x59e3, 0x52ec, 0x9301, 0x20ac];
-  return [...text].some((char) => markerCodePoints.includes(char.codePointAt(0) ?? 0));
-}
+// hasMojibake 已抽到 '@/lib/a3/mojibake'（见文件顶部 import）。

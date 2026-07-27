@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
+import { hasMojibake } from '@/lib/a3/mojibake';
 import {
   ArrowLeft,
   BookOpenText,
@@ -293,6 +294,43 @@ function ResourceBody({
   );
 }
 
+// 对话内联渲染：讲义/卡片/导图直接展示正文；练习/案例/代码是交互式工作台，
+// 塞进对话气泡不合适，改为给一个"打开完整页"入口。供 AI 课堂对话流复用。
+const INLINE_WORKBENCH_ROUTE: Partial<Record<A3ResourcePackV2Resource['type'], string>> = {
+  practice_set: 'practice',
+  case_study: 'case-study',
+  code_lab: 'code-lab',
+  micro_video_script: 'video',
+};
+
+export function ResourceInlineBody({ resource, pack }: { resource: A3ResourcePackV2Resource; pack: A3ResourcePackV2 }) {
+  const workbenchRoute = INLINE_WORKBENCH_ROUTE[resource.type];
+  if (workbenchRoute) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+        <div className="text-sm font-semibold text-slate-900">{resource.title}</div>
+        {resource.personalizationReason && (
+          <p className="mt-1 text-xs leading-5 text-slate-500">{resource.personalizationReason}</p>
+        )}
+        <Link
+          href={`/a3/resources/${pack.resourcePackId}/${workbenchRoute}`}
+          className="mt-3 inline-flex items-center gap-1 text-sm font-medium text-blue-700 hover:underline"
+        >
+          打开完整{resource.type === 'practice_set' ? '练习' : resource.type === 'code_lab' ? '代码实验' : resource.type === 'micro_video_script' ? '视频' : '案例'}
+          <ExternalLink className="size-3.5" />
+        </Link>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {resource.type === 'lecture_doc' && <LectureDocument resource={resource} pack={pack} />}
+      {resource.type === 'knowledge_card' && <KnowledgeCards resource={resource} />}
+      {resource.type === 'mind_map' && <MindMap resource={resource} />}
+    </div>
+  );
+}
+
 function LectureDocument({ resource, pack }: { resource: A3ResourcePackV2Resource; pack: A3ResourcePackV2 }) {
   const content = resource.content;
   const sections = arrayOfRecords(content.sections);
@@ -354,7 +392,25 @@ function RadialMindMap({ resource }: { resource: A3ResourcePackV2Resource }) {
         </div>
         <A3Pill tone="green">{branches.length} 个主分支</A3Pill>
       </div>
-      <div className="overflow-auto rounded-2xl bg-white p-4 shadow-inner">
+      {/* 屏幕阅读器可读的结构化大纲：视觉节点是绝对定位、无阅读顺序，故给一个等价的嵌套列表。 */}
+      <div className="sr-only">
+        <p>{`思维导图，中心主题：${rootTitle}，共 ${branches.length} 个主分支。`}</p>
+        <ul>
+          {branches.map((branch) => (
+            <li key={`sr-${branch.id}`}>
+              {branch.label}
+              {branch.children.length > 0 && (
+                <ul>
+                  {branch.children.map((child, childIndex) => (
+                    <li key={`sr-${branch.id}-${childIndex}`}>{child}</li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div className="overflow-auto rounded-2xl bg-white p-4 shadow-inner" aria-hidden="true">
         <div className="relative" style={{ width: layout.width, height: layout.height, minWidth: layout.width }}>
           <svg className="absolute inset-0" width={layout.width} height={layout.height} viewBox={`0 0 ${layout.width} ${layout.height}`} aria-hidden="true">
             {layout.branchNodes.map((branch) => (
@@ -592,26 +648,8 @@ function curvePath(fromX: number, fromY: number, toX: number, toY: number, side:
 }
 
 function summarizeMindMapRoot(root: string, title: string, branches: MindMapBranchInput[]) {
-  const raw = `${root} ${title} ${branches.map((branch) => branch.label).join(' ')}`;
-  const normalized = raw.replace(/\s+/g, '');
-  const hasOperatingSystem = /操作系统|进程|线程|调度|死锁|信号量|虚拟内存|页面置换|文件系统|磁盘调度/.test(normalized);
-  if (hasOperatingSystem) {
-    const terms = [
-      ['进程调度', '进程调度'],
-      ['处理机调度', '处理机调度'],
-      ['信号量', '信号量'],
-      ['同步互斥', '同步互斥'],
-      ['死锁', '死锁'],
-      ['虚拟内存', '虚拟内存'],
-      ['页面置换', '页面置换'],
-      ['文件系统', '文件系统'],
-      ['磁盘调度', '磁盘调度'],
-    ]
-      .filter(([keyword]) => normalized.includes(keyword))
-      .map(([, label]) => label);
-    const uniqueTerms = Array.from(new Set(terms)).slice(0, 2);
-    return uniqueTerms.length ? `操作系统：${uniqueTerms.join('与')}` : '操作系统复习图';
-  }
+  // 学科无关的中心标题精简：优先用简短标题，否则用 root，再退到首个分支。
+  // 不再按操作系统关键词特判改写——那会把非 OS 主题误贴成“操作系统”标签。
   const titleText = safeText(title, '');
   const rootText = safeText(root, '');
   const candidate = titleText && titleText.length <= 18 ? titleText : rootText;
@@ -622,11 +660,14 @@ function summarizeMindMapRoot(root: string, title: string, branches: MindMapBran
     .replace(/[，。；、,.].*$/, '')
     .trim();
   if (cleaned && cleaned.length <= 18) return cleaned;
+  if (cleaned) return `${cleaned.slice(0, 16)}…`;
   if (branches.length) return `${branches[0].label}学习图`;
   return '知识点思维导图';
 }
 
 function summarizeMindMapLeaf(value: string) {
+  // 学科无关的叶子标签精简：去掉常见前缀噪声，取首个语义子句并限长。
+  // 不再用操作系统术语词表映射——那会把其他学科里恰好含相同词的内容误改成 OS 术语。
   const text = value
     .replace(/\s+/g, '')
     .replace(/^标准问题[:：]?/, '')
@@ -637,28 +678,41 @@ function summarizeMindMapLeaf(value: string) {
     .replace(/^RenderedPPTXslide\d+/i, '课件示例')
     .trim();
 
-  const topicTerms: Array<[RegExp, string]> = [
-    [/时间片轮转|轮转调度|RR调度/, '时间片轮转'],
-    [/处理机调度|CPU调度|调度算法/, '调度算法'],
-    [/进程.*PCB|PCB.*进程/, '进程与 PCB'],
-    [/线程|并发执行/, '线程并发'],
-    [/信号量|PV操作|P\/V/, '信号量机制'],
-    [/临界区|互斥/, '同步互斥'],
-    [/死锁|银行家算法/, '死锁处理'],
-    [/虚拟内存|缺页中断/, '虚拟内存'],
-    [/页面置换|FIFO|LRU|OPT/, '页面置换'],
-    [/文件系统|目录结构/, '文件系统'],
-    [/磁盘调度|SSTF|SCAN/, '磁盘调度'],
-    [/关键步骤/, '关键步骤'],
-    [/影响因素/, '影响因素'],
-    [/题目应用|例题|练习/, '题目应用'],
-  ];
-  const matched = topicTerms.find(([pattern]) => pattern.test(text));
-  if (matched) return matched[1];
-
   const firstClause = text.split(/[。；;，,？?：:]/).find((part) => part.trim().length >= 2)?.trim() || text;
   if (firstClause.length <= 16) return firstClause;
   return `${firstClause.slice(0, 14)}…`;
+}
+
+function FlipCard({ card, index }: { card: Record<string, unknown>; index: number }) {
+  const [flipped, setFlipped] = useState(false);
+  const front = safeText(card.front, '暂无正面');
+  const back = safeText(card.back, safeText(card.answer, '暂无背面内容'));
+  return (
+    <button
+      type="button"
+      onClick={() => setFlipped((value) => !value)}
+      aria-pressed={flipped}
+      aria-label={`速记卡 ${index + 1}，${flipped ? '显示背面，点击看正面' : '显示正面，点击看答案'}`}
+      className="group h-52 w-full [perspective:1000px] focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded-2xl"
+    >
+      <div
+        className={`relative h-full w-full transition-transform duration-500 [transform-style:preserve-3d] ${flipped ? '[transform:rotateY(180deg)]' : ''}`}
+      >
+        {/* 正面：提问 */}
+        <div className="absolute inset-0 flex flex-col rounded-2xl border border-slate-200 bg-slate-50 p-5 [backface-visibility:hidden]">
+          <div className="text-sm font-semibold text-blue-700">卡片 {index + 1}</div>
+          <h2 className="mt-2 text-left text-base font-semibold text-slate-950">{front}</h2>
+          <span className="mt-auto text-xs text-slate-400">点击翻面看答案</span>
+        </div>
+        {/* 背面：答案 */}
+        <div className="absolute inset-0 flex flex-col overflow-auto rounded-2xl border border-blue-200 bg-blue-50 p-5 [backface-visibility:hidden] [transform:rotateY(180deg)]">
+          <div className="text-sm font-semibold text-blue-700">答案</div>
+          <p className="mt-2 text-left text-sm leading-6 text-slate-700">{back}</p>
+          <span className="mt-auto text-xs text-slate-400">点击翻回正面</span>
+        </div>
+      </div>
+    </button>
+  );
 }
 
 function KnowledgeCards({ resource }: { resource: A3ResourcePackV2Resource }) {
@@ -666,11 +720,7 @@ function KnowledgeCards({ resource }: { resource: A3ResourcePackV2Resource }) {
   return (
     <div className="grid gap-4 md:grid-cols-2">
       {cards.map((card, index) => (
-        <div key={`${safeText(card.front, '卡片')}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-          <div className="text-sm font-semibold text-blue-700">卡片 {index + 1}</div>
-          <h2 className="mt-2 text-base font-semibold text-slate-950">{safeText(card.front, '暂无正面')}</h2>
-          <p className="mt-3 text-sm leading-6 text-slate-700">{safeText(card.back, safeText(card.answer, '暂无背面内容'))}</p>
-        </div>
+        <FlipCard key={`${safeText(card.front, '卡片')}-${index}`} card={card} index={index} />
       ))}
     </div>
   );
@@ -792,11 +842,19 @@ function EvidencePanel({
       <A3Card title="引用来源" subtitle={`${resource.citations.length} 条证据，已按资料合并显示。`}>
         <div className="space-y-3">
           {compactCitations.map((citation, index) => (
-            <div key={`${citation.title}-${citation.location}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <Link
+              key={`${citation.title}-${citation.location}-${index}`}
+              href={`/a3/library?q=${encodeURIComponent(citation.title || citation.location || '')}`}
+              className="group block rounded-xl border border-slate-200 bg-slate-50 p-3 transition hover:border-blue-300 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              title="在知识库中查看该来源"
+            >
               <div className="flex items-start gap-2">
                 <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-blue-600" />
-                <div className="min-w-0">
-                  <div className="line-clamp-2 text-xs font-semibold leading-5 text-blue-700">{citation.title}</div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="line-clamp-2 text-xs font-semibold leading-5 text-blue-700 group-hover:underline">{citation.title}</div>
+                    <ExternalLink className="mt-0.5 size-3 shrink-0 text-slate-400 group-hover:text-blue-600" />
+                  </div>
                   <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] text-slate-500">
                     {citation.location && <span className="rounded-full bg-white px-2 py-0.5">{citation.location}</span>}
                     {citation.count > 1 && <span className="rounded-full bg-white px-2 py-0.5">{citation.count} 个命中</span>}
@@ -804,7 +862,7 @@ function EvidencePanel({
                 </div>
               </div>
               {citation.snippet && <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-600">{citation.snippet}</p>}
-            </div>
+            </Link>
           ))}
           {!compactCitations.length && <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">暂无可展示来源，生成内容不会标记为已验证。</div>}
         </div>
@@ -829,11 +887,116 @@ function MissingResource({ pack, config }: { pack: A3ResourcePackV2; config: Res
   );
 }
 
-function GenericContent({ content }: { content: Record<string, unknown> }) {
+const GENERIC_FIELD_LABELS: Record<string, string> = {
+  objective: '学习目标',
+  summary: '概要',
+  overview: '概述',
+  background: '背景',
+  content: '内容',
+  description: '说明',
+  notes: '备注',
+  keyPoints: '要点',
+  concepts: '涉及概念',
+  steps: '步骤',
+  examples: '示例',
+  tips: '提示',
+  conclusion: '小结',
+  reflection: '复盘',
+};
+
+// 这些是结构/元数据键，对学生没有阅读价值，友好视图里跳过。
+const GENERIC_SKIP_KEYS = new Set([
+  'schemaVersion',
+  'resourceType',
+  'generationMode',
+  'sourceIds',
+  'algorithm',
+  'layout',
+  'id',
+  'front',
+  'back',
+]);
+
+function humanizeFieldName(key: string) {
+  if (GENERIC_FIELD_LABELS[key]) return GENERIC_FIELD_LABELS[key];
+  // 驼峰转空格，首字母大写，作为未知字段的兜底标签。
+  const spaced = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim();
+  return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : key;
+}
+
+function GenericValue({ value }: { value: unknown }) {
+  if (value === null || value === undefined || value === '') {
+    return <span className="text-sm text-slate-400">—</span>;
+  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return <A3Markdown className="text-sm leading-6 text-slate-700">{String(value)}</A3Markdown>;
+  }
+  if (Array.isArray(value)) {
+    const primitives = value.filter((item) => typeof item === 'string' || typeof item === 'number');
+    if (primitives.length === value.length) {
+      return (
+        <ul className="ml-4 list-disc space-y-1 text-sm leading-6 text-slate-700">
+          {value.map((item, index) => (
+            <li key={index}>{String(item)}</li>
+          ))}
+        </ul>
+      );
+    }
+    return (
+      <div className="space-y-2">
+        {value.map((item, index) => (
+          <div key={index} className="rounded-lg border border-slate-200 bg-white p-3">
+            <GenericValue value={item} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (typeof value === 'object') {
+    return <GenericFields content={value as Record<string, unknown>} />;
+  }
+  return <span className="text-sm text-slate-700">{String(value)}</span>;
+}
+
+function GenericFields({ content }: { content: Record<string, unknown> }) {
+  const entries = Object.entries(content).filter(([key, value]) => {
+    if (GENERIC_SKIP_KEYS.has(key)) return false;
+    return value !== null && value !== undefined && value !== '';
+  });
+  if (!entries.length) return null;
   return (
-    <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap rounded-2xl bg-slate-950 p-5 text-sm leading-6 text-slate-100">
-      {JSON.stringify(content, null, 2)}
-    </pre>
+    <div className="space-y-3">
+      {entries.map(([key, value]) => (
+        <div key={key} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div className="text-xs font-semibold text-blue-700">{humanizeFieldName(key)}</div>
+          <div className="mt-2">
+            <GenericValue value={value} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function GenericContent({ content }: { content: Record<string, unknown> }) {
+  const hasReadable = Object.keys(content).some((key) => !GENERIC_SKIP_KEYS.has(key));
+  if (!hasReadable) {
+    return (
+      <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm text-slate-500">
+        本次内容结构不完整，暂无法结构化展示。可尝试重新生成该资源。
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      <GenericFields content={content} />
+      <details className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+        <summary className="cursor-pointer text-xs font-medium text-slate-500">查看原始数据</summary>
+        <pre className="mt-2 max-h-[360px] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-4 text-xs leading-5 text-slate-100">
+          {JSON.stringify(content, null, 2)}
+        </pre>
+      </details>
+    </div>
   );
 }
 
@@ -1017,6 +1180,4 @@ function safeText(value: unknown, fallback: string) {
   return text;
 }
 
-function hasMojibake(text: string) {
-  return ['�', '锛', '涓', '璧', '鎺', '鐢', '瑙', '鏁', '瀛', '€'].some((marker) => text.includes(marker));
-}
+// hasMojibake 已抽到 '@/lib/a3/mojibake'（见文件顶部 import）。

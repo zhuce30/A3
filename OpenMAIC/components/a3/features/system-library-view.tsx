@@ -24,7 +24,11 @@ export function SystemLibraryView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const loadLibrary = useCallback(async (nextType = resourceType, nextDifficulty = difficulty, nextQuery = query) => {
+  const loadLibrary = useCallback(async (
+    nextType: '' | A3SystemResourceType,
+    nextDifficulty: string,
+    nextQuery: string,
+  ) => {
     setLoading(true);
     setError('');
     const params = new URLSearchParams();
@@ -40,10 +44,18 @@ export function SystemLibraryView() {
       return;
     }
     setData(result);
-  }, [difficulty, query, resourceType]);
+  }, []);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void loadLibrary('', '', ''), 0);
+    // 支持从引用溯源链接跳转：/a3/library?q=<来源标题> 时用该词作为初始搜索。
+    const initialQuery =
+      typeof window !== 'undefined'
+        ? (new URLSearchParams(window.location.search).get('q') || '').trim()
+        : '';
+    const timer = window.setTimeout(() => {
+      if (initialQuery) setQuery(initialQuery);
+      void loadLibrary('', '', initialQuery);
+    }, 0);
     return () => window.clearTimeout(timer);
   }, [loadLibrary]);
 
@@ -75,7 +87,7 @@ export function SystemLibraryView() {
       {error ? (
         <div className="flex items-center justify-between gap-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
           <span>{error}</span>
-          <Button type="button" size="sm" variant="outline" onClick={() => void loadLibrary()}>重试</Button>
+          <Button type="button" size="sm" variant="outline" onClick={() => void loadLibrary(resourceType, difficulty, query)}>重试</Button>
         </div>
       ) : null}
 
@@ -106,7 +118,7 @@ export function SystemLibraryView() {
         <form
           data-testid="a3-system-library-filters"
           className="mt-4 grid gap-3 border-y border-[var(--a3-border)] py-4 lg:grid-cols-[auto_180px_minmax(240px,1fr)_auto]"
-          onSubmit={(event) => { event.preventDefault(); void loadLibrary(); }}
+          onSubmit={(event) => { event.preventDefault(); void loadLibrary(resourceType, difficulty, query); }}
         >
           <div className="flex min-w-0 flex-wrap gap-1 rounded-md bg-[var(--a3-surface-muted)] p-1" aria-label="资源类型">
             {resourceTypes.map((item) => (

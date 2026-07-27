@@ -252,9 +252,12 @@ class ResourceSynthesisAgent(BaseAgent):
         goal = str(context.state.get("resolvedGoal") or context.goal or "")
         profile = context.state.get("profile")
         sources = context.state.get("resourceSources") if isinstance(context.state.get("resourceSources"), list) else []
+        # 消费 PedagogyAgent 的教学策略：它已从画像+薄弱点排好 weakPoints/preferredFormats，
+        # 直接透传给生成，使 Pedagogy 真正参与个性化，而不是让本 Agent 重新从 profile 取一遍。
+        strategy = context.state.get("resourceStrategy") if isinstance(context.state.get("resourceStrategy"), dict) else None
         requested_types = _requested_resource_types(context.payload)
         allow_llm = _resource_llm_enabled(full_pack=len(requested_types) > 1)
-        resources = [_build_resource_item(kind, goal, profile, sources, allow_llm=allow_llm) for kind in requested_types]
+        resources = _build_resource_items(requested_types, goal, profile, sources, allow_llm=allow_llm, strategy=strategy)
         synthesis_runs = [item.get("synthesis") for item in resources if isinstance(item.get("synthesis"), dict)]
         llm_count = len([item for item in synthesis_runs if item.get("mode") == "llm"])
         degraded_count = len([item for item in synthesis_runs if item.get("degraded")])
@@ -315,17 +318,38 @@ class ResourceVerifierAgent(BaseAgent):
         resources = context.state.get("resources") if isinstance(context.state.get("resources"), list) else []
         verified_count = len([item for item in resources if isinstance(item, dict) and item.get("verified")])
         citation_count = sum(len(item.get("citations") or []) for item in resources if isinstance(item, dict))
+        # 反馈回路：把未接地的资源汇总成明确的待核实清单，并在资源上打 needsReview 标记，
+        # 让"校验发现的问题"可见（前端可据此展示"待核实"而不是一律显示"已验证"），
+        # 而不是像过去那样只做只读计数、问题被无声吞掉。
+        unverified: list[dict] = []
+        for item in resources:
+            if not isinstance(item, dict):
+                continue
+            if item.get("verified"):
+                continue
+            grounding = item.get("grounding") if isinstance(item.get("grounding"), dict) else {}
+            reason = "无可引用的知识库证据" if not grounding.get("citationCount") else "内容缺乏证据支撑"
+            item["needsReview"] = True
+            unverified.append({
+                "type": item.get("type") or "",
+                "title": item.get("title") or "",
+                "reason": reason,
+                "supportedClaims": grounding.get("supportedClaims", 0),
+                "totalClaims": grounding.get("totalClaims", 0),
+            })
         verification = {
             "schemaVersion": "a3.resource-verification.v1",
             "verifiedResourceCount": verified_count,
             "resourceCount": len(resources),
             "citationCount": citation_count,
             "verified": bool(resources) and verified_count == len(resources),
+            "unverifiedResources": unverified,
+            "needsReviewCount": len(unverified),
         }
         return AgentResult(
-            output={"resourceVerification": verification},
-            output_summary=verification,
-            evidence={"verifiedResourceCount": verified_count, "citationCount": citation_count},
+            output={"resourceVerification": verification, "resources": resources},
+            output_summary={key: verification[key] for key in ("verifiedResourceCount", "resourceCount", "citationCount", "needsReviewCount")},
+            evidence={"verifiedResourceCount": verified_count, "citationCount": citation_count, "needsReviewCount": len(unverified)},
             quality={"verified": verification["verified"], "citationCoverage": 1 if resources and citation_count else 0},
         )
 
@@ -1755,24 +1779,115 @@ def _search_resource_sources(
     }]
 
 
-def _build_resource_item(resource_type: str, goal: str, profile: LearnerProfile | None, sources: list[dict], *, allow_llm: bool) -> dict:
+def _build_resource_items(
+    resource_types: list[str],
+    goal: str,
+    profile: LearnerProfile | None,
+    sources: list[dict],
+    *,
+    allow_llm: bool,
+    strategy: dict | None = None,
+) -> list[dict]:
+    """并行构建多种资源，保持与输入顺序一致。
+
+    每个 _build_resource_item 是纯计算 + LLM HTTP 调用（网络 IO 为主），不写数据库、
+    不共享可变状态、profile 只读，因此适合用线程池并行——整包 7 类的耗时从"逐个相加"
+    降到"约等于最慢的一个"，为将来整包启用 LLM 留出时间预算。单类型时直接串行，避免线程开销。
+    """
+    if len(resource_types) <= 1:
+        return [
+            _build_resource_item(kind, goal, profile, sources, allow_llm=allow_llm, strategy=strategy)
+            for kind in resource_types
+        ]
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    results: list[dict | None] = [None] * len(resource_types)
+
+    def _build_at(index: int, kind: str) -> None:
+        results[index] = _build_resource_item(kind, goal, profile, sources, allow_llm=allow_llm, strategy=strategy)
+
+    max_workers = min(len(resource_types), int(os.getenv("A3_RESOURCE_BUILD_MAX_WORKERS", "7")))
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+        futures = [executor.submit(_build_at, index, kind) for index, kind in enumerate(resource_types)]
+        for future in futures:
+            future.result()  # 传播异常，保持与串行版本一致的失败语义
+    # 理论上不会有 None（异常已在上面抛出），保险起见过滤。
+    return [item for item in results if item is not None]
+
+
+def _build_resource_item(resource_type: str, goal: str, profile: LearnerProfile | None, sources: list[dict], *, allow_llm: bool, strategy: dict | None = None) -> dict:
     citations = _normalized_resource_sources(sources, limit=6, goal=goal)
-    reason = _personalization_reason(profile, resource_type)
-    content, synthesis = _resource_content(resource_type, goal, citations, profile, allow_llm=allow_llm)
+    reason = _personalization_reason(profile, resource_type, strategy=strategy)
+    content, synthesis = _resource_content(resource_type, goal, citations, profile, allow_llm=allow_llm, strategy=strategy)
     verification = verify_answer(
         goal,
         _content_text(content),
         [{**citation, "type": citation.get("type") or "RAG", "score": citation.get("score")} for citation in citations],
     )
+    grounding = _resource_grounding(verification)
     return {
         "type": resource_type,
         "title": _resource_title(resource_type, goal),
         "content": content,
         "citations": verification.citations or [{**citation, "type": citation.get("type") or "RAG"} for citation in citations],
-        "verified": bool(verification.verified or verification.citations),
+        # verified 不再是"挂了任一引用就为真"。改为按 claim 支撑率判定：只有内容里
+        # 足够比例的句子能在被引证据里找到 token 支撑，才算真正接地（见 _resource_grounding）。
+        "verified": grounding["verified"],
+        "grounding": grounding,
         "personalizationReason": reason,
         "synthesis": synthesis,
         "estimatedMinutes": _estimated_minutes(resource_type),
+    }
+
+
+def _resource_grounding(verification) -> dict:
+    """把 verify_answer 的逐 claim 结果压成接地摘要，并给出 verified 判定。
+
+    旧逻辑 `verified = verified or citations`（有引用即为真）几乎恒真，无法区分
+    "内容真的被证据支撑" 和 "只是挂了个来源"。这里改成：
+    - 没有可引用证据 → 未接地（False）。
+    - 有证据时，要求至少 min_supported 条 claim 能在被引证据里找到 token 支撑，
+      才算已验证；完全跑题、和证据无文本连接的内容会掉到 0 条支撑而判 False。
+
+    为什么用"最少支撑条数"而不是"支撑率阈值"：不同资源形态的正文可比性差异很大——
+    讲义/卡片是自然语言，token 重叠高；code_lab 正文以代码和通用步骤为主，与证据文本
+    天然重叠低。用固定支撑率会系统性误伤 code_lab。改用"至少 N 条被支撑"对各形态更公平，
+    同时 supportRatio 作为置信度信号透出，供前端区分"已接地"与"高置信接地"。
+    可用 A3_RESOURCE_GROUNDING_MIN_SUPPORTED 调整最少支撑条数，默认 1。
+    """
+    claims = list(getattr(verification, "claims", None) or [])
+    citations = list(getattr(verification, "citations", None) or [])
+    supported = len([claim for claim in claims if claim.get("verified")])
+    total = len(claims)
+    ratio = round(supported / total, 3) if total else 0.0
+    try:
+        min_supported = int(os.getenv("A3_RESOURCE_GROUNDING_MIN_SUPPORTED", "1"))
+    except ValueError:
+        min_supported = 1
+    min_supported = max(min_supported, 1)
+    if not citations:
+        verified = False
+    elif total:
+        verified = supported >= min_supported
+    else:
+        # 有证据但没抽出任何 claim（例如内容为空）→ 退回 verify_answer 自身判定，
+        # 避免因 total==0 把本可接地的资源误判为未接地。
+        verified = bool(getattr(verification, "verified", False))
+    if ratio >= 0.75:
+        confidence = "high"
+    elif verified:
+        confidence = "medium"
+    else:
+        confidence = "low"
+    return {
+        "verified": verified,
+        "confidence": confidence,
+        "supportedClaims": supported,
+        "totalClaims": total,
+        "supportRatio": ratio,
+        "minSupported": min_supported,
+        "citationCount": len(citations),
     }
 
 
@@ -1780,8 +1895,8 @@ def _resource_title(resource_type: str, goal: str) -> str:
     return f"{goal} 路 {RESOURCE_TYPE_LABELS[resource_type]}"
 
 
-def _resource_content(resource_type: str, goal: str, sources: list[dict], profile: LearnerProfile | None, *, allow_llm: bool) -> tuple[dict, dict]:
-    llm_content, llm_meta = _try_llm_resource_content(resource_type, goal, sources, profile, allow_llm=allow_llm)
+def _resource_content(resource_type: str, goal: str, sources: list[dict], profile: LearnerProfile | None, *, allow_llm: bool, strategy: dict | None = None) -> tuple[dict, dict]:
+    llm_content, llm_meta = _try_llm_resource_content(resource_type, goal, sources, profile, allow_llm=allow_llm, strategy=strategy)
     if llm_content:
         llm_content = _repair_llm_resource_content(resource_type, llm_content, goal, sources, profile)
     llm_quality = _resource_content_quality(resource_type, llm_content) if llm_content else None
@@ -1811,14 +1926,22 @@ def _repair_llm_resource_content(resource_type: str, content: dict, goal: str, s
         return _repair_case_study_content(content, goal, sources, profile)
     if resource_type == "code_lab":
         return _repair_code_lab_content(content, goal, sources, profile)
+    if resource_type == "lecture_doc":
+        return _repair_lecture_doc_content(content, goal, sources, profile)
+    if resource_type == "knowledge_card":
+        return _repair_knowledge_card_content(content, goal, sources, profile)
+    if resource_type == "micro_video_script":
+        return _repair_micro_video_script_content(content, goal, sources, profile)
     if resource_type != "mind_map":
         return content
     repaired = dict(content)
+    fallback = _fallback_resource_content("mind_map", goal, sources, profile)
+    fallback_nodes = list(fallback.get("nodes") or [])
     nodes = repaired.get("nodes")
-    if not isinstance(nodes, list) or len(nodes) < 3:
-        return repaired
+    if not isinstance(nodes, list):
+        nodes = []
     normalized_nodes = []
-    source_ids = [f"S{index}" for index in range(1, min(len(sources), 6) + 1)]
+    source_ids = _default_source_ids(sources)
     for index, node in enumerate(nodes, start=1):
         if not isinstance(node, dict):
             continue
@@ -1826,20 +1949,39 @@ def _repair_llm_resource_content(resource_type: str, content: dict, goal: str, s
         children = node.get("children")
         if not isinstance(children, list):
             children = []
-        source_id_list = node.get("sourceIds") if isinstance(node.get("sourceIds"), list) else source_ids[: min(len(source_ids), 2)]
+        cleaned_children = [str(child).strip() for child in children if str(child).strip()][:6]
+        # 子节点不足 2 个会被 branch_depth 门禁挡下；用兜底同位节点的子节点补齐。
+        if len(cleaned_children) < 2 and fallback_nodes:
+            filler = fallback_nodes[(index - 1) % len(fallback_nodes)].get("children") or []
+            for child in filler:
+                text = str(child).strip()
+                if text and text not in cleaned_children:
+                    cleaned_children.append(text)
+                if len(cleaned_children) >= 2:
+                    break
+        source_id_list = node.get("sourceIds") if isinstance(node.get("sourceIds"), list) and node.get("sourceIds") else source_ids[: min(len(source_ids), 2)]
         normalized_nodes.append({
             **node,
             "label": label,
-            "children": [str(child).strip() for child in children if str(child).strip()][:6],
+            "children": cleaned_children,
             "sourceIds": source_id_list,
         })
+    # 一级节点数不足 7 时用兜底节点补齐，避免 node_count 门禁误杀可用的 LLM 主体。
+    existing_labels = {node["label"] for node in normalized_nodes}
+    for filler in fallback_nodes:
+        if len(normalized_nodes) >= 7:
+            break
+        if str(filler.get("label") or "") in existing_labels:
+            continue
+        normalized_nodes.append(dict(filler))
     if not normalized_nodes:
         return repaired
     root = str(repaired.get("root") or goal or "当前学习主题").strip()
     repaired["root"] = root
     repaired["nodes"] = normalized_nodes
-    repaired.setdefault("markdown", _mind_map_markdown(root, normalized_nodes))
-    repaired.setdefault("mermaid", _mind_map_mermaid(root, normalized_nodes))
+    # 节点可能被补齐过，markdown/mermaid 需按最终节点集重算，避免与 nodes 不一致。
+    repaired["markdown"] = _mind_map_markdown(root, normalized_nodes)
+    repaired["mermaid"] = _mind_map_mermaid(root, normalized_nodes)
     repaired.setdefault("algorithm", "llm_repaired_markdown_mindmap.v1")
     repaired.setdefault("layout", {"style": "radial", "primaryAxis": "llm_structured", "sourceAware": True})
     repaired.setdefault("studyPath", _mind_map_study_path(root, normalized_nodes, profile))
@@ -1906,10 +2048,177 @@ def _repair_code_lab_content(content: dict, goal: str, sources: list[dict], prof
     return repaired
 
 
+def _default_source_ids(sources: list[dict]) -> list[str]:
+    """LLM 常漏标 sourceIds；用与 _evidence_units 一致的 S1..S6 兜底，供 repair 回填。"""
+    return [f"S{index}" for index in range(1, min(len(sources), 6) + 1)] or ["S1"]
+
+
+def _repair_lecture_doc_content(content: dict, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
+    """回填讲义分节的 sourceIds、补齐 heading/body，并把节数补足到兜底水平。
+
+    lecture_doc 原本没有 repair，LLM 偶尔漏 sourceIds 或节数不足就会被新的 required
+    grounding 门禁整份拒绝、退回模板。这里与 practice_set repair 同构：以 LLM 内容为主、
+    缺字段用兜底补齐，保证「LLM 主体 + 证据可追溯」两者兼得。
+    """
+    fallback = _fallback_resource_content("lecture_doc", goal, sources, profile)
+    fallback_sections = list(fallback.get("sections") or [])
+    default_ids = _default_source_ids(sources)
+    provided = content.get("sections") if isinstance(content.get("sections"), list) else []
+    sections: list[dict] = []
+    for index, raw in enumerate(provided):
+        if not isinstance(raw, dict):
+            continue
+        base = dict(fallback_sections[index % len(fallback_sections)]) if fallback_sections else {}
+        base.update({key: value for key, value in raw.items() if value not in (None, "", [])})
+        base["heading"] = str(base.get("heading") or f"第 {index + 1} 节")
+        base["body"] = str(base.get("body") or base.get("heading") or goal)
+        base["sourceIds"] = _list_or_fallback(base.get("sourceIds"), default_ids[:2])
+        sections.append(base)
+    # 节数不足 6 时用兜底节补齐，避免 section_count 门禁误杀可用的 LLM 主体。
+    for filler in fallback_sections:
+        if len(sections) >= max(6, len(provided)):
+            break
+        sections.append(dict(filler))
+    return {**fallback, **content, "sections": sections, "sourceIds": _list_or_fallback(content.get("sourceIds"), fallback.get("sourceIds"))}
+
+
+def _repair_knowledge_card_content(content: dict, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
+    """回填速记卡的 sourceIds/正反面，并补足到至少 4 张。"""
+    fallback = _fallback_resource_content("knowledge_card", goal, sources, profile)
+    fallback_cards = list(fallback.get("cards") or [])
+    default_ids = _default_source_ids(sources)
+    provided = content.get("cards") if isinstance(content.get("cards"), list) else []
+    cards: list[dict] = []
+    for index, raw in enumerate(provided):
+        if not isinstance(raw, dict):
+            continue
+        base = dict(fallback_cards[index % len(fallback_cards)]) if fallback_cards else {}
+        base.update({key: value for key, value in raw.items() if value not in (None, "", [])})
+        base["front"] = str(base.get("front") or f"关于“{goal}”的第 {index + 1} 个要点是什么？")
+        base["back"] = str(base.get("back") or base.get("answer") or "结合资料证据作答。")
+        base["sourceIds"] = _list_or_fallback(base.get("sourceIds"), default_ids[:2])
+        cards.append(base)
+    for filler in fallback_cards:
+        if len(cards) >= max(4, len(provided)):
+            break
+        cards.append(dict(filler))
+    first = cards[0] if cards else {"front": "", "back": ""}
+    return {
+        **fallback,
+        **content,
+        "front": str(content.get("front") or first.get("front") or ""),
+        "back": str(content.get("back") or first.get("back") or ""),
+        "cards": cards,
+        "sourceIds": _list_or_fallback(content.get("sourceIds"), fallback.get("sourceIds")),
+    }
+
+
+def _repair_micro_video_script_content(content: dict, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
+    """回填分镜的 sourceIds、补齐 scene/visual/narration，并补足到至少 6 个镜头。"""
+    fallback = _fallback_resource_content("micro_video_script", goal, sources, profile)
+    fallback_shots = list(fallback.get("shots") or [])
+    default_ids = _default_source_ids(sources)
+    provided = content.get("shots") if isinstance(content.get("shots"), list) else []
+    shots: list[dict] = []
+    for index, raw in enumerate(provided):
+        if not isinstance(raw, dict):
+            continue
+        base = dict(fallback_shots[index % len(fallback_shots)]) if fallback_shots else {}
+        base.update({key: value for key, value in raw.items() if value not in (None, "", [])})
+        base["scene"] = str(base.get("scene") or f"镜头 {index + 1}")
+        base["visual"] = str(base.get("visual") or "无文字画面，用图标和颜色表达概念")
+        base["narration"] = str(base.get("narration") or goal)
+        base["sourceIds"] = _list_or_fallback(base.get("sourceIds"), default_ids[:2])
+        shots.append(base)
+    for filler in fallback_shots:
+        if len(shots) >= max(6, len(provided)):
+            break
+        shots.append(dict(filler))
+    return {**fallback, **content, "shots": shots, "sourceIds": _list_or_fallback(content.get("sourceIds"), fallback.get("sourceIds"))}
+
+
 def _list_or_fallback(value, fallback=None) -> list:
     if isinstance(value, list):
         return list(value)
     return list(fallback) if isinstance(fallback, list) else []
+
+
+def _fallback_code_lab_content(goal: str, evidence: list[dict], source_ids: list[str]) -> dict:
+    """按主题参数化的 code_lab 兜底实验。
+
+    旧兜底所有主题共用同一段 score_understanding（拿关键词匹配证据标题），是"关于资源本身"
+    的元练习，与主题无关、一眼假。这里把知识点建模成"一组必须同时满足的条件"，条件名取自
+    该主题的真实关键词，实验检查若干场景是否满足全部条件——不同主题生成不同条件名和场景，
+    代码可见地随主题变化，同时仍是纯标准库、确定性输出、可判题的真实脚本。
+    """
+    keywords = _keywords_for_goal(goal, evidence)
+    conditions = [kw for kw in keywords if kw and kw != goal][:3] or [f"{goal}前提", f"{goal}条件", f"{goal}结论"]
+    while len(conditions) < 3:
+        conditions.append(f"{goal}条件{len(conditions) + 1}")
+    cond_repr = ", ".join(json.dumps(c, ensure_ascii=False) for c in conditions)
+    # 两个内置场景：第一个满足全部条件，第二个缺最后一个条件——输出确定，可作判题基线。
+    scenario_a = {"name": "场景A", "satisfied": list(conditions)}
+    scenario_b = {"name": "场景B", "satisfied": list(conditions[:-1])}
+    starter = "\n".join([
+        f"# 实验主题：{goal}",
+        f"# 把“{goal}”建模成必须同时满足的一组条件，判断各场景是否成立。",
+        "",
+        f"REQUIRED = [{cond_repr}]",
+        "",
+        "def diagnose(scenario):",
+        "    satisfied = set(scenario.get('satisfied', []))",
+        "    missing = [c for c in REQUIRED if c not in satisfied]",
+        "    return '成立' if not missing else '不成立（缺：' + '、'.join(missing) + '）'",
+        "",
+        "scenarios = [",
+        f"    {json.dumps(scenario_a, ensure_ascii=False)},",
+        f"    {json.dumps(scenario_b, ensure_ascii=False)},",
+        "]",
+        "for s in scenarios:",
+        "    print(s['name'] + ': ' + diagnose(s))",
+    ])
+    expected_stdout = (
+        f"场景A: 成立\n"
+        f"场景B: 不成立（缺：{conditions[-1]}）\n"
+    )
+    return {
+        "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
+        "language": "Python",
+        "objective": f"用一段可运行脚本把“{goal}”建模成一组必须满足的条件，并判断不同场景是否成立。",
+        "environment": "Python 3.10+，只依赖标准库。",
+        "concepts": conditions,
+        "starterCode": starter,
+        "steps": [
+            f"阅读资料，确认“{goal}”成立需要同时满足哪些条件（已填入 REQUIRED）。",
+            "运行 starterCode，观察两个场景的判定结果。",
+            "对照资料证据，检查 REQUIRED 里的条件是否准确、是否有遗漏。",
+            f"新增一个你自己构造的场景，预测它对“{goal}”是否成立，再运行验证。",
+            "把结论写成 3 行：判定依据、缺哪个条件会导致不成立、下一步复习动作。",
+        ],
+        "expectedOutput": "逐行打印每个场景是否成立；不成立的场景会指出缺失的条件。",
+        "testCases": [
+            {"name": "默认两个场景的判定", "stdin": "", "expectedStdout": expected_stdout},
+        ],
+        "hints": [
+            "先运行原始代码，记录默认输出，再开始修改。",
+            "缺失条件由 REQUIRED 与场景 satisfied 的差集决定，改哪边都会影响结果。",
+            "一次只改一个条件或场景，比较修改前后的输出。",
+        ],
+        "commonFailures": [
+            "把充分条件和必要条件混淆，导致 REQUIRED 里漏写或多写条件。",
+            "修改了条件却没有同步更新预期结论。",
+            "只看“成立/不成立”，没有解释缺失条件对应的课程含义。",
+        ],
+        "checkpoints": [
+            f"能说出“{goal}”成立需要的每个条件来自哪条资料。",
+            "能解释为什么缺少某个条件就不成立。",
+            "能自己构造场景并预测判定结果。",
+            "能把实验发现写回今日任务或错题复盘。",
+        ],
+        "extension": f"给每个条件加权重，计算“{goal}”的满足程度分数，而不仅是成立/不成立。",
+        "evidence": _join_snippets(evidence[:3]),
+        "sourceIds": source_ids,
+    }
 
 
 def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict], profile: LearnerProfile | None) -> dict:
@@ -1980,70 +2289,7 @@ def _fallback_resource_content(resource_type: str, goal: str, sources: list[dict
             "sourceIds": source_ids,
         }
     if resource_type == "code_lab":
-        keywords = _keywords_for_goal(goal, evidence)[:4]
-        expected_score = _code_lab_expected_score(keywords, evidence[:4])
-        return {
-            "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
-            "language": "Python",
-            "objective": f"用一段可运行脚本把“{goal}”转成可观察、可修改、可复盘的实验结果。",
-            "environment": "Python 3.10+，只依赖标准库；如需绘图可自行扩展 matplotlib。",
-            "concepts": keywords or [goal],
-            "starterCode": "\n".join([
-                "from dataclasses import dataclass",
-                "",
-                "@dataclass",
-                "class Evidence:",
-                "    title: str",
-                "    weight: float",
-                "",
-                "def score_understanding(keywords, evidences):",
-                "    matched = 0",
-                "    for keyword in keywords:",
-                "        if any(keyword in evidence.title for evidence in evidences):",
-                "            matched += 1",
-                "    return round(matched / max(1, len(keywords)), 2)",
-                "",
-                "evidences = [",
-                *[f"    Evidence({json.dumps(item['title'], ensure_ascii=False)}, {round(1 - index * 0.08, 2)})," for index, item in enumerate(evidence[:4])],
-                "]",
-                f"keywords = [{', '.join(json.dumps(token, ensure_ascii=False) for token in keywords)}]",
-                "print(score_understanding(keywords, evidences))",
-            ]),
-            "steps": [
-                "阅读讲解文档中的核心定义，确认实验要观察的关键词。",
-                "运行 starterCode，理解 evidence、keywords 和评分函数的含义。",
-                "把关键词替换成你在资料中看到的关键术语，观察分数变化。",
-                "新增一条来自本地资料的 Evidence，确认代码能处理更多来源。",
-                "把实验结论写成 3 行：依据、判断、下一步复习动作。",
-            ],
-            "expectedOutput": "输出 0.0 到 1.0 之间的小数；分数越高，说明关键词和资料证据匹配越充分。",
-            "testCases": [
-                {
-                    "name": "默认资料匹配分",
-                    "stdin": "",
-                    "expectedStdout": f"{expected_score}\n",
-                }
-            ],
-            "hints": [
-                "先运行原始代码，记录默认输出，再开始修改。",
-                "如果输出不符合预期，先检查输入、循环边界和返回值。",
-                "一次只改一个变量，并比较修改前后的输出。",
-            ],
-            "commonFailures": [
-                "把关键词匹配写成完全相等，导致近义术语无法命中。",
-                "修改输入后没有同步更新预期输出。",
-                "只看最终数字，没有解释数字对应的课程含义。",
-            ],
-            "checkpoints": [
-                "能说明每条 Evidence 来自哪份资料。",
-                "能解释关键词为什么能代表当前知识点。",
-                "能修改输入并预测输出变化。",
-                "能把实验发现写回今日任务或错题复盘。",
-            ],
-            "extension": "把 score_understanding 改成同时计算资料来源权重，比较不同课件/文本对当前知识点的支持程度。",
-            "evidence": _join_snippets(evidence[:3]),
-            "sourceIds": source_ids,
-        }
+        return _fallback_code_lab_content(goal, evidence, source_ids)
     return {
         "schemaVersion": RESOURCE_CONTENT_SCHEMA_VERSION,
         "shots": [
@@ -2333,10 +2579,11 @@ def _attach_content_defaults(content: dict, resource_type: str, sources: list[di
     return next_content
 
 
-def _try_llm_resource_content(resource_type: str, goal: str, sources: list[dict], profile: LearnerProfile | None, *, allow_llm: bool) -> tuple[dict | None, dict]:
+def _try_llm_resource_content(resource_type: str, goal: str, sources: list[dict], profile: LearnerProfile | None, *, allow_llm: bool, strategy: dict | None = None) -> tuple[dict | None, dict]:
     if not allow_llm:
         return None, {"attempted": False, "provider": "rules", "model": "", "error": ""}
     evidence = _evidence_units(sources, goal)
+    learning_design = _strategy_directives(strategy, profile)
     try:
         result = chat_completion(
             [
@@ -2346,6 +2593,8 @@ def _try_llm_resource_content(resource_type: str, goal: str, sources: list[dict]
                         "你是 A3 智学引擎的 ResourceSynthesisAgent。"
                         "只能基于给定本地知识库证据和学生画像生成学习资源。"
                         "必须输出 JSON object，不要 Markdown 代码围栏，不要编造教材页码、来源或系统不具备的执行能力。"
+                        "learningDesign 来自 PedagogyAgent 的教学策略：内容必须优先覆盖 weakPoints 里的薄弱点，"
+                        "并尽量贴合 preferredFormats 的呈现偏好。"
                         f"当前资源使用以下专业生成契约：{_resource_specialist_instructions(resource_type)}"
                     ),
                 },
@@ -2356,6 +2605,7 @@ def _try_llm_resource_content(resource_type: str, goal: str, sources: list[dict]
                             "resourceType": resource_type,
                             "goal": goal,
                             "learnerProfile": _profile_snapshot(profile),
+                            "learningDesign": learning_design,
                             "evidence": evidence,
                             "requirements": _resource_llm_requirements(resource_type),
                             "qualityChecklist": _resource_specialist_instructions(resource_type),
@@ -2411,7 +2661,7 @@ def _resource_llm_requirements(resource_type: str) -> dict:
         "code_lab": {
             "lab": "language 必须是 Python；包含 objective/environment/concepts/starterCode/steps/expectedOutput/testCases/hints/commonFailures/checkpoints/extension/sourceIds；代码只依赖标准库，testCases 必须能用于真实 runner 判题",
         },
-        "micro_video_script": {"shots": "至少 7 个镜头，每个含 scene/durationSeconds/visual/narration/sourceIds；visual 只能描述无文字画面，所有中文概念放到 narration，不要要求视频模型生成板书、字幕、标题或屏幕文字"},
+        "micro_video_script": {"shots": "至少 6 个镜头，每个含 scene/durationSeconds/visual/narration/sourceIds；visual 只能描述无文字画面，所有中文概念放到 narration，不要要求视频模型生成板书、字幕、标题或屏幕文字"},
     }[resource_type]
 
 
@@ -2428,6 +2678,24 @@ def _resource_specialist_instructions(resource_type: str) -> str:
         "code_lab": (
             "你是 CodeLabSpecialist。生成可由真实 runner 执行的 Python 标准库实验；"
             "代码、预期输出和测试用例必须一致；提供分层提示、常见失败、检查点和扩展挑战；不得虚构运行结果。"
+        ),
+        "lecture_doc": (
+            "你是 LectureDocSpecialist。按“目标、先修、概念、步骤、例题、误区、复盘”的顺序组织讲义，"
+            "每节紧扣 learningDesign.weakPoints 里的薄弱点展开，并在正文中标注对应证据 sourceIds；"
+            "解释要给出定义、适用条件和判断依据，避免只堆结论。"
+        ),
+        "knowledge_card": (
+            "你是 KnowledgeCardSpecialist。每张速记卡覆盖一个明确维度（定义、前提条件、易错点、自测），"
+            "优先为 learningDesign.weakPoints 里的薄弱点各出一张卡；正面提问、背面给可复述的要点并标注 sourceIds。"
+        ),
+        "mind_map": (
+            "你是 MindMapSpecialist。构建中心主题发散的思维导图：一级节点覆盖概念边界、核心机制、"
+            "证据来源、题型路径、易错点、复习动作，并把 learningDesign.weakPoints 作为独立分支或重点标注；"
+            "每个节点标 sourceIds，同时输出 markdown 与 mermaid。"
+        ),
+        "micro_video_script": (
+            "你是 MicroVideoSpecialist。用分镜脚本讲清一个知识点，优先讲透 learningDesign.weakPoints 里的薄弱点；"
+            "visual 只描述无文字画面，所有中文概念放进 narration，每个镜头标 sourceIds；节奏先证据后结论。"
         ),
     }
     return specialists.get(resource_type, "生成结构完整、证据可追溯、适合当前画像的学习资源。")
@@ -2466,6 +2734,39 @@ def _resource_content_quality(resource_type: str, content: dict | None) -> dict:
             ("debug_support", len(content.get("checkpoints") or []) >= 4 and len(content.get("hints") or []) >= 2 and len(content.get("commonFailures") or []) >= 2 and bool(content.get("extension") and content.get("sourceIds")), "检查点、提示、失败诊断和来源完整"),
         ]
         return _quality_report(checks, required={"test_contract"})
+    if resource_type == "lecture_doc":
+        sections = [item for item in content.get("sections") or [] if isinstance(item, dict)]
+        checks = [
+            ("section_count", len(sections) >= 6, f"章节数 {len(sections)}/6"),
+            ("section_structure", bool(sections) and all(item.get("heading") and item.get("body") for item in sections), "每节包含标题和正文"),
+            ("grounding", bool(sections) and all(item.get("sourceIds") for item in sections), "每节标注来源"),
+        ]
+        return _quality_report(checks, required={"grounding"})
+    if resource_type == "knowledge_card":
+        cards = [item for item in content.get("cards") or [] if isinstance(item, dict)]
+        checks = [
+            ("card_count", len(cards) >= 4, f"卡片数 {len(cards)}/4"),
+            ("card_structure", bool(cards) and all(item.get("front") and (item.get("back") or item.get("answer")) for item in cards), "每张卡包含正反面"),
+            ("grounding", bool(cards) and all(item.get("sourceIds") for item in cards), "每张卡标注来源"),
+        ]
+        return _quality_report(checks, required={"grounding"})
+    if resource_type == "mind_map":
+        nodes = [item for item in content.get("nodes") or [] if isinstance(item, dict)]
+        checks = [
+            ("node_count", len(nodes) >= 7, f"一级节点数 {len(nodes)}/7"),
+            ("branch_depth", bool(nodes) and all(len(item.get("children") or []) >= 2 for item in nodes), "每个节点至少 2 个子节点"),
+            ("diagram", bool(content.get("markdown") or content.get("mermaid")), "输出 markdown 或 mermaid 结构"),
+            ("grounding", bool(nodes) and all(item.get("sourceIds") for item in nodes), "每个节点标注来源"),
+        ]
+        return _quality_report(checks, required={"grounding"})
+    if resource_type == "micro_video_script":
+        shots = [item for item in content.get("shots") or [] if isinstance(item, dict)]
+        checks = [
+            ("shot_count", len(shots) >= 6, f"镜头数 {len(shots)}/6"),
+            ("shot_structure", bool(shots) and all(item.get("scene") and item.get("visual") and item.get("narration") for item in shots), "每个镜头包含场景、画面和旁白"),
+            ("grounding", bool(shots) and all(item.get("sourceIds") for item in shots), "每个镜头标注来源"),
+        ]
+        return _quality_report(checks, required={"grounding"})
     passed = _is_rich_resource_content(resource_type, content)
     return _quality_report([("legacy_rich_content", passed, "满足现有资源完整性规则")])
 
@@ -3027,13 +3328,37 @@ def _profile_dimension_count(profile: LearnerProfile | None) -> int:
     return len([value for value in values if value])
 
 
-def _personalization_reason(profile: LearnerProfile | None, resource_type: str) -> str:
-    if not profile:
+def _strategy_directives(strategy: dict | None, profile: LearnerProfile | None) -> dict:
+    """把 PedagogyAgent 的教学策略提炼成注入生成 prompt 的指令。
+
+    优先用策略里已排好的 weakPoints/preferredFormats；策略缺失时回退到画像，
+    保证单类型生成（不一定带 strategy）时行为不退化。
+    """
+    weak_points: list = []
+    preferred_formats: list = []
+    if isinstance(strategy, dict):
+        weak_points = [str(item) for item in (strategy.get("weakPoints") or []) if str(item).strip()]
+        preferred_formats = [str(item) for item in (strategy.get("preferredFormats") or []) if str(item).strip()]
+    if not weak_points and profile is not None:
+        weak_points = [str(item) for item in (getattr(profile, "weak_points", None) or []) if str(item).strip()][:5]
+    if not preferred_formats and profile is not None:
+        preferred_formats = [str(item) for item in (getattr(profile, "expected_resources", None) or []) if str(item).strip()][:5]
+    return {
+        "weakPoints": weak_points,
+        "preferredFormats": preferred_formats,
+        "instruction": "内容优先覆盖 weakPoints；呈现方式尽量贴合 preferredFormats。",
+    }
+
+
+def _personalization_reason(profile: LearnerProfile | None, resource_type: str, *, strategy: dict | None = None) -> str:
+    directives = _strategy_directives(strategy, profile)
+    weak = "、".join(directives["weakPoints"]) or "当前路径节点"
+    prefs = "、".join(directives["preferredFormats"]) or "综合资源"
+    if not profile and not (strategy and (directives["weakPoints"] or directives["preferredFormats"])):
         return "根据当前学习目标生成；画像不足时使用标准学习资源组合。"
-    prefs = "、".join(profile.expected_resources or []) or "综合资源"
-    weak = "、".join(profile.weak_points or []) or "当前路径节点"
+    foundation = getattr(profile, "foundation_level", None) or "未评估"
     return (
-        f"匹配画像：基础={profile.foundation_level or '未评估'}，"
+        f"匹配画像：基础={foundation}，"
         f"薄弱点={weak}，偏好资源={prefs}，资源类型={resource_type}。"
     )
 
@@ -3049,7 +3374,68 @@ def _profile_tags(profile: LearnerProfile | None) -> list[str]:
 
 
 def _content_text(content: dict) -> str:
-    return str(content)
+    """抽取资源的自然语言正文，供 verify_answer 做 claim↔证据比对。
+
+    原实现是 str(content)，把 sourceIds/schemaVersion/citation 文本一并塞进"待校验答案"，
+    token 重叠恒真，claim 校验形同虚设。这里按类型只取学生真正会读到的正文
+    （讲义分节正文、卡片正反面、题干与解析、案例分析、代码目标与步骤、镜头旁白），
+    让"内容是否被证据支撑"成为真实判定，而不是被结构字段污染的假阳性。
+    """
+    if not isinstance(content, dict):
+        return str(content or "")
+    parts: list[str] = []
+
+    def _push(value) -> None:
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                parts.append(text)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                _push(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                _push(item)
+
+    resource_type = str(content.get("resourceType") or "")
+    if content.get("sections"):
+        for section in content.get("sections") or []:
+            if isinstance(section, dict):
+                _push(section.get("heading"))
+                _push(section.get("body"))
+    if content.get("cards"):
+        for card in content.get("cards") or []:
+            if isinstance(card, dict):
+                _push(card.get("front"))
+                _push(card.get("back") or card.get("answer"))
+    if content.get("nodes"):
+        _push(content.get("root"))
+        for node in content.get("nodes") or []:
+            if isinstance(node, dict):
+                _push(node.get("label"))
+                _push(node.get("children"))
+    if content.get("questions"):
+        for question in content.get("questions") or []:
+            if isinstance(question, dict):
+                _push(question.get("stem"))
+                _push(question.get("answer"))
+                _push(question.get("explanation"))
+    if content.get("shots"):
+        for shot in content.get("shots") or []:
+            if isinstance(shot, dict):
+                _push(shot.get("narration"))
+    # case_study / code_lab 及其它散字段：取有意义的正文键，跳过 sourceIds/schema 等结构键。
+    for key in ("scenario", "background", "task", "studentPrompt", "expertAnalysis", "analysis", "reflection", "objective", "expectedOutput", "extension"):
+        _push(content.get(key))
+    for key in ("materials", "constraints", "decisionPoints", "analysisSteps", "steps", "concepts", "hints", "commonFailures", "checkpoints"):
+        _push(content.get(key))
+    if not parts:
+        # 兜底：仍优于 str(dict)——只取字符串类顶层值，排除结构键。
+        for key, value in content.items():
+            if key in {"sourceIds", "schemaVersion", "resourceType", "generationMode", "algorithm", "layout"}:
+                continue
+            _push(value)
+    return " ".join(parts) if parts else str(resource_type or "")
 
 
 def _estimated_minutes(resource_type: str) -> int:

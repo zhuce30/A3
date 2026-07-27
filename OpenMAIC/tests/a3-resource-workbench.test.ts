@@ -63,6 +63,14 @@ describe('A3 professional resource workbenches', () => {
     expect(source).toContain('/code-lab/run/');
   });
 
+  it('lets keyboard users enter code editing from the highlighted preview', () => {
+    const source = read(path.join(workbenchRoot, 'code-lab-workbench.tsx'));
+
+    expect(source).toContain('onKeyDown={(event) => {');
+    expect(source).toContain("event.key === 'Enter' || event.key === ' '");
+    expect(source).toContain('onRequestEdit();');
+  });
+
   it('normalizes legacy resources before rendering interactive workbenches', () => {
     const source = read(path.join(workbenchRoot, 'resource-workbench-utils.ts'));
 

@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ArrowLeft, ExternalLink, Film, Loader2, Play, RefreshCw, ShieldCheck, Video } from 'lucide-react';
+import { hasMojibake } from '@/lib/a3/mojibake';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -614,6 +615,4 @@ function safeText(value: unknown, fallback: string) {
   return text;
 }
 
-function hasMojibake(text: string) {
-  return ['�', '锛', '涓', '璧', '鎺', '鐢', '瑙', '鏁', '瀛', '€'].some((marker) => text.includes(marker));
-}
+// hasMojibake 已抽到 '@/lib/a3/mojibake'（见文件顶部 import）。

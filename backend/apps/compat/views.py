@@ -1132,6 +1132,31 @@ def qa_interact(request):
 
 
 @require_http_methods(["POST"])
+def intent_classify(request):
+    """通用意图识别：输入 {text, context} → {intent, confidence, params, source}。
+
+    surface 无关，课堂/语音/首页等都可调用。分类失败一律兜底为 ask_question。
+    """
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    try:
+        payload = _body(request)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return JsonResponse({"success": False, "error": "text 不能为空"}, status=400)
+    if len(text) > 2000:
+        return JsonResponse({"success": False, "error": "text 不能超过 2000 个字符"}, status=400)
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    from backend.apps.compat.intent_router import classify_intent
+
+    result = classify_intent(text, context=context)
+    return JsonResponse({"success": True, **result})
+
+
+@require_http_methods(["POST"])
 def verify_answer_view(request):
     rejected = require_authenticated(request)
     if rejected:
