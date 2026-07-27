@@ -19,6 +19,7 @@
 | `/a3/resources/[packId]` | 查看资源包详情和 artifact 历史 | 课堂、PPTX、视频 artifact 审计 | `GET /api/resources/packs/<id>/` | `a3-resource-pack-artifact-history`、`a3-resource-pack-artifact-summary` |
 | `/a3/classroom` | 学生打开来自资源包的 OpenMAIC 课堂 | OpenMAIC classroom URL、PPTX 导出提示 | `GET /api/resources/packs/`、`GET /api/learning/classroom/` | `a3-classroom-openmaic-entry`、`a3-classroom-openmaic-pptx-hint` |
 | `/a3/teacher` | 教师查看资源包和多模态产物效果 | 聚合课堂、PPTX、视频 artifact 的资源效果 | `GET /api/learning/teacher/workbench/`、`POST /api/learning/teacher/tasks/execute/` | `a3-teacher-openmaic-artifacts`、`a3-teacher-resource-pack-filter` |
+| `/a3/admin/tutors` | 管理导师人格启停、受控 VRM 绑定、provider 状态和聚合质量指标 | 审计 OpenMAIC 课堂人格采用与公开快照 | `GET /api/admin/tutors/`、`PATCH /api/admin/tutors/personas/<id>/`、`POST /api/a3/tutors/voice-preview` | 人格配置审计、资产授权状态、反馈样本量、观察性测评关联 |
 | `/a3/capabilities` | 展示答辩证据、页面分工和真实 smoke 状态 | RAG、trace、artifact 审计、视频 smoke | `GET /api/demo/status/`、`GET /api/a3/system/runtime`、`POST /api/a3/resources/openmaic-pptx-export`、`POST /api/a3/resources/openmaic-video-smoke-writeback` | `a3-openmaic-readable-ownership`、`a3-openmaic-artifact-audit`、`a3-openmaic-smoke-report` |
 | `/a3/knowledge-base` | 上传和索引本地课程资料 | 为 RAG、课堂生成和资源包引用提供证据来源 | `GET /api/kb/resources/`、`POST /api/kb/resources/upload/`、`GET /api/kb/search/` | `a3-knowledge-base-resources`、`a3-kb-search-results` |
 
@@ -43,6 +44,20 @@
 -> OpenMAICArtifact + resourcePack.multimodalArtifacts + ResourcePackLog.payload
 -> /a3/resources/<packId>、/a3/teacher、/a3/capabilities 展示
 ```
+
+## 导师人格 handoff 边界
+
+```text
+已登录 A3 用户选择 allowlisted personaId
+-> Django 保存偏好并返回公开人格快照
+-> POST /api/a3/resources/openmaic-classroom 服务端重新读取当前偏好
+-> 只将 personaId 送入 OpenMAIC 生成边界
+-> Next 私有运行时解析教学策略和 provider voice
+-> Stage / job / artifact 只保存公开、不可变的人格快照
+-> 轮询与 artifact 写回同时校验登录会话、resourcePackId 和 job 所有权
+```
+
+客户端提交的 instruction、provider voice、API key、任意 VRM URL 或本地绝对路径都不是可信输入，也不能进入公开响应。当前只有 `teacher-default-v1` 一套实际 VRM，且授权资料尚未补完整；系统仅完成了后续接入已授权资产的受控框架。私有指令泄漏检查不声称能够绝对识别所有语义改写。
 
 ## 验证命令
 

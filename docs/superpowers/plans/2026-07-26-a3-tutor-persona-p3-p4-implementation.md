@@ -802,13 +802,15 @@ git commit -m "feat: add tutor management workspace"
 
 ### Task 10: Full Verification, Documentation, and Deployment Readiness
 
+**Execution status (2026-07-27):** Tasks 1-9 are implemented in commits `e14891a` through `bdac73a`. Task 10 verification fixed a branch-introduced `react-hooks/set-state-in-effect` error and a reviewer-found stale cache repopulation race. The combined focused backend suite passes 112 tests; focused frontend tests pass a 14-file/178-test batch plus a 4-file/25-test supplemental batch. TypeScript, lint, Django check, and migration drift checks pass. Local strict demo-flow/retrieval checks remain environment-blocked by unavailable MySQL credentials, and Docker verification remains pending because Docker CLI is unavailable on this workstation.
+
 **Files:**
 - Modify: `docs/superpowers/specs/2026-07-26-a3-tutor-persona-p3-p4-design.md`
 - Modify: `docs/superpowers/plans/2026-07-26-a3-tutor-persona-p3-p4-implementation.md`
 - Modify: `docs/A3_OpenMAIC页面分工与接入边界.md`
 - Modify: `.env.example` only if a new non-secret configuration name is required.
 
-- [ ] **Step 1: Run all focused backend tests**
+- [x] **Step 1: Run all focused backend tests**
 
 ```powershell
 backend\.venv\Scripts\python.exe backend\manage.py test backend.apps.learning.tests.test_tutor_persona_operations backend.apps.learning.tests.test_tutor_persona_feedback backend.apps.learning.tests.test_coaching_tutor_persona backend.apps.profiles.tests.test_tutor_preferences backend.apps.system.tests.test_admin_tutors -v 2
@@ -816,7 +818,7 @@ backend\.venv\Scripts\python.exe backend\manage.py test backend.apps.learning.te
 
 Expected: PASS.
 
-- [ ] **Step 2: Run all focused frontend tests**
+- [x] **Step 2: Run all focused frontend tests**
 
 ```powershell
 cd OpenMAIC
@@ -825,7 +827,7 @@ pnpm.cmd vitest run tests/a3-tutor-persona-runtime.test.ts tests/a3-tutor-person
 
 Expected: PASS.
 
-- [ ] **Step 3: Run repository baseline checks**
+- [x] **Step 3: Run repository baseline checks**
 
 ```powershell
 cd OpenMAIC
@@ -839,7 +841,7 @@ backend\.venv\Scripts\python.exe backend\manage.py validate_demo_flow --skip-see
 
 Expected: TypeScript PASS, lint has zero errors and only approved historical warnings, Django check PASS, and no pending migrations. If `validate_demo_flow` cannot connect to local MySQL, record the exact credentials/environment blocker and run it in the production-like Docker stack before deployment.
 
-- [ ] **Step 4: Verify security by serialized-output scan**
+- [x] **Step 4: Verify security by serialized-output scan**
 
 Run focused tests that serialize profile, coaching, Stage, artifact, admin, and audit responses, then assert none contain:
 
@@ -866,18 +868,18 @@ docker compose --env-file .env.production -f docker-compose.yml -f docker-compos
 
 Expected: Compose configuration valid; migration plan includes `learning.0014_tutor_persona_operations` once and no destructive table operations.
 
-- [ ] **Step 6: Update docs with truthful capability status**
+- [x] **Step 6: Update docs with truthful capability status**
 
 Document that only `teacher-default-v1` is currently enabled, additional VRMs require verified licensing and a frontend rebuild, voice preview depends on configured provider credentials, analytics are observational, and private strategy fields never enter public contracts.
 
-- [ ] **Step 7: Mark plan tasks complete and commit verification docs**
+- [x] **Step 7: Mark plan tasks complete and commit verification docs**
 
 ```powershell
 git add docs/superpowers/specs/2026-07-26-a3-tutor-persona-p3-p4-design.md docs/superpowers/plans/2026-07-26-a3-tutor-persona-p3-p4-implementation.md docs/A3_OpenMAIC页面分工与接入边界.md .env.example
 git commit -m "docs: record tutor persona operations verification"
 ```
 
-- [ ] **Step 8: Perform final Git review before any push**
+- [x] **Step 8: Perform final Git review before any push**
 
 ```powershell
 git status --short --branch
@@ -901,4 +903,3 @@ After verified implementation and explicit approval:
 8. Verify `/api/profiles/tutor-preference/`, voice preview, coaching feedback, OpenMAIC classroom artifact snapshots, `/api/admin/tutors/`, and `/a3/admin/tutors`.
 9. Confirm the existing persona preference, legacy coaching sessions, legacy classrooms, and the default VRM still work.
 10. Keep rollback image digests and the database backup until smoke checks pass.
-
