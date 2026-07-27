@@ -12,6 +12,10 @@ from backend.domains.knowledge_base.schemas import KnowledgeBaseSearchResult
 DEFAULT_LEXICAL_FILE_LIMIT = 1
 
 
+# key -> (docs 元组对象, BM25 索引)；靠 docs 的对象身份做失效判定。
+_bm25_cache: dict[tuple, tuple] = {}
+
+
 def search_lexical_knowledge_base(
     query: str,
     top_k: int = 5,
@@ -43,13 +47,21 @@ def search_lexical_knowledge_base(
     if not candidates:
         return []
 
-    tokenized = [doc["tokens"] for doc in candidates]
     try:
         from rank_bm25 import BM25Okapi
     except ModuleNotFoundError:
         return _simple_rank(candidates, query, top_k)
 
-    bm25 = BM25Okapi(tokenized)
+    # BM25Okapi 的构建代价随语料总词数增长，实测每次重建要 12~17s，
+    # 而它只取决于候选集（= 缓存文档 + allowed_paths + course），与查询无关。
+    # 这里按这三者缓存索引；统一通过 clear_lexical_retriever_cache() 失效。
+    cache_key = (tuple(sorted(normalized_allowed)), normalized_course)
+    cached = _bm25_cache.get(cache_key)
+    if cached is not None and cached[0] is docs:
+        bm25 = cached[1]
+    else:
+        bm25 = BM25Okapi([doc["tokens"] for doc in candidates])
+        _bm25_cache[cache_key] = (docs, bm25)
     scores = bm25.get_scores(_tokenize(query))
     ranked = sorted(zip(candidates, scores), key=lambda item: float(item[1]), reverse=True)
     results = []
@@ -72,9 +84,16 @@ def _load_lexical_documents(data_root: str, limit_files: int) -> tuple[dict, ...
     return _documents_to_lexical_rows(source_files)
 
 
+@lru_cache(maxsize=64)
 def _load_lexical_documents_for_paths(source_paths: tuple[str, ...]) -> tuple[dict, ...]:
     source_files = [Path(path) for path in source_paths if Path(path).exists()]
     return _documents_to_lexical_rows(source_files)
+
+
+def clear_lexical_retriever_cache() -> None:
+    _load_lexical_documents.cache_clear()
+    _load_lexical_documents_for_paths.cache_clear()
+    _bm25_cache.clear()
 
 
 def _documents_to_lexical_rows(source_files) -> tuple[dict, ...]:

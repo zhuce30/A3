@@ -23,6 +23,7 @@ import { Button } from '@/components/ui/button';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { DynamicProfileInsightPanel, type DynamicProfileInsight } from '@/components/a3/profile/dynamic-profile-insight-panel';
 import { a3GetJson } from '@/lib/a3/api-client';
+import type { A3ProfileSnapshot } from '@/lib/a3/auth-types';
 import type { LearningReport } from '@/lib/a3/assessment-types';
 import type { ClassroomContext } from '@/lib/a3/classroom-types';
 import type { A3ApiResponse, LearningPath, MotivationSummary, PathItem, StudyPlan } from '@/lib/a3/learning-types';
@@ -40,6 +41,7 @@ type ProfileSnapshotResponse = {
   profile?: {
     extraProfile?: {
       dynamicProfile?: DynamicProfileInsight;
+      profileSnapshot?: A3ProfileSnapshot;
     };
   };
 };
@@ -67,6 +69,7 @@ export function DashboardView() {
   const [studyPlan, setStudyPlan] = useState<StudyPlan | null>(null);
   const [motivation, setMotivation] = useState<MotivationSummary | null>(null);
   const [dynamicProfile, setDynamicProfile] = useState<DynamicProfileInsight | null>(null);
+  const [profileSnapshot, setProfileSnapshot] = useState<A3ProfileSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -88,7 +91,10 @@ export function DashboardView() {
       if (reportResult.success) setReport(reportResult.report);
       if (classroomResult.success) setClassroom(classroomResult.classroom);
       if (planResult.success) setStudyPlan(planResult.plan);
-      if (profileResult.success) setDynamicProfile(profileResult.profile?.extraProfile?.dynamicProfile ?? null);
+      if (profileResult.success) {
+        setDynamicProfile(profileResult.profile?.extraProfile?.dynamicProfile ?? null);
+        setProfileSnapshot(profileResult.profile?.extraProfile?.profileSnapshot ?? null);
+      }
       setLoading(false);
     }
     void load();
@@ -161,6 +167,7 @@ export function DashboardView() {
 
       <DynamicProfileInsightPanel
         dynamicProfile={dynamicProfile}
+        profileSnapshot={profileSnapshot}
         compact
         title="首页画像信号"
         subtitle="今日任务、推荐资源和学情诊断会读取这组动态画像。"

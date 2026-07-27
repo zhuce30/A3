@@ -18,7 +18,7 @@ describe('A3 profile kernel snapshot types', () => {
     const insightSource = readFileSync(join(process.cwd(), 'components/a3/profile/dynamic-profile-insight-panel.tsx'), 'utf8');
 
     expect(authSource).toContain('profileSnapshot');
-    expect(authSource).toContain('画像证据');
+    expect(authSource).toContain('summarizeProfileUpdateEvidence');
     expect(insightSource).toContain('signalSummary');
     expect(insightSource).toContain('置信度');
   });

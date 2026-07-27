@@ -34,7 +34,7 @@ from backend.apps.knowledge_base.models import (
 )
 from backend.core.settings import DATA_ROOT, FAISS_INDEX_DIR, METADATA_DIR
 from backend.domains.knowledge_base.document_loader import SUPPORTED_EXTENSIONS, iter_source_files
-from backend.domains.knowledge_base.lexical_retriever import _load_lexical_documents
+from backend.domains.knowledge_base.lexical_retriever import clear_lexical_retriever_cache
 from backend.domains.knowledge_base.multimodal_parser import IMAGE_EXTENSIONS, MultimodalParseResult, parse_resource
 from backend.domains.knowledge_base.visual_retriever import remove_visual_resource_entries
 
@@ -905,7 +905,7 @@ def delete_resource(resource: KnowledgeResource) -> None:
         if asset_path.exists() and asset_path.is_file():
             asset_path.unlink()
     resource.delete()
-    _load_lexical_documents.cache_clear()
+    clear_lexical_retriever_cache()
 
 
 def cancel_resource_indexing_for_delete(resource: KnowledgeResource) -> bool:
@@ -980,7 +980,7 @@ def clear_text_index_storage() -> None:
         _index_cache.clear()
     except Exception:
         pass
-    _load_lexical_documents.cache_clear()
+    clear_lexical_retriever_cache()
 
 
 def reset_derived_resources(resources: list[KnowledgeResource]) -> dict:
@@ -1106,4 +1106,4 @@ def _delete_resource_derived_data(resource: KnowledgeResource) -> None:
     for asset_path in asset_paths:
         if asset_path.exists() and asset_path.is_file():
             asset_path.unlink()
-    _load_lexical_documents.cache_clear()
+    clear_lexical_retriever_cache()

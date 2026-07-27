@@ -286,6 +286,27 @@ pnpm.cmd vitest run tests/a3-openmaic-classroom-bridge.test.ts tests/a3-openmaic
 npx.cmd playwright test e2e/tests/a3-openmaic-bridge.spec.ts --project=chromium
 ```
 
+文本语义索引（换机器 / 重装 / 清空 `backend\knowledge_base\faiss_index\` 后必须重跑）：
+
+```powershell
+cd <project-root>
+backend\.venv\Scripts\python.exe backend\manage.py build_text_vector_index
+```
+
+`backend\knowledge_base\faiss_index\` 已被 `backend\.gitignore` 忽略，索引是生成物、不入库，新环境不会自带。
+
+必须重跑的原因：默认文本嵌入模型 `BAAI/bge-small-zh-v1.5` 依赖本地 HuggingFace 缓存。当它不可用时，
+在线检索会退化成 BM25 关键词命中。本命令使用已配置的 `A3_VISUAL_EMBED_*` provider 为全部文本、表格和
+公式块建立独立语义索引；使用 DashScope 时需要有效 API key，不能把 key 写入仓库。
+
+自检：
+
+```powershell
+backend\.venv\Scripts\python.exe backend\manage.py shell -c "from backend.domains.knowledge_base.text_vector_retriever import text_vector_index_available; print(text_vector_index_available())"
+```
+
+返回 `True` 才说明语义检索生效；此时检索结果的 `metadata.retriever` 应是 `text_vector` 而不是 `bm25`。
+
 检索与安全评测：
 
 ```powershell

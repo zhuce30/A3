@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -29,6 +30,8 @@ from backend.apps.profiles.profile_aggregator import aggregate_profile_snapshot
 from backend.apps.profiles.profile_signals import append_profile_signal
 from backend.apps.profiles.services import extract_and_save_profile
 from backend.domains.knowledge_base.retriever import search_knowledge_base
+
+logger = logging.getLogger(__name__)
 
 
 RECOMMEND_WORKFLOW_SEQUENCE = [
@@ -193,6 +196,31 @@ class BaseAgent:
         return None
 
 
+def _emit_step_progress(on_step, event: dict) -> None:
+    """上报单个 Agent 进度。回调失败只记日志，绝不影响 workflow 本身。"""
+    if on_step is None:
+        return
+    try:
+        on_step(event)
+    except Exception:  # noqa: BLE001 - 进度上报是尽力而为，不能拖垮生成流程
+        logger.warning("agent step progress callback failed", exc_info=True)
+
+
+def _compact_progress_summary(summary) -> dict:
+    """只保留标量摘要，避免把整个 Agent 输出写进 job 状态。"""
+    if not isinstance(summary, dict):
+        return {}
+    compact = {}
+    for key, value in list(summary.items())[:8]:
+        if isinstance(value, bool) or isinstance(value, (int, float)):
+            compact[str(key)[:40]] = value
+        elif isinstance(value, str):
+            compact[str(key)[:40]] = value[:60]
+        elif isinstance(value, (list, tuple, set)):
+            compact[str(key)[:40]] = len(value)
+    return compact
+
+
 class AgentKernel:
     def __init__(self, circuit_breaker=None):
         self._agents: dict[str, BaseAgent] = {}
@@ -203,15 +231,37 @@ class AgentKernel:
             raise ValueError("agent.name is required")
         self._agents[agent.name] = agent
 
-    def run(self, context: AgentContext, sequence: list[str]) -> KernelRunResult:
+    def run(self, context: AgentContext, sequence: list[str], *, on_step=None) -> KernelRunResult:
+        """执行 workflow。
+
+        on_step 是可选的进度回调，每个 Agent 开始/结束时各调用一次，用于把逐 Agent 进度
+        实时上报给调用方（例如 Celery 任务写回 job 状态）。回调异常绝不影响 workflow。
+        """
         run = AgentRun(context.user, context.workflow, context.goal)
         state = dict(context.state)
         state["traceId"] = run.trace_id
         output: dict = {"traceId": run.trace_id}
-        for name in sequence:
+        total_steps = len(sequence)
+        # workflow 的 Agent 顺序是预先确定的，随事件一起上报，
+        # 前端第一步就能画出完整流水线，而不是显示"第 2 步/第 3 步"占位。
+        planned_sequence = list(sequence)
+        for step_index, name in enumerate(sequence, start=1):
             agent = self._agents.get(name)
             if agent is None:
                 raise ValueError(f"Unknown agent: {name}")
+            _emit_step_progress(
+                on_step,
+                {
+                    "phase": "started",
+                    "order": step_index,
+                    "total": total_steps,
+                    "name": agent.name,
+                    "role": agent.role,
+                    "status": "running",
+                    "traceId": run.trace_id,
+                    "sequence": planned_sequence,
+                },
+            )
             step_context = AgentContext(
                 user=context.user,
                 workflow=context.workflow,
@@ -232,6 +282,20 @@ class AgentKernel:
             except Exception as exc:
                 fallback_result = agent.fallback(step_context, exc)
                 if fallback_result is None:
+                    _emit_step_progress(
+                        on_step,
+                        {
+                            "phase": "completed",
+                            "order": step_index,
+                            "total": total_steps,
+                            "name": agent.name,
+                            "role": agent.role,
+                            "status": "failed",
+                            "traceId": run.trace_id,
+                            "outputSummary": _compact_progress_summary({"error": str(exc)}),
+                            "sequence": planned_sequence,
+                        },
+                    )
                     if circuit_decision.get("open"):
                         run.fallback_strategy = "circuit_breaker"
                         run.step(
@@ -279,6 +343,20 @@ class AgentKernel:
                 state_diff=result.state_diff or result.state_patch,
                 evidence=result.evidence,
                 quality=result.quality,
+            )
+            _emit_step_progress(
+                on_step,
+                {
+                    "phase": "completed",
+                    "order": step_index,
+                    "total": total_steps,
+                    "name": agent.name,
+                    "role": agent.role,
+                    "status": status,
+                    "traceId": run.trace_id,
+                    "outputSummary": _compact_progress_summary(result.output_summary),
+                    "sequence": planned_sequence,
+                },
             )
         contract_error = _validate_workflow_output_contract(context.workflow, output)
         if contract_error:

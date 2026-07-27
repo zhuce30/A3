@@ -26,7 +26,12 @@ import { buildProfileChangeInsight, buildRecommendationEffectInsight, buildRecom
 import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
 import type { A3SystemLibraryResponse } from '@/lib/a3/library-types';
 import { buildA3VideoPrompt, buildA3VideoStoryboard, estimateA3VideoDuration } from '@/lib/a3/video-prompt';
+import { GenerationAgentTrace, summarizeAgentOutput } from '@/components/a3/features/generation-agent-trace';
 import type {
+  A3AgentTrace,
+  A3AgentTraceResponse,
+  A3ResourceAgentPlanEntry,
+  A3ResourceAgentProgressEntry,
   A3MultimodalArtifact,
   A3OpenMAICClassroomArtifact,
   A3OpenMAICVideoArtifact,
@@ -217,6 +222,9 @@ export function RecommendationsView() {
   const [classroomSummary, setClassroomSummary] = useState('');
   const [videoSummary, setVideoSummary] = useState('');
   const [longRunningProgress, setLongRunningProgress] = useState<LongRunningProgress | null>(null);
+  const [agentTrace, setAgentTrace] = useState<A3AgentTrace | null>(null);
+  const [agentTraceLoading, setAgentTraceLoading] = useState(false);
+  const [agentTraceError, setAgentTraceError] = useState('');
   const [recommendationsExpanded, setRecommendationsExpanded] = useState(false);
   const [profileFeed, setProfileFeed] = useState<ProfileFeedResponse | null>(null);
   const [systemLibrary, setSystemLibrary] = useState<A3SystemLibraryResponse | null>(null);
@@ -344,8 +352,9 @@ export function RecommendationsView() {
     }
     const normalizedPack = sanitizeResourcePackV2(synced.resourcePack);
     setPack(normalizedPack);
-    setLongRunningProgress(buildProgress('resource', 5, '资源包已生成，可以选择一个成品单独查看', 'succeeded'));
+    setLongRunningProgress(buildResourceFinishProgress(synced, '资源包已生成，可以选择一个成品单独查看'));
     setMessage(`已生成个性化资源包，traceId: ${(synced.traceId ?? normalizedPack.traceId).slice(0, 12)}。请从下面选择一个成品单独查看。`);
+    void loadAgentTrace(synced.traceId ?? normalizedPack.traceId);
   }
 
   async function generateSingleResourceV2(resourceType: A3ResourcePackV2ResourceType) {
@@ -368,8 +377,9 @@ export function RecommendationsView() {
     }
     const normalizedPack = sanitizeResourcePackV2(synced.resourcePack);
     setPack(normalizedPack);
-    setLongRunningProgress(buildProgress('resource', 5, `${resourceLabels[resourceType]}已生成，可以打开查看`, 'succeeded'));
+    setLongRunningProgress(buildResourceFinishProgress(synced, `${resourceLabels[resourceType]}已生成，可以打开查看`));
     setMessage(`已单独生成${resourceLabels[resourceType]}，traceId: ${(synced.traceId ?? normalizedPack.traceId).slice(0, 12)}。`);
+    void loadAgentTrace(synced.traceId ?? normalizedPack.traceId);
     return normalizedPack;
   }
 
@@ -482,6 +492,22 @@ export function RecommendationsView() {
     setError(`视频生成未成功：${failureReason}`);
   }
 
+  // 生成完成后按 traceId 回捞真实 Agent 执行记录（Django 侧只允许 owner/审计员读取）。
+  async function loadAgentTrace(traceId?: string) {
+    const nextTraceId = String(traceId || '').trim();
+    if (!nextTraceId) return;
+    setAgentTrace(null);
+    setAgentTraceError('');
+    setAgentTraceLoading(true);
+    const result = await a3GetJson<A3AgentTraceResponse>(`/api/demo/agent-runs/${encodeURIComponent(nextTraceId)}/`);
+    setAgentTraceLoading(false);
+    if (!result.success || !result.trace) {
+      setAgentTraceError(result.error || 'Agent 执行记录暂不可用。');
+      return;
+    }
+    setAgentTrace(result.trace);
+  }
+
   async function pollResourceGenerationJob(start: A3ResourceGenerateResponse) {
     const jobStart = start as A3ResourceGenerateResponse & {
       pollUrl?: string;
@@ -506,6 +532,8 @@ export function RecommendationsView() {
       stage?: string;
       message?: string;
       done?: boolean;
+      agentProgress?: A3ResourceAgentProgressEntry[];
+      agentPlan?: A3ResourceAgentPlanEntry[];
     }) | null = null;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       await sleep(attempt === 0 ? 300 : intervalMs);
@@ -530,6 +558,8 @@ export function RecommendationsView() {
         stage?: string;
         message?: string;
         done?: boolean;
+        agentProgress?: A3ResourceAgentProgressEntry[];
+        agentPlan?: A3ResourceAgentPlanEntry[];
       };
       if (!response.ok || !job.success) {
         if (isRetryableResourcePollStatus(response.status)) {
@@ -548,7 +578,13 @@ export function RecommendationsView() {
       const progress = typeof job.progress === 'number' ? Math.max(0, Math.min(100, Math.round(job.progress))) : 0;
       const activeStep = progress >= 95 ? 5 : Math.max(0, Math.min(4, Math.floor(progress / 20)));
       lastActiveStep = activeStep;
-      setLongRunningProgress(buildProgress('resource', activeStep, job.message || `资源生成进度 ${progress}%`));
+      // 后端已上报逐 Agent 进度时优先展示真实 Agent 步骤，否则回退到通用阶段标签。
+      const liveAgentSteps = job.agentProgress ?? [];
+      setLongRunningProgress(
+        liveAgentSteps.length
+          ? buildAgentProgress(liveAgentSteps, job.message || `资源生成进度 ${progress}%`, job.agentPlan ?? [])
+          : buildProgress('resource', activeStep, job.message || `资源生成进度 ${progress}%`),
+      );
       if (job.done || ['succeeded', 'failed'].includes(String(job.status))) break;
     }
     if (!latestJob) return { success: false, error: '资源生成任务未返回状态。' } as A3ResourceGenerateResponse;
@@ -747,6 +783,10 @@ export function RecommendationsView() {
 
       {longRunningProgress && (
         <LongRunningProgressPanel progress={longRunningProgress} />
+      )}
+
+      {(agentTrace || agentTraceLoading || agentTraceError) && (
+        <GenerationAgentTrace trace={agentTrace} loading={agentTraceLoading} error={agentTraceError} />
       )}
 
       {systemLibrary?.recommended.length ? (
@@ -1238,6 +1278,59 @@ function buildProgress(kind: LongRunningProgress['kind'], activeIndex: number, m
       return { label, status };
     }),
   };
+}
+
+/**
+ * 生成结束时的收尾面板：若后端上报过真实 Agent 步骤就保留它们，
+ * 否则回退到通用阶段标签，避免真实 Agent 名在最后一屏被覆盖掉。
+ */
+function buildResourceFinishProgress(
+  synced: A3ResourceGenerateResponse & {
+    agentProgress?: A3ResourceAgentProgressEntry[];
+    agentPlan?: A3ResourceAgentPlanEntry[];
+  },
+  message: string,
+): LongRunningProgress {
+  const entries = synced.agentProgress ?? [];
+  if (entries.length) return buildAgentProgress(entries, message, synced.agentPlan ?? []);
+  return buildProgress('resource', 5, message, 'succeeded');
+}
+
+/**
+ * 用后端上报的真实 Agent 进度构建进度面板（替代 6 个通用阶段标签）。
+ * plan 是完整流水线计划，让尚未执行的步骤也显示真实 Agent 名而不是「第 N 步」。
+ */
+function buildAgentProgress(
+  entries: A3ResourceAgentProgressEntry[],
+  message: string,
+  plan: A3ResourceAgentPlanEntry[] = [],
+): LongRunningProgress {
+  const sorted = [...entries].sort((a, b) => (a.order || 0) - (b.order || 0));
+  const total = Math.max(sorted[0]?.total || 0, sorted.length, plan.length);
+  const steps: LongRunningProgress['steps'] = [];
+  for (let order = 1; order <= total; order += 1) {
+    const entry = sorted.find((item) => item.order === order);
+    if (!entry) {
+      const planned = plan.find((item) => item.order === order);
+      steps.push({ label: planned?.label || planned?.name || `第 ${order} 步`, status: 'pending' });
+      continue;
+    }
+    const summary = summarizeAgentOutput(entry.outputSummary);
+    const degraded = entry.status === 'degraded';
+    steps.push({
+      label: entry.label || entry.name || `第 ${order} 步`,
+      status: agentProgressStatus(entry.status),
+      detail: [degraded ? '已降级' : '', summary].filter(Boolean).join(' · ') || undefined,
+    });
+  }
+  return { kind: 'resource', title: '资源生成进度', message, steps };
+}
+
+function agentProgressStatus(status: string): ProgressStepStatus {
+  if (status === 'running') return 'running';
+  if (status === 'failed') return 'failed';
+  if (status === 'completed' || status === 'degraded') return 'succeeded';
+  return 'pending';
 }
 
 function buildVideoArtifactProgress(artifact: A3OpenMAICVideoArtifact, message: string): LongRunningProgress {

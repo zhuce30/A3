@@ -68,8 +68,11 @@ export function ReportDetails({
         </DetailItem>
 
         <DetailItem title="画像变化" icon={<UserRound className="size-4" />} testId="a3-report-dynamic-profile">
-          <div className="grid gap-4 xl:grid-cols-2">
-            <DynamicProfileInsightPanel dynamicProfile={dynamicProfile} compact />
+          <div className="grid gap-4">
+            <DynamicProfileInsightPanel
+              dynamicProfile={dynamicProfile}
+              profileSnapshot={profileFeed?.profileSnapshot ?? null}
+            />
             <ProfileTimeline feed={profileFeed} />
           </div>
         </DetailItem>

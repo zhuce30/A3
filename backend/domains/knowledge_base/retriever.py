@@ -11,6 +11,10 @@ configure_huggingface_runtime()
 from backend.core.settings import DEFAULT_EMBED_MODEL, FAISS_INDEX_DIR, HF_CACHE_DIR
 from backend.domains.knowledge_base.lexical_retriever import search_lexical_knowledge_base
 from backend.domains.knowledge_base.schemas import KnowledgeBaseSearchResult
+from backend.domains.knowledge_base.text_vector_retriever import (
+    search_text_vector_knowledge_base,
+    text_vector_index_available,
+)
 from backend.domains.knowledge_base.visual_retriever import search_visual_knowledge_base
 
 _index_cache: dict[tuple[str, str], Any] = {}
@@ -38,19 +42,39 @@ def search_knowledge_base(
     apply_weights = retrieval_mode in {"hybrid", "vector", "bm25"}
     lexical_top_k = min(max(int(bm25_candidate_count or 0), top_k), 200) if bm25_candidate_count else min(max(top_k * max(1, int(candidate_multiplier)), top_k), 200)
     if force_lexical or retrieval_mode == "bm25" or not _embedding_model_available_locally(embed_model_name):
-        text_results = search_lexical_knowledge_base(
-            query=query,
-            top_k=lexical_top_k,
-            allowed_source_paths=allowed_source_paths,
-            course=course,
-        )
+        text_results: list[KnowledgeBaseSearchResult] = []
+        semantic_query_failed = False
+        # 本地 HF 嵌入模型不可用时，优先用 DashScope 建好的文本语义索引，
+        # 而不是直接退化成 BM25 关键词检索。两者分数量纲不同（BM25 无上界、
+        # 余弦是 0~1），混排会让弱相关的 BM25 结果压住更相关的语义结果，
+        # 所以这里语义索引可用时就把它作为文本检索主力。
+        use_semantic_text = not force_lexical and retrieval_mode != "bm25"
+        if use_semantic_text:
+            try:
+                if text_vector_index_available():
+                    text_results = search_text_vector_knowledge_base(
+                        query=query,
+                        top_k=lexical_top_k,
+                        allowed_source_paths=allowed_source_paths,
+                        source_scope_by_path=normalized_scope_by_path,
+                    )
+            except Exception:
+                text_results = []
+                semantic_query_failed = True
+        if not text_results:
+            text_results = search_lexical_knowledge_base(
+                query=query,
+                top_k=lexical_top_k,
+                allowed_source_paths=allowed_source_paths,
+                course=course,
+            )
         return _merge_visual_results(
             query,
             text_results,
             top_k,
             allowed_source_paths,
             source_scope_by_path=normalized_scope_by_path,
-            visual_use_embedding=visual_use_embedding,
+            visual_use_embedding=visual_use_embedding and not semantic_query_failed,
             similarity_threshold=similarity_threshold,
             vector_weight=vector_weight,
             bm25_weight=bm25_weight,

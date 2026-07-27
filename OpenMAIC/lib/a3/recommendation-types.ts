@@ -238,6 +238,64 @@ export type A3ResourceGenerateResponse = {
   resourcePack?: A3ResourcePackV2;
 };
 
+/** 完整 Agent 流水线计划（含尚未执行的步骤），用于一开始就列出全部步骤名。 */
+export type A3ResourceAgentPlanEntry = {
+  order: number;
+  name: string;
+  label: string;
+};
+
+/** 生成过程中逐 Agent 的实时进度（由 Celery 任务写入 job.metadata.agentProgress）。 */
+export type A3ResourceAgentProgressEntry = {
+  order: number;
+  total: number;
+  name: string;
+  label: string;
+  role?: string;
+  status: 'running' | 'completed' | 'degraded' | 'failed' | string;
+  outputSummary?: Record<string, unknown>;
+};
+
+/** 对应 Django _serialize_agent_run_detail 的单个 Agent 步骤。 */
+export type A3AgentTraceStep = {
+  order: number;
+  name: string;
+  role: string;
+  status: 'succeeded' | 'failed' | 'degraded' | string;
+  detail: string;
+  latencyMs: number;
+  createdAt?: string | null;
+  metadata?: {
+    inputSummary?: Record<string, unknown>;
+    outputSummary?: Record<string, unknown>;
+    stateDiff?: Record<string, unknown>;
+    evidence?: Record<string, unknown>;
+    quality?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+};
+
+/** 对应 Django GET /api/demo/agent-runs/<traceId>/ 返回的 trace。 */
+export type A3AgentTrace = {
+  traceId: string;
+  schemaVersion?: string;
+  workflow: string;
+  goal?: string;
+  status: string;
+  fallbackStrategy?: string;
+  latencyMs?: number;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  steps: A3AgentTraceStep[];
+  metadata?: Record<string, unknown>;
+};
+
+export type A3AgentTraceResponse = {
+  success: boolean;
+  error?: string;
+  trace?: A3AgentTrace;
+};
+
 export type A3ResourcePacksResponse = {
   success: boolean;
   error?: string;

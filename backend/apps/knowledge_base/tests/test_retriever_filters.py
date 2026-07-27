@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,9 +11,52 @@ from django.test import SimpleTestCase
 from backend.domains.knowledge_base.lexical_retriever import search_lexical_knowledge_base
 from backend.domains.knowledge_base.retriever import search_knowledge_base
 from backend.domains.knowledge_base.schemas import KnowledgeBaseSearchResult
+from backend.domains.knowledge_base.text_vector_retriever import search_text_vector_knowledge_base
 
 
 class RetrieverFilterTests(SimpleTestCase):
+    def test_text_vector_search_filters_disallowed_sources_before_returning_results(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            allowed = root / "allowed.pdf"
+            denied = root / "denied.pdf"
+            index_path = root / "text-index.json"
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "items": [
+                            {
+                                "block_id": "denied",
+                                "source_path": str(denied),
+                                "text": "denied evidence",
+                                "embedding": [1.0, 0.0],
+                            },
+                            {
+                                "block_id": "allowed",
+                                "source_path": str(allowed),
+                                "text": "allowed evidence",
+                                "embedding": [0.8, 0.2],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "backend.domains.knowledge_base.text_vector_retriever._embed_text",
+                return_value=[1.0, 0.0],
+            ):
+                results = search_text_vector_knowledge_base(
+                    "deadlock",
+                    top_k=2,
+                    allowed_source_paths={str(allowed)},
+                    index_path=index_path,
+                )
+
+        self.assertEqual([item.text for item in results], ["allowed evidence"])
+
     def test_search_filters_by_allowed_path_and_course(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             allowed = Path(temp_dir) / "allowed.pdf"
@@ -40,6 +84,69 @@ class RetrieverFilterTests(SimpleTestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].text, "keep")
 
+    def test_text_vector_index_is_preferred_over_lexical_when_available(self):
+        """本地 HF 模型不可用时，应优先用 DashScope 文本语义索引而不是 BM25。
+
+        BM25 分数无上界（实测可达 9.79），与 0~1 的余弦分数混排会让弱相关的
+        关键词命中压住更相关的语义结果，所以语义索引可用时它就是文本检索主力。
+        """
+        semantic = KnowledgeBaseSearchResult(
+            score=0.72,
+            text="死锁的四个必要条件",
+            metadata={"retriever": "text_vector", "source_path": "os.pptx", "block_id": "b1"},
+        )
+        with patch("backend.domains.knowledge_base.retriever._embedding_model_available_locally", return_value=False):
+            with patch("backend.domains.knowledge_base.retriever.text_vector_index_available", return_value=True):
+                with patch("backend.domains.knowledge_base.retriever.search_text_vector_knowledge_base", return_value=[semantic]) as semantic_search:
+                    with patch("backend.domains.knowledge_base.retriever.search_lexical_knowledge_base") as lexical:
+                        with patch("backend.domains.knowledge_base.retriever.search_visual_knowledge_base", return_value=[]):
+                            results = search_knowledge_base(query="死锁", top_k=3)
+
+        semantic_search.assert_called_once()
+        lexical.assert_not_called()
+        self.assertEqual([item.metadata["retriever"] for item in results], ["text_vector"])
+
+    def test_lexical_is_used_when_text_vector_index_is_empty(self):
+        """语义索引为空时仍必须能退回 BM25，不能把检索整条打死。"""
+        fallback = KnowledgeBaseSearchResult(
+            score=0.5,
+            text="bm25 evidence",
+            metadata={"retriever": "bm25", "source_path": "os.pdf"},
+        )
+        with patch("backend.domains.knowledge_base.retriever._embedding_model_available_locally", return_value=False):
+            with patch("backend.domains.knowledge_base.retriever.text_vector_index_available", return_value=True):
+                with patch("backend.domains.knowledge_base.retriever.search_text_vector_knowledge_base", return_value=[]):
+                    with patch("backend.domains.knowledge_base.retriever.search_lexical_knowledge_base", return_value=[fallback]) as lexical:
+                        with patch("backend.domains.knowledge_base.retriever.search_visual_knowledge_base", return_value=[]):
+                            results = search_knowledge_base(query="死锁", top_k=3)
+
+        lexical.assert_called_once()
+        self.assertEqual([item.metadata["retriever"] for item in results], ["bm25"])
+
+    def test_visual_retrieval_uses_lexical_mode_after_semantic_query_timeout(self):
+        fallback = KnowledgeBaseSearchResult(
+            score=0.5,
+            text="bm25 evidence",
+            metadata={"retriever": "bm25", "source_path": "os.pdf"},
+        )
+        with patch("backend.domains.knowledge_base.retriever._embedding_model_available_locally", return_value=False):
+            with patch("backend.domains.knowledge_base.retriever.text_vector_index_available", return_value=True):
+                with patch(
+                    "backend.domains.knowledge_base.retriever.search_text_vector_knowledge_base",
+                    side_effect=TimeoutError("embedding timed out"),
+                ):
+                    with patch(
+                        "backend.domains.knowledge_base.retriever.search_lexical_knowledge_base",
+                        return_value=[fallback],
+                    ):
+                        with patch(
+                            "backend.domains.knowledge_base.retriever.search_visual_knowledge_base",
+                            return_value=[],
+                        ) as visual:
+                            search_knowledge_base(query="死锁", top_k=3)
+
+        self.assertFalse(visual.call_args.kwargs["use_embedding"])
+
     def test_search_uses_lexical_fallback_when_embedding_model_is_not_cached(self):
         fallback = [
             KnowledgeBaseSearchResult(
@@ -49,9 +156,11 @@ class RetrieverFilterTests(SimpleTestCase):
             )
         ]
 
-        with patch("backend.domains.knowledge_base.retriever._embedding_model_available_locally", return_value=False):
-            with patch("backend.domains.knowledge_base.retriever.search_lexical_knowledge_base", return_value=fallback) as lexical:
-                results = search_knowledge_base(query="根轨迹", top_k=1)
+        # 文本语义索引不可用时才会退到 BM25，这里显式关掉以隔离生产索引文件。
+        with patch("backend.domains.knowledge_base.retriever.text_vector_index_available", return_value=False):
+            with patch("backend.domains.knowledge_base.retriever._embedding_model_available_locally", return_value=False):
+                with patch("backend.domains.knowledge_base.retriever.search_lexical_knowledge_base", return_value=fallback) as lexical:
+                    results = search_knowledge_base(query="根轨迹", top_k=1)
 
         self.assertEqual(results, fallback)
         lexical.assert_called_once()
@@ -68,10 +177,11 @@ class RetrieverFilterTests(SimpleTestCase):
             metadata={"retriever": "visual_vector", "source_path": "slide.pptx", "block_id": "block-1"},
         )
 
-        with patch("backend.domains.knowledge_base.retriever._embedding_model_available_locally", return_value=False):
-            with patch("backend.domains.knowledge_base.retriever.search_lexical_knowledge_base", return_value=[text_result]):
-                with patch("backend.domains.knowledge_base.retriever.search_visual_knowledge_base", return_value=[visual_result]) as visual:
-                    results = search_knowledge_base(query="root locus", top_k=3)
+        with patch("backend.domains.knowledge_base.retriever.text_vector_index_available", return_value=False):
+            with patch("backend.domains.knowledge_base.retriever._embedding_model_available_locally", return_value=False):
+                with patch("backend.domains.knowledge_base.retriever.search_lexical_knowledge_base", return_value=[text_result]):
+                    with patch("backend.domains.knowledge_base.retriever.search_visual_knowledge_base", return_value=[visual_result]) as visual:
+                        results = search_knowledge_base(query="root locus", top_k=3)
 
         self.assertEqual([item.metadata["retriever"] for item in results], ["visual_vector", "bm25"])
         visual.assert_called_once()

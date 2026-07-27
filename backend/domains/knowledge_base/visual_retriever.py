@@ -5,6 +5,7 @@ import math
 import mimetypes
 import os
 import re
+import threading
 from base64 import b64encode
 from functools import lru_cache
 from pathlib import Path
@@ -178,11 +179,32 @@ def _embed_image(path: Path) -> list[float]:
 
 
 def _embed_text(text: str) -> list[float]:
+    """把查询文本向量化。
+
+    一次检索里文本语义索引和视觉索引会各自embed同一个查询，走 DashScope 时
+    等于两次网络往返（每次约 4s）。这里对查询做小容量缓存，让同一查询只embed一次。
+    """
+    cached = _embed_text_cached(text)
+    # 返回副本，避免调用方就地修改污染缓存。
+    return list(cached)
+
+
+@lru_cache(maxsize=256)
+def _embed_text_cached(text: str) -> tuple[float, ...]:
     if _visual_embed_provider() == "dashscope":
-        return _dashscope_embed({"text": text})
+        # 查询期用更短的超时：这条调用挡在用户等待路径上，
+        # 宁可快速失败退回关键词检索，也不要吊死几十秒。
+        deadline = _query_embed_timeout()
+        return tuple(
+            _call_with_deadline(
+                lambda: _dashscope_embed({"text": text}, timeout=deadline),
+                deadline,
+                label="query text embedding",
+            )
+        )
 
     vector = _get_visual_model().encode([text], normalize_embeddings=True)[0]
-    return [float(value) for value in vector]
+    return tuple(float(value) for value in vector)
 
 
 @lru_cache(maxsize=1)
@@ -215,7 +237,7 @@ def _visual_embed_model() -> str:
     return os.getenv("A3_VISUAL_EMBED_MODEL", default_model).strip() or default_model
 
 
-def _dashscope_embed(content: dict) -> list[float]:
+def _dashscope_embed(content: dict, *, timeout: float | None = None) -> list[float]:
     api_key = _resolve_env_reference(os.getenv("A3_VISUAL_EMBED_API_KEY")) or _resolve_env_reference(os.getenv("DASHSCOPE_API_KEY"))
     if not api_key:
         raise RuntimeError("DashScope visual embedding API key is not configured")
@@ -238,7 +260,7 @@ def _dashscope_embed(content: dict) -> list[float]:
         },
         method="POST",
     )
-    timeout = _visual_embed_timeout()
+    timeout = timeout if timeout is not None else _visual_embed_timeout()
     try:
         with urlopen(request, timeout=timeout) as response:
             response_payload = json.loads(response.read().decode("utf-8"))
@@ -283,6 +305,46 @@ def _visual_embed_timeout() -> float:
         return max(1.0, float(raw))
     except ValueError:
         return 30.0
+
+
+def _call_with_deadline(func, deadline: float, *, label: str):
+    """在墙钟时限内执行 func，超时抛 TimeoutError。
+
+    urlopen 的 timeout 只约束单次 socket 操作，不约束整次请求总时长——实测设 8s
+    仍出现 9.3s 的调用。检索在用户等待路径上，需要的是"总时长有上界"，
+    所以这里用守护线程 + join(timeout) 兜一层墙钟时限：超时后调用方立即拿回控制权，
+    残留请求由 socket 超时自行收尾（守护线程不会阻塞进程退出）。
+    """
+    outcome: dict = {}
+
+    def runner() -> None:
+        try:
+            outcome["value"] = func()
+        except BaseException as exc:  # noqa: BLE001 - 原样带回调用线程
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=runner, name="a3-embed-deadline", daemon=True)
+    worker.start()
+    worker.join(deadline)
+    if worker.is_alive():
+        raise TimeoutError(f"{label} exceeded {deadline}s wall-clock deadline")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
+
+
+def _query_embed_timeout() -> float:
+    """查询期向量化超时。
+
+    建索引可以慢（离线批处理），但检索发生在用户等待路径上：实测正常 3~6s，
+    偶发会卡到几十秒，而 RetrieverAgent 还会重试一次，等于把生成流程拖死。
+    这里默认 8s 快速失败，让检索退回关键词命中而不是长时间无响应。
+    """
+    raw = os.getenv("A3_QUERY_EMBED_TIMEOUT_SECONDS", "8").strip()
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 8.0
 
 
 def _extract_dashscope_embedding(payload: dict) -> list:

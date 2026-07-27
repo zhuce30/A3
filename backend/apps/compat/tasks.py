@@ -62,16 +62,61 @@ def run_resource_generation_job(self, job_id: str) -> dict:
         _save_job_state(
             job,
             stage="synthesis",
-            progress=45,
-            message="正在结合画像、薄弱点和学习目标生成资源内容",
+            progress=20,
+            message="正在启动 Agent 编排",
         )
         from backend.apps.compat import resource_generation
+
+        # 逐 Agent 实时上报：Agent 阶段占 20%~85%，剩余留给写回。
+        agent_progress: list[dict] = []
+
+        def _handle_agent_step(event: dict) -> None:
+            order = int(event.get("order") or 0)
+            total = max(1, int(event.get("total") or 1))
+            name = str(event.get("name") or "")
+            label = resource_generation.RESOURCE_AGENT_LABELS.get(name, name)
+            running = str(event.get("phase") or "") == "started"
+            agent_progress[:] = [item for item in agent_progress if item.get("order") != order]
+            agent_progress.append(
+                {
+                    "order": order,
+                    "total": total,
+                    "name": name,
+                    "label": label,
+                    "role": str(event.get("role") or ""),
+                    "status": "running" if running else str(event.get("status") or ""),
+                    "outputSummary": event.get("outputSummary") or {},
+                }
+            )
+            agent_progress.sort(key=lambda item: item.get("order") or 0)
+            done = sum(1 for item in agent_progress if item.get("status") != "running")
+            # 完整流水线计划（含尚未执行的 Agent），让前端一开始就能列出全部步骤名。
+            planned = [
+                {
+                    "order": index,
+                    "name": str(agent_name),
+                    "label": resource_generation.RESOURCE_AGENT_LABELS.get(str(agent_name), str(agent_name)),
+                }
+                for index, agent_name in enumerate(event.get("sequence") or [], start=1)
+            ]
+            next_metadata = {**metadata, "agentProgress": list(agent_progress)}
+            if planned:
+                next_metadata["agentPlan"] = planned
+            _save_job_state(
+                job,
+                status="running",
+                stage=f"agent:{name}" if name else "agents",
+                progress=20 + round(65 * done / total),
+                message=f"第 {order}/{total} 步 {label} " + ("正在执行" if running else "已完成"),
+                metadata=next_metadata,
+            )
 
         result = resource_generation.generate_resource_pack_v2(
             job.user,
             goal=job.goal,
             top_k=job.top_k,
             resource_type=job.resource_type,
+            on_step=_handle_agent_step,
         )
         resource_pack = result.get("resourcePack") if isinstance(result, dict) else None
         if not isinstance(resource_pack, dict):

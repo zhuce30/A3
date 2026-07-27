@@ -213,6 +213,48 @@ def fail_stale_resource_generation_jobs(user=None, *, stale_after: timedelta | N
     )
 
 
+def _resource_job_agent_progress(job: ResourceGenerationJob) -> list[dict]:
+    """读取 Celery 任务写入 metadata 的逐 Agent 进度（无需额外建表）。"""
+    metadata = job.metadata if isinstance(job.metadata, dict) else {}
+    entries = metadata.get("agentProgress")
+    if not isinstance(entries, list):
+        return []
+    progress = []
+    for entry in entries[:20]:
+        if not isinstance(entry, dict):
+            continue
+        summary = entry.get("outputSummary")
+        progress.append(
+            {
+                "order": entry.get("order") or 0,
+                "total": entry.get("total") or 0,
+                "name": str(entry.get("name") or "")[:80],
+                "label": str(entry.get("label") or "")[:80],
+                "role": str(entry.get("role") or "")[:80],
+                "status": str(entry.get("status") or "")[:20],
+                "outputSummary": summary if isinstance(summary, dict) else {},
+            }
+        )
+    return progress
+
+
+def _resource_job_agent_plan(job: ResourceGenerationJob) -> list[dict]:
+    """完整的 Agent 流水线计划（含尚未执行的步骤），供前端一次性列出全部步骤名。"""
+    metadata = job.metadata if isinstance(job.metadata, dict) else {}
+    entries = metadata.get("agentPlan")
+    if not isinstance(entries, list):
+        return []
+    return [
+        {
+            "order": entry.get("order") or 0,
+            "name": str(entry.get("name") or "")[:80],
+            "label": str(entry.get("label") or "")[:80],
+        }
+        for entry in entries[:20]
+        if isinstance(entry, dict)
+    ]
+
+
 def serialize_resource_generation_job(job: ResourceGenerationJob) -> dict:
     result = job.result if isinstance(job.result, dict) else {}
     resource_pack = result.get("resourcePack") if isinstance(result.get("resourcePack"), dict) else None
@@ -231,6 +273,8 @@ def serialize_resource_generation_job(job: ResourceGenerationJob) -> dict:
         "resourcePackId": job.resource_pack_id,
         "traceId": job.trace_id,
         "resourcePack": resource_pack,
+        "agentProgress": _resource_job_agent_progress(job),
+        "agentPlan": _resource_job_agent_plan(job),
         "error": job.error_message,
         "done": job.status in {"succeeded", "failed"},
         "actionUrl": f"/a3/resources/{job.resource_pack_id}" if job.resource_pack_id else "/a3/recommendations",

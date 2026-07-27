@@ -2,7 +2,12 @@ import { NextRequest } from 'next/server';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { fetchA3DjangoJson, postA3DjangoJson } from '@/lib/server/a3-django-api';
 import type { A3PublicUser } from '@/lib/a3/auth-types';
-import type { A3ResourceGenerateResponse, A3ResourcePackV2ResourceType } from '@/lib/a3/recommendation-types';
+import type {
+  A3ResourceAgentPlanEntry,
+  A3ResourceAgentProgressEntry,
+  A3ResourceGenerateResponse,
+  A3ResourcePackV2ResourceType,
+} from '@/lib/a3/recommendation-types';
 
 type AuthMeResponse = {
   user?: A3PublicUser | null;
@@ -18,6 +23,8 @@ type PersistedResourceGenerationJob = {
   done?: boolean;
   resourcePack?: A3ResourceGenerateResponse['resourcePack'];
   traceId?: string;
+  agentProgress?: A3ResourceAgentProgressEntry[];
+  agentPlan?: A3ResourceAgentPlanEntry[];
   error?: string;
   updatedAt?: string;
 };
@@ -119,6 +126,8 @@ export async function GET(request: NextRequest) {
       pollIntervalMs: 1500,
       resourcePack: job.resourcePack,
       traceId: job.traceId,
+      agentProgress: job.agentProgress ?? [],
+      agentPlan: job.agentPlan ?? [],
       error: job.error,
       updatedAt: job.updatedAt,
     });

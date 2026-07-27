@@ -193,7 +193,10 @@ A3_AGENT_CIRCUIT_OPEN_THRESHOLD = float(os.getenv("A3_AGENT_CIRCUIT_OPEN_THRESHO
 A3_AGENT_RUNTIME_POLICIES = {
     "ProfileAgent": {"maxRetries": int(os.getenv("A3_PROFILE_AGENT_MAX_RETRIES", "1")), "timeoutMs": int(os.getenv("A3_PROFILE_AGENT_TIMEOUT_MS", "2500"))},
     "PlannerAgent": {"maxRetries": int(os.getenv("A3_PLANNER_AGENT_MAX_RETRIES", "1")), "timeoutMs": int(os.getenv("A3_PLANNER_AGENT_TIMEOUT_MS", "5000"))},
-    "RetrieverAgent": {"maxRetries": int(os.getenv("A3_RETRIEVER_AGENT_MAX_RETRIES", "1")), "timeoutMs": int(os.getenv("A3_RETRIEVER_AGENT_TIMEOUT_MS", "3000"))},
+    # 本地知识库检索（向量 + BM25 + 视觉）预热后约 5~7s、冷启动可接近 20s。
+    # 查询向量网络调用另有墙钟时限；Agent 预算用于识别整体超时，默认不重试整条检索，
+    # 避免冷启动或上游超时时把用户等待时间翻倍。
+    "RetrieverAgent": {"maxRetries": int(os.getenv("A3_RETRIEVER_AGENT_MAX_RETRIES", "0")), "timeoutMs": int(os.getenv("A3_RETRIEVER_AGENT_TIMEOUT_MS", "20000"))},
     "VerifierAgent": {"maxRetries": int(os.getenv("A3_VERIFIER_AGENT_MAX_RETRIES", "1")), "timeoutMs": int(os.getenv("A3_VERIFIER_AGENT_TIMEOUT_MS", "3000"))},
     "AssessmentAgent": {"maxRetries": int(os.getenv("A3_ASSESSMENT_AGENT_MAX_RETRIES", "0")), "timeoutMs": int(os.getenv("A3_ASSESSMENT_AGENT_TIMEOUT_MS", "2000"))},
     "StudyPlanAgent": {"maxRetries": int(os.getenv("A3_STUDY_PLAN_AGENT_MAX_RETRIES", "1")), "timeoutMs": int(os.getenv("A3_STUDY_PLAN_AGENT_TIMEOUT_MS", "4000"))},

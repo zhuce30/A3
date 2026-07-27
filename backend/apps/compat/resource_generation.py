@@ -13,6 +13,8 @@ from backend.apps.compat.agent_kernel import AgentContext, AgentKernel, AgentRes
 from backend.apps.compat.llm import LLMUnavailable, chat_completion
 from backend.apps.compat.models import OpenMAICArtifact
 from backend.apps.compat.verification import verify_answer
+from backend.apps.knowledge_base.display import format_source_display_location, safe_source_filename
+from backend.apps.knowledge_base.services import indexed_resource_scope_by_path
 from backend.apps.learning.effect_events import aggregate_learning_events, record_learning_event
 from backend.apps.learning.effect_metrics import build_learning_effect_metrics
 from backend.apps.learning.models import ResourcePackLog
@@ -58,6 +60,16 @@ RESOURCE_GENERATE_WORKFLOW_SEQUENCE = [
     "VerifierAgent",
     "ResourcePackCommitAgent",
 ]
+
+# Agent 名 → 面向学生的中文职责，用于生成过程的实时进度文案。
+RESOURCE_AGENT_LABELS = {
+    "RetrieverAgent": "知识检索",
+    "PedagogyAgent": "教学策略设计",
+    "ResourceSynthesisAgent": "资源合成",
+    "PracticeGenerationAgent": "练习与实验生成",
+    "VerifierAgent": "引用与安全校验",
+    "ResourcePackCommitAgent": "资源包写回",
+}
 
 RESOURCE_FEEDBACK_WORKFLOW_SEQUENCE = [
     "ResourceFeedbackAgent",
@@ -124,9 +136,15 @@ class ResourceRetrieverAgent(BaseAgent):
         profile = LearnerProfile.objects.filter(user=context.user).first()
         classroom = classroom_context(context.user)
         target = classroom.get("target") if isinstance(classroom.get("target"), dict) else {}
-        resolved_goal = str(context.payload.get("goal") or target.get("title") or "褰撳墠瀛︿範鐩爣").strip()
+        resolved_goal = str(context.payload.get("goal") or target.get("title") or "当前学习目标").strip()
         top_k = max(6, int(context.payload.get("topK") or 6))
-        sources = _search_resource_sources(resolved_goal, top_k=top_k, fallback_sources=classroom.get("sources") or [])
+        source_scope_by_path = indexed_resource_scope_by_path(context.user, include_global=True)
+        sources = _search_resource_sources(
+            resolved_goal,
+            top_k=top_k,
+            fallback_sources=classroom.get("sources") or [],
+            source_scope_by_path=source_scope_by_path,
+        )
         return AgentResult(
             output={
                 "resolvedGoal": resolved_goal,
@@ -143,20 +161,31 @@ class ResourceRetrieverAgent(BaseAgent):
         )
 
     def fallback(self, context: AgentContext, error: Exception) -> AgentResult:
-        fallback_goal = str(context.payload.get("goal") or context.goal or "褰撳墠瀛︿範鐩爣").strip()
-        sources = _search_resource_sources(fallback_goal, top_k=1, fallback_sources=[])
+        fallback_goal = str(context.payload.get("goal") or context.goal or "当前学习目标").strip()
+        # run() 已经执行过一次检索；超时后再次检索会把等待时间翻倍。
+        # 降级阶段只保留学习目标证据，下一次正常生成再使用知识库。
+        sources = _search_resource_sources(
+            fallback_goal,
+            top_k=1,
+            fallback_sources=[],
+            source_scope_by_path={},
+        )
+        # 检索降级不代表画像不可用：画像是本地库读取，与检索失败无关。
+        # 之前这里硬编码空画像，导致检索一超时，下游 PedagogyAgent 就只能按空画像做"个性化"。
+        profile = LearnerProfile.objects.filter(user=context.user).first()
+        dimension_count = _profile_dimension_count(profile)
         return AgentResult(
             output={
                 "resolvedGoal": fallback_goal,
                 "resourceSources": sources,
-                "profileSnapshot": {},
-                "profileDimensionCount": 0,
+                "profileSnapshot": _profile_snapshot(profile),
+                "profileDimensionCount": dimension_count,
             },
             input_summary={"goal": fallback_goal},
-            output_summary={"sourceCount": len(sources), "fallback": True},
+            output_summary={"sourceCount": len(sources), "profileDimensionCount": dimension_count, "fallback": True},
             evidence={"retrievalMode": "resource_generation_goal_fallback", "reason": str(error)},
-            quality={"grounded": bool(sources), "fallbackUsed": True},
-            detail="Use current goal as fallback evidence when resource retrieval fails.",
+            quality={"grounded": bool(sources), "fallbackUsed": True, "profilePreserved": bool(dimension_count)},
+            detail="Use current goal as fallback evidence when resource retrieval fails, keeping the learner profile.",
         )
 
 
@@ -309,7 +338,7 @@ class ResourcePackCommitAgent(BaseAgent):
     }
 
     def run(self, context: AgentContext) -> AgentResult:
-        goal = str(context.state.get("resolvedGoal") or context.goal or "褰撳墠瀛︿範鐩爣").strip()
+        goal = str(context.state.get("resolvedGoal") or context.goal or "当前学习目标").strip()
         profile = context.state.get("profile")
         resources = context.state.get("resources") if isinstance(context.state.get("resources"), list) else []
         pack_id = uuid4().hex
@@ -353,14 +382,15 @@ def build_resource_generate_kernel() -> AgentKernel:
     return kernel
 
 
-def run_resource_generate_workflow(user, payload: dict, *, kernel: AgentKernel | None = None):
+def run_resource_generate_workflow(user, payload: dict, *, kernel: AgentKernel | None = None, on_step=None):
     kernel = kernel or build_resource_generate_kernel()
     if kernel._circuit_breaker is None:
         kernel._circuit_breaker = build_recent_run_circuit_breaker(user)
-    goal = str(payload.get("goal") or "鐢熸垚涓€у寲澶氭ā鎬佽祫婧愬寘")
+    goal = str(payload.get("goal") or "生成个性化多模态资源包")
     return kernel.run(
         AgentContext(user=user, workflow="resource_generate", goal=goal, payload=payload),
         RESOURCE_GENERATE_WORKFLOW_SEQUENCE,
+        on_step=on_step,
     )
 
 
@@ -759,12 +789,12 @@ def _resource_pack_next_actions(goal: str) -> list[dict]:
     ]
 
 
-def generate_resource_pack_v2(user, *, goal: str = "", top_k: int = 3, resource_type: str = "") -> dict:
+def generate_resource_pack_v2(user, *, goal: str = "", top_k: int = 3, resource_type: str = "", on_step=None) -> dict:
     payload = {"goal": goal, "topK": top_k}
     if resource_type:
         payload["resourceType"] = resource_type
         _requested_resource_type(payload)
-    result = run_resource_generate_workflow(user, payload)
+    result = run_resource_generate_workflow(user, payload, on_step=on_step)
     if not result.success:
         raise RuntimeError(str(result.output.get("error") or "resource generation failed"))
     pack = result.output.get("resourcePack")
@@ -1617,16 +1647,35 @@ def _latest_resource_event_goal(events: list) -> str:
     return ""
 
 
-def _search_resource_sources(goal: str, *, top_k: int, fallback_sources: list[dict]) -> list[dict]:
-    try:
-        results = search_knowledge_base(query=goal, top_k=max(1, top_k))
-    except Exception:
+def _search_resource_sources(
+    goal: str,
+    *,
+    top_k: int,
+    fallback_sources: list[dict],
+    source_scope_by_path: dict[str, str],
+) -> list[dict]:
+    if source_scope_by_path:
+        try:
+            results = search_knowledge_base(
+                query=goal,
+                top_k=max(1, top_k),
+                allowed_source_paths=set(source_scope_by_path),
+                source_scope_by_path=source_scope_by_path,
+            )
+        except Exception:
+            results = []
+    else:
         results = []
     sources = [
         {
             "id": f"rag-{index}",
-            "title": str(item.metadata.get("title") or "知识库片段"),
-            "location": str(item.metadata.get("display_location") or item.metadata.get("source_path") or "本地知识库"),
+            "title": str(
+                item.metadata.get("title")
+                or item.metadata.get("resource_name")
+                or safe_source_filename(item.metadata.get("source_path"))
+                or "知识库片段"
+            ),
+            "location": format_source_display_location(item.metadata),
             "type": "RAG",
             "score": round(float(item.score), 3) if item.score is not None else None,
             "snippet": item.text[:500],

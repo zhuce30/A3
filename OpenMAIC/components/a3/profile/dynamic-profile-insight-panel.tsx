@@ -5,6 +5,7 @@ import { ArrowRight, Brain, History, Sparkles, Target } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { A3Pill } from '@/components/a3/ui/a3-card';
+import { ProfileDimensionRadar } from '@/components/a3/profile/profile-dimension-radar';
 import type { A3ProfileSnapshot } from '@/lib/a3/auth-types';
 
 export type DynamicProfileInsight = {
@@ -98,6 +99,9 @@ export function DynamicProfileInsightPanel({
                 confidenceAverage={confidenceAverage}
                 signalRows={signalRows}
               />
+              {snapshotDimensions && (
+                <ProfileDimensionRadar dimensions={snapshotDimensions} className="mt-3" compact />
+              )}
               <CompactProfileDetails
                 dynamicProfile={dynamicProfile}
                 eventRows={eventRows}
@@ -137,6 +141,10 @@ export function DynamicProfileInsightPanel({
                     )}
                   </div>
                 </div>
+              )}
+
+              {snapshotDimensions && (
+                <ProfileDimensionRadar dimensions={snapshotDimensions} className="mt-4" />
               )}
 
               <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_1fr_1fr]">

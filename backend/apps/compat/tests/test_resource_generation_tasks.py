@@ -12,6 +12,7 @@ from backend.apps.accounts.models import User
 from backend.apps.compat.models import ResourceGenerationJob
 from backend.apps.learning.models import ResourcePackLog
 from backend.apps.profiles.models import LearnerProfile
+from backend.domains.knowledge_base.schemas import KnowledgeBaseSearchResult
 
 
 class ResourceGenerationTaskTests(TransactionTestCase):
@@ -56,12 +57,14 @@ class ResourceGenerationTaskTests(TransactionTestCase):
         self.assertEqual(job.result["resourcePack"]["resources"][0]["type"], "mind_map")
         self.assertIsNotNone(job.started_at)
         self.assertIsNotNone(job.finished_at)
-        generate.assert_called_once_with(
-            self.user,
-            goal="生成操作系统思维导图",
-            top_k=3,
-            resource_type="mind_map",
-        )
+        generate.assert_called_once()
+        call_args, call_kwargs = generate.call_args
+        self.assertEqual(call_args, (self.user,))
+        self.assertEqual(call_kwargs["goal"], "生成操作系统思维导图")
+        self.assertEqual(call_kwargs["top_k"], 3)
+        self.assertEqual(call_kwargs["resource_type"], "mind_map")
+        # 逐 Agent 实时进度依赖任务传入 on_step 回调。
+        self.assertTrue(callable(call_kwargs["on_step"]))
 
     @patch("backend.apps.compat.resource_generation.generate_resource_pack_v2")
     def test_task_persists_readable_failure(self, generate):
@@ -211,3 +214,47 @@ class ResourceGenerationTaskTests(TransactionTestCase):
         self.assertFalse(task.reject_on_worker_lost)
         self.assertEqual(task.soft_time_limit, 1200)
         self.assertEqual(task.time_limit, 1320)
+
+    @patch("backend.apps.compat.resource_generation.search_knowledge_base")
+    def test_resource_source_search_filters_to_accessible_paths(self, search):
+        from backend.apps.compat.resource_generation import _search_resource_sources
+
+        search.return_value = [
+            KnowledgeBaseSearchResult(
+                score=0.91,
+                text="死锁的四个必要条件",
+                metadata={"title": "操作系统讲义", "source_path": "D:/kb/os.pdf"},
+            )
+        ]
+        scope_by_path = {"D:/kb/os.pdf": "teacher"}
+
+        sources = _search_resource_sources(
+            "死锁",
+            top_k=3,
+            fallback_sources=[],
+            source_scope_by_path=scope_by_path,
+        )
+
+        search.assert_called_once_with(
+            query="死锁",
+            top_k=3,
+            allowed_source_paths=set(scope_by_path),
+            source_scope_by_path=scope_by_path,
+        )
+        self.assertEqual(sources[0]["title"], "操作系统讲义")
+        self.assertEqual(sources[0]["location"], "操作系统讲义")
+        self.assertNotIn("D:/", sources[0]["location"])
+
+    @patch("backend.apps.compat.resource_generation.search_knowledge_base")
+    def test_resource_source_search_does_not_scan_all_resources_when_scope_is_empty(self, search):
+        from backend.apps.compat.resource_generation import _search_resource_sources
+
+        sources = _search_resource_sources(
+            "死锁",
+            top_k=3,
+            fallback_sources=[],
+            source_scope_by_path={},
+        )
+
+        search.assert_not_called()
+        self.assertEqual(sources[0]["id"], "learning-state")
