@@ -16,24 +16,28 @@ export type AvatarLoadResult =
 
 export const A3_DEFAULT_AVATAR_ASSET: AvatarAssetSelection = Object.freeze({
   assetId: 'teacher-default-v1',
-  publicPath: '/a3/assets/teacher-avatar/teacher.vrm',
+  publicPath: '/a3/assets/teacher-avatar/teacher.glb',
 });
 
-const CONTROLLED_AVATAR_PATH = /^\/a3\/assets\/teacher-avatar\/[A-Za-z0-9][A-Za-z0-9._-]*\.vrm$/;
+const LEGACY_DEFAULT_AVATAR_PATH = '/a3/assets/teacher-avatar/teacher.vrm';
+const CONTROLLED_AVATAR_PATH = /^\/a3\/assets\/teacher-avatar\/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:vrm|glb)$/;
 const CONTROLLED_AVATAR_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export function resolveControlledAvatarAssetSelection(selection?: AvatarAssetSelection | null): {
   selection: AvatarAssetSelection;
   fallbackUsed: boolean;
 } {
+  const normalizedSelection = selection?.publicPath === LEGACY_DEFAULT_AVATAR_PATH
+    ? { ...selection, publicPath: A3_DEFAULT_AVATAR_ASSET.publicPath }
+    : selection;
   if (
-    !selection ||
-    !CONTROLLED_AVATAR_ID.test(selection.assetId) ||
-    !CONTROLLED_AVATAR_PATH.test(selection.publicPath)
+    !normalizedSelection ||
+    !CONTROLLED_AVATAR_ID.test(normalizedSelection.assetId) ||
+    !CONTROLLED_AVATAR_PATH.test(normalizedSelection.publicPath)
   ) {
     return { selection: A3_DEFAULT_AVATAR_ASSET, fallbackUsed: true };
   }
-  return { selection, fallbackUsed: false };
+  return { selection: normalizedSelection, fallbackUsed: false };
 }
 
 export type AvatarModelResources = {

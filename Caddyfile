@@ -29,6 +29,10 @@ a3.zhuce.work {
 	redir @root /a3 308
 	@realtime path /a3/realtime/ws
 	reverse_proxy @realtime realtime-proxy:3003
+	@teacherAvatar path /a3/assets/teacher-avatar/teacher.glb
+	reverse_proxy @teacherAvatar frontend:3000 {
+		header_down Cache-Control "public, max-age=86400, stale-while-revalidate=604800"
+	}
 	reverse_proxy frontend:3000
 }
 

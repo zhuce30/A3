@@ -127,7 +127,7 @@ describe('DigitalHumanAvatar', () => {
 
     expect(html).toContain('data-testid="a3-digital-human-three-stage"');
     expect(html).toContain('data-avatar-renderer="primitive"');
-    expect(html).toContain('data-avatar-asset="/a3/assets/teacher-avatar/teacher.vrm"');
+    expect(html).toContain('data-avatar-asset="/a3/assets/teacher-avatar/teacher.glb"');
   });
 
   it('declares Three.js as the browser 3D avatar renderer dependency', () => {
@@ -154,7 +154,7 @@ describe('DigitalHumanAvatar', () => {
     expect(packageJson.dependencies).toHaveProperty('@pixiv/three-vrm');
     expect(packageJson.dependencies).toHaveProperty('@pixiv/three-vrm-animation');
     expect(stageSource).toContain('A3_DEFAULT_TEACHER_VRM_PATH');
-    expect(stageSource).toContain('/a3/assets/teacher-avatar/teacher.vrm');
+    expect(stageSource).toContain('/a3/assets/teacher-avatar/teacher.glb');
     expect(stageSource).toContain('VRMLoaderPlugin');
     expect(stageSource).toContain('data-avatar-renderer={activeRenderer}');
   });
@@ -384,6 +384,7 @@ describe('DigitalHumanAvatar', () => {
       path.resolve(process.cwd(), 'components/a3/features/coaching/realtime-coaching-call.tsx'),
       'utf8',
     );
+    const caddySource = fs.readFileSync(path.resolve(process.cwd(), '../Caddyfile'), 'utf8');
     expect(avatarSource).toContain('min-h-[580px]');
     expect(stageSource).toContain('h-[420px]');
     expect(stageSource).toContain('md:h-[500px]');
@@ -400,6 +401,9 @@ describe('DigitalHumanAvatar', () => {
     expect(callSource).toContain('renderSuspended={avatarCovered}');
     expect(callSource).toContain('backdrop-blur-xl');
     expect(callSource).not.toContain('2xl:grid-cols-[minmax(0,1fr)_210px]');
+    expect(stageSource).toContain('/a3/assets/teacher-avatar/teacher.glb');
+    expect(caddySource).toContain('/a3/assets/teacher-avatar/teacher.glb');
+    expect(caddySource).toContain('header_down Cache-Control');
   });
 });
 

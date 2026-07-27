@@ -109,6 +109,19 @@ afterEach(() => {
 });
 
 describe('controlled tutor avatar assets', () => {
+  it('uses a cache-friendly GLB URL while accepting the legacy default VRM path', () => {
+    expect(A3_DEFAULT_AVATAR_ASSET.publicPath).toBe(
+      '/a3/assets/teacher-avatar/teacher.glb',
+    );
+
+    expect(
+      resolveControlledAvatarAssetSelection({
+        assetId: A3_DEFAULT_AVATAR_ASSET.assetId,
+        publicPath: '/a3/assets/teacher-avatar/teacher.vrm',
+      }),
+    ).toEqual({ selection: A3_DEFAULT_AVATAR_ASSET, fallbackUsed: false });
+  });
+
   it.each([
     'https://example.com/teacher.vrm',
     '//example.com/teacher.vrm',
@@ -331,9 +344,34 @@ describe('controlled tutor avatar assets', () => {
 
     expect(html.match(/<canvas/g)).toHaveLength(1);
     expect(html).toContain('data-testid="a3-avatar-loading-overlay"');
+    expect(html).toContain('data-testid="a3-avatar-static-preview"');
+    expect(html).toContain('src="/a3/assets/teacher-avatar/teacher-preview.webp"');
     expect(html).toContain('h-[420px]');
     expect(html).toContain('md:h-[500px]');
     expect(html).toContain('xl:h-[560px]');
+  });
+
+  it('ends the blocking loading state and keeps the static tutor when the VRM is slow', async () => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    const timeoutSpy = vi.spyOn(window, 'setTimeout').mockImplementation((handler, timeout, ...args) => {
+      if (Number(timeout) >= 10_000) {
+        queueMicrotask(() => {
+          if (typeof handler === 'function') handler(...args);
+        });
+        return nativeSetTimeout(() => undefined, 0) as unknown as ReturnType<typeof globalThis.setTimeout>;
+      }
+      return nativeSetTimeout(handler, timeout, ...args) as unknown as ReturnType<typeof globalThis.setTimeout>;
+    });
+
+    const container = await mountStage(secondAsset);
+    await act(async () => flushEffects());
+
+    expect(container.querySelector('[data-testid="a3-avatar-loading-overlay"]')).toBeNull();
+    expect(container.querySelector('[data-testid="a3-avatar-static-preview"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="a3-avatar-load-error"]')?.textContent).toContain(
+      '已先显示静态导师',
+    );
+    timeoutSpy.mockRestore();
   });
 
   it('keeps the Canvas and renderer when the same asset id only changes persona behavior', async () => {
@@ -555,7 +593,7 @@ function activeVrmModels() {
 }
 
 function vrmLoadCalls() {
-  return clientRuntime.loaderCalls.filter((path) => path.endsWith('.vrm'));
+  return clientRuntime.loaderCalls.filter((path) => /\.(?:vrm|glb)$/.test(path));
 }
 
 function stage(container: Element) {

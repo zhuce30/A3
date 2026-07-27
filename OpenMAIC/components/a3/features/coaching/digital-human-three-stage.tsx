@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import type { VRM } from '@pixiv/three-vrm';
@@ -24,7 +25,9 @@ import {
   type TeacherVrmActionKey,
 } from './digital-human-runtime';
 
-export const A3_DEFAULT_TEACHER_VRM_PATH = '/a3/assets/teacher-avatar/teacher.vrm';
+export const A3_DEFAULT_TEACHER_VRM_PATH = '/a3/assets/teacher-avatar/teacher.glb';
+export const A3_TEACHER_STATIC_PREVIEW_PATH = '/a3/assets/teacher-avatar/teacher-preview.webp';
+export const A3_AVATAR_SLOW_LOAD_MS = 12_000;
 export const A3_DEFAULT_TEACHER_IDLE_VRMA_PATH = '/a3/assets/teacher-avatar/idle.vrma';
 export const A3_DEFAULT_TEACHER_IDLE_VRMA_URL = `${A3_DEFAULT_TEACHER_IDLE_VRMA_PATH}?v=20260710-arms-down`;
 
@@ -678,6 +681,7 @@ export function DigitalHumanThreeStage({
     let activeMixer: THREE.AnimationMixer | null = null;
     let activeTeacherActionKey: TeacherVrmActionKey | null = null;
     let avatarLoadStarted = false;
+    let avatarSlowTimer: number | null = null;
     let teacherActions = new Map<TeacherVrmActionKey, THREE.AnimationAction>();
     setIdleAnimationState('pending');
     setActiveActionState('pending');
@@ -799,6 +803,11 @@ export function DigitalHumanThreeStage({
       },
     });
 
+    const clearAvatarSlowTimer = () => {
+      if (avatarSlowTimer !== null) window.clearTimeout(avatarSlowTimer);
+      avatarSlowTimer = null;
+    };
+
     async function selectAvatarAsset(
       selection: AvatarAssetSelection,
       selectionFallbackUsed: boolean,
@@ -816,6 +825,16 @@ export function DigitalHumanThreeStage({
       setAvatarLoadError('');
       setIdleAnimationState('pending');
       setActiveActionState('pending');
+      clearAvatarSlowTimer();
+      avatarSlowTimer = window.setTimeout(() => {
+        if (
+          disposed ||
+          requestVersion !== avatarRequestVersionRef.current ||
+          assetCoordinator.isActiveSelection(selection)
+        ) return;
+        setAvatarLoading(false);
+        setAvatarLoadError('3D 导师加载较慢，已先显示静态导师，加载完成后会自动切换');
+      }, A3_AVATAR_SLOW_LOAD_MS);
       try {
         const result = await assetCoordinator.select(selection);
         if (
@@ -823,6 +842,7 @@ export function DigitalHumanThreeStage({
           requestVersion !== avatarRequestVersionRef.current ||
           result.status !== 'active'
         ) return;
+        clearAvatarSlowTimer();
         setAvatarLoadResult({
           activeAssetId: result.activeAssetId,
           fallbackUsed: selectionFallbackUsed || result.fallbackUsed,
@@ -830,9 +850,12 @@ export function DigitalHumanThreeStage({
         setAvatarLoading(false);
         if (selectionFallbackUsed || result.fallbackUsed) {
           setAvatarLoadError('导师形象加载失败，已切换为默认形象');
+        } else {
+          setAvatarLoadError('');
         }
       } catch {
         if (disposed || requestVersion !== avatarRequestVersionRef.current) return;
+        clearAvatarSlowTimer();
         setAvatarLoadResult({ activeAssetId: '', fallbackUsed: true });
         setAvatarLoading(false);
         setAvatarLoadError('导师形象暂时无法加载');
@@ -947,6 +970,7 @@ export function DigitalHumanThreeStage({
       syncAnimationRef.current = () => undefined;
       requestAvatarAssetRef.current = () => undefined;
       stopAnimation();
+      clearAvatarSlowTimer();
       intersectionObserver?.disconnect();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('resize', resize);
@@ -992,12 +1016,27 @@ export function DigitalHumanThreeStage({
           aria-label="3D 数字助教"
         />
       )}
+      {!webglUnavailable && (avatarLoading || activeRenderer === 'primitive') ? (
+        <div
+          data-testid="a3-avatar-static-preview"
+          className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-8 pb-10 pt-12"
+        >
+          <Image
+            src={A3_TEACHER_STATIC_PREVIEW_PATH}
+            alt="静态导师形象"
+            width={512}
+            height={512}
+            unoptimized
+            className="h-auto w-[min(72%,360px)] drop-shadow-[0_24px_55px_rgba(15,23,42,0.28)]"
+          />
+        </div>
+      ) : null}
       {avatarLoading && !webglUnavailable ? (
         <div
           data-testid="a3-avatar-loading-overlay"
           role="status"
           aria-label="导师形象加载中"
-          className="pointer-events-none absolute inset-0 flex items-end justify-center pb-16"
+          className="pointer-events-none absolute inset-0 z-20 flex items-end justify-center pb-16"
         >
           <span className="rounded-full border border-white/20 bg-slate-950/55 px-3 py-1.5 text-xs text-white backdrop-blur-lg">
             导师形象加载中

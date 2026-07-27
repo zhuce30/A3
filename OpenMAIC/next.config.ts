@@ -7,6 +7,14 @@ const nextConfig: NextConfig = {
   experimental: {
     proxyClientMaxBodySize: '200mb',
   },
+  async rewrites() {
+    return [
+      {
+        source: '/a3/assets/teacher-avatar/teacher.glb',
+        destination: '/a3/assets/teacher-avatar/teacher.vrm',
+      },
+    ];
+  },
   async headers() {
     const extraAncestors = process.env.ALLOWED_FRAME_ANCESTORS?.trim();
     const frameAncestors = extraAncestors ? `'self' ${extraAncestors}` : "'self'";
