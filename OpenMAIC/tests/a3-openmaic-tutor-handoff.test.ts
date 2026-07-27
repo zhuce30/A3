@@ -231,7 +231,7 @@ describe('A3 OpenMAIC tutor handoff', () => {
     expect(routeSource).toContain('readClassroomGenerationJob(body.job.jobId)');
     expect(routeSource).toContain('isAuthorizedForClassroomJob(storedJob, cookieHeader, resourcePackId)');
     expect(routeSource).toContain('canonicalJob');
-    expect(routeSource).toContain('buildA3OpenMAICArtifactPayload(\n    canonicalJob');
+    expect(routeSource).toMatch(/buildA3OpenMAICArtifactPayload\(\r?\n\s+canonicalJob/);
     expect(routeSource).not.toContain('buildA3OpenMAICArtifactPayload(\n    body.job');
   });
 });

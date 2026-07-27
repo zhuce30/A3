@@ -393,12 +393,11 @@ describe('DigitalHumanAvatar', () => {
     expect(stageSource).toContain('modelScale: 1.72');
     expect(stageSource).toContain('new THREE.Vector3(0, 1.55, 2.05)');
     expect(stageSource).toContain('md:w-[46%]');
-    expect(callSource).toContain('data-testid="a3-realtime-preview-strip"');
+    expect(callSource).toContain('<RealtimeMediaStage');
     expect(callSource).toContain('data-testid="a3-realtime-video-surface"');
     expect(callSource).toContain('data-testid="a3-realtime-floating-controls"');
-    expect(callSource).toContain('md:absolute md:right-6 md:top-24');
     expect(callSource).toContain('md:bottom-28 md:left-6');
-    expect(callSource).not.toContain('md:absolute md:right-6 md:top-6');
+    expect(callSource).toContain('renderSuspended={avatarCovered}');
     expect(callSource).toContain('backdrop-blur-xl');
     expect(callSource).not.toContain('2xl:grid-cols-[minmax(0,1fr)_210px]');
   });
