@@ -33,6 +33,10 @@ from backend.apps.learning.models import (
     TutorPersonaFeedback,
 )
 from backend.apps.learning.services import append_coaching_messages
+from backend.apps.learning.tutor_persona_operations import (
+    get_tutor_persona_overlay_cache_generation,
+    tutor_persona_overlay_cache_key,
+)
 from backend.apps.system.models import AdminAuditLog
 from backend.apps.system.admin_tutor_services import (
     _build_analytics,
@@ -45,7 +49,6 @@ from backend.apps.system.admin_tutor_cache import (
 )
 
 
-OVERLAY_CACHE_KEY = "a3:tutor-persona-config:v1"
 KNOWN_PERSONA_IDS = {
     "structured-teacher",
     "socratic-guide",
@@ -1215,10 +1218,12 @@ class AdminTutorApiTests(TestCase):
 
     def test_patch_invalidates_overlay_and_all_analytics_caches_on_commit(self):
         generation = get_admin_tutor_analytics_generation()
+        overlay_generation = get_tutor_persona_overlay_cache_generation()
+        overlay_cache_key = tutor_persona_overlay_cache_key(overlay_generation)
         analytics_keys = tuple(
             admin_tutor_analytics_cache_key(item, generation) for item in ("7d", "30d", "90d")
         )
-        for key in (*analytics_keys, OVERLAY_CACHE_KEY):
+        for key in (*analytics_keys, overlay_cache_key):
             cache.set(key, {"stale": True}, timeout=60)
 
         with self.captureOnCommitCallbacks(execute=True):
@@ -1226,7 +1231,8 @@ class AdminTutorApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotEqual(get_admin_tutor_analytics_generation(), generation)
-        for key in (*analytics_keys, OVERLAY_CACHE_KEY):
+        self.assertNotEqual(get_tutor_persona_overlay_cache_generation(), overlay_generation)
+        for key in (*analytics_keys, overlay_cache_key):
             self.assertIsNone(cache.get(key))
 
     @staticmethod

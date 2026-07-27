@@ -15,12 +15,13 @@ from backend.apps.learning.models import (
     TutorAvatarAsset,
     TutorPersonaConfiguration,
 )
+from backend.apps.learning.tutor_persona_operations import invalidate_tutor_persona_overlay_cache
 from backend.apps.profiles.models import LearnerProfile
 
 
 class CoachingTutorPersonaTests(TestCase):
     def setUp(self):
-        cache.delete("a3:tutor-persona-config:v1")
+        invalidate_tutor_persona_overlay_cache()
         self.user = User.objects.create_user(phone="13800007701", password="TestPassword123")
         LearnerProfile.objects.create(user=self.user)
         self.client = Client()
@@ -241,7 +242,7 @@ class CoachingTutorPersonaTests(TestCase):
             user=self.user,
             metadata={"tutorPersona": deepcopy(current_snapshot), "fallbackUsed": False},
         )
-        cache.delete("a3:tutor-persona-config:v1")
+        invalidate_tutor_persona_overlay_cache()
 
         with patch.object(
             TutorPersonaConfiguration.objects,
@@ -350,7 +351,7 @@ class CoachingTutorPersonaTests(TestCase):
         self.assertEqual(preference["source"], "default")
 
     def test_unavailable_configuration_table_does_not_break_new_session(self):
-        cache.delete("a3:tutor-persona-config:v1")
+        invalidate_tutor_persona_overlay_cache()
         with patch.object(
             TutorPersonaConfiguration.objects,
             "select_related",

@@ -10,11 +10,16 @@ from django.test.utils import CaptureQueriesContext
 
 from backend.apps.accounts.models import User
 from backend.apps.learning.models import TutorAvatarAsset, TutorPersonaConfiguration
+from backend.apps.learning import tutor_persona_operations
 from backend.apps.learning.tutor_persona_operations import (
     invalidate_tutor_persona_overlay_cache,
     is_safe_avatar_public_path,
 )
-from backend.apps.learning.tutor_personas import list_public_tutor_personas, resolve_tutor_persona
+from backend.apps.learning.tutor_personas import (
+    _TUTOR_PERSONAS,
+    list_public_tutor_personas,
+    resolve_tutor_persona,
+)
 from backend.apps.profiles.models import LearnerProfile
 
 
@@ -22,7 +27,7 @@ class TutorPreferenceTests(TestCase):
     endpoint = "/api/profiles/tutor-preference/"
 
     def setUp(self):
-        cache.delete("a3:tutor-persona-config:v1")
+        invalidate_tutor_persona_overlay_cache()
         self.user = User.objects.create_user(
             phone="13800002101",
             password="Password123",
@@ -266,7 +271,7 @@ class TutorPreferenceTests(TestCase):
         )
 
     def test_unavailable_configuration_table_uses_code_catalog_and_preserves_default_source(self):
-        cache.delete("a3:tutor-persona-config:v1")
+        invalidate_tutor_persona_overlay_cache()
         with patch.object(
             TutorPersonaConfiguration.objects,
             "select_related",
@@ -295,7 +300,7 @@ class TutorPreferenceTests(TestCase):
 
     def test_weak_profile_keeps_recommendation_when_configuration_table_is_unavailable(self):
         LearnerProfile.objects.create(user=self.user, foundation_level="基础较弱")
-        cache.delete("a3:tutor-persona-config:v1")
+        invalidate_tutor_persona_overlay_cache()
 
         with patch.object(
             TutorPersonaConfiguration.objects,
@@ -319,7 +324,7 @@ class TutorPreferenceTests(TestCase):
                 }
             },
         )
-        cache.delete("a3:tutor-persona-config:v1")
+        invalidate_tutor_persona_overlay_cache()
 
         with patch.object(
             TutorPersonaConfiguration.objects,
@@ -345,7 +350,7 @@ class TutorPreferenceTests(TestCase):
         self.assertNotIn("socratic-guide", [item["id"] for item in refreshed.json()["personas"]])
 
     def test_actual_missing_overlay_table_does_not_poison_outer_transaction(self):
-        cache.delete("a3:tutor-persona-config:v1")
+        invalidate_tutor_persona_overlay_cache()
         query_savepoint_depths = []
 
         def inject_missing_table(execute, sql, params, many, context):
@@ -373,7 +378,7 @@ class TutorPreferenceTests(TestCase):
         self.assertEqual(created.phone, "13800002199")
 
     def test_overlay_query_filters_known_ids_and_defers_unneeded_fields(self):
-        cache.delete("a3:tutor-persona-config:v1")
+        invalidate_tutor_persona_overlay_cache()
 
         with CaptureQueriesContext(connection) as queries:
             personas = list_public_tutor_personas()
@@ -423,6 +428,28 @@ class TutorPreferenceTests(TestCase):
             side_effect=RuntimeError("cache delete unavailable"),
         ):
             invalidate_tutor_persona_overlay_cache()
+
+    def test_concurrent_invalidation_cannot_repopulate_current_generation_with_stale_catalog(self):
+        original_database_catalog = tutor_persona_operations._database_catalog
+
+        def update_after_rows_were_read(rows, code_personas, *, database_has_rows):
+            TutorPersonaConfiguration.objects.filter(persona_id="socratic-guide").update(enabled=False)
+            invalidate_tutor_persona_overlay_cache()
+            return original_database_catalog(
+                rows,
+                code_personas,
+                database_has_rows=database_has_rows,
+            )
+
+        with patch(
+            "backend.apps.learning.tutor_persona_operations._database_catalog",
+            side_effect=update_after_rows_were_read,
+        ):
+            stale_catalog = tutor_persona_operations.get_tutor_persona_overlay_catalog(_TUTOR_PERSONAS)
+
+        self.assertTrue(stale_catalog["overlays"]["socratic-guide"]["enabled"])
+        refreshed = tutor_persona_operations.get_tutor_persona_overlay_catalog(_TUTOR_PERSONAS)
+        self.assertFalse(refreshed["overlays"]["socratic-guide"]["enabled"])
 
     def test_get_recommends_foundation_coach_for_weak_foundation_profile(self):
         LearnerProfile.objects.create(user=self.user, foundation_level="基础较弱")

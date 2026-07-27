@@ -68,12 +68,18 @@ function feedbackEndpoint(sessionId: string) {
 }
 
 export function TutorFeedbackPanel({ sessionId }: { sessionId: string }) {
+  return <TutorFeedbackSessionPanel key={sessionId || 'missing'} sessionId={sessionId} />;
+}
+
+function TutorFeedbackSessionPanel({ sessionId }: { sessionId: string }) {
   const [rating, setRating] = useState(0);
   const [tags, setTags] = useState<TutorFeedbackTag[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(sessionId));
   const [submitting, setSubmitting] = useState(false);
   const [existing, setExisting] = useState(false);
-  const [loadError, setLoadError] = useState('');
+  const [loadError, setLoadError] = useState(
+    sessionId ? '' : '缺少辅导会话 ID，请重新选择已结束的会话。',
+  );
   const [submitError, setSubmitError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
@@ -81,19 +87,9 @@ export function TutorFeedbackPanel({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     const requestGeneration = ++requestGenerationRef.current;
-    setRating(0);
-    setTags([]);
-    setExisting(false);
-    setSubmitting(false);
-    setSuccessMessage('');
-    setSubmitError('');
     if (!sessionId) {
-      setLoading(false);
-      setLoadError('缺少辅导会话 ID，请重新选择已结束的会话。');
       return () => { requestGenerationRef.current += 1; };
     }
-    setLoading(true);
-    setLoadError('');
     void loadTutorFeedback(sessionId).then((result) => {
       if (requestGeneration !== requestGenerationRef.current) return;
       setLoading(false);
@@ -166,7 +162,11 @@ export function TutorFeedbackPanel({ sessionId }: { sessionId: string }) {
       }}
       onTagToggle={toggleTag}
       onSubmit={() => void submit()}
-      onRetryLoad={() => setReloadKey((value) => value + 1)}
+      onRetryLoad={() => {
+        setLoading(true);
+        setLoadError('');
+        setReloadKey((value) => value + 1);
+      }}
       onRetrySubmit={() => void submit()}
     />
   );
