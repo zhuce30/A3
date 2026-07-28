@@ -211,6 +211,7 @@ services:
       NODE_ENV: production
       NEXT_PUBLIC_A3_API_BASE_URL: ${NEXT_PUBLIC_A3_API_BASE_URL:-https://api.zhuce.work}
       A3_API_BASE_URL: http://backend:8000
+      A3_TRUSTED_ORIGINS: ${A3_TRUSTED_ORIGINS:-https://a3.zhuce.work}
       A3_TUTOR_PREVIEW_REDIS_URL: redis://redis:6379/3
       A3_INTERNAL_FRONTEND_BASE_URL: http://127.0.0.1:3000
       A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:?set A3_VIDEO_WORKER_TOKEN in .env.production}

@@ -1,9 +1,23 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { A3Markdown } from '../components/a3/ui/a3-markdown';
 
 describe('A3Markdown', () => {
+  it('normalizes completion marks inside math without emitting KaTeX font warnings', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const html = renderToStaticMarkup(
+      createElement(A3Markdown, null, '$$\\text{✅ 已完成}\\quad \\text{✓ 已掌握}$$'),
+    );
+
+    expect(html).toContain('katex');
+    expect(html).toContain('checkmark');
+    expect(html).not.toContain('$$\\text');
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('No character metrics'));
+    warn.mockRestore();
+  });
+
   it('renders display math as KaTeX instead of exposing raw delimiters', () => {
     const html = renderToStaticMarkup(
       createElement(A3Markdown, null, '公式如下：\n\n$$G_c(s)=K_p+\\frac{K_i}{s}+K_d s$$'),

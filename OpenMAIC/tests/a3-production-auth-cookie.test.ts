@@ -20,6 +20,22 @@ const composeSchema = yaml.DEFAULT_SCHEMA.extend([resetSequenceType]);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 describe('A3 production authentication cookie', () => {
+  it('trusts the public A3 origin for same-site POST routes behind the reverse proxy', () => {
+    const compose = yaml.load(
+      fs.readFileSync(path.join(root, 'docker-compose.prod.yml'), 'utf8'),
+      { schema: composeSchema },
+    ) as ComposeDocument;
+    const envTemplate = fs.readFileSync(
+      path.join(root, '.env.production.template'),
+      'utf8',
+    );
+
+    expect(compose.services?.frontend?.environment?.A3_TRUSTED_ORIGINS).toBe(
+      '${A3_TRUSTED_ORIGINS:-https://a3.zhuce.work}',
+    );
+    expect(envTemplate).toMatch(/^A3_TRUSTED_ORIGINS=https:\/\/a3\.zhuce\.work$/m);
+  });
+
   it('shares a secure, migration-safe session cookie across A3 subdomains', () => {
     const compose = yaml.load(
       fs.readFileSync(path.join(root, 'docker-compose.prod.yml'), 'utf8'),

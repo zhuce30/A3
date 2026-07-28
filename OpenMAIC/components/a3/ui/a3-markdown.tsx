@@ -79,6 +79,10 @@ function repairMisusedDisplayMathDelimiters(markdown: string) {
     .split(/\r?\n/)
     .flatMap((line) => {
       let repaired = line;
+      const completeDisplayMath = repaired.match(/^(\s*)\$\$\s*([\s\S]*?)\s*\$\$(\s*)$/);
+      if (completeDisplayMath && !looksLikeProseWrappedByDisplayMath(completeDisplayMath[2])) {
+        return [repaired];
+      }
       const leading = repaired.match(/^(\s*)\$\$\s*(.*)$/);
       if (leading && looksLikeProseWrappedByDisplayMath(leading[2])) {
         repaired = `${leading[1]}${leading[2]}`;
@@ -428,7 +432,7 @@ function MathInline({ latex }: { latex: string }) {
 
 function renderKatex(latex: string, displayMode: boolean) {
   try {
-    return katex.renderToString(latex, {
+    return katex.renderToString(normalizeKatexSymbols(latex), {
       displayMode,
       throwOnError: true,
       strict: false,
@@ -437,6 +441,10 @@ function renderKatex(latex: string, displayMode: boolean) {
   } catch {
     return escapeHtml(displayMode ? `$$${latex}$$` : `$${latex}$`);
   }
+}
+
+function normalizeKatexSymbols(latex: string) {
+  return latex.replace(/[✅✓✔]/gu, '\\checkmark{}');
 }
 
 function escapeHtml(value: string) {
