@@ -141,6 +141,7 @@ async function generateWithinDeadline(
   try {
     for (const candidate of input.candidates) {
       if (controller.signal.aborted) throw abortError(false);
+      const startedAt = Date.now();
       try {
         return await generateForProvider({
           ...candidate,
@@ -157,12 +158,48 @@ async function generateWithinDeadline(
         ) {
           throw abortError(false);
         }
+        console.warn('[a3-tutor-voice-preview] provider failed', {
+          providerId: candidate.providerId,
+          model: candidate.model,
+          elapsedMs: Date.now() - startedAt,
+          ...sanitizeProviderError(error),
+        });
       }
     }
     throw new TutorVoicePreviewError(502, '音色试听生成失败，请稍后重试');
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function sanitizeProviderError(error: unknown) {
+  const value = error instanceof Error ? error : new Error(String(error));
+  const cause = value.cause instanceof Error ? value.cause : undefined;
+  return {
+    errorName: sanitizeLogValue(value.name),
+    errorCode: sanitizeLogValue(readErrorCode(value)),
+    errorMessage: sanitizeLogValue(value.message),
+    causeName: sanitizeLogValue(cause?.name),
+    causeCode: sanitizeLogValue(cause ? readErrorCode(cause) : undefined),
+    causeMessage: sanitizeLogValue(cause?.message),
+  };
+}
+
+function readErrorCode(error: Error): unknown {
+  return (error as Error & { code?: unknown }).code;
+}
+
+function sanitizeLogValue(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return String(value)
+    .replace(/https?:\/\/[^\s"'<>]+/giu, '[redacted-url]')
+    .replace(/\bBearer\s+[^\s,;}]+/giu, '[redacted-secret]')
+    .replace(/\bsk-[A-Za-z0-9_-]+/gu, '[redacted-secret]')
+    .replace(
+      /((?:api[_-]?key|token|authorization|secret)\s*[:=]\s*)[^\s,;}]+/giu,
+      '$1[redacted-secret]',
+    )
+    .slice(0, 500);
 }
 
 async function generateForProvider(input: {

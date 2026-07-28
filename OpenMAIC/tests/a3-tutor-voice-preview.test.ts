@@ -257,6 +257,33 @@ describe('A3 tutor voice preview generation', () => {
     expect(Date.now() - startedAt).toBeLessThan(190);
   });
 
+  it('logs provider failures without exposing credentials or signed audio URLs', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const generateTTS = vi.fn<TutorVoicePreviewGenerate>(async () => {
+      throw new Error(
+        'provider failed with sk-production-secret at https://example.com/audio.wav?token=signed-secret',
+      );
+    });
+
+    await expect(
+      generateTutorVoicePreview(
+        'structured-teacher',
+        runtime(await cacheDir(), {
+          getConfiguredProviders: () => ({ 'qwen-tts': {} }),
+          generateTTS,
+        }),
+      ),
+    ).rejects.toMatchObject({ status: 502 });
+
+    expect(warning).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(warning.mock.calls);
+    expect(logged).toContain('qwen-tts');
+    expect(logged).toContain('provider failed');
+    expect(logged).not.toContain('sk-production-secret');
+    expect(logged).not.toContain('signed-secret');
+    expect(logged).not.toContain('https://example.com');
+  });
+
   it('does not fall back after request cancellation', async () => {
     const controller = new AbortController();
     let providerSignal!: AbortSignal;
