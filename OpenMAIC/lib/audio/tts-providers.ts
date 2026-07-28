@@ -683,14 +683,15 @@ function validateQwenAudioUrl(value: unknown): URL {
   }
   const hostname = parsed.hostname.toLowerCase();
   if (
-    parsed.protocol !== 'https:' ||
+    !['http:', 'https:'].includes(parsed.protocol) ||
     parsed.username ||
     parsed.password ||
-    (parsed.port && parsed.port !== '443') ||
+    parsed.port ||
     !QWEN_TTS_AUDIO_HOST_PATTERN.test(hostname)
   ) {
     throw new Error(`Qwen TTS audio URL is not trusted: ${hostname || 'invalid-host'}`);
   }
+  if (parsed.protocol === 'http:') parsed.protocol = 'https:';
   return parsed;
 }
 
