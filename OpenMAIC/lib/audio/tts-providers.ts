@@ -113,12 +113,8 @@ export interface TTSGenerationResult {
 export const TTS_MAX_AUDIO_BYTES = 5 * 1024 * 1024;
 export const QWEN_TTS_MAX_AUDIO_BYTES = TTS_MAX_AUDIO_BYTES;
 const TTS_MAX_ERROR_BYTES = 64 * 1024;
-const QWEN_TTS_AUDIO_HOSTS = new Set([
-  'dashscope-result-bj.oss-cn-beijing.aliyuncs.com',
-  'dashscope-result-hz.oss-cn-hangzhou.aliyuncs.com',
-  'dashscope-result-sh.oss-cn-shanghai.aliyuncs.com',
-  'dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com',
-]);
+const QWEN_TTS_AUDIO_HOST_PATTERN =
+  /^dashscope-result-[a-z0-9-]+\.oss-[a-z0-9-]+\.aliyuncs\.com$/iu;
 
 /**
  * Thrown when a TTS provider returns a rate-limit / concurrency-quota error.
@@ -685,14 +681,15 @@ function validateQwenAudioUrl(value: unknown): URL {
   } catch {
     throw new Error('Qwen TTS audio URL is invalid');
   }
+  const hostname = parsed.hostname.toLowerCase();
   if (
     parsed.protocol !== 'https:' ||
     parsed.username ||
     parsed.password ||
     (parsed.port && parsed.port !== '443') ||
-    !QWEN_TTS_AUDIO_HOSTS.has(parsed.hostname.toLowerCase())
+    !QWEN_TTS_AUDIO_HOST_PATTERN.test(hostname)
   ) {
-    throw new Error('Qwen TTS audio URL is not trusted');
+    throw new Error(`Qwen TTS audio URL is not trusted: ${hostname || 'invalid-host'}`);
   }
   return parsed;
 }

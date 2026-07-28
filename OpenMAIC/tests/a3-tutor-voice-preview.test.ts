@@ -495,11 +495,27 @@ describe('Qwen preview audio download security', () => {
     voice: 'Cherry',
   };
 
+  it('accepts regional DashScope result buckets on official Aliyun OSS hosts', async () => {
+    const audioUrl =
+      'https://dashscope-result-gd.oss-cn-shenzhen.aliyuncs.com/generated/audio.wav?signature=test';
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ output: { audio: { url: audioUrl } } }))
+      .mockResolvedValueOnce(
+        new Response(audio, { headers: { 'content-type': 'audio/x-wav' } }),
+      ) as typeof fetch;
+
+    await expect(generateTTS(qwenConfig, '你好')).resolves.toMatchObject({ format: 'wav' });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     'http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/audio.wav',
     'https://localhost/audio.wav',
     'https://127.0.0.1/audio.wav',
     'https://example.com/audio.wav',
+    'https://example.aliyuncs.com/audio.wav',
+    'https://dashscope-result-bj.evil.aliyuncs.com/audio.wav',
   ])('rejects untrusted Qwen audio URL %s', async (audioUrl) => {
     global.fetch = vi.fn(async () =>
       Response.json({ output: { audio: { url: audioUrl } } }),
