@@ -1486,6 +1486,7 @@ export function ClassroomViewRedesign() {
           <DialogContent
             showCloseButton={false}
             data-testid="a3-classroom-drawer-dialog"
+            aria-modal="true"
             className="inset-y-0 right-0 left-auto top-0 h-dvh max-h-dvh w-[min(360px,calc(100vw-24px))] max-w-none translate-x-0 translate-y-0 gap-0 rounded-none border-0 bg-transparent p-3 ring-0 sm:max-w-none"
             onOpenAutoFocus={focusDrawer}
             onCloseAutoFocus={restoreDrawerFocus}

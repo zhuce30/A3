@@ -100,6 +100,13 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source).toContain("from '@/components/ui/dialog'");
     expect(source).toContain('<Dialog open={drawerOpen} modal');
     expect(source).toContain('data-testid="a3-classroom-drawer-dialog"');
+    const drawerTestId = 'data-testid="a3-classroom-drawer-dialog"';
+    const drawerTestIdIndex = source.indexOf(drawerTestId);
+    const drawerContent = source.slice(
+      source.lastIndexOf('<DialogContent', drawerTestIdIndex),
+      source.indexOf('>', drawerTestIdIndex) + 1,
+    );
+    expect(drawerContent).toContain('aria-modal="true"');
     expect(source).toContain('<DialogTitle');
     expect(source).toContain('onCloseAutoFocus={restoreDrawerFocus}');
     expect(source).toContain('isDesktopDrawer ? (');
