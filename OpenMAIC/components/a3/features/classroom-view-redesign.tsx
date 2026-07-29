@@ -1486,7 +1486,7 @@ function WorkspaceHeader({
 }) {
   return (
     <header aria-label={copy.classroomInfo} className="border-b border-slate-200 px-4 py-3 md:px-6">
-      <div className="flex flex-col gap-3 pr-32 lg:flex-row lg:items-start lg:justify-between">
+      <div className="flex min-w-0 flex-col gap-3 pr-32 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             {!historyOpen && (
@@ -1510,7 +1510,7 @@ function WorkspaceHeader({
             {target?.reason || target?.description || copy.targetFallback}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex shrink-0 flex-wrap gap-2">
           <Button asChild size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS}>
             <Link href="/a3/learning-path">
               <Route className="size-4" />
@@ -1533,7 +1533,7 @@ function WorkspaceHeader({
 function OpenMAICInlineBar({ copy, artifact }: { copy: ClassroomCopy; artifact: A3OpenMAICClassroomArtifact | null }) {
   return (
     <div className="min-h-12 border-b border-slate-200 bg-slate-50/80 px-4 py-2 md:px-6" data-testid="a3-classroom-openmaic-entry">
-      <div className="flex min-h-8 items-center gap-3">
+      <div className="flex min-w-0 min-h-8 items-center gap-3">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-white">
             <Layers3 className="size-4" />

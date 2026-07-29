@@ -68,6 +68,31 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source).toContain('document.body.style.overflowY = previousBodyOverflowY');
   });
 
+  it('keeps compact classroom context controls constrained at narrow widths', () => {
+    const source = fs.readFileSync(redesignPath, 'utf8');
+    const workspaceStart = source.indexOf('function WorkspaceHeader(');
+    const openmaicStart = source.indexOf('function OpenMAICInlineBar(');
+    const historyStart = source.indexOf('function HistorySidebar(', openmaicStart);
+    const workspaceSource = source.slice(workspaceStart, openmaicStart);
+    const openmaicSource = source.slice(openmaicStart, historyStart);
+
+    expect(workspaceSource).toContain('className="flex min-w-0 flex-col gap-3 pr-32 lg:flex-row');
+    expect(workspaceSource).toContain('className="min-w-0"');
+    expect(workspaceSource).toContain('line-clamp-1');
+    expect(workspaceSource).toContain('className="flex shrink-0 flex-wrap gap-2"');
+
+    expect(openmaicSource).toContain('className="flex min-w-0 min-h-8 items-center gap-3"');
+    expect(openmaicSource).toContain('className="flex min-w-0 flex-1 items-center gap-2"');
+    expect(openmaicSource).toContain('className="min-w-0 truncate text-sm');
+    expect(openmaicSource).toContain('className="hidden min-w-0 flex-1 truncate text-xs');
+    expect(openmaicSource).toContain('title={copy.pptxHint}');
+    expect(openmaicSource).toContain('className="shrink-0"');
+    expect(openmaicSource).toContain('className="shrink-0 bg-blue-600');
+    expect(openmaicSource).toContain("cn('shrink-0', CLASSROOM_OUTLINE_BUTTON_CLASS)");
+    expect(openmaicSource).not.toContain('flex flex-col gap-3 lg:flex-row');
+    expect(openmaicSource).not.toContain('flex shrink-0 flex-wrap gap-2');
+  });
+
   it('integrates classroom context into the unique stick-to-bottom dialogue flow', () => {
     const source = fs.readFileSync(redesignPath, 'utf8');
 
