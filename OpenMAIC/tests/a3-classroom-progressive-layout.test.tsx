@@ -342,7 +342,7 @@ describe('responsive classroom controls', () => {
     expect(classroomPanelDefaults(width)).toEqual(expected);
   });
 
-  it('uses a native mobile details menu and closes it after each action', async () => {
+  it('uses a native mobile details action list and closes it after each action', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -368,6 +368,8 @@ describe('responsive classroom controls', () => {
     const details = container.querySelector<HTMLDetailsElement>('details');
     const summary = details?.querySelector('summary');
     expect(details).not.toBeNull();
+    expect(details?.querySelector('[role="menu"]')).toBeNull();
+    expect(details?.querySelector('[role="menuitem"]')).toBeNull();
     expect(summary?.getAttribute('aria-label')).toBe('更多操作');
     expect(summary?.getAttribute('title')).toBe('更多操作');
 
@@ -420,7 +422,7 @@ describe('responsive classroom controls', () => {
     expect(frame?.className).toContain('px-3');
     expect(frame?.className).toContain('pb-[calc(.5rem+env(safe-area-inset-bottom))]');
     expect(frame?.className).toContain('md:px-6');
-    expect(frame?.className).toContain('md:pb-2');
+    expect(frame?.className).not.toContain('md:pb-2');
 
     act(() => root.unmount());
     container.remove();

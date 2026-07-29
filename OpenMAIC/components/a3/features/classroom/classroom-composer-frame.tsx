@@ -43,7 +43,7 @@ export function ClassroomComposerFrame({
   return (
     <div
       ref={frameRef}
-      className="absolute inset-x-0 bottom-0 z-20 px-3 pb-[calc(.5rem+env(safe-area-inset-bottom))] md:px-6 md:pb-2"
+      className="absolute inset-x-0 bottom-0 z-20 px-3 pb-[calc(.5rem+env(safe-area-inset-bottom))] md:px-6"
       data-testid="a3-classroom-composer-frame"
     >
       <div className="mx-auto rounded-lg border border-slate-200 bg-white p-1.5 shadow-lg">

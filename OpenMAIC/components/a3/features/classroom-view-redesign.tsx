@@ -664,6 +664,15 @@ export function ClassroomViewRedesign() {
   }, []);
 
   useEffect(() => {
+    if (!drawerOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDrawerOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [drawerOpen]);
+
+  useEffect(() => {
     const desktopViewport = window.matchMedia('(min-width: 1280px)');
     const previousHtmlOverflowY = document.documentElement.style.overflowY;
     const previousBodyOverflowY = document.body.style.overflowY;
@@ -1414,29 +1423,43 @@ export function ClassroomViewRedesign() {
       </section>
 
       {drawerOpen && (
-        <LearningDrawer
-          copy={copy}
-          tab={drawerTab}
-          onTabChange={setDrawerTab}
-          onClose={() => setDrawerOpen(false)}
-          classroom={classroom}
-          studyPlan={studyPlan}
-          sessions={classroomSessions}
-          activeHistoryId={viewingHistoryId}
-          profileFeed={profileFeed}
-          savingSourceId={savingSourceId}
-          sourceFavoriteMessage={sourceFavoriteMessage}
-          sourceFavoriteSuccess={sourceFavoriteSuccess}
-          savingPracticeId={savingPracticeId}
-          practiceFeedback={practiceFeedback}
-          embeddedPractice={embeddedPractice}
-          onOpenHistory={viewClassroomHistory}
-          onSaveSource={saveSourceFavorite}
-          onCompletePractice={completePracticeRecommendation}
-          onStartEmbeddedPractice={startEmbeddedPractice}
-          onSelectEmbeddedPracticeAnswer={selectEmbeddedPracticeAnswer}
-          onSubmitEmbeddedPractice={submitEmbeddedPractice}
-        />
+        <div
+          className="fixed inset-0 z-50 xl:static xl:z-auto xl:min-h-0"
+          data-testid="a3-classroom-drawer-overlay"
+        >
+          <button
+            type="button"
+            className="absolute inset-0 bg-slate-950/30 xl:hidden"
+            data-testid="a3-classroom-drawer-backdrop"
+            aria-label={copy.closeDrawer}
+            onClick={() => setDrawerOpen(false)}
+          />
+          <div className="absolute inset-y-0 right-0 h-full w-[min(360px,calc(100vw-24px))] p-3 xl:static xl:h-full xl:w-auto xl:p-0">
+            <LearningDrawer
+              copy={copy}
+              tab={drawerTab}
+              onTabChange={setDrawerTab}
+              onClose={() => setDrawerOpen(false)}
+              classroom={classroom}
+              studyPlan={studyPlan}
+              sessions={classroomSessions}
+              activeHistoryId={viewingHistoryId}
+              profileFeed={profileFeed}
+              savingSourceId={savingSourceId}
+              sourceFavoriteMessage={sourceFavoriteMessage}
+              sourceFavoriteSuccess={sourceFavoriteSuccess}
+              savingPracticeId={savingPracticeId}
+              practiceFeedback={practiceFeedback}
+              embeddedPractice={embeddedPractice}
+              onOpenHistory={viewClassroomHistory}
+              onSaveSource={saveSourceFavorite}
+              onCompletePractice={completePracticeRecommendation}
+              onStartEmbeddedPractice={startEmbeddedPractice}
+              onSelectEmbeddedPracticeAnswer={selectEmbeddedPracticeAnswer}
+              onSubmitEmbeddedPractice={submitEmbeddedPractice}
+            />
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1828,6 +1851,8 @@ function Composer({
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
+    textarea.style.height = '44px';
+    if (!input) return;
     textarea.style.height = 'auto';
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, [input]);
@@ -1895,7 +1920,7 @@ function Composer({
         </div>
       )}
 
-      <form onSubmit={(event) => { event.preventDefault(); submitComposer(); }} className="rounded-lg border border-slate-200 bg-slate-50 p-2 focus-within:border-blue-300 focus-within:ring-4 focus-within:ring-blue-50">
+      <form onSubmit={(event) => { event.preventDefault(); submitComposer(); }} className="flex items-end gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1.5 focus-within:border-blue-300 focus-within:ring-4 focus-within:ring-blue-50">
         <input
           ref={imageInputRef}
           type="file"
@@ -1915,12 +1940,12 @@ function Composer({
           }}
           data-testid="a3-classroom-input"
           rows={1}
-          className="max-h-[35dvh] min-h-11 w-full resize-none overflow-y-auto bg-transparent px-3 py-2 text-sm leading-6 text-slate-950 outline-none placeholder:text-slate-400"
+          className="max-h-[35dvh] min-h-11 min-w-28 flex-1 resize-none overflow-y-auto bg-transparent px-2 py-2 text-sm leading-6 text-slate-950 outline-none placeholder:text-slate-400"
           placeholder={target ? copy.placeholder(target.title) : copy.placeholderNoTarget}
           disabled={inputDisabled}
         />
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-end gap-2 overflow-x-auto">
+          <div className="flex shrink-0 items-center gap-2">
             <Button
               type="button"
               variant="outline"
@@ -1947,7 +1972,7 @@ function Composer({
               {voiceTranscribing ? <Loader2 className="size-4 animate-spin" /> : voiceListening ? <MicOff className="size-4" /> : <Mic className="size-4" />}
             </Button>
           </div>
-          <div className="min-w-0 flex-1 overflow-x-auto">
+          <div className="shrink-0">
             <RetrievalControls
               copy={copy}
               mode={retrievalMode}
@@ -1958,11 +1983,11 @@ function Composer({
               onScopeChange={onScopeChange}
             />
           </div>
-          <Button data-testid="a3-classroom-submit" type="submit" disabled={submitDisabled} className="size-11 shrink-0 rounded-lg bg-blue-600 p-0 hover:bg-blue-700" aria-label={copy.send} title={copy.send}>
-            {asking ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-            <span className="sr-only">{copy.send}</span>
-          </Button>
         </div>
+        <Button data-testid="a3-classroom-submit" type="submit" disabled={submitDisabled} className="size-11 shrink-0 rounded-lg bg-blue-600 p-0 hover:bg-blue-700" aria-label={copy.send} title={copy.send}>
+          {asking ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+          <span className="sr-only">{copy.send}</span>
+        </Button>
       </form>
     </div>
   );
@@ -2069,7 +2094,7 @@ function LearningDrawer({
   onSubmitEmbeddedPractice: (resource: ClassroomContext['recommended'][number]) => void;
 }) {
   return (
-    <aside className="min-h-[420px] overflow-hidden rounded-[18px] border border-slate-200 bg-white shadow-sm">
+    <aside className="h-full min-h-0 overflow-hidden rounded-[18px] border border-slate-200 bg-white shadow-sm">
       <div className="flex h-full min-h-0 flex-col">
         <div className="border-b border-slate-200 p-4">
           <div className="flex items-center justify-between gap-3">

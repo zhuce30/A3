@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 const pagePath = path.resolve(process.cwd(), 'app/a3/classroom/page.tsx');
 const redesignPath = path.resolve(process.cwd(), 'components/a3/features/classroom-view-redesign.tsx');
+const rootLayoutPath = path.resolve(process.cwd(), 'app/layout.tsx');
 
 describe('A3 classroom redesigned workspace contract', () => {
   it('routes the classroom page through the redesigned workspace without deleting the legacy view', () => {
@@ -91,6 +92,18 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(openmaicSource).toContain("cn('shrink-0', CLASSROOM_OUTLINE_BUTTON_CLASS)");
     expect(openmaicSource).not.toContain('flex flex-col gap-3 lg:flex-row');
     expect(openmaicSource).not.toContain('flex shrink-0 flex-wrap gap-2');
+  });
+
+  it('renders the learning drawer as a viewport overlay below xl without adding a grid row', () => {
+    const source = fs.readFileSync(redesignPath, 'utf8');
+
+    expect(source).toContain('data-testid="a3-classroom-drawer-overlay"');
+    expect(source).toContain('data-testid="a3-classroom-drawer-backdrop"');
+    expect(source).toContain('fixed inset-0 z-50');
+    expect(source).toContain('xl:static xl:z-auto xl:min-h-0');
+    expect(source).toContain('xl:hidden');
+    expect(source).toContain('xl:static xl:h-full xl:w-auto xl:p-0');
+    expect(source).not.toContain('grid-rows-[minmax(0,1fr)_auto]');
   });
 
   it('integrates classroom context into the unique stick-to-bottom dialogue flow', () => {
@@ -193,10 +206,20 @@ describe('A3 classroom redesigned workspace contract', () => {
   it('keeps retrieval controls on one scrollable row and the send action fixed at 44px', () => {
     const source = fs.readFileSync(redesignPath, 'utf8');
 
-    expect(source).toContain('className="min-w-0 flex-1 overflow-x-auto"');
+    expect(source).toContain("textarea.style.height = '44px'");
+    expect(source).toContain('if (!input) return');
+    expect(source).toContain('className="flex min-w-0 flex-1 items-end gap-2 overflow-x-auto"');
     expect(source).toContain('className="flex min-w-max flex-nowrap items-center gap-2" data-testid="a3-classroom-retrieval-controls"');
     expect(source).toContain('data-testid="a3-classroom-submit"');
     expect(source).toContain('className="size-11 shrink-0 rounded-lg bg-blue-600 p-0 hover:bg-blue-700"');
+  });
+
+  it('keeps safe-area composition active at every breakpoint with cover viewport metadata', () => {
+    const source = fs.readFileSync(rootLayoutPath, 'utf8');
+
+    expect(source).toContain("import type { Metadata, Viewport } from 'next'");
+    expect(source).toContain('export const viewport: Viewport = {');
+    expect(source).toContain("viewportFit: 'cover'");
   });
 
   it('keeps classroom context collapse state local to the browser session', () => {

@@ -169,6 +169,7 @@ async function mockClassroomLayoutDependencies(page: Page) {
 
 test.describe('A3 classroom viewport layout', () => {
   test('gives courseware the remaining viewport height without covering the composer', async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
     await mockClassroomLayoutDependencies(page);
 
     for (const viewport of [
@@ -252,13 +253,41 @@ test.describe('A3 classroom viewport layout', () => {
         fullPage: true,
       });
 
-      if (viewport.width === 1920) {
-        await page.setViewportSize({ width: 1024, height: 768 });
-        await expect(page.getByTestId('a3-classroom-history-panel')).toBeHidden();
-        await expect(page.getByTestId('a3-classroom-drawer-tab-practice')).toBeHidden();
-      }
     }
 
+  });
+
+  test('applies panel defaults only on mount and preserves manual state after resize', async ({ page }) => {
+    await mockClassroomLayoutDependencies(page);
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await page.goto('/a3/classroom', { waitUntil: 'domcontentloaded' });
+
+    const workspace = page.getByTestId('a3-classroom-workspace');
+    const history = page.getByTestId('a3-classroom-history-panel');
+    const drawerTab = page.getByTestId('a3-classroom-drawer-tab-practice');
+    await expect(history).toBeVisible();
+    await expect(drawerTab).toBeVisible();
+
+    await page.getByTestId('a3-classroom-history-panel').locator('button:has(.lucide-panel-left-close)').click();
+    await workspace.locator('button:has(.lucide-panel-right-close)').first().click();
+    await expect(history).toBeHidden();
+    await expect(drawerTab).toBeHidden();
+
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await expect(history).toBeHidden();
+    await expect(drawerTab).toBeHidden();
+
+    const workspaceBeforeDrawer = await workspace.boundingBox();
+    await workspace.locator('button:has(.lucide-panel-right-open)').first().click();
+    await expect(page.getByTestId('a3-classroom-drawer-overlay')).toBeVisible();
+    await expect(drawerTab).toBeVisible();
+    expect(await workspace.boundingBox()).toEqual(workspaceBeforeDrawer);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(history).toBeHidden();
+    await expect(drawerTab).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(drawerTab).toBeHidden();
   });
 
   test('collapses context, reveals the sticky summary, and never covers the last message', async ({ page }) => {

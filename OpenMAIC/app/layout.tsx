@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import localFont from 'next/font/local';
 import './globals.css';
 import 'animate.css';
@@ -40,6 +40,10 @@ export const metadata: Metadata = {
     shortcut: '/a3-brand-icon.png',
     apple: '/a3-brand-icon.png',
   },
+};
+
+export const viewport: Viewport = {
+  viewportFit: 'cover',
 };
 
 export default function RootLayout({

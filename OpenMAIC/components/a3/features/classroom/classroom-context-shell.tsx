@@ -277,11 +277,10 @@ export function MobileStickyActions({
       >
         <MoreHorizontal className="size-5" aria-hidden="true" />
       </summary>
-      <div className="absolute right-0 top-full z-40 mt-1 w-48 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg" role="menu">
+      <div className="absolute right-0 top-full z-40 mt-1 w-48 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg">
         {retryTutorLabel && onRetryTutor && (
           <button
             type="button"
-            role="menuitem"
             className={actionClassName}
             aria-label={retryTutorLabel}
             title={retryTutorLabel}
@@ -293,7 +292,6 @@ export function MobileStickyActions({
         )}
         <button
           type="button"
-          role="menuitem"
           className={actionClassName}
           aria-label={refreshLabel}
           title={refreshLabel}
@@ -305,7 +303,6 @@ export function MobileStickyActions({
         </button>
         <button
           type="button"
-          role="menuitem"
           className={actionClassName}
           aria-label={sidePanelLabel}
           title={sidePanelLabel}

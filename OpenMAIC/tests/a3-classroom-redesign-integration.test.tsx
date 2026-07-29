@@ -545,11 +545,12 @@ describe('ClassroomViewRedesign progressive context integration', () => {
     const imageButton = queryRequired<HTMLButtonElement>(form, '[data-testid="a3-classroom-image-trigger"]');
     const submitButton = queryRequired<HTMLButtonElement>(form, '[data-testid="a3-classroom-submit"]');
 
-    expect(retrievalSlot?.className).toContain('min-w-0');
-    expect(retrievalSlot?.className).toContain('flex-1');
-    expect(retrievalSlot?.className).toContain('overflow-x-auto');
+    expect(retrievalSlot?.className).toContain('shrink-0');
+    expect(toolRow?.className).toContain('min-w-0');
+    expect(toolRow?.className).toContain('flex-1');
+    expect(toolRow?.className).toContain('overflow-x-auto');
     expect(toolRow?.contains(imageButton)).toBe(true);
-    expect(toolRow?.lastElementChild).toBe(submitButton);
+    expect(form.lastElementChild).toBe(submitButton);
     expect(imageButton.compareDocumentPosition(retrieval) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(retrieval.compareDocumentPosition(submitButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
