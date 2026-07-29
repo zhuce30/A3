@@ -47,8 +47,8 @@ describe('A3 classroom redesigned workspace contract', () => {
   it('lets the dialogue and composer expand when classroom side panels are collapsed', () => {
     const source = fs.readFileSync(redesignPath, 'utf8');
 
-    expect(source).toContain('resolveClassroomContentWidthClass(historyOpen, drawerOpen)');
-    expect(source).toContain('resolveClassroomBubbleWidthClass(historyOpen, drawerOpen)');
+    expect(source).toContain('resolveClassroomContentWidthClass(inlineHistoryOpen, inlineDrawerOpen)');
+    expect(source).toContain('resolveClassroomBubbleWidthClass(inlineHistoryOpen, inlineDrawerOpen)');
     expect(source).toContain("return 'max-w-[min(1320px,calc(100vw-120px))]'");
     expect(source).toContain("return 'max-w-[min(1040px,92%)]'");
     expect(source).toContain('contentWidthClass={contentWidthClass}');
@@ -109,9 +109,30 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(drawerContent).toContain('aria-modal="true"');
     expect(source).toContain('<DialogTitle');
     expect(source).toContain('onCloseAutoFocus={restoreDrawerFocus}');
-    expect(source).toContain('isDesktopDrawer ? (');
+    expect(source).toContain('isDesktopLayout ? (');
     expect(source).toContain('<LearningDrawer');
     expect(source).not.toContain('grid-rows-[minmax(0,1fr)_auto]');
+  });
+
+  it('renders history inline only on desktop and as a modal below xl', () => {
+    const source = fs.readFileSync(redesignPath, 'utf8');
+
+    expect(source).toContain('{inlineHistoryOpen ? historySidebar : null}');
+    expect(source).toContain('<Dialog open={historyOpen} modal');
+    expect(source).toContain('data-testid="a3-classroom-history-dialog"');
+    expect(source).toContain('onOpenAutoFocus={focusHistory}');
+    expect(source).toContain('onCloseAutoFocus={restoreHistoryFocus}');
+    expect(source).toContain('<DialogTitle className="sr-only">{copy.classroomConversations}</DialogTitle>');
+    expect(source).toContain('<DialogDescription className="sr-only">{copy.searchHistory}</DialogDescription>');
+  });
+
+  it('uses typed composer status instead of localized message prefixes', () => {
+    const source = fs.readFileSync(redesignPath, 'utf8');
+
+    expect(source).toContain("kind: 'success' | 'error' | 'info'");
+    expect(source).toContain('COMPOSER_STATUS_DISMISS_MS');
+    expect(source).not.toContain('setMessage(');
+    expect(source).not.toContain("message.startsWith('已保存')");
   });
 
   it('exposes stable classroom panel controls without coupling tests to icon classes', () => {

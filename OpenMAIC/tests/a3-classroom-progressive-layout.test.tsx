@@ -96,6 +96,9 @@ function ContextHarness({
         onCollapse={layout.collapse}
         onExpand={layout.expand}
       >
+        <h2 tabIndex={-1} data-a3-context-focus-target data-testid="a3-classroom-context-title">
+          {summary.title}
+        </h2>
         <div style={{ height: 180 }}>课堂完整信息</div>
       </ClassroomContextShell>
       <ClassroomStickyContextBar
@@ -531,7 +534,7 @@ describe('progressive classroom context', () => {
     expect(sticky?.querySelector('[data-testid="desktop-actions"]')?.parentElement?.className).toContain('sm:flex');
   });
 
-  it('opens from the sticky bar, persists expansion, smooth-scrolls, and focuses the context', async () => {
+  it('opens from the sticky bar, persists expansion, smooth-scrolls, and focuses the context title', async () => {
     const view = await mountContext({ storageKey: 'target-a' });
     const collapseButton = view.container.querySelector<HTMLButtonElement>('[aria-label="收起课堂信息"]');
     await act(async () => collapseButton?.click());
@@ -550,10 +553,8 @@ describe('progressive classroom context', () => {
     expect(view.container.querySelector('[data-testid="a3-classroom-context-expanded"]')).not.toBeNull();
     expect(sessionStorage.getItem('a3:classroom-context:target-a')).toBe('expanded');
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'smooth' });
-    expect(document.activeElement).toBe(view.contextElement);
-    expect(view.contextElement.className).toContain('focus-visible:ring-2');
-    expect(view.contextElement.className).toContain('focus-visible:ring-inset');
-    expect(view.contextElement.className).toContain('focus-visible:ring-blue-500');
+    const contextTitle = view.container.querySelector('[data-testid="a3-classroom-context-title"]');
+    expect(document.activeElement).toBe(contextTitle);
   });
 
   it('uses auto scrolling when reduced motion is requested', async () => {
@@ -574,6 +575,7 @@ describe('progressive classroom context', () => {
     await act(async () => stickyOpenButton?.click());
 
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'auto' });
-    expect(document.activeElement).toBe(view.contextElement);
+    const contextTitle = view.container.querySelector('[data-testid="a3-classroom-context-title"]');
+    expect(document.activeElement).toBe(contextTitle);
   });
 });

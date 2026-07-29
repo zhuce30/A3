@@ -158,11 +158,17 @@ type ClassroomImageAttachment = {
 };
 type TranscriptionResponse = { success?: boolean; text?: string; error?: string; details?: string };
 type DrawerTab = 'practice' | 'actions' | 'history';
+type ComposerStatus = {
+  kind: 'success' | 'error' | 'info';
+  message: string;
+  action?: 'favorites';
+};
 
 const MAX_CLASSROOM_IMAGE_BYTES = 6 * 1024 * 1024;
 const CLASSROOM_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp']);
 const CLASSROOM_ASR_PROVIDER_ID = 'qwen-asr';
 const CLASSROOM_ASR_MODEL_ID = 'qwen3-asr-flash';
+const COMPOSER_STATUS_DISMISS_MS = 4_000;
 const CLASSROOM_OUTLINE_BUTTON_CLASS = 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:text-slate-950 dark:border-slate-200 dark:bg-white dark:text-slate-700 dark:hover:bg-slate-50 dark:hover:text-slate-950 dark:disabled:border-slate-200 dark:disabled:bg-slate-100 dark:disabled:text-slate-500 dark:disabled:opacity-100';
 
 const CLASSROOM_RESOURCE_LABELS: Record<A3ResourcePackV2ResourceType, string> = {
@@ -575,7 +581,7 @@ export function ClassroomViewRedesign() {
   const router = useRouter();
   const [classroom, setClassroom] = useState<ClassroomContext | null>(null);
   const [loading, setLoading] = useState(true);
-  const [message, setMessage] = useState('');
+  const [composerStatus, setComposerStatus] = useState<ComposerStatus | null>(null);
   const [input, setInput] = useState('');
   const [asking, setAsking] = useState(false);
   const [savingNoteId, setSavingNoteId] = useState('');
@@ -602,12 +608,14 @@ export function ClassroomViewRedesign() {
   const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [isDesktopDrawer, setIsDesktopDrawer] = useState(false);
+  const [isDesktopLayout, setIsDesktopLayout] = useState(false);
   const [drawerTab, setDrawerTab] = useState<DrawerTab>('practice');
   const [historyQuery, setHistoryQuery] = useState('');
   const [composerHeight, setComposerHeight] = useState(88);
   const chatRef = useRef(chat);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const historyCloseRef = useRef<HTMLButtonElement | null>(null);
+  const historyOpenerRef = useRef<HTMLElement | null>(null);
   const drawerCloseRef = useRef<HTMLButtonElement | null>(null);
   const drawerOpenerRef = useRef<HTMLElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -668,21 +676,40 @@ export function ClassroomViewRedesign() {
   }, []);
 
   useEffect(() => {
-    const desktopDrawer = window.matchMedia('(min-width: 1280px)');
-    const syncDesktopDrawer = () => setIsDesktopDrawer(desktopDrawer.matches);
-    syncDesktopDrawer();
-    desktopDrawer.addEventListener('change', syncDesktopDrawer);
-    return () => desktopDrawer.removeEventListener('change', syncDesktopDrawer);
+    const desktopLayout = window.matchMedia('(min-width: 1280px)');
+    const syncDesktopLayout = () => setIsDesktopLayout(desktopLayout.matches);
+    syncDesktopLayout();
+    desktopLayout.addEventListener('change', syncDesktopLayout);
+    return () => desktopLayout.removeEventListener('change', syncDesktopLayout);
   }, []);
 
   useEffect(() => {
-    if (!drawerOpen || !isDesktopDrawer) return;
+    if (!drawerOpen || !isDesktopLayout) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setDrawerOpen(false);
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [drawerOpen, isDesktopDrawer]);
+  }, [drawerOpen, isDesktopLayout]);
+
+  const openHistory = useCallback((opener: HTMLElement) => {
+    historyOpenerRef.current = opener;
+    setHistoryOpen(true);
+  }, []);
+  const toggleHistory = useCallback((opener: HTMLElement) => {
+    setHistoryOpen((current) => {
+      if (!current) historyOpenerRef.current = opener;
+      return !current;
+    });
+  }, []);
+  const focusHistory = useCallback((event: Event) => {
+    event.preventDefault();
+    historyCloseRef.current?.focus();
+  }, []);
+  const restoreHistoryFocus = useCallback((event: Event) => {
+    event.preventDefault();
+    if (historyOpenerRef.current?.isConnected) historyOpenerRef.current.focus();
+  }, []);
 
   const openDrawer = useCallback((opener: HTMLElement | null) => {
     drawerOpenerRef.current = opener;
@@ -739,6 +766,14 @@ export function ClassroomViewRedesign() {
     chatRef.current = chat;
   }, [chat]);
 
+  useEffect(() => {
+    if (!composerStatus || composerStatus.kind === 'error') return;
+    const timer = window.setTimeout(() => {
+      setComposerStatus((current) => current === composerStatus ? null : current);
+    }, COMPOSER_STATUS_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [composerStatus]);
+
   useLayoutEffect(() => {
     if (!initialHistoryPositionPendingRef.current || chat.length === 0) return;
     initialHistoryPositionPendingRef.current = false;
@@ -769,7 +804,7 @@ export function ClassroomViewRedesign() {
     ]);
     setLoading(false);
     if (!result.success) {
-      setMessage(result.error ?? '课堂上下文加载失败');
+      setComposerStatus({ kind: 'error', message: result.error ?? '课堂上下文加载失败' });
       return;
     }
     if (packsResult.success) {
@@ -778,7 +813,7 @@ export function ClassroomViewRedesign() {
     if (planResult.success) setStudyPlan(planResult.plan);
     if (profileFeedResult.success) setProfileFeed(profileFeedResult);
     setClassroom(result.classroom);
-    setMessage('');
+    setComposerStatus(null);
     const restoredMessages = historyResult.success ? normalizeClassroomMessages(historyResult.messages) : [];
     setClassroomSessions(historyResult.success ? normalizeClassroomSessions(historyResult.sessions ?? []) : []);
     setViewingHistoryId('');
@@ -797,12 +832,12 @@ export function ClassroomViewRedesign() {
     if (asking || resourceGen.generating) return;
     const goal = (goalOverride || target?.title || '').trim();
     if (!goal) {
-      setMessage('请先确定课堂学习目标再生成资源。');
+      setComposerStatus({ kind: 'error', message: '请先确定课堂学习目标再生成资源。' });
       return;
     }
     setInput('');
     setAsking(true);
-    setMessage('');
+    setComposerStatus(null);
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -841,6 +876,7 @@ export function ClassroomViewRedesign() {
   async function askQuestion(question = input) {
     const normalized = question.trim() || (imageAttachment ? '请解答图片里的题目，并说明关键步骤。' : '');
     if (!normalized || asking) return;
+    setComposerStatus(null);
     // B：先过意图识别。generate_resource / navigate 走各自分支，其余（含 explain/兜底）继续问答。
     if (!imageAttachment) {
       const intent = await classifyIntent(normalized, { goal: target?.title ?? '', surface: 'classroom' });
@@ -857,7 +893,6 @@ export function ClassroomViewRedesign() {
     const attachmentForRequest = imageAttachment;
     setInput('');
     setAsking(true);
-    setMessage('');
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -909,7 +944,10 @@ export function ClassroomViewRedesign() {
       setImageAttachment(null);
       if (imageInputRef.current) imageInputRef.current.value = '';
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'AI 课堂服务暂时不可用');
+      setComposerStatus({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'AI 课堂服务暂时不可用',
+      });
     } finally {
       setAsking(false);
     }
@@ -947,7 +985,7 @@ export function ClassroomViewRedesign() {
         return;
       }
       setInput((current) => appendVoiceTranscript(current, text));
-      setMessage(copy.voiceRecognized);
+      setComposerStatus({ kind: 'success', message: copy.voiceRecognized });
     } catch (error) {
       setVoiceError(error instanceof Error ? error.message : copy.voiceFailed);
     } finally {
@@ -1003,7 +1041,7 @@ export function ClassroomViewRedesign() {
       setVoiceListening(true);
       setVoiceDraft(copy.recording);
       setVoiceError('');
-      setMessage('');
+      setComposerStatus(null);
     } catch (error) {
       setVoiceListening(false);
       setVoiceDraft('');
@@ -1014,6 +1052,7 @@ export function ClassroomViewRedesign() {
   }
 
   async function handleImageUpload(file?: File) {
+    setComposerStatus(null);
     setImageAttachmentError('');
     if (!file) return;
     try {
@@ -1055,7 +1094,9 @@ export function ClassroomViewRedesign() {
     if (imageInputRef.current) imageInputRef.current.value = '';
     const result = await a3PostJson<ClassroomHistoryResponse>('/api/learning/classroom/history/', { startNew: true });
     if (result.success) setClassroomSessions(normalizeClassroomSessions(result.sessions ?? []));
-    setMessage(result.success ? copy.newDialogueSuccess : result.error ?? copy.newDialogueFailed);
+    setComposerStatus(result.success
+      ? { kind: 'success', message: copy.newDialogueSuccess }
+      : { kind: 'error', message: result.error ?? copy.newDialogueFailed });
   }
 
   function viewClassroomHistory(session: ClassroomHistorySession) {
@@ -1064,15 +1105,15 @@ export function ClassroomViewRedesign() {
     setViewingHistoryId(session.id);
     setChat(normalizeClassroomMessages(session.messages));
     setInput('');
-    setMessage(copy.viewingHistory);
+    setComposerStatus({ kind: 'info', message: copy.viewingHistory });
   }
 
   async function copyUserMessage(content: string) {
     try {
       await navigator.clipboard.writeText(content);
-      setMessage(copy.copiedMessage);
+      setComposerStatus({ kind: 'success', message: copy.copiedMessage });
     } catch {
-      setMessage(copy.copyFailed);
+      setComposerStatus({ kind: 'error', message: copy.copyFailed });
     }
   }
 
@@ -1083,13 +1124,13 @@ export function ClassroomViewRedesign() {
     setImageAttachment(null);
     setImageAttachmentError('');
     if (imageInputRef.current) imageInputRef.current.value = '';
-    setMessage(copy.editingMessage);
+    setComposerStatus({ kind: 'info', message: copy.editingMessage });
   }
 
   async function saveAsNote(item: ChatMessage) {
     if (item.role !== 'assistant') return;
     setSavingNoteId(item.id);
-    setMessage('');
+    setComposerStatus(null);
     const result = await a3PostJson<FavoriteResponse>('/api/engagement/favorites/create/', {
       type: 'note',
       title: `课堂笔记：${target?.title ?? 'AI 课堂回答'}`,
@@ -1105,7 +1146,9 @@ export function ClassroomViewRedesign() {
       },
     });
     setSavingNoteId('');
-    setMessage(result.success ? copy.noteSaved : result.error ?? copy.noteSaveFailed);
+    setComposerStatus(result.success
+      ? { kind: 'success', message: copy.noteSaved, action: 'favorites' }
+      : { kind: 'error', message: result.error ?? copy.noteSaveFailed });
   }
 
   async function saveSourceFavorite(source: Citation) {
@@ -1130,25 +1173,25 @@ export function ClassroomViewRedesign() {
     const match = findPracticePlanTaskForRecommendation(resource, studyPlan);
     if (!match || match.completed) return;
     setSavingPracticeId(resource.href);
-    setMessage('');
+    setComposerStatus(null);
     const response = await a3PostJson<StudyPlanResponse>('/api/learning/study-plan/tasks/complete/', {
       dayIndex: match.dayIndex,
       taskId: match.taskId,
     });
     setSavingPracticeId('');
     if (!response.success) {
-      setMessage(response.error ?? copy.practiceWritebackFailed);
+      setComposerStatus({ kind: 'error', message: response.error ?? copy.practiceWritebackFailed });
       return;
     }
     setStudyPlan(response.plan);
     setPracticeFeedback(response.feedback ?? response.plan.lastTaskFeedback ?? null);
-    setMessage(copy.practiceCompletedMessage);
+    setComposerStatus({ kind: 'success', message: copy.practiceCompletedMessage });
   }
 
   async function startEmbeddedPractice(resource: ClassroomContext['recommended'][number]) {
     const key = classroomPracticeKey(resource);
     setEmbeddedPractice((current) => current?.key === key ? { ...current, starting: true, error: '' } : null);
-    setMessage('');
+    setComposerStatus(null);
     const result = await a3PostJson<AssessmentStartResponse>('/api/assessments/start/', {
       mode: 'practice',
       knowledgePoint: resource.title,
@@ -1218,8 +1261,24 @@ export function ClassroomViewRedesign() {
     } : current);
   }
 
-  const contentWidthClass = resolveClassroomContentWidthClass(historyOpen, drawerOpen);
-  const bubbleWidthClass = resolveClassroomBubbleWidthClass(historyOpen, drawerOpen);
+  const inlineHistoryOpen = isDesktopLayout && historyOpen;
+  const inlineDrawerOpen = isDesktopLayout && drawerOpen;
+  const contentWidthClass = resolveClassroomContentWidthClass(inlineHistoryOpen, inlineDrawerOpen);
+  const bubbleWidthClass = resolveClassroomBubbleWidthClass(inlineHistoryOpen, inlineDrawerOpen);
+  const historySidebar = (
+    <HistorySidebar
+      copy={copy}
+      sessions={filteredSessions}
+      activeId={viewingHistoryId}
+      query={historyQuery}
+      asking={asking}
+      closeButtonRef={historyCloseRef}
+      onQueryChange={setHistoryQuery}
+      onOpen={viewClassroomHistory}
+      onNew={() => void startNewClassroomDialogue()}
+      onClose={() => setHistoryOpen(false)}
+    />
+  );
   const learningDrawer = (
     <LearningDrawer
       copy={copy}
@@ -1261,19 +1320,7 @@ export function ClassroomViewRedesign() {
       )}
       data-testid="a3-classroom-view"
     >
-      {historyOpen && (
-        <HistorySidebar
-          copy={copy}
-          sessions={filteredSessions}
-          activeId={viewingHistoryId}
-          query={historyQuery}
-          asking={asking}
-          onQueryChange={setHistoryQuery}
-          onOpen={viewClassroomHistory}
-          onNew={() => void startNewClassroomDialogue()}
-          onClose={() => setHistoryOpen(false)}
-        />
-      )}
+      {inlineHistoryOpen ? historySidebar : null}
 
       <section
         className="relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm"
@@ -1330,11 +1377,11 @@ export function ClassroomViewRedesign() {
                       classroom={classroom}
                       target={target}
                       loading={loading}
-                      historyOpen={historyOpen}
+                      historyOpen={inlineHistoryOpen}
                       drawerOpen={drawerOpen}
                       readiness={completedReadiness}
                       onRefresh={() => void loadClassroom()}
-                      onToggleHistory={() => setHistoryOpen((value) => !value)}
+                      onToggleHistory={toggleHistory}
                       onToggleDrawer={toggleDrawer}
                     />
                     <div className="border-b border-slate-200 bg-[#fbfaf5] px-4 py-2 md:px-6">
@@ -1416,7 +1463,7 @@ export function ClassroomViewRedesign() {
               target={target}
               asking={asking}
               input={input}
-              message={message}
+              status={composerStatus}
               retrievalMode={retrievalMode}
               retrievalScope={retrievalScope}
               sources={classroom?.sources ?? []}
@@ -1429,7 +1476,10 @@ export function ClassroomViewRedesign() {
               voiceDraft={voiceDraft}
               voiceError={voiceError}
               imageInputRef={imageInputRef}
-              onInputChange={setInput}
+              onInputChange={(value) => {
+                setInput(value);
+                setComposerStatus(null);
+              }}
               onModeChange={setRetrievalMode}
               onScopeChange={setRetrievalScope}
               onAsk={askQuestion}
@@ -1454,9 +1504,9 @@ export function ClassroomViewRedesign() {
               copy={copy}
               loading={loading}
               tutorError={Boolean(tutorPersona.error)}
-              historyOpen={historyOpen}
+              historyOpen={inlineHistoryOpen}
               drawerOpen={drawerOpen}
-              onOpenHistory={() => setHistoryOpen(true)}
+              onOpenHistory={openHistory}
               onRetryTutor={() => void tutorPersona.reload()}
               onRefresh={() => void loadClassroom()}
               onToggleDrawer={toggleDrawer}
@@ -1479,7 +1529,24 @@ export function ClassroomViewRedesign() {
         />
       </section>
 
-      {isDesktopDrawer ? (
+      {!isDesktopLayout && (
+        <Dialog open={historyOpen} modal onOpenChange={setHistoryOpen}>
+          <DialogContent
+            showCloseButton={false}
+            data-testid="a3-classroom-history-dialog"
+            aria-modal="true"
+            className="inset-y-0 left-0 right-auto top-0 h-dvh max-h-dvh w-[min(320px,calc(100vw-24px))] max-w-none translate-x-0 translate-y-0 gap-0 rounded-none border-0 bg-transparent p-3 ring-0 sm:max-w-none"
+            onOpenAutoFocus={focusHistory}
+            onCloseAutoFocus={restoreHistoryFocus}
+          >
+            <DialogTitle className="sr-only">{copy.classroomConversations}</DialogTitle>
+            <DialogDescription className="sr-only">{copy.searchHistory}</DialogDescription>
+            {historySidebar}
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {isDesktopLayout ? (
         drawerOpen ? learningDrawer : null
       ) : (
         <Dialog open={drawerOpen} modal onOpenChange={setDrawerOpen}>
@@ -1517,7 +1584,7 @@ function ClassroomStickyActions({
   tutorError: boolean;
   historyOpen: boolean;
   drawerOpen: boolean;
-  onOpenHistory: () => void;
+  onOpenHistory: (opener: HTMLElement) => void;
   onRetryTutor: () => void;
   onRefresh: () => void;
   onToggleDrawer: (opener: HTMLElement) => void;
@@ -1529,10 +1596,11 @@ function ClassroomStickyActions({
       {!historyOpen && (
         <button
           type="button"
+          data-testid="a3-classroom-sticky-history-toggle"
           className={actionClassName}
           aria-label={copy.expandHistory}
           title={copy.expandHistory}
-          onClick={onOpenHistory}
+          onClick={(event) => onOpenHistory(event.currentTarget)}
         >
           <PanelLeftOpen className="size-4" aria-hidden="true" />
         </button>
@@ -1597,7 +1665,7 @@ function WorkspaceHeader({
   drawerOpen: boolean;
   readiness: number;
   onRefresh: () => void;
-  onToggleHistory: () => void;
+  onToggleHistory: (opener: HTMLElement) => void;
   onToggleDrawer: (opener: HTMLElement) => void;
 }) {
   return (
@@ -1608,7 +1676,8 @@ function WorkspaceHeader({
             {!historyOpen && (
               <button
                 type="button"
-                onClick={onToggleHistory}
+                data-testid="a3-classroom-history-toggle"
+                onClick={(event) => onToggleHistory(event.currentTarget)}
                 className="inline-flex size-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:border-blue-200 hover:text-blue-700"
                 aria-label={historyOpen ? copy.collapseHistory : copy.expandHistory}
               >
@@ -1619,7 +1688,12 @@ function WorkspaceHeader({
             {classroom?.course && <A3Pill tone="slate">{classroom.course.title}</A3Pill>}
             <A3Pill tone={readiness >= 3 ? 'green' : 'orange'}>{readiness >= 3 ? copy.closedLoopReady : copy.needsEvidence}</A3Pill>
           </div>
-          <h1 className="mt-2 truncate text-xl font-semibold tracking-normal text-slate-950 md:text-2xl">
+          <h1
+            tabIndex={-1}
+            data-a3-context-focus-target
+            data-testid="a3-classroom-context-title"
+            className="mt-2 truncate rounded text-xl font-semibold tracking-normal text-slate-950 outline-none focus-visible:ring-2 focus-visible:ring-blue-500 md:text-2xl"
+          >
             {target?.title ?? copy.waitingTarget}
           </h1>
           <p className="mt-1 line-clamp-1 max-w-3xl text-sm leading-6 text-slate-600">
@@ -1708,6 +1782,7 @@ function HistorySidebar({
   activeId,
   query,
   asking,
+  closeButtonRef,
   onQueryChange,
   onOpen,
   onNew,
@@ -1718,13 +1793,14 @@ function HistorySidebar({
   activeId: string;
   query: string;
   asking: boolean;
+  closeButtonRef: React.RefObject<HTMLButtonElement | null>;
   onQueryChange: (value: string) => void;
   onOpen: (session: ClassroomHistorySession) => void;
   onNew: () => void;
   onClose: () => void;
 }) {
   return (
-    <aside className="min-h-[420px] overflow-hidden rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm" data-testid="a3-classroom-history-panel">
+    <aside className="h-full min-h-0 overflow-hidden rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm" data-testid="a3-classroom-history-panel">
       <div className="flex h-full min-h-0 flex-col">
         <div className="border-b border-slate-200 bg-slate-50/80 p-3">
           <div className="flex items-center justify-between gap-2">
@@ -1734,7 +1810,7 @@ function HistorySidebar({
               </span>
               {copy.classroomConversations}
             </div>
-            <button type="button" data-testid="a3-classroom-history-close" onClick={onClose} className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:border-blue-200 hover:text-blue-700" aria-label={copy.collapseHistory}>
+            <button ref={closeButtonRef} type="button" data-testid="a3-classroom-history-close" onClick={onClose} className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:border-blue-200 hover:text-blue-700" aria-label={copy.collapseHistory}>
               <PanelLeftClose className="size-4" />
             </button>
           </div>
@@ -1837,7 +1913,7 @@ function Composer({
   target,
   asking,
   input,
-  message,
+  status,
   retrievalMode,
   retrievalScope,
   sources,
@@ -1864,7 +1940,7 @@ function Composer({
   target: ClassroomContext['target'];
   asking: boolean;
   input: string;
-  message: string;
+  status: ComposerStatus | null;
   retrievalMode: ClassroomRetrievalMode;
   retrievalScope: ClassroomRetrievalScope;
   sources: Citation[];
@@ -1906,7 +1982,7 @@ function Composer({
 
   return (
     <div className={cn('mx-auto w-full transition-[max-width] duration-200 ease-out', contentWidthClass)}>
-      {message && message !== copy.viewingHistory && <ClassroomMessage message={message} />}
+      {status && status.message !== copy.viewingHistory && <ClassroomMessage status={status} />}
       {viewingHistoryId && (
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
           <span>{copy.viewingHistory}</span>
@@ -3066,13 +3142,22 @@ function groupClaimsByCitation(claims: MappedClaim[]) {
   return Array.from(groups.values());
 }
 
-function ClassroomMessage({ message }: { message: string }) {
+function ClassroomMessage({ status }: { status: ComposerStatus }) {
   const { copy } = useClassroomCopy();
-  const saved = message.startsWith('已保存');
+  const toneClass = {
+    success: 'bg-emerald-50 text-emerald-700',
+    error: 'bg-rose-50 text-rose-700',
+    info: 'bg-blue-50 text-blue-700',
+  }[status.kind];
   return (
-    <div data-testid="a3-classroom-message" className={cn('mb-3 flex flex-col gap-3 rounded-lg px-3 py-2 text-sm md:flex-row md:items-center md:justify-between', saved ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700')}>
-      <span>{message}</span>
-      {saved && (
+    <div
+      data-testid="a3-classroom-message"
+      role={status.kind === 'error' ? 'alert' : 'status'}
+      aria-live={status.kind === 'error' ? 'assertive' : 'polite'}
+      className={cn('mb-3 flex flex-col gap-3 rounded-lg px-3 py-2 text-sm md:flex-row md:items-center md:justify-between', toneClass)}
+    >
+      <span>{status.message}</span>
+      {status.action === 'favorites' && (
         <Button asChild size="sm" variant="outline" className="border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-100">
           <Link data-testid="a3-classroom-open-favorites" href="/a3/favorites">{copy.openFavorites}</Link>
         </Button>

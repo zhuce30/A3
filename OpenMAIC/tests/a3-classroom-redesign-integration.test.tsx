@@ -332,6 +332,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   if (mountedRoot) {
     act(() => mountedRoot?.unmount());
     mountedRoot = null;
@@ -343,6 +344,78 @@ afterEach(() => {
 });
 
 describe('ClassroomViewRedesign progressive context integration', () => {
+  it('opens mobile history as a modal and restores focus to its exact opener', async () => {
+    const container = await mountClassroom(classroom('Process scheduling'));
+    const opener = queryRequired<HTMLButtonElement>(container, '[data-testid="a3-classroom-history-toggle"]');
+
+    await act(async () => opener.click());
+
+    const dialog = queryRequired<HTMLElement>(document, '[data-testid="a3-classroom-history-dialog"]');
+    const closeButton = queryRequired<HTMLButtonElement>(dialog, '[data-testid="a3-classroom-history-close"]');
+    expect(dialog.getAttribute('role')).toBe('dialog');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(dialog.getAttribute('aria-labelledby')).toBeTruthy();
+    expect(dialog.getAttribute('aria-describedby')).toBeTruthy();
+    expect(document.activeElement).toBe(closeButton);
+    expect(container.querySelectorAll('[data-testid="a3-classroom-dialogue"]')).toHaveLength(1);
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    await waitFor(() => expect(document.querySelector('[data-testid="a3-classroom-history-dialog"]')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(opener));
+  });
+
+  it('classifies transient composer success semantically and dismisses it', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const container = await mountClassroom(classroom('Process scheduling'), [{
+      id: 'copy-user',
+      role: 'user',
+      content: 'Explain round-robin scheduling',
+    }]);
+    vi.useFakeTimers();
+
+    await act(async () => {
+      queryRequired<HTMLButtonElement>(container, '[data-testid="a3-classroom-user-copy"]').click();
+      await Promise.resolve();
+    });
+
+    const status = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-message"]');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.className).toContain('bg-emerald-50');
+
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(container.querySelector('[data-testid="a3-classroom-message"]')).toBeNull();
+  });
+
+  it('keeps composer errors announced until the next edit', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('clipboard denied'));
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const container = await mountClassroom(classroom('Process scheduling'), [{
+      id: 'copy-user',
+      role: 'user',
+      content: 'Explain round-robin scheduling',
+    }]);
+    vi.useFakeTimers();
+
+    await act(async () => {
+      queryRequired<HTMLButtonElement>(container, '[data-testid="a3-classroom-user-copy"]').click();
+      await Promise.resolve();
+    });
+
+    const error = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-message"]');
+    expect(error.getAttribute('role')).toBe('alert');
+    expect(error.getAttribute('aria-live')).toBe('assertive');
+    expect(error.className).toContain('bg-rose-50');
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(container.querySelector('[data-testid="a3-classroom-message"]')).toBe(error);
+
+    setTextareaValue(queryRequired(container, '[data-testid="a3-classroom-input"]'), 'Try again');
+    expect(container.querySelector('[data-testid="a3-classroom-message"]')).toBeNull();
+  });
+
   it('forces the generated-resource user message into view before the resource finishes', async () => {
     resourceMocks.generate.mockReturnValue(new Promise(() => undefined));
     const requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {

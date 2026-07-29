@@ -55,6 +55,7 @@ function writeContextExpanded(key: string, expanded: boolean) {
 
 export function useClassroomContextVisibility({ storageKey, scrollRootRef }: VisibilityOptions) {
   const regionRef = useRef<HTMLElement | null>(null);
+  const focusAfterExpandRef = useRef(false);
   const regionId = `a3-classroom-context-${useId().replaceAll(':', '')}`;
   const key = `a3:classroom-context:${storageKey || 'waiting-target'}`;
   const getExpandedSnapshot = useCallback(() => readContextExpanded(key), [key]);
@@ -89,7 +90,19 @@ export function useClassroomContextVisibility({ storageKey, scrollRootRef }: Vis
     writeContextExpanded(key, value);
   }, [key]);
 
+  useLayoutEffect(() => {
+    if (!expanded || !focusAfterExpandRef.current) return;
+    focusAfterExpandRef.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      regionRef.current
+        ?.querySelector<HTMLElement>('[data-a3-context-focus-target]')
+        ?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [expanded]);
+
   const openFromSticky = useCallback(() => {
+    focusAfterExpandRef.current = true;
     setContextExpanded(true);
     const reduceMotion = typeof window.matchMedia === 'function'
       && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -97,7 +110,6 @@ export function useClassroomContextVisibility({ storageKey, scrollRootRef }: Vis
       block: 'start',
       behavior: reduceMotion ? 'auto' : 'smooth',
     });
-    window.requestAnimationFrame(() => regionRef.current?.focus({ preventScroll: true }));
   }, [setContextExpanded]);
 
   return {
@@ -138,9 +150,8 @@ export function ClassroomContextShell({
     <section
       ref={regionRef}
       id={regionId}
-      tabIndex={-1}
       data-testid="a3-classroom-context-region"
-      className="border-b border-slate-200 bg-white outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
+      className="border-b border-slate-200 bg-white"
     >
       {expanded ? (
         <div

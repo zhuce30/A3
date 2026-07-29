@@ -277,6 +277,29 @@ test.describe('A3 classroom viewport layout', () => {
     await expect(history).toBeHidden();
     await expect(drawerTab).toBeHidden();
 
+    const workspaceBeforeHistory = await workspace.boundingBox();
+    const historyOpener = page.getByTestId('a3-classroom-history-toggle');
+    await historyOpener.focus();
+    await historyOpener.click();
+    const historyDialog = page.getByTestId('a3-classroom-history-dialog');
+    await expect(historyDialog).toBeVisible();
+    await expect(historyDialog).toHaveAttribute('role', 'dialog');
+    await expect(historyDialog).toHaveAttribute('aria-modal', 'true');
+    expect(await workspace.boundingBox()).toEqual(workspaceBeforeHistory);
+    await expect.poll(() => workspace.evaluate((element) => Boolean(
+      element.closest('[aria-hidden="true"], [inert]'),
+    ))).toBe(true);
+    await expect.poll(() => historyDialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    for (let index = 0; index < 6; index += 1) {
+      await page.keyboard.press('Tab');
+      expect(await historyDialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    }
+    await page.keyboard.press('Shift+Tab');
+    expect(await historyDialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press('Escape');
+    await expect(historyDialog).toBeHidden();
+    await expect(historyOpener).toBeFocused();
+
     const workspaceBeforeDrawer = await workspace.boundingBox();
     const drawerOpener = page.getByTestId('a3-classroom-drawer-toggle');
     await drawerOpener.focus();
