@@ -19,6 +19,8 @@ export function ClassroomComposerFrame({
 
     onHeightChange(Math.ceil(frame.getBoundingClientRect().height));
 
+    if (typeof ResizeObserver === 'undefined') return;
+
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (entry) onHeightChange(Math.ceil(entry.contentRect.height));

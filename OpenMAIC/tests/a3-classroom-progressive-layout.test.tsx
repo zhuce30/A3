@@ -280,6 +280,30 @@ describe('floating classroom composer frame', () => {
     expect(resizeObserverInstances[0].disconnect).toHaveBeenCalledTimes(1);
     container.remove();
   });
+
+  it('still reports its initial height when ResizeObserver is unavailable', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onHeightChange = vi.fn();
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(createDomRect(63.2));
+    vi.stubGlobal('ResizeObserver', undefined);
+
+    await act(async () => {
+      root.render(
+        <ClassroomComposerFrame onHeightChange={onHeightChange}>
+          <div>Composer content</div>
+        </ClassroomComposerFrame>,
+      );
+    });
+
+    expect(onHeightChange).toHaveBeenCalledTimes(1);
+    expect(onHeightChange).toHaveBeenCalledWith(64);
+    expect(resizeObserverInstances).toHaveLength(0);
+
+    act(() => root.unmount());
+    container.remove();
+  });
 });
 
 describe('progressive classroom context', () => {

@@ -171,6 +171,15 @@ describe('A3 classroom redesigned workspace contract', () => {
     }
   });
 
+  it('keeps composer accessibility semantics explicit in both locales', () => {
+    const source = fs.readFileSync(redesignPath, 'utf8');
+
+    expect(source).toContain("role={voiceError || !voiceSupported ? 'alert' : 'status'}");
+    expect(source.match(/removeImage:/g)).toHaveLength(2);
+    expect(source).toContain('aria-label={copy.removeImage}');
+    expect(source).toContain('title={copy.removeImage}');
+  });
+
   it('keeps classroom context collapse state local to the browser session', () => {
     const contextSource = fs.readFileSync(
       path.resolve(process.cwd(), 'components/a3/features/classroom/classroom-context-shell.tsx'),

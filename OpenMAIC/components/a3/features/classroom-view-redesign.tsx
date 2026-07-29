@@ -307,6 +307,7 @@ const classroomCopy = {
     currentSources: (count: number) => `当前 ${count} 条来源`,
     send: '发送',
     attachImage: '上传本地图片题目',
+    removeImage: '移除图片',
     voiceInput: '语音输入',
     finishVoice: '结束录音并识别',
     recording: '正在录音，再点一次麦克风结束并识别。',
@@ -472,6 +473,7 @@ const classroomCopy = {
     currentSources: (count: number) => `Current sources: ${count}`,
     send: 'Send',
     attachImage: 'Upload local image question',
+    removeImage: 'Remove image',
     voiceInput: 'Voice input',
     finishVoice: 'Finish recording and transcribe',
     recording: 'Recording. Tap the microphone again to finish and transcribe.',
@@ -1807,21 +1809,13 @@ function Composer({
         </div>
       )}
       {!target && (
-        <div className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
-          {copy.chooseTargetFirst}
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+          <span>{copy.chooseTargetFirst}</span>
+          <Button asChild size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS}>
+            <Link href="/a3/learning-path">{copy.learningPath}</Link>
+          </Button>
         </div>
       )}
-      <div className="mb-2">
-        <RetrievalControls
-          copy={copy}
-          mode={retrievalMode}
-          scope={retrievalScope}
-          sources={sources}
-          disabled={controlsDisabled}
-          onModeChange={onModeChange}
-          onScopeChange={onScopeChange}
-        />
-      </div>
 
       {imageAttachment && (
         <div data-testid="a3-classroom-image-preview" className="mb-2 flex items-center gap-3 rounded-lg border border-blue-100 bg-blue-50 p-2 text-xs text-blue-800">
@@ -1830,8 +1824,16 @@ function Composer({
             <div className="truncate font-semibold">{imageAttachment.name}</div>
             <div>{Math.max(1, Math.round(imageAttachment.size / 1024))} KB</div>
           </div>
-          <Button type="button" size="sm" variant="outline" data-testid="a3-classroom-image-remove" onClick={onRemoveImage}>
-            <X className="size-4" />
+          <Button
+            type="button"
+            variant="outline"
+            className={cn('size-11 rounded-lg p-0', CLASSROOM_OUTLINE_BUTTON_CLASS)}
+            data-testid="a3-classroom-image-remove"
+            aria-label={copy.removeImage}
+            title={copy.removeImage}
+            onClick={onRemoveImage}
+          >
+            <X className="size-4" aria-hidden="true" />
           </Button>
         </div>
       )}
@@ -1840,7 +1842,7 @@ function Composer({
         <div
           className={cn('mb-2 flex items-start gap-2 rounded-lg px-3 py-2 text-sm', voiceError || !voiceSupported ? 'bg-amber-50 text-amber-800' : 'bg-blue-50 text-blue-800')}
           data-testid="a3-classroom-voice-status"
-          role="status"
+          role={voiceError || !voiceSupported ? 'alert' : 'status'}
           aria-live="polite"
         >
           {voiceTranscribing ? <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" /> : voiceListening ? <Mic className="mt-0.5 size-4 shrink-0" /> : <MicOff className="mt-0.5 size-4 shrink-0" />}
@@ -1883,6 +1885,7 @@ function Composer({
               type="button"
               variant="outline"
               disabled={controlsDisabled}
+              data-testid="a3-classroom-image-trigger"
               className={cn('size-11 rounded-lg p-0', CLASSROOM_OUTLINE_BUTTON_CLASS)}
               title={copy.attachImage}
               aria-label={copy.attachImage}
@@ -1903,6 +1906,17 @@ function Composer({
             >
               {voiceTranscribing ? <Loader2 className="size-4 animate-spin" /> : voiceListening ? <MicOff className="size-4" /> : <Mic className="size-4" />}
             </Button>
+          </div>
+          <div className="min-w-0 flex-1 overflow-x-auto">
+            <RetrievalControls
+              copy={copy}
+              mode={retrievalMode}
+              scope={retrievalScope}
+              sources={sources}
+              disabled={controlsDisabled}
+              onModeChange={onModeChange}
+              onScopeChange={onScopeChange}
+            />
           </div>
           <Button data-testid="a3-classroom-submit" type="submit" disabled={submitDisabled} className="h-11 rounded-lg bg-blue-600 px-4 hover:bg-blue-700">
             {asking ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}

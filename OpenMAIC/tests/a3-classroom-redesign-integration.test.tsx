@@ -17,6 +17,9 @@ const tutorMocks = vi.hoisted(() => ({
 const resourceMocks = vi.hoisted(() => ({
   generate: vi.fn(),
 }));
+const intentMocks = vi.hoisted(() => ({
+  classify: vi.fn(),
+}));
 
 vi.mock('next/link', () => ({
   default: ({ children, href, ...props }: { children: ReactNode; href: string }) => (
@@ -43,7 +46,7 @@ vi.mock('@/lib/a3/use-resource-generation', () => ({
   }),
 }));
 vi.mock('@/lib/a3/intent-router', () => ({
-  classifyIntent: vi.fn(),
+  classifyIntent: intentMocks.classify,
 }));
 vi.mock('@/components/a3/features/tutor-persona/use-tutor-persona', () => ({
   useTutorPersona: () => ({
@@ -149,6 +152,52 @@ function classroomResponse(title: string) {
   return { success: true, classroom: classroom(title) };
 }
 
+function mockClassroomApis(value: ClassroomContext) {
+  apiMocks.get.mockImplementation((path: string) => {
+    if (path === '/api/learning/classroom/') return Promise.resolve({ success: true, classroom: value });
+    if (path === '/api/resources/packs/') return Promise.resolve({ success: true, resourcePacks: [] });
+    if (path === '/api/learning/classroom/history/') return Promise.resolve({ success: true, messages: [], sessions: [] });
+    if (path === '/api/learning/study-plan/?auto=1') return Promise.resolve({ success: false, error: 'not needed' });
+    if (path === '/api/profiles/dynamic-profile/') return Promise.resolve({ success: false, error: 'not needed' });
+    return Promise.resolve({ success: false, error: `Unexpected path: ${path}` });
+  });
+}
+
+async function mountClassroom(value: ClassroomContext) {
+  mockClassroomApis(value);
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  mountedRoot = createRoot(container);
+  await act(async () => {
+    mountedRoot?.render(<ClassroomViewRedesign />);
+  });
+  await waitFor(() => {
+    expect(container.querySelector('[data-testid="a3-classroom-input"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="a3-classroom-context-loading"]')).toBeNull();
+  });
+  return container;
+}
+
+function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+  if (!setter) throw new Error('Textarea value setter is unavailable');
+  act(() => {
+    setter.call(textarea, value);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
+function dispatchEnter(textarea: HTMLTextAreaElement, init: KeyboardEventInit = {}) {
+  const event = new KeyboardEvent('keydown', {
+    key: 'Enter',
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  act(() => textarea.dispatchEvent(event));
+  return event;
+}
+
 async function waitFor(assertion: () => void) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -177,12 +226,24 @@ beforeEach(() => {
   tutorMocks.reload.mockReset();
   tutorMocks.selectPersona.mockReset();
   resourceMocks.generate.mockReset();
+  intentMocks.classify.mockReset();
+  intentMocks.classify.mockResolvedValue({
+    intent: 'ask_question',
+    confidence: 1,
+    params: {},
+    source: 'rule',
+  });
+  apiMocks.post.mockResolvedValue({ success: true });
   resizeObserverInstances.length = 0;
   sessionStorage.clear();
   document.body.replaceChildren();
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('ResizeObserver', TestResizeObserver);
   vi.stubGlobal('IntersectionObserver', TestIntersectionObserver);
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ success: true, reply: 'Answer', citations: [], claims: [] }),
+  }));
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     callback(0);
     return 1;
@@ -212,6 +273,95 @@ afterEach(() => {
 });
 
 describe('ClassroomViewRedesign progressive context integration', () => {
+  it('keeps retrieval controls in the form tool row between media controls and send', async () => {
+    const container = await mountClassroom(classroom('进程调度'));
+    const form = queryRequired<HTMLFormElement>(container, '[data-testid="a3-classroom-input"]').closest('form');
+    if (!form) throw new Error('Missing classroom composer form');
+    const retrieval = queryRequired<HTMLElement>(form, '[data-testid="a3-classroom-retrieval-controls"]');
+    const retrievalSlot = retrieval.parentElement;
+    const toolRow = retrievalSlot?.parentElement;
+    const imageButton = queryRequired<HTMLButtonElement>(form, '[data-testid="a3-classroom-image-trigger"]');
+    const submitButton = queryRequired<HTMLButtonElement>(form, '[data-testid="a3-classroom-submit"]');
+
+    expect(retrievalSlot?.className).toContain('min-w-0');
+    expect(retrievalSlot?.className).toContain('flex-1');
+    expect(retrievalSlot?.className).toContain('overflow-x-auto');
+    expect(toolRow?.contains(imageButton)).toBe(true);
+    expect(toolRow?.lastElementChild).toBe(submitButton);
+    expect(imageButton.compareDocumentPosition(retrieval) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(retrieval.compareDocumentPosition(submitButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('offers a real learning-path action when no classroom target exists', async () => {
+    const noTargetClassroom = { ...classroom('等待目标'), target: null };
+    const container = await mountClassroom(noTargetClassroom);
+    const input = queryRequired<HTMLTextAreaElement>(container, '[data-testid="a3-classroom-input"]');
+    const submit = queryRequired<HTMLButtonElement>(container, '[data-testid="a3-classroom-submit"]');
+    const noTargetStatus = Array.from(container.querySelectorAll<HTMLElement>('[role="status"]'))
+      .find((element) => element.textContent?.includes('请先选择学习目标'));
+    if (!noTargetStatus) throw new Error('Missing no-target composer status');
+    const learningPathLink = queryRequired<HTMLAnchorElement>(noTargetStatus, 'a[href="/a3/learning-path"]');
+
+    expect(input.disabled).toBe(true);
+    expect(submit.disabled).toBe(true);
+    expect(learningPathLink.textContent).toBe('学习路径');
+  });
+
+  it('announces unsupported voice input as an alert', async () => {
+    vi.stubGlobal('MediaRecorder', undefined);
+    const container = await mountClassroom(classroom('进程调度'));
+    const voiceButton = queryRequired<HTMLButtonElement>(container, '[data-testid="a3-classroom-voice-input"]');
+
+    await act(async () => voiceButton.click());
+
+    const voiceStatus = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-voice-status"]');
+    expect(voiceStatus.getAttribute('aria-live')).toBe('polite');
+    expect(voiceStatus.getAttribute('role')).toBe('alert');
+  });
+
+  it('labels a 44px image removal button and preserves removal behavior', async () => {
+    const container = await mountClassroom(classroom('进程调度'));
+    const fileInput = queryRequired<HTMLInputElement>(container, '[data-testid="a3-classroom-image-upload"]');
+    const file = new File(['image'], 'question.png', { type: 'image/png' });
+    Object.defineProperty(fileInput, 'files', { configurable: true, value: [file] });
+
+    await act(async () => {
+      fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="a3-classroom-image-preview"]')).not.toBeNull();
+    });
+
+    const removeButton = queryRequired<HTMLButtonElement>(container, '[data-testid="a3-classroom-image-remove"]');
+    expect(removeButton.className).toContain('size-11');
+    expect(removeButton.getAttribute('aria-label')).toBe('移除图片');
+    expect(removeButton.getAttribute('title')).toBe('移除图片');
+
+    await act(async () => removeButton.click());
+    expect(container.querySelector('[data-testid="a3-classroom-image-preview"]')).toBeNull();
+  });
+
+  it('submits on Enter but not Shift+Enter or IME composition', async () => {
+    intentMocks.classify.mockReturnValue(new Promise(() => undefined));
+    const container = await mountClassroom(classroom('进程调度'));
+    const input = queryRequired<HTMLTextAreaElement>(container, '[data-testid="a3-classroom-input"]');
+    setTextareaValue(input, 'Explain process scheduling');
+
+    const shiftEnter = dispatchEnter(input, { shiftKey: true });
+    const composingEnter = dispatchEnter(input, { isComposing: true });
+    expect(shiftEnter.defaultPrevented).toBe(false);
+    expect(composingEnter.defaultPrevented).toBe(false);
+    expect(intentMocks.classify).not.toHaveBeenCalled();
+
+    const enter = dispatchEnter(input);
+    expect(enter.defaultPrevented).toBe(true);
+    await waitFor(() => expect(intentMocks.classify).toHaveBeenCalledTimes(1));
+    expect(intentMocks.classify).toHaveBeenCalledWith(
+      'Explain process scheduling',
+      expect.objectContaining({ surface: 'classroom' }),
+    );
+  });
+
   it('keeps one attached dialogue root and loaded context throughout refresh', async () => {
     const refresh = deferred<ReturnType<typeof classroomResponse>>();
     let classroomRequestCount = 0;
