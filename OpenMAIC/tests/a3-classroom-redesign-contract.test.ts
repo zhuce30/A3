@@ -103,6 +103,9 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source).toContain('useStickToBottom({');
     expect(source).toContain('initial: false');
     expect(source).toContain("resize: { damping: 0.78, stiffness: 0.08, mass: 1 }");
+    expect(source).toContain('scrollToBottom');
+    expect(source).toContain('isNearBottom');
+    expect(source).toContain('initialHistoryPositionPendingRef');
     expect(source).toContain('scrollRootRef: scrollRef');
     expect(source).toContain('ref={scrollRef}');
     expect(source).toContain('ref={contentRef}');
@@ -121,6 +124,13 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source).toContain("'--a3-composer-height': `${composerHeight}px`");
     expect(source).toContain("scrollPaddingBottom: 'calc(var(--a3-composer-height) + 16px)'");
     expect(source).toContain("paddingBottom: 'calc(var(--a3-composer-height) + 16px)'");
+    expect(source).toContain('data-testid="a3-classroom-jump-latest"');
+    expect(source).toContain('bottom-[calc(var(--a3-composer-height)+12px)]');
+    expect(source).toContain("animation: 'smooth'");
+    expect(source).toContain('ignoreEscapes: true');
+    expect(source.match(/scrollAfterActiveSend\(\);/g)).toHaveLength(2);
+    expect(source).not.toContain('dialogueEndRef');
+    expect(source).not.toContain('scrollIntoView({ behavior: \'smooth\' });');
     expect(source).not.toContain('grid-rows-[minmax(0,1fr)_auto]');
   });
 

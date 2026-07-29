@@ -7,6 +7,7 @@ import { useStickToBottom } from 'use-stick-to-bottom';
 import {
   Bot,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   ClipboardCheck,
   Copy,
@@ -606,9 +607,10 @@ export function ClassroomViewRedesign() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const voiceStreamRef = useRef<MediaStream | null>(null);
   const voiceChunksRef = useRef<Blob[]>([]);
+  const initialHistoryPositionPendingRef = useRef(true);
 
   const target = classroom?.target ?? null;
-  const { scrollRef, contentRef } = useStickToBottom({
+  const { scrollRef, contentRef, scrollToBottom, isNearBottom } = useStickToBottom({
     initial: false,
     resize: { damping: 0.78, stiffness: 0.08, mass: 1 },
   });
@@ -638,6 +640,11 @@ export function ClassroomViewRedesign() {
   const handleComposerHeightChange = useCallback((height: number) => {
     setComposerHeight((current) => current === height ? current : height);
   }, []);
+  const scrollAfterActiveSend = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      void scrollToBottom({ animation: 'smooth', ignoreEscapes: true });
+    });
+  }, [scrollToBottom]);
   const showLessonRunway = !viewingHistoryId && !chat.some((item) => item.role === 'user');
   const filteredSessions = useMemo(() => {
     const query = historyQuery.trim().toLowerCase();
@@ -683,6 +690,15 @@ export function ClassroomViewRedesign() {
   useEffect(() => {
     chatRef.current = chat;
   }, [chat]);
+
+  useLayoutEffect(() => {
+    if (!initialHistoryPositionPendingRef.current || chat.length === 0) return;
+    initialHistoryPositionPendingRef.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [chat.length, scrollRef]);
 
   useEffect(() => {
     setVoiceSupported(Boolean(navigator.mediaDevices?.getUserMedia) && typeof MediaRecorder !== 'undefined');
@@ -746,6 +762,7 @@ export function ClassroomViewRedesign() {
       createdAt: new Date().toISOString(),
     };
     setChat((current) => [...current, userMessage]);
+    scrollAfterActiveSend();
     try {
       const pack = await resourceGen.generate(resourceType, goal);
       if (!pack) {
@@ -800,6 +817,7 @@ export function ClassroomViewRedesign() {
       createdAt: new Date().toISOString(),
     };
     setChat((current) => [...current, userMessage]);
+    scrollAfterActiveSend();
     try {
       const response = await fetch('/api/a3/coaching/respond', {
         method: 'POST',
@@ -1301,6 +1319,21 @@ export function ClassroomViewRedesign() {
               </div>
             </div>
           </div>
+
+          {!isNearBottom && chat.length > 0 && (
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              className="absolute bottom-[calc(var(--a3-composer-height)+12px)] left-1/2 z-30 size-11 -translate-x-1/2 border-slate-200 bg-white text-slate-700 shadow-md hover:bg-slate-50 hover:text-slate-950"
+              data-testid="a3-classroom-jump-latest"
+              aria-label={copy.jumpLatest}
+              title={copy.jumpLatest}
+              onClick={() => void scrollToBottom({ animation: 'smooth', ignoreEscapes: true })}
+            >
+              <ChevronDown className="size-5" aria-hidden="true" />
+            </Button>
+          )}
 
           <ClassroomComposerFrame onHeightChange={handleComposerHeightChange}>
             <Composer

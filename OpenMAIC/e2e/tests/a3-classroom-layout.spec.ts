@@ -271,4 +271,76 @@ test.describe('A3 classroom viewport layout', () => {
     expect(floatingBox).not.toBeNull();
     expect(messageBox!.y + messageBox!.height).toBeLessThanOrEqual(floatingBox!.y + 1);
   });
+
+  test('preserves reading position for an appended reply and resumes following on demand', async ({ page }) => {
+    await mockClassroomLayoutDependencies(page);
+    const releaseReplies: Array<() => void> = [];
+    const replyGates = Array.from({ length: 2 }, () => new Promise<void>((resolve) => {
+      releaseReplies.push(resolve);
+    }));
+    let replyIndex = 0;
+    await page.route('**/api/a3/coaching/respond', async (route) => {
+      const currentReply = replyIndex;
+      replyIndex += 1;
+      await replyGates[currentReply];
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          reply: `${longLessonContent}\n\nNew assistant explanation ${currentReply + 1}`,
+          citations: [],
+          claims: [],
+        }),
+      });
+    });
+    await page.setViewportSize({ width: 1366, height: 768 });
+    await page.goto('/a3/classroom', { waitUntil: 'domcontentloaded' });
+
+    const dialogue = page.getByTestId('a3-classroom-dialogue');
+    const input = page.getByTestId('a3-classroom-input');
+    await expect(page.getByTestId('a3-classroom-message-assistant')).toHaveCount(1);
+    await input.fill('Explain why deadlock prevention works');
+    await page.getByTestId('a3-classroom-submit').click();
+    await expect.poll(() => dialogue.evaluate((element) => (
+      Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop)
+    ))).toBeLessThanOrEqual(2);
+
+    await dialogue.evaluate((element) => {
+      element.scrollTop = Math.max(0, element.scrollTop - 240);
+      element.dispatchEvent(new Event('scroll'));
+    });
+    await expect(page.getByTestId('a3-classroom-jump-latest')).toBeVisible();
+    const readingPosition = await dialogue.evaluate((element) => element.scrollTop);
+
+    releaseReplies[0]();
+    await expect(page.getByTestId('a3-classroom-message-assistant')).toHaveCount(2);
+    await expect.poll(() => dialogue.evaluate((element) => element.scrollTop)).toBe(readingPosition);
+    await expect(page.getByTestId('a3-classroom-jump-latest')).toBeVisible();
+
+    await page.getByTestId('a3-classroom-jump-latest').click();
+    await expect.poll(() => dialogue.evaluate((element) => (
+      Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop)
+    ))).toBeLessThanOrEqual(2);
+    await expect(page.getByTestId('a3-classroom-jump-latest')).toBeHidden();
+
+    await input.fill('Add a worked example');
+    await page.getByTestId('a3-classroom-submit').click();
+    await expect.poll(() => dialogue.evaluate((element) => (
+      Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop)
+    ))).toBeLessThanOrEqual(2);
+    await dialogue.evaluate((element) => {
+      element.scrollTop = Math.max(0, element.scrollTop - 240);
+      element.dispatchEvent(new Event('scroll'));
+    });
+    await expect(page.getByTestId('a3-classroom-jump-latest')).toBeVisible();
+    await page.getByTestId('a3-classroom-jump-latest').click();
+    await expect(page.getByTestId('a3-classroom-jump-latest')).toBeHidden();
+
+    releaseReplies[1]();
+    await expect(page.getByTestId('a3-classroom-message-assistant')).toHaveCount(3);
+    await expect.poll(() => dialogue.evaluate((element) => (
+      Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop)
+    ))).toBeLessThanOrEqual(2);
+  });
 });

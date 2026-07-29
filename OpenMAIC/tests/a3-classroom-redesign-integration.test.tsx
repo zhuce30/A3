@@ -20,6 +20,9 @@ const resourceMocks = vi.hoisted(() => ({
 const intentMocks = vi.hoisted(() => ({
   classify: vi.fn(),
 }));
+const stickToBottomMocks = vi.hoisted(() => ({
+  scrollToBottom: vi.fn(),
+}));
 
 vi.mock('next/link', () => ({
   default: ({ children, href, ...props }: { children: ReactNode; href: string }) => (
@@ -68,6 +71,29 @@ vi.mock('@/components/a3/features/tutor-persona/tutor-persona-selector', () => (
 vi.mock('@/components/a3/ui/a3-speech-controls', () => ({
   A3SpeechControls: () => null,
 }));
+vi.mock('use-stick-to-bottom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('use-stick-to-bottom')>();
+  return {
+    ...actual,
+    useStickToBottom: (...args: Parameters<typeof actual.useStickToBottom>) => {
+      const instance = actual.useStickToBottom(...args);
+      return {
+        ...instance,
+        scrollToBottom: (options?: Parameters<typeof instance.scrollToBottom>[0]) => {
+          stickToBottomMocks.scrollToBottom(options);
+          const instantOptions = typeof options === 'object'
+            ? { ...options, animation: 'instant' as const }
+            : 'instant' as const;
+          const result = instance.scrollToBottom(instantOptions);
+          void Promise.resolve(result).then(() => {
+            instance.scrollRef.current?.dispatchEvent(new Event('scroll'));
+          });
+          return result;
+        },
+      };
+    },
+  };
+});
 
 import { ClassroomViewRedesign } from '@/components/a3/features/classroom-view-redesign';
 
@@ -259,6 +285,7 @@ beforeEach(() => {
   tutorMocks.selectPersona.mockReset();
   resourceMocks.generate.mockReset();
   intentMocks.classify.mockReset();
+  stickToBottomMocks.scrollToBottom.mockReset();
   intentMocks.classify.mockResolvedValue({
     intent: 'ask_question',
     confidence: 1,
@@ -305,6 +332,88 @@ afterEach(() => {
 });
 
 describe('ClassroomViewRedesign progressive context integration', () => {
+  it('preserves an escaped reading position and lets the user resume following the latest reply', async () => {
+    const reply = deferred<{
+      ok: boolean;
+      json: () => Promise<{ success: boolean; reply: string; citations: never[]; claims: never[] }>;
+    }>();
+    vi.stubGlobal('fetch', vi.fn(() => reply.promise));
+    const container = await mountClassroom(classroom('Process scheduling'));
+    const dialogue = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-dialogue"]');
+    const content = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-dialogue-content"]');
+    const contentObserver = resizeObserverInstances.find((observer) => (
+      observer.observe.mock.calls.some(([target]) => target === content)
+    ));
+    if (!contentObserver) throw new Error('Missing dialogue ResizeObserver');
+
+    let scrollTop = 0;
+    let scrollHeight = 1200;
+    Object.defineProperties(dialogue, {
+      clientHeight: { configurable: true, get: () => 300 },
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => { scrollTop = value; },
+      },
+    });
+    act(() => {
+      contentObserver.emit([createResizeEntry(content, scrollHeight, scrollHeight)]);
+    });
+
+    const input = queryRequired<HTMLTextAreaElement>(container, '[data-testid="a3-classroom-input"]');
+    setTextareaValue(input, 'Explain round-robin scheduling');
+    await act(async () => {
+      queryRequired<HTMLButtonElement>(container, '[data-testid="a3-classroom-submit"]').click();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(scrollTop).toBe(899));
+
+    act(() => {
+      scrollTop = 240;
+      dialogue.dispatchEvent(new Event('scroll'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="a3-classroom-jump-latest"]')).not.toBeNull();
+    });
+    const readingPosition = scrollTop;
+
+    await act(async () => {
+      reply.resolve({
+        ok: true,
+        json: async () => ({
+          success: true,
+          reply: 'Round-robin rotates through runnable processes.',
+          citations: [],
+          claims: [],
+        }),
+      });
+      await reply.promise;
+    });
+    await waitFor(() => {
+      expect(container.querySelectorAll('[data-testid="a3-classroom-message-assistant"]')).toHaveLength(2);
+    });
+    scrollHeight = 1500;
+    act(() => {
+      contentObserver.emit([createResizeEntry(content, scrollHeight, scrollHeight)]);
+    });
+    expect(scrollTop).toBe(readingPosition);
+    expect(container.querySelector('[data-testid="a3-classroom-jump-latest"]')).not.toBeNull();
+
+    await act(async () => {
+      queryRequired<HTMLButtonElement>(container, '[data-testid="a3-classroom-jump-latest"]').click();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(scrollTop).toBe(1199);
+      expect(container.querySelector('[data-testid="a3-classroom-jump-latest"]')).toBeNull();
+    });
+    expect(stickToBottomMocks.scrollToBottom).toHaveBeenLastCalledWith({
+      animation: 'smooth',
+      ignoreEscapes: true,
+    });
+  });
+
   it('uses the measured composer border box for workspace and message clearance', async () => {
     const container = await mountClassroom(classroom('进程调度'));
     const workspace = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-workspace"]');
