@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import React, { act, useRef } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
+import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -264,6 +264,8 @@ describe('progressive classroom context', () => {
     const regionId = view.contextElement.id;
     const collapseButton = view.container.querySelector<HTMLButtonElement>('[aria-label="收起课堂信息"]');
     await act(async () => collapseButton?.click());
+    emitIntersection(view, false);
+    expect(view.container.querySelector('[data-testid="a3-classroom-sticky-context"]')).not.toBeNull();
     const scrollTo = vi.fn();
     Object.defineProperty(view.scrollRootElement, 'scrollTo', {
       configurable: true,
@@ -277,6 +279,13 @@ describe('progressive classroom context', () => {
     expect(sessionStorage.getItem('a3:classroom-context:target-a')).toBe('collapsed');
     expect(sessionStorage.getItem('a3:classroom-context:target-b')).toBeNull();
     expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'auto' });
+    expect(view.container.querySelector('[data-testid="a3-classroom-sticky-context"]')).toBeNull();
+
+    await view.rerender({ storageKey: 'target-a' });
+
+    expect(view.container.querySelector('[data-testid="a3-classroom-context-summary"]')).not.toBeNull();
+    expect(view.contextElement.id).toBe(regionId);
+    expect(scrollTo).toHaveBeenCalledTimes(2);
   });
 
   it('roots the observer at the real scroll root and shows the sticky bar when context leaves view', async () => {

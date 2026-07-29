@@ -83,6 +83,7 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source).toContain('ref={contentRef}');
     expect(source).toContain('data-testid="a3-classroom-dialogue-content"');
     expect(source).toContain('data-testid="a3-classroom-context-loading"');
+    expect(source).toContain('loading && !classroom ? (');
     expect(source).toContain('copy.chooseTargetFirst');
     expect(source).toContain('copy.viewingHistoryCompact');
     expect(source).toContain('aria-live="polite"');

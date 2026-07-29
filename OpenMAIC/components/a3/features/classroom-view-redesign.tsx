@@ -1203,7 +1203,7 @@ export function ClassroomViewRedesign() {
                 onCollapse={contextLayout.collapse}
                 onExpand={contextLayout.expand}
               >
-                {loading ? (
+                {loading && !classroom ? (
                   <div
                     data-testid="a3-classroom-context-loading"
                     role="status"

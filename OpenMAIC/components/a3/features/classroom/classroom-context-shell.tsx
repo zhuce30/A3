@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
   type Ref,
   type RefObject,
@@ -27,16 +28,48 @@ type VisibilityOptions = {
   scrollRootRef: RefObject<HTMLElement | null>;
 };
 
+const contextStorageListeners = new Set<() => void>();
+
+function subscribeContextStorage(listener: () => void) {
+  const handleStorage = () => listener();
+  contextStorageListeners.add(listener);
+  window.addEventListener('storage', handleStorage);
+  return () => {
+    contextStorageListeners.delete(listener);
+    window.removeEventListener('storage', handleStorage);
+  };
+}
+
+function readContextExpanded(key: string) {
+  return window.sessionStorage.getItem(key) !== 'collapsed';
+}
+
+function readServerContextExpanded() {
+  return true;
+}
+
+function writeContextExpanded(key: string, expanded: boolean) {
+  window.sessionStorage.setItem(key, expanded ? 'expanded' : 'collapsed');
+  contextStorageListeners.forEach((listener) => listener());
+}
+
 export function useClassroomContextVisibility({ storageKey, scrollRootRef }: VisibilityOptions) {
   const regionRef = useRef<HTMLElement | null>(null);
   const regionId = `a3-classroom-context-${useId().replaceAll(':', '')}`;
-  const [expanded, setExpanded] = useState(true);
-  const [contextInView, setContextInView] = useState(true);
   const key = `a3:classroom-context:${storageKey || 'waiting-target'}`;
+  const getExpandedSnapshot = useCallback(() => readContextExpanded(key), [key]);
+  const expanded = useSyncExternalStore(
+    subscribeContextStorage,
+    getExpandedSnapshot,
+    readServerContextExpanded,
+  );
+  const [visibility, setVisibility] = useState({ key, contextInView: true });
+  if (visibility.key !== key) {
+    setVisibility({ key, contextInView: true });
+  }
+  const contextInView = visibility.key === key ? visibility.contextInView : true;
 
   useLayoutEffect(() => {
-    setExpanded(window.sessionStorage.getItem(key) !== 'collapsed');
-    setContextInView(true);
     scrollRootRef.current?.scrollTo?.({ top: 0, behavior: 'auto' });
   }, [key, scrollRootRef]);
 
@@ -45,7 +78,7 @@ export function useClassroomContextVisibility({ storageKey, scrollRootRef }: Vis
     if (!region || typeof IntersectionObserver === 'undefined') return;
 
     const observer = new IntersectionObserver(
-      ([entry]) => setContextInView(entry.isIntersecting),
+      ([entry]) => setVisibility({ key, contextInView: entry.isIntersecting }),
       { root: scrollRootRef.current, threshold: 0 },
     );
     observer.observe(region);
@@ -53,8 +86,7 @@ export function useClassroomContextVisibility({ storageKey, scrollRootRef }: Vis
   }, [key, scrollRootRef]);
 
   const setContextExpanded = useCallback((value: boolean) => {
-    setExpanded(value);
-    window.sessionStorage.setItem(key, value ? 'expanded' : 'collapsed');
+    writeContextExpanded(key, value);
   }, [key]);
 
   const openFromSticky = useCallback(() => {
