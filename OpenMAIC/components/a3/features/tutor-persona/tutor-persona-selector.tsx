@@ -169,27 +169,48 @@ export function TutorPersonaSelector({
                 onKeyDown={(event) => handlePersonaKeyDown(event, persona.id)}
                 className={cn(
                   'block w-full px-3 pr-12 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f6b53] focus-visible:ring-inset disabled:cursor-wait disabled:opacity-65',
-                  compact ? 'min-h-[76px] py-1.5' : 'min-h-[84px] py-2',
+                  compact ? 'min-h-16 py-1.5' : 'min-h-[84px] py-2',
                   selected ? 'text-[#153f32]' : 'text-[#4f6059]',
                 )}
               >
                 <span className="flex items-center gap-2">
                   <Icon className={cn('size-4 shrink-0', selected ? 'text-[#1f6b53]' : 'text-[#7a8781]')} />
                   <span className="truncate text-sm font-semibold">{persona.name}</span>
+                  {compact && recommended ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span
+                          aria-label="适合当前基础"
+                          className="inline-flex shrink-0 text-[#8a6818]"
+                        >
+                          <Star className="size-3" />
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" sideOffset={6}>适合当前基础</TooltipContent>
+                    </Tooltip>
+                  ) : null}
                 </span>
-                <span className="mt-1.5 line-clamp-2 block text-xs leading-5 text-[#6a7771]">
+                <span
+                  data-testid="a3-tutor-persona-description"
+                  className={cn(
+                    'mt-1 block text-xs leading-5 text-[#6a7771]',
+                    compact ? 'line-clamp-1' : 'line-clamp-2',
+                  )}
+                >
                   {persona.shortDescription}
                 </span>
-                <span className="mt-1 flex min-h-4 items-center gap-2">
-                  {recommended ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#8a6818]">
-                      <Star className="size-3" />适合当前基础
-                    </span>
-                  ) : null}
-                  {previewUnavailable ? (
-                    <span className="text-[11px] font-medium text-[#8a7560]">不可试听</span>
-                  ) : null}
-                </span>
+                {!compact ? (
+                  <span className="mt-1 flex min-h-4 items-center gap-2">
+                    {recommended ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#8a6818]">
+                        <Star className="size-3" />适合当前基础
+                      </span>
+                    ) : null}
+                    {previewUnavailable ? (
+                      <span className="text-[11px] font-medium text-[#8a7560]">不可试听</span>
+                    ) : null}
+                  </span>
+                ) : null}
               </button>
 
               <Tooltip>

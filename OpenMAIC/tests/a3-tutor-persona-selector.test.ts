@@ -82,6 +82,25 @@ describe('TutorPersonaSelector', () => {
     expect(html).not.toContain('dashscopeVoice');
   });
 
+  it('keeps compact classroom personas within a 64px option target', () => {
+    mountSelector({
+      compact: true,
+      personas: [personas[0]],
+      recommendedPersonaId: 'structured-teacher',
+    });
+
+    const compactOption = option('structured-teacher');
+    const description = compactOption.querySelector<HTMLElement>(
+      '[data-testid="a3-tutor-persona-description"]',
+    );
+
+    expect(compactOption.className).toContain('min-h-16');
+    expect(compactOption.className).toContain('py-1.5');
+    expect(description?.className).toContain('line-clamp-1');
+    expect(compactOption.textContent).not.toContain('适合当前基础');
+    expect(compactOption.querySelector('[aria-label="适合当前基础"]')).not.toBeNull();
+  });
+
   it('renders stable icon preview controls and an explicit unavailable state', () => {
     const html = renderSelector({
       personas: [personas[0], { ...personas[1], voicePreviewEnabled: false }],

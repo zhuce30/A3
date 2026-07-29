@@ -1485,8 +1485,8 @@ function WorkspaceHeader({
   onToggleDrawer: () => void;
 }) {
   return (
-    <header aria-label={copy.classroomInfo} className="border-b border-slate-200 px-4 pb-4 pt-16 md:px-6 md:pt-4">
-      <div className="flex flex-col gap-4 md:pr-48 lg:flex-row lg:items-start lg:justify-between">
+    <header aria-label={copy.classroomInfo} className="border-b border-slate-200 px-4 py-3 md:px-6">
+      <div className="flex flex-col gap-3 pr-32 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             {!historyOpen && (
@@ -1503,10 +1503,10 @@ function WorkspaceHeader({
             {classroom?.course && <A3Pill tone="slate">{classroom.course.title}</A3Pill>}
             <A3Pill tone={readiness >= 3 ? 'green' : 'orange'}>{readiness >= 3 ? copy.closedLoopReady : copy.needsEvidence}</A3Pill>
           </div>
-          <h1 className="mt-3 truncate text-2xl font-semibold tracking-normal text-slate-950 md:text-3xl">
+          <h1 className="mt-2 truncate text-xl font-semibold tracking-normal text-slate-950 md:text-2xl">
             {target?.title ?? copy.waitingTarget}
           </h1>
-          <p className="mt-2 line-clamp-2 max-w-3xl text-sm leading-6 text-slate-600">
+          <p className="mt-1 line-clamp-1 max-w-3xl text-sm leading-6 text-slate-600">
             {target?.reason || target?.description || copy.targetFallback}
           </p>
         </div>
@@ -1532,35 +1532,43 @@ function WorkspaceHeader({
 }
 function OpenMAICInlineBar({ copy, artifact }: { copy: ClassroomCopy; artifact: A3OpenMAICClassroomArtifact | null }) {
   return (
-    <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3 md:px-6" data-testid="a3-classroom-openmaic-entry">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex min-w-0 items-start gap-3">
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white">
-            <Layers3 className="size-5" />
+    <div className="min-h-12 border-b border-slate-200 bg-slate-50/80 px-4 py-2 md:px-6" data-testid="a3-classroom-openmaic-entry">
+      <div className="flex min-h-8 items-center gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-white">
+            <Layers3 className="size-4" />
           </div>
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-sm font-semibold text-slate-950">{copy.openmaicClassroom}</h2>
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <h2 className="min-w-0 truncate text-sm font-semibold text-slate-950">{copy.openmaicClassroom}</h2>
+            <span className="shrink-0">
               <A3Pill tone={artifact?.status === 'succeeded' ? 'green' : artifact ? 'orange' : 'slate'}>
                 {artifact?.status ?? copy.notGenerated}
               </A3Pill>
-              {artifact?.scenesCount ? <A3Pill tone="blue">{artifact.scenesCount} {copy.scenesUnit}</A3Pill> : null}
-            </div>
-            <p className="mt-1 text-xs leading-5 text-slate-600" data-testid="a3-classroom-openmaic-pptx-hint">
+            </span>
+            {artifact?.scenesCount ? (
+              <span className="hidden shrink-0 xl:inline">
+                <A3Pill tone="blue">{artifact.scenesCount} {copy.scenesUnit}</A3Pill>
+              </span>
+            ) : null}
+            <p
+              className="hidden min-w-0 flex-1 truncate text-xs text-slate-600 lg:block"
+              data-testid="a3-classroom-openmaic-pptx-hint"
+              title={copy.pptxHint}
+            >
               {copy.pptxHint}
             </p>
           </div>
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
+        <div className="shrink-0">
           {artifact?.classroomUrl ? (
-            <Button asChild size="sm" className="bg-blue-600 text-white hover:bg-blue-700" data-testid="a3-classroom-openmaic-open">
+            <Button asChild size="sm" className="shrink-0 bg-blue-600 text-white hover:bg-blue-700" data-testid="a3-classroom-openmaic-open">
               <Link href={artifact.classroomUrl}>
                 <ExternalLink className="size-4" />
                 {copy.openClassroom}
               </Link>
             </Button>
           ) : (
-            <Button asChild size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS}>
+            <Button asChild size="sm" variant="outline" className={cn('shrink-0', CLASSROOM_OUTLINE_BUTTON_CLASS)}>
               <Link href="/a3/recommendations">
                 <UploadCloud className="size-4" />
                 {copy.generateResourceClassroom}
