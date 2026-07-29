@@ -78,13 +78,20 @@ type Deferred<T> = {
 
 const resizeObserverInstances: TestResizeObserver[] = [];
 
-class TestResizeObserver {
+class TestResizeObserver implements ResizeObserver {
   readonly disconnect = vi.fn();
   readonly observe = vi.fn();
+  readonly takeRecords = vi.fn<() => ResizeObserverEntry[]>(() => []);
   readonly unobserve = vi.fn();
+  readonly callback: ResizeObserverCallback;
 
-  constructor() {
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
     resizeObserverInstances.push(this);
+  }
+
+  emit(entries: ResizeObserverEntry[]) {
+    this.callback(entries, this);
   }
 }
 
@@ -198,6 +205,31 @@ function dispatchEnter(textarea: HTMLTextAreaElement, init: KeyboardEventInit = 
   return event;
 }
 
+function createResizeEntry(
+  target: Element,
+  contentHeight: number,
+  borderHeight: number,
+): ResizeObserverEntry {
+  const contentRect = {
+    x: 0,
+    y: 0,
+    width: 0,
+    height: contentHeight,
+    top: 0,
+    right: 0,
+    bottom: contentHeight,
+    left: 0,
+    toJSON: () => ({}),
+  };
+  return {
+    target,
+    contentRect,
+    borderBoxSize: [{ blockSize: borderHeight, inlineSize: 0 }],
+    contentBoxSize: [{ blockSize: contentHeight, inlineSize: 0 }],
+    devicePixelContentBoxSize: [{ blockSize: contentHeight, inlineSize: 0 }],
+  } as ResizeObserverEntry;
+}
+
 async function waitFor(assertion: () => void) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -273,6 +305,26 @@ afterEach(() => {
 });
 
 describe('ClassroomViewRedesign progressive context integration', () => {
+  it('uses the measured composer border box for workspace and message clearance', async () => {
+    const container = await mountClassroom(classroom('进程调度'));
+    const workspace = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-workspace"]');
+    const dialogue = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-dialogue"]');
+    const content = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-dialogue-content"]');
+    const composerFrame = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-composer-frame"]');
+    const composerObserver = resizeObserverInstances.find((observer) => (
+      observer.observe.mock.calls.some(([target]) => target === composerFrame)
+    ));
+    if (!composerObserver) throw new Error('Missing composer ResizeObserver');
+
+    act(() => {
+      composerObserver.emit([createResizeEntry(composerFrame, 120, 132.2)]);
+    });
+
+    expect(workspace.style.getPropertyValue('--a3-composer-height')).toBe('133px');
+    expect(dialogue.style.scrollPaddingBottom).toBe('calc(var(--a3-composer-height) + 16px)');
+    expect(content.style.paddingBottom).toBe('calc(var(--a3-composer-height) + 16px)');
+  });
+
   it('keeps retrieval controls in the form tool row between media controls and send', async () => {
     const container = await mountClassroom(classroom('进程调度'));
     const form = queryRequired<HTMLFormElement>(container, '[data-testid="a3-classroom-input"]').closest('form');

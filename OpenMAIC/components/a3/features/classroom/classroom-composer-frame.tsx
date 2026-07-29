@@ -7,6 +7,16 @@ type ClassroomComposerFrameProps = {
   onHeightChange: (height: number) => void;
 };
 
+function readBorderBoxHeight(entry: ResizeObserverEntry, frame: HTMLElement) {
+  const borderBoxSize = (entry as unknown as {
+    borderBoxSize?: ResizeObserverSize | readonly ResizeObserverSize[];
+  }).borderBoxSize;
+  const box = Array.isArray(borderBoxSize)
+    ? borderBoxSize[0]
+    : borderBoxSize as ResizeObserverSize | undefined;
+  return box?.blockSize ?? frame.getBoundingClientRect().height;
+}
+
 export function ClassroomComposerFrame({
   children,
   onHeightChange,
@@ -23,7 +33,7 @@ export function ClassroomComposerFrame({
 
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
-      if (entry) onHeightChange(Math.ceil(entry.contentRect.height));
+      if (entry) onHeightChange(Math.ceil(readBorderBoxHeight(entry, frame)));
     });
     observer.observe(frame);
 

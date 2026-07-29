@@ -168,14 +168,28 @@ function createDomRect(height = 0): DOMRectReadOnly {
   };
 }
 
-function emitResize(height: number) {
+function emitResize({
+  contentHeight,
+  borderHeight,
+  borderBoxShape = 'array',
+}: {
+  contentHeight: number;
+  borderHeight?: number;
+  borderBoxShape?: 'array' | 'object' | 'missing';
+}) {
   const observer = resizeObserverInstances.at(-1);
   if (!observer || !resizeObserverCallback) throw new Error('Resize observer was not created');
 
+  const borderBoxSize = borderHeight === undefined || borderBoxShape === 'missing'
+    ? undefined
+    : borderBoxShape === 'object'
+      ? { blockSize: borderHeight, inlineSize: 0 }
+      : [{ blockSize: borderHeight, inlineSize: 0 }];
   const entry = {
     target: document.querySelector('[data-testid="a3-classroom-composer-frame"]'),
-    contentRect: createDomRect(height),
-  } as ResizeObserverEntry;
+    contentRect: createDomRect(contentHeight),
+    borderBoxSize,
+  } as unknown as ResizeObserverEntry;
 
   act(() => {
     resizeObserverCallback?.([entry], observer);
@@ -252,12 +266,14 @@ afterEach(() => {
 });
 
 describe('floating classroom composer frame', () => {
-  it('reports the initial height, rounds resize entries up, and disconnects on cleanup', async () => {
+  it('reports one rounded border-box height across array, object, and fallback resize shapes', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
     const onHeightChange = vi.fn();
-    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(createDomRect(87.1));
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockReturnValueOnce(createDomRect(87.1))
+      .mockReturnValue(createDomRect(103.2));
 
     await act(async () => {
       root.render(
@@ -273,8 +289,14 @@ describe('floating classroom composer frame', () => {
     expect(resizeObserverInstances).toHaveLength(1);
     expect(resizeObserverInstances[0].observe).toHaveBeenCalledWith(frame);
 
-    emitResize(88.01);
-    expect(onHeightChange).toHaveBeenLastCalledWith(89);
+    emitResize({ contentHeight: 80.1, borderHeight: 96.2, borderBoxShape: 'array' });
+    expect(onHeightChange).toHaveBeenLastCalledWith(97);
+
+    emitResize({ contentHeight: 81.1, borderHeight: 98.4, borderBoxShape: 'object' });
+    expect(onHeightChange).toHaveBeenLastCalledWith(99);
+
+    emitResize({ contentHeight: 82.1, borderBoxShape: 'missing' });
+    expect(onHeightChange).toHaveBeenLastCalledWith(104);
 
     act(() => root.unmount());
     expect(resizeObserverInstances[0].disconnect).toHaveBeenCalledTimes(1);
