@@ -55,7 +55,8 @@ function writeContextExpanded(key: string, expanded: boolean) {
 
 export function useClassroomContextVisibility({ storageKey, scrollRootRef }: VisibilityOptions) {
   const regionRef = useRef<HTMLElement | null>(null);
-  const focusAfterExpandRef = useRef(false);
+  const [focusRequest, setFocusRequest] = useState(0);
+  const handledFocusRequestRef = useRef(0);
   const regionId = `a3-classroom-context-${useId().replaceAll(':', '')}`;
   const key = `a3:classroom-context:${storageKey || 'waiting-target'}`;
   const getExpandedSnapshot = useCallback(() => readContextExpanded(key), [key]);
@@ -91,18 +92,18 @@ export function useClassroomContextVisibility({ storageKey, scrollRootRef }: Vis
   }, [key]);
 
   useLayoutEffect(() => {
-    if (!expanded || !focusAfterExpandRef.current) return;
-    focusAfterExpandRef.current = false;
+    if (!expanded || focusRequest === handledFocusRequestRef.current) return;
+    handledFocusRequestRef.current = focusRequest;
     const frame = window.requestAnimationFrame(() => {
       regionRef.current
         ?.querySelector<HTMLElement>('[data-a3-context-focus-target]')
         ?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [expanded]);
+  }, [expanded, focusRequest]);
 
   const openFromSticky = useCallback(() => {
-    focusAfterExpandRef.current = true;
+    setFocusRequest((current) => current + 1);
     setContextExpanded(true);
     const reduceMotion = typeof window.matchMedia === 'function'
       && window.matchMedia('(prefers-reduced-motion: reduce)').matches;

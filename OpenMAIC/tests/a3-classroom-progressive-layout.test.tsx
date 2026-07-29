@@ -557,6 +557,27 @@ describe('progressive classroom context', () => {
     expect(document.activeElement).toBe(contextTitle);
   });
 
+  it('focuses the visible title when sticky opens an already-expanded context', async () => {
+    const view = await mountContext({ storageKey: 'target-a' });
+    emitIntersection(view, false);
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(view.contextElement, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    const stickyOpenButton = view.container.querySelector<HTMLButtonElement>(
+      '[data-testid="a3-classroom-sticky-context"] [aria-label="展开课堂信息"]',
+    );
+    await act(async () => stickyOpenButton?.click());
+
+    expect(view.container.querySelector('[data-testid="a3-classroom-context-expanded"]')).not.toBeNull();
+    expect(sessionStorage.getItem('a3:classroom-context:target-a')).toBe('expanded');
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'smooth' });
+    const contextTitle = view.container.querySelector('[data-testid="a3-classroom-context-title"]');
+    expect(document.activeElement).toBe(contextTitle);
+  });
+
   it('uses auto scrolling when reduced motion is requested', async () => {
     const view = await mountContext({ storageKey: 'target-a' });
     const collapseButton = view.container.querySelector<HTMLButtonElement>('[aria-label="收起课堂信息"]');
