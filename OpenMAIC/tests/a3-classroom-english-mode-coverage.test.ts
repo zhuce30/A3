@@ -45,8 +45,13 @@ describe('A3 classroom English mode coverage', () => {
     const focusedHeader = shell.slice(focusedStart, focusedEnd);
 
     expect(shell).toContain('className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden"');
-    expect(focusedHeader).toContain('hidden min-w-0 items-center gap-3 overflow-hidden xl:flex');
+    expect(shell).toContain(
+      "const focusedPageTitle = pathname === '/a3/coaching' ? messages.coachingTitle : messages.classroomTitle;",
+    );
+    expect(focusedHeader.match(/<h1\b/g)).toHaveLength(1);
+    expect(focusedHeader).toContain('<h1 className="sr-only md:not-sr-only md:min-w-0 md:truncate md:whitespace-nowrap');
+    expect(focusedHeader).toContain('{focusedPageTitle}</h1>');
+    expect(focusedHeader).toContain('hidden min-w-0 shrink overflow-hidden xl:block');
     expect(focusedHeader).not.toContain('items-center gap-3 md:flex');
-    expect(focusedHeader).toContain('truncate whitespace-nowrap');
   });
 });

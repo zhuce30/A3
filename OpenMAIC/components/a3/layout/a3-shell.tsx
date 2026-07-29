@@ -51,6 +51,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
   const userInitial = displayName.slice(0, 1);
   const studyGroup = user?.school ? `${user.school}${messages.studyGroupSuffix}` : messages.defaultStudyGroup;
   const focusedHeader = pathname === '/a3/classroom' || pathname === '/a3/coaching';
+  const focusedPageTitle = pathname === '/a3/coaching' ? messages.coachingTitle : messages.classroomTitle;
   const pageTitle = pathname === '/a3/report' ? messages.reportTitle : pathname === '/a3/help' ? messages.helpCenter : '';
   const compactHeader = pathname === '/a3/dashboard' || Boolean(pageTitle);
   const visibleNavItems = a3NavItems.filter((item) => !item.roles || (user?.role && item.roles.includes(user.role)));
@@ -281,18 +282,16 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
               </div>
             </div>
             {focusedHeader && (
-              <div className="mr-4 hidden min-w-0 items-center gap-3 overflow-hidden xl:flex 2xl:mr-8">
-                <div className="min-w-0 shrink">
+              <>
+                <div className="hidden min-w-0 shrink overflow-hidden xl:block">
                   <div className="truncate whitespace-nowrap text-xl font-semibold">{messages.appName}</div>
                   <div className="truncate whitespace-nowrap text-xs font-medium uppercase tracking-wide text-[var(--a3-text-muted)]">
                     {messages.appNameEn}
                   </div>
                 </div>
-                <div className="ml-2 h-8 w-px shrink-0 bg-[var(--a3-border)] 2xl:ml-8" />
-                <div className="min-w-0 truncate whitespace-nowrap text-lg font-semibold text-[var(--a3-text)]">
-                  {pathname === '/a3/coaching' ? messages.coachingTitle : messages.classroomTitle}
-                </div>
-              </div>
+                <div className="ml-2 hidden h-8 w-px shrink-0 bg-[var(--a3-border)] xl:block 2xl:ml-8" />
+                <h1 className="sr-only md:not-sr-only md:min-w-0 md:truncate md:whitespace-nowrap md:text-lg md:font-semibold md:text-[var(--a3-text)] xl:mr-4 2xl:mr-8">{focusedPageTitle}</h1>
+              </>
             )}
             {pageTitle && (
               <h1 className="hidden text-xl font-semibold text-[var(--a3-text)] md:block">{pageTitle}</h1>
