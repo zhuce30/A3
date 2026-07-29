@@ -90,7 +90,7 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source.match(/data-testid="a3-classroom-dialogue"/g)).toHaveLength(1);
     expect(source.match(/ref=\{scrollRef\}/g)).toHaveLength(1);
     expect(source.match(/ref=\{contentRef\}/g)).toHaveLength(1);
-    expect(source).not.toContain('grid-rows-[minmax(0,1fr)_auto]');
+    expect(source).toContain('grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]');
   });
 
   it('keeps progressive classroom copy synchronized in zh-CN and en-US', () => {
@@ -110,6 +110,17 @@ describe('A3 classroom redesigned workspace contract', () => {
       'More actions',
     ]) {
       expect(source).toContain(englishValue);
+    }
+
+    for (const chineseEntry of [
+      "jumpLatest: '回到最新消息'",
+      "loadingContext: '正在加载课堂信息'",
+      "tutorUnavailable: '导师方式加载失败'",
+      "retryTutor: '重试导师方式'",
+      "chooseTargetFirst: '请先选择学习目标，再开始提问'",
+      "tutorPending: '辅导方式待选择'",
+    ]) {
+      expect(source).toContain(chineseEntry);
     }
 
     for (const key of [

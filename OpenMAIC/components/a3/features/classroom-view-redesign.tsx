@@ -185,13 +185,13 @@ const classroomCopy = {
     classroomInfo: '课堂信息',
     collapseClassroomInfo: '收起课堂信息',
     expandClassroomInfo: '展开课堂信息',
-    jumpLatest: '跳至最新消息',
+    jumpLatest: '回到最新消息',
     viewingHistoryCompact: '正在查看历史对话',
-    loadingContext: '正在加载课堂上下文',
-    tutorUnavailable: '辅导方式不可用',
-    retryTutor: '重试加载辅导方式',
-    chooseTargetFirst: '请先选择学习目标再提问',
-    tutorPending: '辅导方式待加载',
+    loadingContext: '正在加载课堂信息',
+    tutorUnavailable: '导师方式加载失败',
+    retryTutor: '重试导师方式',
+    chooseTargetFirst: '请先选择学习目标，再开始提问',
+    tutorPending: '辅导方式待选择',
     moreActions: '更多操作',
     collapseHistory: '收起历史侧栏',
     expandHistory: '展开历史侧栏',
@@ -1175,7 +1175,7 @@ export function ClassroomViewRedesign() {
       )}
 
       <section className="relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm" data-testid="a3-classroom-workspace">
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]">
           <div
             ref={scrollRef}
             className="min-h-0 flex-1 overflow-y-auto"
