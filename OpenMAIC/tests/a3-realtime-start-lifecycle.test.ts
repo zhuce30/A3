@@ -3,6 +3,7 @@ import {
   acquireRealtimeStartResource,
   canStartRealtimeCall,
   createRealtimeStartOperationController,
+  ensureRealtimeInputAudioContextRunning,
   runRealtimeEndLifecycle,
   runRealtimeStartStep,
 } from '@/components/a3/features/coaching/use-realtime-coaching';
@@ -101,6 +102,29 @@ describe('A3 realtime start lifecycle', () => {
   it('does not allow starting another call while a summary is ending', () => {
     expect(canStartRealtimeCall('ending')).toBe(false);
     expect(canStartRealtimeCall('ended')).toBe(true);
+  });
+
+  it('resumes a suspended microphone audio context before streaming samples', async () => {
+    const context = {
+      state: 'suspended' as AudioContextState,
+      resume: vi.fn(async () => {
+        context.state = 'running';
+      }),
+    };
+
+    await expect(ensureRealtimeInputAudioContextRunning(context)).resolves.toBeUndefined();
+    expect(context.resume).toHaveBeenCalledOnce();
+  });
+
+  it('rejects microphone streaming when the browser keeps audio processing suspended', async () => {
+    const context = {
+      state: 'suspended' as AudioContextState,
+      resume: vi.fn(async () => undefined),
+    };
+
+    await expect(ensureRealtimeInputAudioContextRunning(context)).rejects.toThrow(
+      '浏览器暂停了麦克风音频处理',
+    );
   });
 });
 

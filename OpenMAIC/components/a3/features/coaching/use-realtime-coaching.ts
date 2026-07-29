@@ -56,6 +56,7 @@ type EndResponse = {
 };
 
 type BrowserAudioContext = typeof AudioContext;
+type RealtimeInputAudioContext = Pick<AudioContext, 'state' | 'resume'>;
 type RetrievalProgress = {
   status: 'idle' | 'running' | 'succeeded' | 'failed';
   message: string;
@@ -170,6 +171,18 @@ export function canStartRealtimeCall(status: A3RealtimeStatus) {
     && status !== 'connecting'
     && status !== 'live'
     && status !== 'ending';
+}
+
+export async function ensureRealtimeInputAudioContextRunning(
+  context: RealtimeInputAudioContext,
+) {
+  if (context.state === 'suspended') {
+    await context.resume();
+  }
+  const currentState: AudioContextState = context.state;
+  if (currentState !== 'running') {
+    throw new Error('浏览器暂停了麦克风音频处理，请重新点击“开启麦克风”后再试。');
+  }
 }
 
 export async function runRealtimeEndLifecycle<T>({
@@ -326,6 +339,19 @@ export function useRealtimeCoaching(personaId: string = '') {
 
   const attachCameraStream = useCallback(() => {
     if (cameraVideoRef.current) cameraVideoRef.current.srcObject = cameraStreamRef.current;
+  }, []);
+
+  const prepareInputAudioContext = useCallback(() => {
+    const AudioContextCtor = window.AudioContext || (window as unknown as {
+      webkitAudioContext?: BrowserAudioContext;
+    }).webkitAudioContext;
+    if (!AudioContextCtor) return;
+    const existing = audioContextRef.current;
+    const audioContext = existing && existing.state !== 'closed'
+      ? existing
+      : new AudioContextCtor({ sampleRate: 16000 });
+    audioContextRef.current = audioContext;
+    void ensureRealtimeInputAudioContextRunning(audioContext).catch(() => undefined);
   }, []);
 
   const attachScreenStream = useCallback(() => {
@@ -745,7 +771,13 @@ export function useRealtimeCoaching(personaId: string = '') {
       setError('当前浏览器不支持实时音频采集');
       return false;
     }
-    const audioContext = new AudioContextCtor({ sampleRate: 16000 });
+    const existingAudioContext = audioContextRef.current;
+    const audioContext = existingAudioContext && existingAudioContext.state !== 'closed'
+      ? existingAudioContext
+      : new AudioContextCtor({ sampleRate: 16000 });
+    audioContextRef.current = audioContext;
+    await ensureRealtimeInputAudioContextRunning(audioContext);
+    if (operation && !isStartOperationCurrent(operation)) return false;
     const source = audioContext.createMediaStreamSource(stream);
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
     const silenceGain = audioContext.createGain();
@@ -781,7 +813,6 @@ export function useRealtimeCoaching(personaId: string = '') {
     source.connect(processor);
     processor.connect(silenceGain);
     silenceGain.connect(audioContext.destination);
-    audioContextRef.current = audioContext;
     audioSourceRef.current = source;
     audioProcessorRef.current = processor;
     audioSilenceGainRef.current = silenceGain;
@@ -949,6 +980,7 @@ export function useRealtimeCoaching(personaId: string = '') {
     setStatus('connecting');
     setError('');
     setSummary(null);
+    prepareInputAudioContext();
 
     try {
       let startFailure: Error | null = null;
@@ -1053,7 +1085,7 @@ export function useRealtimeCoaching(personaId: string = '') {
           : '实时面对面辅导连接失败，请检查网络后重试。',
       );
     }
-  }, [connectRealtimePeer, connectRealtimeWebSocket, isStartOperationCurrent, personaId, stopMediaTracks]);
+  }, [connectRealtimePeer, connectRealtimeWebSocket, isStartOperationCurrent, personaId, prepareInputAudioContext, stopMediaTracks]);
 
   const persistRealtimeTranscript = useCallback(async (
     sessionSnapshot: A3RealtimeCoachingSession | null,
@@ -1235,6 +1267,7 @@ export function useRealtimeCoaching(personaId: string = '') {
         setError('当前浏览器不支持麦克风访问');
         return;
       }
+      if (!microphoneEnabled) prepareInputAudioContext();
       if (!cameraStreamRef.current) {
         cameraStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         attachCameraStream();
@@ -1251,10 +1284,14 @@ export function useRealtimeCoaching(personaId: string = '') {
           stopDashScopeAudioStreaming();
         }
       }
-    } catch {
-      setError('麦克风权限被拒绝或设备不可用，请检查浏览器权限。');
+    } catch (microphoneError) {
+      setError(
+        microphoneError instanceof Error
+          ? microphoneError.message
+          : '麦克风权限被拒绝或设备不可用，请检查浏览器权限。',
+      );
     }
-  }, [attachCameraStream, microphoneEnabled, startDashScopeAudioStreaming, stopDashScopeAudioStreaming]);
+  }, [attachCameraStream, microphoneEnabled, prepareInputAudioContext, startDashScopeAudioStreaming, stopDashScopeAudioStreaming]);
 
   const toggleCamera = useCallback(async () => {
     try {
