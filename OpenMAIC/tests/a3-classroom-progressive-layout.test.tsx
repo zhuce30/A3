@@ -373,6 +373,10 @@ describe('responsive classroom controls', () => {
     expect(summary?.getAttribute('aria-label')).toBe('更多操作');
     expect(summary?.getAttribute('title')).toBe('更多操作');
     expect(summary?.getAttribute('data-testid')).toBe('a3-classroom-mobile-actions-trigger');
+    const drawerAction = details?.querySelector<HTMLButtonElement>(
+      '[data-testid="a3-classroom-mobile-drawer-action"]',
+    );
+    expect(drawerAction?.getAttribute('aria-label')).toBe('打开侧面板');
 
     for (const [label, callback] of [
       ['重试导师方式', onRetryTutor],

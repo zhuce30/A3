@@ -118,6 +118,14 @@ describe('A3 classroom redesigned workspace contract', () => {
     ]) {
       expect(source).toContain(`data-testid="${testId}"`);
     }
+
+    const stickyTestId = 'data-testid="a3-classroom-sticky-drawer-toggle"';
+    const stickyTestIdIndex = source.indexOf(stickyTestId);
+    const stickyButton = source.slice(
+      source.lastIndexOf('<button', stickyTestIdIndex),
+      source.indexOf('>', stickyTestIdIndex) + 1,
+    );
+    expect(stickyButton).toContain('aria-label={copy.sidePanel}');
   });
 
   it('integrates classroom context into the unique stick-to-bottom dialogue flow', () => {

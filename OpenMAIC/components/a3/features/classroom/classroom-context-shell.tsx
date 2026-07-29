@@ -293,7 +293,6 @@ export function MobileStickyActions({
         )}
         <button
           type="button"
-          data-testid="a3-classroom-mobile-drawer-action"
           className={actionClassName}
           aria-label={refreshLabel}
           title={refreshLabel}
@@ -305,6 +304,7 @@ export function MobileStickyActions({
         </button>
         <button
           type="button"
+          data-testid="a3-classroom-mobile-drawer-action"
           className={actionClassName}
           aria-label={sidePanelLabel}
           title={sidePanelLabel}

@@ -1549,7 +1549,6 @@ function ClassroomStickyActions({
       )}
       <button
         type="button"
-        data-testid="a3-classroom-sticky-drawer-toggle"
         className={actionClassName}
         aria-label={copy.refreshContext}
         title={copy.refreshContext}
@@ -1562,6 +1561,7 @@ function ClassroomStickyActions({
       </button>
       <button
         type="button"
+        data-testid="a3-classroom-sticky-drawer-toggle"
         className={actionClassName}
         aria-label={copy.sidePanel}
         title={copy.sidePanel}
