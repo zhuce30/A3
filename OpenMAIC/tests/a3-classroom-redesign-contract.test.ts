@@ -61,11 +61,39 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source).not.toContain('h-[calc(100dvh-310px)]');
     expect(source).toContain('grid h-[calc(100dvh-104px)] min-h-[640px]');
     expect(source).toContain('flex min-h-0 min-w-0 flex-col overflow-hidden');
-    expect(source).toContain('grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]');
     expect(source).toContain("window.matchMedia('(min-width: 1280px)')");
     expect(source).toContain("document.documentElement.style.overflowY = 'hidden'");
     expect(source).toContain("document.body.style.overflowY = 'hidden'");
     expect(source).toContain('document.documentElement.style.overflowY = previousHtmlOverflowY');
     expect(source).toContain('document.body.style.overflowY = previousBodyOverflowY');
+  });
+
+  it('uses progressive classroom context and a measured floating composer', () => {
+    const source = fs.readFileSync(redesignPath, 'utf8');
+
+    expect(source).toContain('ClassroomContextShell');
+    expect(source).toContain('ClassroomStickyContextBar');
+    expect(source).toContain('ClassroomComposerFrame');
+    expect(source).toContain('useStickToBottom');
+    expect(source).toContain("'--a3-composer-height'");
+    expect(source).toContain('data-testid="a3-classroom-jump-latest"');
+    expect(source).toContain('data-testid="a3-classroom-context-loading"');
+    expect(source).toContain('copy.chooseTargetFirst');
+    expect(source).toContain('copy.viewingHistoryCompact');
+    expect(source).toContain('aria-live="polite"');
+    expect(source).toContain('role="alert"');
+    expect(source).not.toContain('grid-rows-[minmax(0,1fr)_auto]');
+  });
+
+  it('keeps classroom context collapse state local to the browser session', () => {
+    const contextSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'components/a3/features/classroom/classroom-context-shell.tsx'),
+      'utf8',
+    );
+
+    expect(contextSource).toContain('window.sessionStorage.getItem');
+    expect(contextSource).toContain('window.sessionStorage.setItem');
+    expect(contextSource).toContain('IntersectionObserver');
+    expect(contextSource).not.toContain('localStorage');
   });
 });

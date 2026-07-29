@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import type { A3ResourcePacksResponse } from '@/lib/a3/recommendation-types';
 import { expect, test } from '../fixtures/base';
 
 const longLessonContent = [
@@ -9,6 +10,34 @@ const longLessonContent = [
     `### 课件要点 ${index + 1}\n银行家算法会在资源分配前检查系统是否仍处于安全状态，避免进入死锁。`
   )),
 ].join('\n\n');
+
+const classroomResourcePacksFixture = {
+  success: true,
+  resourcePacks: [{
+    schemaVersion: 'a3.resource-pack.v2',
+    resourcePackId: 'classroom-layout-pack',
+    generationMode: 'full',
+    requestedResourceType: '',
+    goal: '掌握进程调度与死锁',
+    learnerProfileSnapshot: {},
+    resources: [],
+    multimodalArtifacts: [{
+      type: 'openmaic_classroom',
+      jobId: 'job-classroom-layout-001',
+      status: 'succeeded',
+      classroomId: 'classroom-layout-001',
+      classroomUrl: '/classroom/classroom-layout-001',
+      scenesCount: 4,
+      pptxExportable: true,
+      provider: 'openmaic',
+      elapsedMs: 1200,
+      createdAt: '2026-07-29T08:00:00Z',
+    }],
+    nextActions: [],
+    traceId: 'trace-classroom-layout-001',
+    createdAt: '2026-07-29T08:00:00Z',
+  }],
+} satisfies A3ResourcePacksResponse;
 
 async function mockClassroomLayoutDependencies(page: Page) {
   await page.route('**/api/access-code/status', (route) => route.fulfill({
@@ -45,10 +74,50 @@ async function mockClassroomLayoutDependencies(page: Page) {
       },
     }),
   }));
+  await page.route('**/api/profiles/tutor-preference/', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      success: true,
+      preference: {
+        personaId: 'practice-coach',
+        source: 'profile_recommendation',
+        schemaVersion: 'a3.tutor-preference.v1',
+        updatedAt: '2026-07-29T08:00:00Z',
+      },
+      selectedPersona: {
+        id: 'practice-coach',
+        name: '例题实战',
+        shortDescription: '用例题、步骤和即时反馈巩固薄弱点',
+        teachingStyle: 'practice',
+        avatarAssetId: 'teacher-default-v1',
+        avatarPublicPath: '/a3/assets/teacher-avatar/teacher.vrm',
+        voiceProfileId: 'voice-energetic-coach',
+        voicePreviewEnabled: true,
+        allowedWorkflows: ['coaching', 'classroom'],
+        schemaVersion: 'a3.tutor-persona.v1',
+        enabled: true,
+      },
+      fallbackUsed: false,
+      personas: [{
+        id: 'practice-coach',
+        name: '例题实战',
+        shortDescription: '用例题、步骤和即时反馈巩固薄弱点',
+        teachingStyle: 'practice',
+        avatarAssetId: 'teacher-default-v1',
+        avatarPublicPath: '/a3/assets/teacher-avatar/teacher.vrm',
+        voiceProfileId: 'voice-energetic-coach',
+        voicePreviewEnabled: true,
+        allowedWorkflows: ['coaching', 'classroom'],
+        schemaVersion: 'a3.tutor-persona.v1',
+        enabled: true,
+      }],
+    }),
+  }));
   await page.route('**/api/resources/packs/', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({ success: true, resourcePacks: [] }),
+    body: JSON.stringify(classroomResourcePacksFixture),
   }));
   await page.route('**/api/learning/classroom/history/', (route) => route.fulfill({
     status: 200,
@@ -113,6 +182,7 @@ test.describe('A3 classroom viewport layout', () => {
       const classroom = page.getByTestId('a3-classroom-view');
       const workspace = page.getByTestId('a3-classroom-workspace');
       const dialogue = page.getByTestId('a3-classroom-dialogue');
+      const composer = page.getByTestId('a3-classroom-composer-frame');
       const input = page.getByTestId('a3-classroom-input');
       await expect(classroom).toBeVisible();
       await expect(workspace).toBeVisible();
@@ -130,19 +200,24 @@ test.describe('A3 classroom viewport layout', () => {
       await expect(page.getByTestId('a3-classroom-history-panel')).toBeHidden();
       await expect(page.getByTestId('a3-classroom-drawer-tab-practice')).toBeHidden();
 
-      const [classroomBox, workspaceBox, dialogueBox, inputBox] = await Promise.all([
+      const [classroomBox, workspaceBox, dialogueBox, composerBox] = await Promise.all([
         classroom.boundingBox(),
         workspace.boundingBox(),
         dialogue.boundingBox(),
-        input.boundingBox(),
+        composer.boundingBox(),
       ]);
       expect(classroomBox).not.toBeNull();
       expect(workspaceBox).not.toBeNull();
       expect(dialogueBox).not.toBeNull();
-      expect(inputBox).not.toBeNull();
+      expect(composerBox).not.toBeNull();
       expect(dialogueBox!.height).toBeGreaterThanOrEqual(viewport.minimumDialogueHeight);
-      expect(dialogueBox!.y + dialogueBox!.height).toBeLessThanOrEqual(inputBox!.y);
-      expect(inputBox!.y + inputBox!.height).toBeLessThanOrEqual(workspaceBox!.y + workspaceBox!.height);
+      expect(Math.abs(
+        dialogueBox!.y + dialogueBox!.height - (workspaceBox!.y + workspaceBox!.height),
+      )).toBeLessThanOrEqual(1);
+      expect(composerBox!.y).toBeGreaterThanOrEqual(workspaceBox!.y);
+      expect(composerBox!.y + composerBox!.height).toBeLessThanOrEqual(
+        workspaceBox!.y + workspaceBox!.height,
+      );
       expect(Math.abs(classroomBox!.height - workspaceBox!.height)).toBeLessThanOrEqual(1);
 
       await page.screenshot({
@@ -156,5 +231,44 @@ test.describe('A3 classroom viewport layout', () => {
       html: document.documentElement.style.overflowY,
       body: document.body.style.overflowY,
     }))).toEqual({ html: '', body: '' });
+  });
+
+  test('collapses context, reveals the sticky summary, and never covers the last message', async ({ page }) => {
+    await mockClassroomLayoutDependencies(page);
+    await page.setViewportSize({ width: 1366, height: 768 });
+    await page.goto('/a3/classroom', { waitUntil: 'domcontentloaded' });
+
+    const context = page.getByTestId('a3-classroom-context-region');
+    const composer = page.getByTestId('a3-classroom-composer-frame');
+    const dialogue = page.getByTestId('a3-classroom-dialogue');
+
+    await expect(context).toBeVisible();
+    await expect(composer).toBeVisible();
+    await expect(page.getByTestId('a3-classroom-sticky-context')).toBeHidden();
+    await page.getByRole('button', { name: '收起课堂信息' }).click();
+    await expect(page.getByTestId('a3-classroom-context-summary')).toBeVisible();
+
+    const collapsedBox = await context.boundingBox();
+    const composerBox = await composer.boundingBox();
+    expect(collapsedBox).not.toBeNull();
+    expect(composerBox).not.toBeNull();
+    expect(collapsedBox!.height).toBeLessThanOrEqual(56);
+    expect(composerBox!.height).toBeLessThanOrEqual(96);
+
+    await dialogue.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event('scroll'));
+    });
+    await expect(page.getByTestId('a3-classroom-sticky-context')).toBeVisible();
+
+    const lastMessage = page.getByTestId('a3-classroom-message-assistant').last();
+    await expect(lastMessage).toBeVisible();
+    const [messageBox, floatingBox] = await Promise.all([
+      lastMessage.boundingBox(),
+      composer.boundingBox(),
+    ]);
+    expect(messageBox).not.toBeNull();
+    expect(floatingBox).not.toBeNull();
+    expect(messageBox!.y + messageBox!.height).toBeLessThanOrEqual(floatingBox!.y + 1);
   });
 });
