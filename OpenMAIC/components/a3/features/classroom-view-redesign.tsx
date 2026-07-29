@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useStickToBottom } from 'use-stick-to-bottom';
 import {
   Bot,
@@ -55,6 +55,9 @@ import { A3Markdown } from '../ui/a3-markdown';
 import { A3SpeechControls } from '../ui/a3-speech-controls';
 import { TutorPersonaSelector } from './tutor-persona/tutor-persona-selector';
 import { useTutorPersona } from './tutor-persona/use-tutor-persona';
+import {
+  ClassroomComposerFrame,
+} from './classroom/classroom-composer-frame';
 import {
   ClassroomContextShell,
   ClassroomStickyContextBar,
@@ -595,6 +598,7 @@ export function ClassroomViewRedesign() {
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [drawerTab, setDrawerTab] = useState<DrawerTab>('practice');
   const [historyQuery, setHistoryQuery] = useState('');
+  const [composerHeight, setComposerHeight] = useState(88);
   const chatRef = useRef(chat);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -629,6 +633,9 @@ export function ClassroomViewRedesign() {
         : openmaicStatusLabel,
     statusTone: tutorPersona.error ? 'warning' as const : 'neutral' as const,
   };
+  const handleComposerHeightChange = useCallback((height: number) => {
+    setComposerHeight((current) => current === height ? current : height);
+  }, []);
   const showLessonRunway = !viewingHistoryId && !chat.some((item) => item.role === 'user');
   const filteredSessions = useMemo(() => {
     const query = historyQuery.trim().toLowerCase();
@@ -1174,14 +1181,23 @@ export function ClassroomViewRedesign() {
         />
       )}
 
-      <section className="relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm" data-testid="a3-classroom-workspace">
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]">
+      <section
+        className="relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm"
+        style={{ '--a3-composer-height': `${composerHeight}px` } as CSSProperties}
+        data-testid="a3-classroom-workspace"
+      >
+        <div className="relative flex min-h-0 flex-1">
           <div
             ref={scrollRef}
             className="min-h-0 flex-1 overflow-y-auto"
+            style={{ scrollPaddingBottom: 'calc(var(--a3-composer-height) + 16px)' }}
             data-testid="a3-classroom-dialogue"
           >
-            <div ref={contentRef} data-testid="a3-classroom-dialogue-content">
+            <div
+              ref={contentRef}
+              style={{ paddingBottom: 'calc(var(--a3-composer-height) + 16px)' }}
+              data-testid="a3-classroom-dialogue-content"
+            >
               <ClassroomContextShell
                 regionRef={contextLayout.regionRef}
                 regionId={contextLayout.regionId}
@@ -1284,42 +1300,40 @@ export function ClassroomViewRedesign() {
             </div>
           </div>
 
-          <Composer
-            copy={copy}
-            contentWidthClass={contentWidthClass}
-            target={target}
-            asking={asking}
-            input={input}
-            message={message}
-            retrievalMode={retrievalMode}
-            retrievalScope={retrievalScope}
-            sources={classroom?.sources ?? []}
-            viewingHistoryId={viewingHistoryId}
-            imageAttachment={imageAttachment}
-            imageAttachmentError={imageAttachmentError}
-            voiceSupported={voiceSupported}
-            voiceListening={voiceListening}
-            voiceTranscribing={voiceTranscribing}
-            voiceDraft={voiceDraft}
-            voiceError={voiceError}
-            imageInputRef={imageInputRef}
-            onInputChange={setInput}
-            onModeChange={setRetrievalMode}
-            onScopeChange={setRetrievalScope}
-            onAsk={askQuestion}
-            onImageUpload={handleImageUpload}
-            onRemoveImage={() => {
-              setImageAttachment(null);
-              setImageAttachmentError('');
-              if (imageInputRef.current) imageInputRef.current.value = '';
-            }}
-            onToggleVoice={() => void toggleVoiceInput()}
-            onNewDialogue={() => void startNewClassroomDialogue()}
-            onOpenDrawer={(tab) => {
-              setDrawerTab(tab);
-              setDrawerOpen(true);
-            }}
-          />
+          <ClassroomComposerFrame onHeightChange={handleComposerHeightChange}>
+            <Composer
+              copy={copy}
+              contentWidthClass={contentWidthClass}
+              target={target}
+              asking={asking}
+              input={input}
+              message={message}
+              retrievalMode={retrievalMode}
+              retrievalScope={retrievalScope}
+              sources={classroom?.sources ?? []}
+              viewingHistoryId={viewingHistoryId}
+              imageAttachment={imageAttachment}
+              imageAttachmentError={imageAttachmentError}
+              voiceSupported={voiceSupported}
+              voiceListening={voiceListening}
+              voiceTranscribing={voiceTranscribing}
+              voiceDraft={voiceDraft}
+              voiceError={voiceError}
+              imageInputRef={imageInputRef}
+              onInputChange={setInput}
+              onModeChange={setRetrievalMode}
+              onScopeChange={setRetrievalScope}
+              onAsk={askQuestion}
+              onImageUpload={handleImageUpload}
+              onRemoveImage={() => {
+                setImageAttachment(null);
+                setImageAttachmentError('');
+                if (imageInputRef.current) imageInputRef.current.value = '';
+              }}
+              onToggleVoice={() => void toggleVoiceInput()}
+              onNewDialogue={() => void startNewClassroomDialogue()}
+            />
+          </ClassroomComposerFrame>
         </div>
 
         <ClassroomStickyContextBar
@@ -1736,7 +1750,6 @@ function Composer({
   onRemoveImage,
   onToggleVoice,
   onNewDialogue,
-  onOpenDrawer,
 }: {
   copy: ClassroomCopy;
   contentWidthClass: string;
@@ -1764,107 +1777,139 @@ function Composer({
   onRemoveImage: () => void;
   onToggleVoice: () => void;
   onNewDialogue: () => void;
-  onOpenDrawer: (tab: DrawerTab) => void;
 }) {
-  const disabled = asking || Boolean(viewingHistoryId);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const inputDisabled = !target || Boolean(viewingHistoryId);
+  const controlsDisabled = asking || inputDisabled;
+  const submitDisabled = controlsDisabled || (!input.trim() && !imageAttachment);
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [input]);
+
+  function submitComposer() {
+    if (!submitDisabled) onAsk();
+  }
+
   return (
-    <div className="border-t border-slate-200 bg-white px-4 py-3 md:px-6">
-      <div className={cn('mx-auto w-full transition-[max-width] duration-200 ease-out', contentWidthClass)}>
-        {message && <ClassroomMessage message={message} />}
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <RetrievalControls
-            copy={copy}
-            mode={retrievalMode}
-            scope={retrievalScope}
-            sources={sources}
-            disabled={disabled}
-            onModeChange={onModeChange}
-            onScopeChange={onScopeChange}
-          />
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS} disabled={asking} onClick={onNewDialogue}>
-              <Plus className="size-4" />
-              {copy.shortNewDialogue}
-            </Button>
-            <Button type="button" size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS} onClick={() => onOpenDrawer('practice')}>
-              <ClipboardCheck className="size-4" />
-              {copy.practiceTab}
-            </Button>
-            <Button type="button" size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS} onClick={() => onOpenDrawer('actions')}>
-              <ListChecks className="size-4" />
-              {copy.actionsTab}
-            </Button>
+    <div className={cn('mx-auto w-full transition-[max-width] duration-200 ease-out', contentWidthClass)}>
+      {message && message !== copy.viewingHistory && <ClassroomMessage message={message} />}
+      {viewingHistoryId && (
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+          <span>{copy.viewingHistory}</span>
+          <Button type="button" size="sm" variant="outline" className={CLASSROOM_OUTLINE_BUTTON_CLASS} disabled={asking} onClick={onNewDialogue}>
+            <Plus className="size-4" aria-hidden="true" />
+            {copy.shortNewDialogue}
+          </Button>
+        </div>
+      )}
+      {!target && (
+        <div className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+          {copy.chooseTargetFirst}
+        </div>
+      )}
+      <div className="mb-2">
+        <RetrievalControls
+          copy={copy}
+          mode={retrievalMode}
+          scope={retrievalScope}
+          sources={sources}
+          disabled={controlsDisabled}
+          onModeChange={onModeChange}
+          onScopeChange={onScopeChange}
+        />
+      </div>
+
+      {imageAttachment && (
+        <div data-testid="a3-classroom-image-preview" className="mb-2 flex items-center gap-3 rounded-lg border border-blue-100 bg-blue-50 p-2 text-xs text-blue-800">
+          <div className="size-12 shrink-0 rounded-lg bg-cover bg-center" style={{ backgroundImage: `url(${imageAttachment.dataUrl})` }} />
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-semibold">{imageAttachment.name}</div>
+            <div>{Math.max(1, Math.round(imageAttachment.size / 1024))} KB</div>
+          </div>
+          <Button type="button" size="sm" variant="outline" data-testid="a3-classroom-image-remove" onClick={onRemoveImage}>
+            <X className="size-4" />
+          </Button>
+        </div>
+      )}
+      {imageAttachmentError && <div className="mb-2 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">{imageAttachmentError}</div>}
+      {(voiceListening || voiceTranscribing || voiceDraft || voiceError || !voiceSupported) && (
+        <div
+          className={cn('mb-2 flex items-start gap-2 rounded-lg px-3 py-2 text-sm', voiceError || !voiceSupported ? 'bg-amber-50 text-amber-800' : 'bg-blue-50 text-blue-800')}
+          data-testid="a3-classroom-voice-status"
+          role="status"
+          aria-live="polite"
+        >
+          {voiceTranscribing ? <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" /> : voiceListening ? <Mic className="mt-0.5 size-4 shrink-0" /> : <MicOff className="mt-0.5 size-4 shrink-0" />}
+          <div className="min-w-0">
+            {voiceError || (!voiceSupported ? copy.voiceUnsupported : '')}
+            {!voiceError && voiceSupported && voiceListening && !voiceDraft && copy.recording}
+            {!voiceError && voiceTranscribing && !voiceDraft && copy.transcribing}
+            {!voiceError && voiceDraft && <span>{voiceDraft}</span>}
           </div>
         </div>
+      )}
 
-        {imageAttachment && (
-          <div data-testid="a3-classroom-image-preview" className="mb-3 flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-2 text-xs text-blue-800">
-            <div className="size-12 shrink-0 rounded-lg bg-cover bg-center" style={{ backgroundImage: `url(${imageAttachment.dataUrl})` }} />
-            <div className="min-w-0 flex-1">
-              <div className="truncate font-semibold">{imageAttachment.name}</div>
-              <div>{Math.max(1, Math.round(imageAttachment.size / 1024))} KB</div>
-            </div>
-            <Button type="button" size="sm" variant="outline" data-testid="a3-classroom-image-remove" onClick={onRemoveImage}>
-              <X className="size-4" />
+      <form onSubmit={(event) => { event.preventDefault(); submitComposer(); }} className="rounded-lg border border-slate-200 bg-slate-50 p-2 focus-within:border-blue-300 focus-within:ring-4 focus-within:ring-blue-50">
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          data-testid="a3-classroom-image-upload"
+          onChange={(event) => onImageUpload(event.target.files?.[0])}
+        />
+        <textarea
+          ref={textareaRef}
+          value={input}
+          onChange={(event) => onInputChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            submitComposer();
+          }}
+          data-testid="a3-classroom-input"
+          rows={1}
+          className="max-h-[35dvh] min-h-11 w-full resize-none overflow-y-auto bg-transparent px-3 py-2 text-sm leading-6 text-slate-950 outline-none placeholder:text-slate-400"
+          placeholder={target ? copy.placeholder(target.title) : copy.placeholderNoTarget}
+          disabled={inputDisabled}
+        />
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={controlsDisabled}
+              className={cn('size-11 rounded-lg p-0', CLASSROOM_OUTLINE_BUTTON_CLASS)}
+              title={copy.attachImage}
+              aria-label={copy.attachImage}
+              onClick={() => imageInputRef.current?.click()}
+            >
+              <ImageIcon className="size-4" aria-hidden="true" />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={controlsDisabled || voiceTranscribing}
+              aria-pressed={voiceListening}
+              aria-label={voiceListening ? copy.finishVoice : copy.voiceInput}
+              data-testid="a3-classroom-voice-input"
+              className={cn('size-11 rounded-lg p-0 transition', CLASSROOM_OUTLINE_BUTTON_CLASS, voiceListening && 'border-blue-300 bg-blue-50 text-blue-700')}
+              title={voiceListening ? copy.finishVoice : copy.voiceInput}
+              onClick={onToggleVoice}
+            >
+              {voiceTranscribing ? <Loader2 className="size-4 animate-spin" /> : voiceListening ? <MicOff className="size-4" /> : <Mic className="size-4" />}
             </Button>
           </div>
-        )}
-        {imageAttachmentError && <div className="mb-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{imageAttachmentError}</div>}
-        {(voiceListening || voiceTranscribing || voiceDraft || voiceError || !voiceSupported) && (
-          <div className={cn('mb-3 flex items-start gap-2 rounded-lg px-3 py-2 text-sm', voiceError || !voiceSupported ? 'bg-amber-50 text-amber-800' : 'bg-blue-50 text-blue-800')} data-testid="a3-classroom-voice-status">
-            {voiceTranscribing ? <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" /> : voiceListening ? <Mic className="mt-0.5 size-4 shrink-0" /> : <MicOff className="mt-0.5 size-4 shrink-0" />}
-            <div className="min-w-0">
-              {voiceError || (!voiceSupported ? copy.voiceUnsupported : '')}
-              {!voiceError && voiceSupported && voiceListening && !voiceDraft && copy.recording}
-              {!voiceError && voiceTranscribing && !voiceDraft && copy.transcribing}
-              {!voiceError && voiceDraft && <span>{voiceDraft}</span>}
-            </div>
-          </div>
-        )}
-
-        <form onSubmit={(event) => { event.preventDefault(); onAsk(); }} className="rounded-2xl border border-slate-200 bg-slate-50 p-2 focus-within:border-blue-300 focus-within:ring-4 focus-within:ring-blue-50">
-          <input
-            ref={imageInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            data-testid="a3-classroom-image-upload"
-            onChange={(event) => onImageUpload(event.target.files?.[0])}
-          />
-          <textarea
-            value={input}
-            onChange={(event) => onInputChange(event.target.value)}
-            data-testid="a3-classroom-input"
-            rows={2}
-            className="max-h-32 min-h-14 w-full resize-none bg-transparent px-3 py-2 text-sm leading-6 text-slate-950 outline-none placeholder:text-slate-400"
-            placeholder={target ? copy.placeholder(target.title) : copy.placeholderNoTarget}
-            disabled={!target || Boolean(viewingHistoryId)}
-          />
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Button type="button" variant="outline" disabled={asking || !target} className={cn('size-10 rounded-xl p-0', CLASSROOM_OUTLINE_BUTTON_CLASS)} title={copy.attachImage} onClick={() => imageInputRef.current?.click()}>
-                <ImageIcon className="size-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={asking || voiceTranscribing || !target || Boolean(viewingHistoryId)}
-                aria-pressed={voiceListening}
-                data-testid="a3-classroom-voice-input"
-                className={cn('size-10 rounded-xl p-0 transition', CLASSROOM_OUTLINE_BUTTON_CLASS, voiceListening && 'border-blue-300 bg-blue-50 text-blue-700')}
-                title={voiceListening ? copy.finishVoice : copy.voiceInput}
-                onClick={onToggleVoice}
-              >
-                {voiceTranscribing ? <Loader2 className="size-4 animate-spin" /> : voiceListening ? <MicOff className="size-4" /> : <Mic className="size-4" />}
-              </Button>
-            </div>
-            <Button data-testid="a3-classroom-submit" type="submit" disabled={asking || !target || Boolean(viewingHistoryId) || (!input.trim() && !imageAttachment)} className="h-10 rounded-xl bg-blue-600 px-4 hover:bg-blue-700">
-              {asking ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-              {copy.send}
-            </Button>
-          </div>
-        </form>
-      </div>
+          <Button data-testid="a3-classroom-submit" type="submit" disabled={submitDisabled} className="h-11 rounded-lg bg-blue-600 px-4 hover:bg-blue-700">
+            {asking ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+            {copy.send}
+          </Button>
+        </div>
+      </form>
     </div>
   );
 }

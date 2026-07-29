@@ -10,9 +10,23 @@ import {
   useClassroomContextVisibility,
   type ClassroomContextSummary,
 } from '@/components/a3/features/classroom/classroom-context-shell';
+import { ClassroomComposerFrame } from '@/components/a3/features/classroom/classroom-composer-frame';
 
 let observerCallback: IntersectionObserverCallback | null = null;
 const observerInstances: ControlledIntersectionObserver[] = [];
+let resizeObserverCallback: ResizeObserverCallback | null = null;
+const resizeObserverInstances: ControlledResizeObserver[] = [];
+
+class ControlledResizeObserver implements ResizeObserver {
+  readonly disconnect = vi.fn();
+  readonly observe = vi.fn<(target: Element) => void>();
+  readonly unobserve = vi.fn<(target: Element) => void>();
+
+  constructor(callback: ResizeObserverCallback) {
+    resizeObserverCallback = callback;
+    resizeObserverInstances.push(this);
+  }
+}
 
 class ControlledIntersectionObserver implements IntersectionObserver {
   readonly root: Element | Document | null;
@@ -140,18 +154,32 @@ async function mountContext({
   return mounted;
 }
 
-function createDomRect(): DOMRectReadOnly {
+function createDomRect(height = 0): DOMRectReadOnly {
   return {
     x: 0,
     y: 0,
     width: 0,
-    height: 0,
+    height,
     top: 0,
     right: 0,
-    bottom: 0,
+    bottom: height,
     left: 0,
     toJSON: () => ({}),
   };
+}
+
+function emitResize(height: number) {
+  const observer = resizeObserverInstances.at(-1);
+  if (!observer || !resizeObserverCallback) throw new Error('Resize observer was not created');
+
+  const entry = {
+    target: document.querySelector('[data-testid="a3-classroom-composer-frame"]'),
+    contentRect: createDomRect(height),
+  } as ResizeObserverEntry;
+
+  act(() => {
+    resizeObserverCallback?.([entry], observer);
+  });
 }
 
 function createIntersectionEntry(
@@ -198,8 +226,11 @@ function stubReducedMotion(matches: boolean) {
 beforeEach(() => {
   observerCallback = null;
   observerInstances.length = 0;
+  resizeObserverCallback = null;
+  resizeObserverInstances.length = 0;
   sessionStorage.clear();
   vi.stubGlobal('IntersectionObserver', ControlledIntersectionObserver);
+  vi.stubGlobal('ResizeObserver', ControlledResizeObserver);
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     callback(0);
     return 1;
@@ -214,7 +245,41 @@ afterEach(() => {
   sessionStorage.clear();
   observerCallback = null;
   observerInstances.length = 0;
+  resizeObserverCallback = null;
+  resizeObserverInstances.length = 0;
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('floating classroom composer frame', () => {
+  it('reports the initial height, rounds resize entries up, and disconnects on cleanup', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onHeightChange = vi.fn();
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(createDomRect(87.1));
+
+    await act(async () => {
+      root.render(
+        <ClassroomComposerFrame onHeightChange={onHeightChange}>
+          <div>Composer content</div>
+        </ClassroomComposerFrame>,
+      );
+    });
+
+    const frame = container.querySelector('[data-testid="a3-classroom-composer-frame"]');
+    expect(frame).not.toBeNull();
+    expect(onHeightChange).toHaveBeenCalledWith(88);
+    expect(resizeObserverInstances).toHaveLength(1);
+    expect(resizeObserverInstances[0].observe).toHaveBeenCalledWith(frame);
+
+    emitResize(88.01);
+    expect(onHeightChange).toHaveBeenLastCalledWith(89);
+
+    act(() => root.unmount());
+    expect(resizeObserverInstances[0].disconnect).toHaveBeenCalledTimes(1);
+    container.remove();
+  });
 });
 
 describe('progressive classroom context', () => {

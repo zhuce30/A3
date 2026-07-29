@@ -241,13 +241,21 @@ describe('ClassroomViewRedesign progressive context integration', () => {
 
     const dialogueRoot = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-dialogue"]');
     const contentRoot = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-dialogue-content"]');
+    const composerFrame = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-composer-frame"]');
     const loadedHeader = queryRequired<HTMLElement>(container, 'h1');
     expect(container.querySelectorAll('[data-testid="a3-classroom-dialogue"]')).toHaveLength(1);
     expect(container.querySelectorAll('[data-testid="a3-classroom-dialogue-content"]')).toHaveLength(1);
     expect(dialogueRoot.contains(contentRoot)).toBe(true);
     expect(container.querySelector('[data-testid="a3-classroom-context-loading"]')).toBeNull();
-    expect(resizeObserverInstances).toHaveLength(1);
-    const contentObserver = resizeObserverInstances[0];
+    expect(resizeObserverInstances).toHaveLength(2);
+    const contentObserver = resizeObserverInstances.find((observer) => (
+      observer.observe.mock.calls.some(([target]) => target === contentRoot)
+    ));
+    const composerObserver = resizeObserverInstances.find((observer) => (
+      observer.observe.mock.calls.some(([target]) => target === composerFrame)
+    ));
+    expect(contentObserver).toBeDefined();
+    expect(composerObserver).toBeDefined();
 
     const refreshButton = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
       .find((button) => button.textContent?.includes('刷新上下文'));
@@ -264,8 +272,9 @@ describe('ClassroomViewRedesign progressive context integration', () => {
     expect(container.textContent).toContain('进程调度');
     expect(container.querySelector('[data-testid="a3-classroom-context-loading"]')).toBeNull();
     expect(container.querySelectorAll('[data-testid="a3-classroom-dialogue"]')).toHaveLength(1);
-    expect(resizeObserverInstances).toHaveLength(1);
-    expect(contentObserver.disconnect).not.toHaveBeenCalled();
+    expect(resizeObserverInstances).toHaveLength(2);
+    expect(contentObserver?.disconnect).not.toHaveBeenCalled();
+    expect(composerObserver?.disconnect).not.toHaveBeenCalled();
 
     await act(async () => {
       refresh.resolve(classroomResponse('进程调度与优先级'));
@@ -280,7 +289,8 @@ describe('ClassroomViewRedesign progressive context integration', () => {
     expect(container.querySelector('[data-testid="a3-classroom-dialogue-content"]')).toBe(contentRoot);
     expect(container.querySelectorAll('[data-testid="a3-classroom-dialogue"]')).toHaveLength(1);
     expect(container.querySelectorAll('[data-testid="a3-classroom-dialogue-content"]')).toHaveLength(1);
-    expect(resizeObserverInstances).toHaveLength(1);
-    expect(contentObserver.disconnect).not.toHaveBeenCalled();
+    expect(resizeObserverInstances).toHaveLength(2);
+    expect(contentObserver?.disconnect).not.toHaveBeenCalled();
+    expect(composerObserver?.disconnect).not.toHaveBeenCalled();
   });
 });

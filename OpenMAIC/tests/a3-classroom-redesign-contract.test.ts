@@ -116,7 +116,12 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source.match(/data-testid="a3-classroom-dialogue"/g)).toHaveLength(1);
     expect(source.match(/ref=\{scrollRef\}/g)).toHaveLength(1);
     expect(source.match(/ref=\{contentRef\}/g)).toHaveLength(1);
-    expect(source).toContain('grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]');
+    expect(source).toContain('relative flex min-h-0 flex-1');
+    expect(source).toContain('ClassroomComposerFrame');
+    expect(source).toContain("'--a3-composer-height': `${composerHeight}px`");
+    expect(source).toContain("scrollPaddingBottom: 'calc(var(--a3-composer-height) + 16px)'");
+    expect(source).toContain("paddingBottom: 'calc(var(--a3-composer-height) + 16px)'");
+    expect(source).not.toContain('grid-rows-[minmax(0,1fr)_auto]');
   });
 
   it('keeps progressive classroom copy synchronized in zh-CN and en-US', () => {
