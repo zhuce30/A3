@@ -108,7 +108,7 @@ export function ClassroomContextShell({
       id={regionId}
       tabIndex={-1}
       data-testid="a3-classroom-context-region"
-      className="border-b border-slate-200 bg-white outline-none"
+      className="border-b border-slate-200 bg-white outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
     >
       {expanded ? (
         <div

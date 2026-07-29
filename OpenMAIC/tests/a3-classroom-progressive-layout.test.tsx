@@ -324,6 +324,9 @@ describe('progressive classroom context', () => {
     expect(sessionStorage.getItem('a3:classroom-context:target-a')).toBe('expanded');
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'smooth' });
     expect(document.activeElement).toBe(view.contextElement);
+    expect(view.contextElement.className).toContain('focus-visible:ring-2');
+    expect(view.contextElement.className).toContain('focus-visible:ring-inset');
+    expect(view.contextElement.className).toContain('focus-visible:ring-blue-500');
   });
 
   it('uses auto scrolling when reduced motion is requested', async () => {
