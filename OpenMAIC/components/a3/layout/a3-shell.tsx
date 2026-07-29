@@ -262,7 +262,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
 
       <div className={cn('transition-[padding] duration-300 ease-out', sidebarCollapsed ? 'md:pl-20' : 'md:pl-[248px]')}>
         <header className="sticky top-0 z-40 flex h-[72px] min-w-0 items-center justify-between gap-2 border-b border-[var(--a3-border)] bg-[var(--a3-surface)] px-3 backdrop-blur sm:px-4 md:px-6">
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
             <button
               type="button"
               onClick={toggleSidebar}
@@ -281,15 +281,15 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
               </div>
             </div>
             {focusedHeader && (
-              <div className="mr-8 hidden items-center gap-3 md:flex">
-                <div>
-                  <div className="text-xl font-semibold">{messages.appName}</div>
-                  <div className="text-xs font-medium uppercase tracking-wide text-[var(--a3-text-muted)]">
+              <div className="mr-4 hidden min-w-0 items-center gap-3 overflow-hidden xl:flex 2xl:mr-8">
+                <div className="min-w-0 shrink">
+                  <div className="truncate whitespace-nowrap text-xl font-semibold">{messages.appName}</div>
+                  <div className="truncate whitespace-nowrap text-xs font-medium uppercase tracking-wide text-[var(--a3-text-muted)]">
                     {messages.appNameEn}
                   </div>
                 </div>
-                <div className="ml-8 h-8 w-px bg-[var(--a3-border)]" />
-                <div className="text-lg font-semibold text-[var(--a3-text)]">
+                <div className="ml-2 h-8 w-px shrink-0 bg-[var(--a3-border)] 2xl:ml-8" />
+                <div className="min-w-0 truncate whitespace-nowrap text-lg font-semibold text-[var(--a3-text)]">
                   {pathname === '/a3/coaching' ? messages.coachingTitle : messages.classroomTitle}
                 </div>
               </div>

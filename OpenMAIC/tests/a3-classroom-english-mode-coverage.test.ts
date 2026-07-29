@@ -37,4 +37,16 @@ describe('A3 classroom English mode coverage', () => {
     expect(source).toContain('target?.title');
     expect(source).toContain('source.title');
   });
+
+  it('keeps the focused shell header inside its fixed-height row at constrained widths', () => {
+    const shell = fs.readFileSync(shellPath, 'utf8');
+    const focusedStart = shell.indexOf('{focusedHeader && (');
+    const focusedEnd = shell.indexOf('{pageTitle && (', focusedStart);
+    const focusedHeader = shell.slice(focusedStart, focusedEnd);
+
+    expect(shell).toContain('className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden"');
+    expect(focusedHeader).toContain('hidden min-w-0 items-center gap-3 overflow-hidden xl:flex');
+    expect(focusedHeader).not.toContain('items-center gap-3 md:flex');
+    expect(focusedHeader).toContain('truncate whitespace-nowrap');
+  });
 });
