@@ -97,13 +97,27 @@ describe('A3 classroom redesigned workspace contract', () => {
   it('renders the learning drawer as a viewport overlay below xl without adding a grid row', () => {
     const source = fs.readFileSync(redesignPath, 'utf8');
 
-    expect(source).toContain('data-testid="a3-classroom-drawer-overlay"');
-    expect(source).toContain('data-testid="a3-classroom-drawer-backdrop"');
-    expect(source).toContain('fixed inset-0 z-50');
-    expect(source).toContain('xl:static xl:z-auto xl:min-h-0');
-    expect(source).toContain('xl:hidden');
-    expect(source).toContain('xl:static xl:h-full xl:w-auto xl:p-0');
+    expect(source).toContain("from '@/components/ui/dialog'");
+    expect(source).toContain('<Dialog open={drawerOpen} modal');
+    expect(source).toContain('data-testid="a3-classroom-drawer-dialog"');
+    expect(source).toContain('<DialogTitle');
+    expect(source).toContain('onCloseAutoFocus={restoreDrawerFocus}');
+    expect(source).toContain('isDesktopDrawer ? (');
+    expect(source).toContain('<LearningDrawer');
     expect(source).not.toContain('grid-rows-[minmax(0,1fr)_auto]');
+  });
+
+  it('exposes stable classroom panel controls without coupling tests to icon classes', () => {
+    const source = fs.readFileSync(redesignPath, 'utf8');
+
+    for (const testId of [
+      'a3-classroom-history-close',
+      'a3-classroom-drawer-toggle',
+      'a3-classroom-sticky-drawer-toggle',
+      'a3-classroom-drawer-close',
+    ]) {
+      expect(source).toContain(`data-testid="${testId}"`);
+    }
   });
 
   it('integrates classroom context into the unique stick-to-bottom dialogue flow', () => {

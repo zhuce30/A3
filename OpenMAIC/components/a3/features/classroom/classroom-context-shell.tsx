@@ -259,7 +259,7 @@ export function MobileStickyActions({
   loading: boolean;
   onRetryTutor?: () => void;
   onRefresh: () => void;
-  onOpenDrawer: () => void;
+  onOpenDrawer: (opener: HTMLElement | null) => void;
 }) {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const actionClassName = 'flex min-h-11 w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-wait disabled:opacity-50';
@@ -272,6 +272,7 @@ export function MobileStickyActions({
     <details ref={detailsRef} className="relative" data-testid="a3-classroom-mobile-actions">
       <summary
         className="flex size-11 cursor-pointer list-none items-center justify-center rounded-lg text-slate-600 transition hover:bg-slate-100 hover:text-blue-700 [&::-webkit-details-marker]:hidden"
+        data-testid="a3-classroom-mobile-actions-trigger"
         aria-label={label}
         title={label}
       >
@@ -292,6 +293,7 @@ export function MobileStickyActions({
         )}
         <button
           type="button"
+          data-testid="a3-classroom-mobile-drawer-action"
           className={actionClassName}
           aria-label={refreshLabel}
           title={refreshLabel}
@@ -306,7 +308,7 @@ export function MobileStickyActions({
           className={actionClassName}
           aria-label={sidePanelLabel}
           title={sidePanelLabel}
-          onClick={() => runAction(onOpenDrawer)}
+          onClick={() => runAction(() => onOpenDrawer(detailsRef.current?.querySelector('summary') ?? null))}
         >
           <PanelRightOpen className="size-4 shrink-0" aria-hidden="true" />
           {sidePanelLabel}

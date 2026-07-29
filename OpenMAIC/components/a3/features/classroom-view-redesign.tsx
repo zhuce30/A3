@@ -37,6 +37,7 @@ import {
   X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { ProfileUpdateCandidatePanel } from '@/components/a3/profile/profile-update-candidate-panel';
 import { a3GetJson, a3PostJson, resolveA3Endpoint } from '@/lib/a3/api-client';
 import type { AnswerFeedback, AssessmentSession } from '@/lib/a3/assessment-types';
@@ -601,11 +602,14 @@ export function ClassroomViewRedesign() {
   const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [isDesktopDrawer, setIsDesktopDrawer] = useState(false);
   const [drawerTab, setDrawerTab] = useState<DrawerTab>('practice');
   const [historyQuery, setHistoryQuery] = useState('');
   const [composerHeight, setComposerHeight] = useState(88);
   const chatRef = useRef(chat);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const drawerCloseRef = useRef<HTMLButtonElement | null>(null);
+  const drawerOpenerRef = useRef<HTMLElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const voiceStreamRef = useRef<MediaStream | null>(null);
   const voiceChunksRef = useRef<Blob[]>([]);
@@ -664,13 +668,40 @@ export function ClassroomViewRedesign() {
   }, []);
 
   useEffect(() => {
-    if (!drawerOpen) return;
+    const desktopDrawer = window.matchMedia('(min-width: 1280px)');
+    const syncDesktopDrawer = () => setIsDesktopDrawer(desktopDrawer.matches);
+    syncDesktopDrawer();
+    desktopDrawer.addEventListener('change', syncDesktopDrawer);
+    return () => desktopDrawer.removeEventListener('change', syncDesktopDrawer);
+  }, []);
+
+  useEffect(() => {
+    if (!drawerOpen || !isDesktopDrawer) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setDrawerOpen(false);
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [drawerOpen]);
+  }, [drawerOpen, isDesktopDrawer]);
+
+  const openDrawer = useCallback((opener: HTMLElement | null) => {
+    drawerOpenerRef.current = opener;
+    setDrawerOpen(true);
+  }, []);
+  const toggleDrawer = useCallback((opener: HTMLElement) => {
+    setDrawerOpen((current) => {
+      if (!current) drawerOpenerRef.current = opener;
+      return !current;
+    });
+  }, []);
+  const focusDrawer = useCallback((event: Event) => {
+    event.preventDefault();
+    drawerCloseRef.current?.focus();
+  }, []);
+  const restoreDrawerFocus = useCallback((event: Event) => {
+    event.preventDefault();
+    if (drawerOpenerRef.current?.isConnected) drawerOpenerRef.current.focus();
+  }, []);
 
   useEffect(() => {
     const desktopViewport = window.matchMedia('(min-width: 1280px)');
@@ -1189,6 +1220,32 @@ export function ClassroomViewRedesign() {
 
   const contentWidthClass = resolveClassroomContentWidthClass(historyOpen, drawerOpen);
   const bubbleWidthClass = resolveClassroomBubbleWidthClass(historyOpen, drawerOpen);
+  const learningDrawer = (
+    <LearningDrawer
+      copy={copy}
+      tab={drawerTab}
+      onTabChange={setDrawerTab}
+      onClose={() => setDrawerOpen(false)}
+      closeButtonRef={drawerCloseRef}
+      classroom={classroom}
+      studyPlan={studyPlan}
+      sessions={classroomSessions}
+      activeHistoryId={viewingHistoryId}
+      profileFeed={profileFeed}
+      savingSourceId={savingSourceId}
+      sourceFavoriteMessage={sourceFavoriteMessage}
+      sourceFavoriteSuccess={sourceFavoriteSuccess}
+      savingPracticeId={savingPracticeId}
+      practiceFeedback={practiceFeedback}
+      embeddedPractice={embeddedPractice}
+      onOpenHistory={viewClassroomHistory}
+      onSaveSource={saveSourceFavorite}
+      onCompletePractice={completePracticeRecommendation}
+      onStartEmbeddedPractice={startEmbeddedPractice}
+      onSelectEmbeddedPracticeAnswer={selectEmbeddedPracticeAnswer}
+      onSubmitEmbeddedPractice={submitEmbeddedPractice}
+    />
+  );
 
   return (
     <div
@@ -1278,7 +1335,7 @@ export function ClassroomViewRedesign() {
                       readiness={completedReadiness}
                       onRefresh={() => void loadClassroom()}
                       onToggleHistory={() => setHistoryOpen((value) => !value)}
-                      onToggleDrawer={() => setDrawerOpen((value) => !value)}
+                      onToggleDrawer={toggleDrawer}
                     />
                     <div className="border-b border-slate-200 bg-[#fbfaf5] px-4 py-2 md:px-6">
                       <TutorPersonaSelector
@@ -1402,7 +1459,7 @@ export function ClassroomViewRedesign() {
               onOpenHistory={() => setHistoryOpen(true)}
               onRetryTutor={() => void tutorPersona.reload()}
               onRefresh={() => void loadClassroom()}
-              onToggleDrawer={() => setDrawerOpen((value) => !value)}
+              onToggleDrawer={toggleDrawer}
             />
           )}
           mobileActions={(
@@ -1414,7 +1471,7 @@ export function ClassroomViewRedesign() {
               loading={loading}
               onRetryTutor={tutorPersona.error ? () => void tutorPersona.reload() : undefined}
               onRefresh={() => void loadClassroom()}
-              onOpenDrawer={() => setDrawerOpen(true)}
+              onOpenDrawer={openDrawer}
             />
           )}
           onOpen={contextLayout.openFromSticky}
@@ -1422,44 +1479,22 @@ export function ClassroomViewRedesign() {
         />
       </section>
 
-      {drawerOpen && (
-        <div
-          className="fixed inset-0 z-50 xl:static xl:z-auto xl:min-h-0"
-          data-testid="a3-classroom-drawer-overlay"
-        >
-          <button
-            type="button"
-            className="absolute inset-0 bg-slate-950/30 xl:hidden"
-            data-testid="a3-classroom-drawer-backdrop"
-            aria-label={copy.closeDrawer}
-            onClick={() => setDrawerOpen(false)}
-          />
-          <div className="absolute inset-y-0 right-0 h-full w-[min(360px,calc(100vw-24px))] p-3 xl:static xl:h-full xl:w-auto xl:p-0">
-            <LearningDrawer
-              copy={copy}
-              tab={drawerTab}
-              onTabChange={setDrawerTab}
-              onClose={() => setDrawerOpen(false)}
-              classroom={classroom}
-              studyPlan={studyPlan}
-              sessions={classroomSessions}
-              activeHistoryId={viewingHistoryId}
-              profileFeed={profileFeed}
-              savingSourceId={savingSourceId}
-              sourceFavoriteMessage={sourceFavoriteMessage}
-              sourceFavoriteSuccess={sourceFavoriteSuccess}
-              savingPracticeId={savingPracticeId}
-              practiceFeedback={practiceFeedback}
-              embeddedPractice={embeddedPractice}
-              onOpenHistory={viewClassroomHistory}
-              onSaveSource={saveSourceFavorite}
-              onCompletePractice={completePracticeRecommendation}
-              onStartEmbeddedPractice={startEmbeddedPractice}
-              onSelectEmbeddedPracticeAnswer={selectEmbeddedPracticeAnswer}
-              onSubmitEmbeddedPractice={submitEmbeddedPractice}
-            />
-          </div>
-        </div>
+      {isDesktopDrawer ? (
+        drawerOpen ? learningDrawer : null
+      ) : (
+        <Dialog open={drawerOpen} modal onOpenChange={setDrawerOpen}>
+          <DialogContent
+            showCloseButton={false}
+            data-testid="a3-classroom-drawer-dialog"
+            className="inset-y-0 right-0 left-auto top-0 h-dvh max-h-dvh w-[min(360px,calc(100vw-24px))] max-w-none translate-x-0 translate-y-0 gap-0 rounded-none border-0 bg-transparent p-3 ring-0 sm:max-w-none"
+            onOpenAutoFocus={focusDrawer}
+            onCloseAutoFocus={restoreDrawerFocus}
+          >
+            <DialogTitle className="sr-only">{copy.drawerTitle}</DialogTitle>
+            <DialogDescription className="sr-only">{copy.drawerSubtitle}</DialogDescription>
+            {learningDrawer}
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   );
@@ -1484,7 +1519,7 @@ function ClassroomStickyActions({
   onOpenHistory: () => void;
   onRetryTutor: () => void;
   onRefresh: () => void;
-  onToggleDrawer: () => void;
+  onToggleDrawer: (opener: HTMLElement) => void;
 }) {
   const actionClassName = 'inline-flex size-11 items-center justify-center rounded-lg text-slate-600 transition hover:bg-slate-100 hover:text-blue-700 disabled:cursor-wait disabled:opacity-50';
 
@@ -1514,6 +1549,7 @@ function ClassroomStickyActions({
       )}
       <button
         type="button"
+        data-testid="a3-classroom-sticky-drawer-toggle"
         className={actionClassName}
         aria-label={copy.refreshContext}
         title={copy.refreshContext}
@@ -1530,7 +1566,7 @@ function ClassroomStickyActions({
         aria-label={copy.sidePanel}
         title={copy.sidePanel}
         aria-pressed={drawerOpen}
-        onClick={onToggleDrawer}
+        onClick={(event) => onToggleDrawer(event.currentTarget)}
       >
         {drawerOpen
           ? <PanelRightClose className="size-4" aria-hidden="true" />
@@ -1561,7 +1597,7 @@ function WorkspaceHeader({
   readiness: number;
   onRefresh: () => void;
   onToggleHistory: () => void;
-  onToggleDrawer: () => void;
+  onToggleDrawer: (opener: HTMLElement) => void;
 }) {
   return (
     <header aria-label={copy.classroomInfo} className="border-b border-slate-200 px-4 py-3 md:px-6">
@@ -1600,7 +1636,13 @@ function WorkspaceHeader({
             {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
             {copy.refreshContext}
           </Button>
-          <Button size="sm" variant="outline" onClick={onToggleDrawer} className={CLASSROOM_OUTLINE_BUTTON_CLASS}>
+          <Button
+            size="sm"
+            variant="outline"
+            data-testid="a3-classroom-drawer-toggle"
+            onClick={(event) => onToggleDrawer(event.currentTarget)}
+            className={CLASSROOM_OUTLINE_BUTTON_CLASS}
+          >
             {drawerOpen ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
             {copy.sidePanel}
           </Button>
@@ -1691,7 +1733,7 @@ function HistorySidebar({
               </span>
               {copy.classroomConversations}
             </div>
-            <button type="button" onClick={onClose} className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:border-blue-200 hover:text-blue-700" aria-label={copy.collapseHistory}>
+            <button type="button" data-testid="a3-classroom-history-close" onClick={onClose} className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:border-blue-200 hover:text-blue-700" aria-label={copy.collapseHistory}>
               <PanelLeftClose className="size-4" />
             </button>
           </div>
@@ -2053,6 +2095,7 @@ function LearningDrawer({
   tab,
   onTabChange,
   onClose,
+  closeButtonRef,
   classroom,
   studyPlan,
   sessions,
@@ -2075,6 +2118,7 @@ function LearningDrawer({
   tab: DrawerTab;
   onTabChange: (tab: DrawerTab) => void;
   onClose: () => void;
+  closeButtonRef: React.RefObject<HTMLButtonElement | null>;
   classroom: ClassroomContext | null;
   studyPlan: StudyPlan | null;
   sessions: ClassroomHistorySession[];
@@ -2102,7 +2146,7 @@ function LearningDrawer({
               <h2 className="text-base font-semibold text-slate-950">{copy.drawerTitle}</h2>
               <p className="mt-1 text-xs text-slate-500">{copy.drawerSubtitle}</p>
             </div>
-            <button type="button" onClick={onClose} className="rounded-lg border border-slate-200 p-2 text-slate-500 hover:border-blue-200 hover:text-blue-700" aria-label={copy.closeDrawer}>
+            <button ref={closeButtonRef} type="button" data-testid="a3-classroom-drawer-close" onClick={onClose} className="rounded-lg border border-slate-200 p-2 text-slate-500 hover:border-blue-200 hover:text-blue-700" aria-label={copy.closeDrawer}>
               <PanelRightClose className="size-4" />
             </button>
           </div>

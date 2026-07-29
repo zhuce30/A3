@@ -268,8 +268,8 @@ test.describe('A3 classroom viewport layout', () => {
     await expect(history).toBeVisible();
     await expect(drawerTab).toBeVisible();
 
-    await page.getByTestId('a3-classroom-history-panel').locator('button:has(.lucide-panel-left-close)').click();
-    await workspace.locator('button:has(.lucide-panel-right-close)').first().click();
+    await page.getByTestId('a3-classroom-history-close').click();
+    await page.getByTestId('a3-classroom-drawer-toggle').click();
     await expect(history).toBeHidden();
     await expect(drawerTab).toBeHidden();
 
@@ -278,15 +278,31 @@ test.describe('A3 classroom viewport layout', () => {
     await expect(drawerTab).toBeHidden();
 
     const workspaceBeforeDrawer = await workspace.boundingBox();
-    await workspace.locator('button:has(.lucide-panel-right-open)').first().click();
-    await expect(page.getByTestId('a3-classroom-drawer-overlay')).toBeVisible();
+    const drawerOpener = page.getByTestId('a3-classroom-drawer-toggle');
+    await drawerOpener.focus();
+    await drawerOpener.click();
+    const dialog = page.getByRole('dialog', { name: /.+/ });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute('aria-modal', 'true');
     await expect(drawerTab).toBeVisible();
     expect(await workspace.boundingBox()).toEqual(workspaceBeforeDrawer);
+    await expect.poll(() => workspace.evaluate((element) => Boolean(
+      element.closest('[aria-hidden="true"], [inert]'),
+    ))).toBe(true);
+    await expect.poll(() => dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    for (let index = 0; index < 8; index += 1) {
+      await page.keyboard.press('Tab');
+      expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    }
+    await page.keyboard.press('Shift+Tab');
+    expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(drawerOpener).toBeFocused();
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(history).toBeHidden();
-    await expect(drawerTab).toBeVisible();
-    await page.keyboard.press('Escape');
     await expect(drawerTab).toBeHidden();
   });
 

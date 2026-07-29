@@ -372,6 +372,7 @@ describe('responsive classroom controls', () => {
     expect(details?.querySelector('[role="menuitem"]')).toBeNull();
     expect(summary?.getAttribute('aria-label')).toBe('更多操作');
     expect(summary?.getAttribute('title')).toBe('更多操作');
+    expect(summary?.getAttribute('data-testid')).toBe('a3-classroom-mobile-actions-trigger');
 
     for (const [label, callback] of [
       ['重试导师方式', onRetryTutor],
@@ -385,6 +386,7 @@ describe('responsive classroom controls', () => {
       expect(callback).toHaveBeenCalledTimes(1);
       expect(details!.open).toBe(false);
     }
+    expect(onOpenDrawer).toHaveBeenCalledWith(summary);
 
     await act(async () => {
       root.render(
