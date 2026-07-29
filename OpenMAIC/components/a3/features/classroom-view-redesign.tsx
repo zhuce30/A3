@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useStickToBottom } from 'use-stick-to-bottom';
 import {
   Bot,
   CheckCircle2,
@@ -54,6 +55,11 @@ import { A3Markdown } from '../ui/a3-markdown';
 import { A3SpeechControls } from '../ui/a3-speech-controls';
 import { TutorPersonaSelector } from './tutor-persona/tutor-persona-selector';
 import { useTutorPersona } from './tutor-persona/use-tutor-persona';
+import {
+  ClassroomContextShell,
+  ClassroomStickyContextBar,
+  useClassroomContextVisibility,
+} from './classroom/classroom-context-shell';
 
 type ClassroomResponse = { success: boolean; error?: string; classroom: ClassroomContext };
 type FavoriteResponse = { success: boolean; error?: string };
@@ -176,6 +182,17 @@ const classroomCopy = {
     learningPath: '学习路径',
     refreshContext: '刷新上下文',
     sidePanel: '侧面板',
+    classroomInfo: '课堂信息',
+    collapseClassroomInfo: '收起课堂信息',
+    expandClassroomInfo: '展开课堂信息',
+    jumpLatest: '跳至最新消息',
+    viewingHistoryCompact: '正在查看历史对话',
+    loadingContext: '正在加载课堂上下文',
+    tutorUnavailable: '辅导方式不可用',
+    retryTutor: '重试加载辅导方式',
+    chooseTargetFirst: '请先选择学习目标再提问',
+    tutorPending: '辅导方式待加载',
+    moreActions: '更多操作',
     collapseHistory: '收起历史侧栏',
     expandHistory: '展开历史侧栏',
     openmaicClassroom: 'OpenMAIC 资源课堂',
@@ -330,6 +347,17 @@ const classroomCopy = {
     learningPath: 'Learning path',
     refreshContext: 'Refresh context',
     sidePanel: 'Side panel',
+    classroomInfo: 'Classroom info',
+    collapseClassroomInfo: 'Collapse classroom info',
+    expandClassroomInfo: 'Expand classroom info',
+    jumpLatest: 'Jump to latest',
+    viewingHistoryCompact: 'Viewing chat history',
+    loadingContext: 'Loading classroom context',
+    tutorUnavailable: 'Tutor preference unavailable',
+    retryTutor: 'Retry tutor preference',
+    chooseTargetFirst: 'Choose a learning target before asking a question',
+    tutorPending: 'Tutor preference pending',
+    moreActions: 'More actions',
     collapseHistory: 'Collapse history sidebar',
     expandHistory: 'Expand history sidebar',
     openmaicClassroom: 'OpenMAIC resource classroom',
@@ -572,12 +600,35 @@ export function ClassroomViewRedesign() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const voiceStreamRef = useRef<MediaStream | null>(null);
   const voiceChunksRef = useRef<Blob[]>([]);
-  const dialogueEndRef = useRef<HTMLDivElement | null>(null);
 
   const target = classroom?.target ?? null;
+  const { scrollRef, contentRef } = useStickToBottom({
+    initial: false,
+    resize: { damping: 0.78, stiffness: 0.08, mass: 1 },
+  });
+  const contextLayout = useClassroomContextVisibility({
+    storageKey: target?.id || target?.title || 'waiting-target',
+    scrollRootRef: scrollRef,
+  });
   const sourceCount = classroom?.sources.length ?? 0;
   const exerciseCount = classroom?.recommended.length ?? 0;
   const completedReadiness = [Boolean(target), sourceCount > 0, exerciseCount > 0].filter(Boolean).length;
+  const selectedTutorLabel = tutorPersona.error
+    ? copy.tutorUnavailable
+    : tutorPersona.selectedPersona?.name || copy.tutorPending;
+  const openmaicStatusLabel = openmaicClassroomArtifact?.status === 'succeeded'
+    ? `${openmaicClassroomArtifact.scenesCount ?? 0} ${copy.scenesUnit}`
+    : openmaicClassroomArtifact?.status ?? copy.notGenerated;
+  const contextSummary = {
+    title: target?.title ?? copy.waitingTarget,
+    tutorLabel: selectedTutorLabel,
+    statusLabel: !target
+      ? copy.chooseTargetFirst
+      : viewingHistoryId
+        ? copy.viewingHistoryCompact
+        : openmaicStatusLabel,
+    statusTone: tutorPersona.error ? 'warning' as const : 'neutral' as const,
+  };
   const showLessonRunway = !viewingHistoryId && !chat.some((item) => item.role === 'user');
   const filteredSessions = useMemo(() => {
     const query = historyQuery.trim().toLowerCase();
@@ -622,8 +673,7 @@ export function ClassroomViewRedesign() {
 
   useEffect(() => {
     chatRef.current = chat;
-    dialogueEndRef.current?.scrollIntoView({ block: 'end' });
-  }, [chat, asking]);
+  }, [chat]);
 
   useEffect(() => {
     setVoiceSupported(Boolean(navigator.mediaDevices?.getUserMedia) && typeof MediaRecorder !== 'undefined');
@@ -1124,73 +1174,113 @@ export function ClassroomViewRedesign() {
         />
       )}
 
-      <section className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm" data-testid="a3-classroom-workspace">
-        <WorkspaceHeader
-          copy={copy}
-          classroom={classroom}
-          target={target}
-          loading={loading}
-          historyOpen={historyOpen}
-          drawerOpen={drawerOpen}
-          readiness={completedReadiness}
-          onRefresh={() => void loadClassroom()}
-          onToggleHistory={() => setHistoryOpen((value) => !value)}
-          onToggleDrawer={() => setDrawerOpen((value) => !value)}
-        />
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto]">
-          <div className="min-h-0 overflow-y-auto" data-testid="a3-classroom-dialogue">
-            {/* 辅导方式选择器与 OpenMAIC 条移入滚动区：它们占约 150px，固定时会把对话区压到只剩几行。
-                随对话一起滚动后，对话区能占满可用高度，往下看内容时顶部块自然让位。 */}
-            <div className="border-b border-slate-200 bg-[#fbfaf5] px-4 py-2 md:px-6">
-              <TutorPersonaSelector
-                compact
-                personas={tutorPersona.personas}
-                selectedPersonaId={tutorPersona.selectedPersonaId}
-                recommendedPersonaId={tutorPersona.recommendedPersonaId}
-                loading={tutorPersona.loading}
-                saving={tutorPersona.saving}
-                error={tutorPersona.error}
-                onSelect={tutorPersona.selectPersona}
-                onRetry={tutorPersona.reload}
-              />
-            </div>
-            <OpenMAICInlineBar copy={copy} artifact={openmaicClassroomArtifact} />
-            <div className={cn('mx-auto flex w-full flex-col gap-5 px-4 py-5 md:px-7 transition-[max-width] duration-200 ease-out', contentWidthClass)}>
-              <ClassroomResourceChips
-                disabled={asking || resourceGen.generating}
-                activeType={resourceGen.activeType}
-                hasTarget={Boolean(target?.title)}
-                onGenerate={(resourceType) => void generateResourceInClassroom(resourceType)}
-              />
-              {showLessonRunway && (
-                <LessonRunway
-                  copy={copy}
-                  target={target}
-                  sourceCount={sourceCount}
-                  exerciseCount={exerciseCount}
-                  asking={asking}
-                  onAsk={askQuestion}
+      <section className="relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[18px] border border-slate-200 bg-white text-slate-950 shadow-sm" data-testid="a3-classroom-workspace">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div
+            ref={scrollRef}
+            className="min-h-0 flex-1 overflow-y-auto"
+            data-testid="a3-classroom-dialogue"
+          >
+            <div ref={contentRef} data-testid="a3-classroom-dialogue-content">
+              <ClassroomContextShell
+                regionRef={contextLayout.regionRef}
+                regionId={contextLayout.regionId}
+                expanded={contextLayout.expanded}
+                summary={contextSummary}
+                summaryAction={tutorPersona.error ? (
+                  <button
+                    type="button"
+                    className="inline-flex size-11 items-center justify-center rounded-lg text-amber-700 transition hover:bg-amber-50"
+                    aria-label={copy.retryTutor}
+                    title={copy.retryTutor}
+                    onClick={() => void tutorPersona.reload()}
+                  >
+                    <RefreshCw className="size-4" aria-hidden="true" />
+                  </button>
+                ) : undefined}
+                collapseLabel={copy.collapseClassroomInfo}
+                expandLabel={copy.expandClassroomInfo}
+                onCollapse={contextLayout.collapse}
+                onExpand={contextLayout.expand}
+              >
+                {loading ? (
+                  <div
+                    data-testid="a3-classroom-context-loading"
+                    role="status"
+                    aria-live="polite"
+                    className="flex min-h-28 items-center gap-3 px-4 py-6 text-sm text-slate-600 md:px-6"
+                  >
+                    <Loader2 className="size-5 animate-spin text-blue-600" aria-hidden="true" />
+                    {copy.loadingContext}
+                  </div>
+                ) : (
+                  <>
+                    <WorkspaceHeader
+                      copy={copy}
+                      classroom={classroom}
+                      target={target}
+                      loading={loading}
+                      historyOpen={historyOpen}
+                      drawerOpen={drawerOpen}
+                      readiness={completedReadiness}
+                      onRefresh={() => void loadClassroom()}
+                      onToggleHistory={() => setHistoryOpen((value) => !value)}
+                      onToggleDrawer={() => setDrawerOpen((value) => !value)}
+                    />
+                    <div className="border-b border-slate-200 bg-[#fbfaf5] px-4 py-2 md:px-6">
+                      <TutorPersonaSelector
+                        compact
+                        personas={tutorPersona.personas}
+                        selectedPersonaId={tutorPersona.selectedPersonaId}
+                        recommendedPersonaId={tutorPersona.recommendedPersonaId}
+                        loading={tutorPersona.loading}
+                        saving={tutorPersona.saving}
+                        error={tutorPersona.error}
+                        onSelect={tutorPersona.selectPersona}
+                        onRetry={tutorPersona.reload}
+                      />
+                    </div>
+                    <OpenMAICInlineBar copy={copy} artifact={openmaicClassroomArtifact} />
+                  </>
+                )}
+              </ClassroomContextShell>
+
+              <div className={cn('mx-auto flex w-full flex-col gap-5 px-4 py-5 md:px-7 transition-[max-width] duration-200 ease-out', contentWidthClass)}>
+                <ClassroomResourceChips
+                  disabled={asking || resourceGen.generating}
+                  activeType={resourceGen.activeType}
+                  hasTarget={Boolean(target?.title)}
+                  onGenerate={(resourceType) => void generateResourceInClassroom(resourceType)}
                 />
-              )}
-              {chat.map((item) => (
-                <ChatBubble
-                  key={item.id}
-                  item={item}
-                  widthClassName={bubbleWidthClass}
-                  savingNoteId={savingNoteId}
-                  onSaveNote={saveAsNote}
-                  onFollowUp={(question) => void askQuestion(question)}
-                  onCopyUserMessage={(content) => void copyUserMessage(content)}
-                  onEditUserMessage={editUserMessage}
-                />
-              ))}
-              {asking && (
-                <div className="flex w-fit items-center gap-2 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800" data-testid="a3-classroom-asking">
-                  <Loader2 className="size-4 animate-spin" />
-                  正在结合学习目标、知识库引用和错题记录回答
-                </div>
-              )}
-              <div ref={dialogueEndRef} />
+                {showLessonRunway && (
+                  <LessonRunway
+                    copy={copy}
+                    target={target}
+                    sourceCount={sourceCount}
+                    exerciseCount={exerciseCount}
+                    asking={asking}
+                    onAsk={askQuestion}
+                  />
+                )}
+                {chat.map((item) => (
+                  <ChatBubble
+                    key={item.id}
+                    item={item}
+                    widthClassName={bubbleWidthClass}
+                    savingNoteId={savingNoteId}
+                    onSaveNote={saveAsNote}
+                    onFollowUp={(question) => void askQuestion(question)}
+                    onCopyUserMessage={(content) => void copyUserMessage(content)}
+                    onEditUserMessage={editUserMessage}
+                  />
+                ))}
+                {asking && (
+                  <div className="flex w-fit items-center gap-2 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800" data-testid="a3-classroom-asking">
+                    <Loader2 className="size-4 animate-spin" />
+                    正在结合学习目标、知识库引用和错题记录回答
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1231,6 +1321,40 @@ export function ClassroomViewRedesign() {
             }}
           />
         </div>
+
+        <ClassroomStickyContextBar
+          visible={!contextLayout.contextInView}
+          regionId={contextLayout.regionId}
+          summary={contextSummary}
+          actions={(
+            <ClassroomStickyActions
+              copy={copy}
+              loading={loading}
+              tutorError={Boolean(tutorPersona.error)}
+              historyOpen={historyOpen}
+              drawerOpen={drawerOpen}
+              onOpenHistory={() => setHistoryOpen(true)}
+              onRetryTutor={() => void tutorPersona.reload()}
+              onRefresh={() => void loadClassroom()}
+              onToggleDrawer={() => setDrawerOpen((value) => !value)}
+            />
+          )}
+          mobileActions={(
+            <ClassroomStickyActions
+              copy={copy}
+              loading={loading}
+              tutorError={Boolean(tutorPersona.error)}
+              historyOpen={historyOpen}
+              drawerOpen={drawerOpen}
+              onOpenHistory={() => setHistoryOpen(true)}
+              onRetryTutor={() => void tutorPersona.reload()}
+              onRefresh={() => void loadClassroom()}
+              onToggleDrawer={() => setDrawerOpen((value) => !value)}
+            />
+          )}
+          onOpen={contextLayout.openFromSticky}
+          openLabel={copy.expandClassroomInfo}
+        />
       </section>
 
       {drawerOpen && (
@@ -1262,6 +1386,81 @@ export function ClassroomViewRedesign() {
   );
 }
 
+function ClassroomStickyActions({
+  copy,
+  loading,
+  tutorError,
+  historyOpen,
+  drawerOpen,
+  onOpenHistory,
+  onRetryTutor,
+  onRefresh,
+  onToggleDrawer,
+}: {
+  copy: ClassroomCopy;
+  loading: boolean;
+  tutorError: boolean;
+  historyOpen: boolean;
+  drawerOpen: boolean;
+  onOpenHistory: () => void;
+  onRetryTutor: () => void;
+  onRefresh: () => void;
+  onToggleDrawer: () => void;
+}) {
+  const actionClassName = 'inline-flex size-11 items-center justify-center rounded-lg text-slate-600 transition hover:bg-slate-100 hover:text-blue-700 disabled:cursor-wait disabled:opacity-50';
+
+  return (
+    <div className="flex items-center gap-1" role="group" aria-label={copy.moreActions}>
+      {!historyOpen && (
+        <button
+          type="button"
+          className={actionClassName}
+          aria-label={copy.expandHistory}
+          title={copy.expandHistory}
+          onClick={onOpenHistory}
+        >
+          <PanelLeftOpen className="size-4" aria-hidden="true" />
+        </button>
+      )}
+      {tutorError && (
+        <button
+          type="button"
+          className={actionClassName}
+          aria-label={copy.retryTutor}
+          title={copy.retryTutor}
+          onClick={onRetryTutor}
+        >
+          <RefreshCw className="size-4" aria-hidden="true" />
+        </button>
+      )}
+      <button
+        type="button"
+        className={actionClassName}
+        aria-label={copy.refreshContext}
+        title={copy.refreshContext}
+        disabled={loading}
+        onClick={onRefresh}
+      >
+        {loading
+          ? <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+          : <RefreshCw className="size-4" aria-hidden="true" />}
+      </button>
+      <button
+        type="button"
+        className={actionClassName}
+        aria-label={copy.sidePanel}
+        title={copy.sidePanel}
+        aria-pressed={drawerOpen}
+        onClick={onToggleDrawer}
+      >
+        {drawerOpen
+          ? <PanelRightClose className="size-4" aria-hidden="true" />
+          : <PanelRightOpen className="size-4" aria-hidden="true" />}
+      </button>
+    </div>
+  );
+}
+
 function WorkspaceHeader({
   copy,
   classroom,
@@ -1286,8 +1485,8 @@ function WorkspaceHeader({
   onToggleDrawer: () => void;
 }) {
   return (
-    <header className="border-b border-slate-200 px-4 py-4 md:px-6">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+    <header aria-label={copy.classroomInfo} className="border-b border-slate-200 px-4 pb-4 pt-16 md:px-6 md:pt-4">
+      <div className="flex flex-col gap-4 md:pr-48 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             {!historyOpen && (

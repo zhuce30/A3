@@ -68,21 +68,65 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source).toContain('document.body.style.overflowY = previousBodyOverflowY');
   });
 
-  it('uses progressive classroom context and a measured floating composer', () => {
+  it('integrates classroom context into the unique stick-to-bottom dialogue flow', () => {
     const source = fs.readFileSync(redesignPath, 'utf8');
 
+    expect(source).toContain("import { useStickToBottom } from 'use-stick-to-bottom'");
     expect(source).toContain('ClassroomContextShell');
     expect(source).toContain('ClassroomStickyContextBar');
-    expect(source).toContain('ClassroomComposerFrame');
-    expect(source).toContain('useStickToBottom');
-    expect(source).toContain("'--a3-composer-height'");
-    expect(source).toContain('data-testid="a3-classroom-jump-latest"');
+    expect(source).toContain('useClassroomContextVisibility');
+    expect(source).toContain('useStickToBottom({');
+    expect(source).toContain('initial: false');
+    expect(source).toContain("resize: { damping: 0.78, stiffness: 0.08, mass: 1 }");
+    expect(source).toContain('scrollRootRef: scrollRef');
+    expect(source).toContain('ref={scrollRef}');
+    expect(source).toContain('ref={contentRef}');
+    expect(source).toContain('data-testid="a3-classroom-dialogue-content"');
     expect(source).toContain('data-testid="a3-classroom-context-loading"');
     expect(source).toContain('copy.chooseTargetFirst');
     expect(source).toContain('copy.viewingHistoryCompact');
     expect(source).toContain('aria-live="polite"');
-    expect(source).toContain('role="alert"');
+    expect(source).toContain('visible={!contextLayout.contextInView}');
+    expect(source.match(/data-testid="a3-classroom-dialogue"/g)).toHaveLength(1);
+    expect(source.match(/ref=\{scrollRef\}/g)).toHaveLength(1);
+    expect(source.match(/ref=\{contentRef\}/g)).toHaveLength(1);
     expect(source).not.toContain('grid-rows-[minmax(0,1fr)_auto]');
+  });
+
+  it('keeps progressive classroom copy synchronized in zh-CN and en-US', () => {
+    const source = fs.readFileSync(redesignPath, 'utf8');
+
+    for (const englishValue of [
+      'Classroom info',
+      'Collapse classroom info',
+      'Expand classroom info',
+      'Jump to latest',
+      'Viewing chat history',
+      'Loading classroom context',
+      'Tutor preference unavailable',
+      'Retry tutor preference',
+      'Choose a learning target before asking a question',
+      'Tutor preference pending',
+      'More actions',
+    ]) {
+      expect(source).toContain(englishValue);
+    }
+
+    for (const key of [
+      'classroomInfo',
+      'collapseClassroomInfo',
+      'expandClassroomInfo',
+      'jumpLatest',
+      'viewingHistoryCompact',
+      'loadingContext',
+      'tutorUnavailable',
+      'retryTutor',
+      'chooseTargetFirst',
+      'tutorPending',
+      'moreActions',
+    ]) {
+      expect(source.match(new RegExp(`${key}:`, 'g'))).toHaveLength(2);
+    }
   });
 
   it('keeps classroom context collapse state local to the browser session', () => {
