@@ -189,6 +189,7 @@ test.describe('A3 classroom viewport layout', () => {
       await expect(dialogue).toBeVisible();
       await expect(input).toBeVisible();
       await expect(page.getByTestId('a3-classroom-message-assistant')).toBeVisible();
+      await expect.poll(() => dialogue.evaluate((element) => element.scrollTop)).toBe(0);
       await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
       await expect.poll(() => page.evaluate(() => ({
         html: document.documentElement.style.overflowY,

@@ -101,6 +101,14 @@ type Deferred<T> = {
   promise: Promise<T>;
   resolve: (value: T) => void;
 };
+type ClassroomHistoryMessageFixture = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  verified?: boolean;
+  citations?: never[];
+  claims?: never[];
+};
 
 const resizeObserverInstances: TestResizeObserver[] = [];
 
@@ -185,19 +193,22 @@ function classroomResponse(title: string) {
   return { success: true, classroom: classroom(title) };
 }
 
-function mockClassroomApis(value: ClassroomContext) {
+function mockClassroomApis(value: ClassroomContext, messages: ClassroomHistoryMessageFixture[] = []) {
   apiMocks.get.mockImplementation((path: string) => {
     if (path === '/api/learning/classroom/') return Promise.resolve({ success: true, classroom: value });
     if (path === '/api/resources/packs/') return Promise.resolve({ success: true, resourcePacks: [] });
-    if (path === '/api/learning/classroom/history/') return Promise.resolve({ success: true, messages: [], sessions: [] });
+    if (path === '/api/learning/classroom/history/') return Promise.resolve({ success: true, messages, sessions: [] });
     if (path === '/api/learning/study-plan/?auto=1') return Promise.resolve({ success: false, error: 'not needed' });
     if (path === '/api/profiles/dynamic-profile/') return Promise.resolve({ success: false, error: 'not needed' });
     return Promise.resolve({ success: false, error: `Unexpected path: ${path}` });
   });
 }
 
-async function mountClassroom(value: ClassroomContext) {
-  mockClassroomApis(value);
+async function mountClassroom(
+  value: ClassroomContext,
+  messages: ClassroomHistoryMessageFixture[] = [],
+) {
+  mockClassroomApis(value, messages);
   const container = document.createElement('div');
   document.body.appendChild(container);
   mountedRoot = createRoot(container);
@@ -332,6 +343,96 @@ afterEach(() => {
 });
 
 describe('ClassroomViewRedesign progressive context integration', () => {
+  it('forces the generated-resource user message into view before the resource finishes', async () => {
+    resourceMocks.generate.mockReturnValue(new Promise(() => undefined));
+    const requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal('requestAnimationFrame', requestAnimationFrame);
+    const container = await mountClassroom(classroom('Process scheduling'));
+    const dialogue = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-dialogue"]');
+    let scrollTop = 120;
+    Object.defineProperties(dialogue, {
+      clientHeight: { configurable: true, get: () => 300 },
+      scrollHeight: { configurable: true, get: () => 1000 },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => { scrollTop = value; },
+      },
+    });
+    const framesBeforeGeneration = requestAnimationFrame.mock.calls.length;
+    const resourceChips = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-resource-chips"]');
+    const lectureButton = Array.from(resourceChips.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('讲解文档'));
+    if (!lectureButton) throw new Error('Missing lecture resource generation button');
+
+    await act(async () => {
+      lectureButton.click();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('生成讲解文档：Process scheduling');
+      expect(resourceMocks.generate).toHaveBeenCalledWith('lecture_doc', 'Process scheduling');
+      expect(scrollTop).toBe(699);
+    });
+    expect(requestAnimationFrame.mock.calls.length).toBeGreaterThan(framesBeforeGeneration);
+    expect(stickToBottomMocks.scrollToBottom).toHaveBeenCalledWith({
+      animation: 'smooth',
+      ignoreEscapes: true,
+    });
+  });
+
+  it('keeps restored classroom history at the context top on initial mount', async () => {
+    const container = await mountClassroom(classroom('Process scheduling'), [
+      {
+        id: 'restored-user',
+        role: 'user',
+        content: 'How does round-robin scheduling work?',
+      },
+      {
+        id: 'restored-assistant',
+        role: 'assistant',
+        content: 'It rotates through runnable processes with a fixed time slice.',
+        verified: true,
+        citations: [],
+        claims: [],
+      },
+    ]);
+    const dialogue = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-dialogue"]');
+    const content = queryRequired<HTMLElement>(container, '[data-testid="a3-classroom-dialogue-content"]');
+    const contentObserver = resizeObserverInstances.find((observer) => (
+      observer.observe.mock.calls.some(([target]) => target === content)
+    ));
+    if (!contentObserver) throw new Error('Missing dialogue ResizeObserver');
+    let scrollTop = 0;
+    Object.defineProperties(dialogue, {
+      clientHeight: { configurable: true, get: () => 300 },
+      scrollHeight: { configurable: true, get: () => 1600 },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => { scrollTop = value; },
+      },
+    });
+
+    act(() => {
+      contentObserver.emit([createResizeEntry(content, 1600, 1600)]);
+    });
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('How does round-robin scheduling work?');
+      expect(container.textContent).toContain('It rotates through runnable processes with a fixed time slice.');
+    });
+    expect(scrollTop).toBe(0);
+    expect(stickToBottomMocks.scrollToBottom).not.toHaveBeenCalled();
+    const context = queryRequired<HTMLElement>(content, '[data-testid="a3-classroom-context-region"]');
+    const firstMessage = queryRequired<HTMLElement>(content, '[data-testid="a3-classroom-message-user"]');
+    expect(context.compareDocumentPosition(firstMessage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('preserves an escaped reading position and lets the user resume following the latest reply', async () => {
     const reply = deferred<{
       ok: boolean;
