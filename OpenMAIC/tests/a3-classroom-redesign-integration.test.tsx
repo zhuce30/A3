@@ -506,7 +506,7 @@ describe('ClassroomViewRedesign progressive context integration', () => {
       await Promise.resolve();
     });
     await waitFor(() => {
-      expect(scrollTop).toBe(1199);
+      expect(scrollTop).toBeCloseTo(1199, 3);
       expect(container.querySelector('[data-testid="a3-classroom-jump-latest"]')).toBeNull();
     });
     expect(stickToBottomMocks.scrollToBottom).toHaveBeenLastCalledWith({

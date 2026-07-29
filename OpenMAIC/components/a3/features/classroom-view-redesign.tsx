@@ -62,8 +62,10 @@ import {
 import {
   ClassroomContextShell,
   ClassroomStickyContextBar,
+  MobileStickyActions,
   useClassroomContextVisibility,
 } from './classroom/classroom-context-shell';
+import { classroomPanelDefaults } from './classroom/classroom-responsive-layout';
 
 type ClassroomResponse = { success: boolean; error?: string; classroom: ClassroomContext };
 type FavoriteResponse = { success: boolean; error?: string };
@@ -597,8 +599,8 @@ export function ClassroomViewRedesign() {
   const [retrievalMode, setRetrievalMode] = useState<ClassroomRetrievalMode>('fast');
   const [retrievalScope, setRetrievalScope] = useState<ClassroomRetrievalScope>('all');
   const [profileFeed, setProfileFeed] = useState<DynamicProfileFeedResponse | null>(null);
-  const [historyOpen, setHistoryOpen] = useState(true);
-  const [drawerOpen, setDrawerOpen] = useState(true);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerTab, setDrawerTab] = useState<DrawerTab>('practice');
   const [historyQuery, setHistoryQuery] = useState('');
   const [composerHeight, setComposerHeight] = useState(88);
@@ -654,6 +656,12 @@ export function ClassroomViewRedesign() {
       || (session.summary ?? '').toLowerCase().includes(query)
     ));
   }, [classroomSessions, historyQuery]);
+
+  useEffect(() => {
+    const defaults = classroomPanelDefaults(window.innerWidth);
+    setHistoryOpen(defaults.historyOpen);
+    setDrawerOpen(defaults.drawerOpen);
+  }, []);
 
   useEffect(() => {
     const desktopViewport = window.matchMedia('(min-width: 1280px)');
@@ -1389,16 +1397,15 @@ export function ClassroomViewRedesign() {
             />
           )}
           mobileActions={(
-            <ClassroomStickyActions
-              copy={copy}
+            <MobileStickyActions
+              label={copy.moreActions}
+              retryTutorLabel={tutorPersona.error ? copy.retryTutor : undefined}
+              refreshLabel={copy.refreshContext}
+              sidePanelLabel={copy.sidePanel}
               loading={loading}
-              tutorError={Boolean(tutorPersona.error)}
-              historyOpen={historyOpen}
-              drawerOpen={drawerOpen}
-              onOpenHistory={() => setHistoryOpen(true)}
-              onRetryTutor={() => void tutorPersona.reload()}
+              onRetryTutor={tutorPersona.error ? () => void tutorPersona.reload() : undefined}
               onRefresh={() => void loadClassroom()}
-              onToggleDrawer={() => setDrawerOpen((value) => !value)}
+              onOpenDrawer={() => setDrawerOpen(true)}
             />
           )}
           onOpen={contextLayout.openFromSticky}
@@ -1951,9 +1958,9 @@ function Composer({
               onScopeChange={onScopeChange}
             />
           </div>
-          <Button data-testid="a3-classroom-submit" type="submit" disabled={submitDisabled} className="h-11 rounded-lg bg-blue-600 px-4 hover:bg-blue-700">
+          <Button data-testid="a3-classroom-submit" type="submit" disabled={submitDisabled} className="size-11 shrink-0 rounded-lg bg-blue-600 p-0 hover:bg-blue-700" aria-label={copy.send} title={copy.send}>
             {asking ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-            {copy.send}
+            <span className="sr-only">{copy.send}</span>
           </Button>
         </div>
       </form>
@@ -1980,7 +1987,7 @@ function RetrievalControls({
   const { locale } = useA3Locale();
   const localizedScopeOptions = classroomScopeOptions[locale];
   return (
-    <div className="flex flex-wrap items-center gap-2" data-testid="a3-classroom-retrieval-controls">
+    <div className="flex min-w-max flex-nowrap items-center gap-2" data-testid="a3-classroom-retrieval-controls">
       <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1">
         {([
           { value: 'fast' as const, label: copy.fastAnswer },

@@ -7,10 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ClassroomContextShell,
   ClassroomStickyContextBar,
+  MobileStickyActions,
   useClassroomContextVisibility,
   type ClassroomContextSummary,
 } from '@/components/a3/features/classroom/classroom-context-shell';
 import { ClassroomComposerFrame } from '@/components/a3/features/classroom/classroom-composer-frame';
+import { classroomPanelDefaults } from '@/components/a3/features/classroom/classroom-responsive-layout';
 
 let observerCallback: IntersectionObserverCallback | null = null;
 const observerInstances: ControlledIntersectionObserver[] = [];
@@ -322,6 +324,103 @@ describe('floating classroom composer frame', () => {
     expect(onHeightChange).toHaveBeenCalledTimes(1);
     expect(onHeightChange).toHaveBeenCalledWith(64);
     expect(resizeObserverInstances).toHaveLength(0);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+});
+
+describe('responsive classroom controls', () => {
+  it.each([
+    [1920, { historyOpen: true, drawerOpen: true }],
+    [1600, { historyOpen: true, drawerOpen: true }],
+    [1440, { historyOpen: true, drawerOpen: false }],
+    [1280, { historyOpen: true, drawerOpen: false }],
+    [1024, { historyOpen: false, drawerOpen: false }],
+    [390, { historyOpen: false, drawerOpen: false }],
+  ])('chooses one-time panel defaults for a %ipx viewport', (width, expected) => {
+    expect(classroomPanelDefaults(width)).toEqual(expected);
+  });
+
+  it('uses a native mobile details menu and closes it after each action', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onRetryTutor = vi.fn();
+    const onRefresh = vi.fn();
+    const onOpenDrawer = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <MobileStickyActions
+          label="更多操作"
+          retryTutorLabel="重试导师方式"
+          refreshLabel="刷新课堂信息"
+          sidePanelLabel="打开侧面板"
+          loading={false}
+          onRetryTutor={onRetryTutor}
+          onRefresh={onRefresh}
+          onOpenDrawer={onOpenDrawer}
+        />,
+      );
+    });
+
+    const details = container.querySelector<HTMLDetailsElement>('details');
+    const summary = details?.querySelector('summary');
+    expect(details).not.toBeNull();
+    expect(summary?.getAttribute('aria-label')).toBe('更多操作');
+    expect(summary?.getAttribute('title')).toBe('更多操作');
+
+    for (const [label, callback] of [
+      ['重试导师方式', onRetryTutor],
+      ['刷新课堂信息', onRefresh],
+      ['打开侧面板', onOpenDrawer],
+    ] as const) {
+      details!.open = true;
+      const button = Array.from(details!.querySelectorAll('button'))
+        .find((candidate) => candidate.getAttribute('aria-label') === label);
+      await act(async () => button?.click());
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(details!.open).toBe(false);
+    }
+
+    await act(async () => {
+      root.render(
+        <MobileStickyActions
+          label="更多操作"
+          refreshLabel="刷新课堂信息"
+          sidePanelLabel="打开侧面板"
+          loading={false}
+          onRefresh={onRefresh}
+          onOpenDrawer={onOpenDrawer}
+        />,
+      );
+    });
+    expect(container.querySelector('[aria-label="重试导师方式"]')).toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('keeps the composer frame safe-area aware without changing its measured wrapper', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <ClassroomComposerFrame onHeightChange={() => undefined}>
+          <div>Composer content</div>
+        </ClassroomComposerFrame>,
+      );
+    });
+
+    const frame = container.querySelector<HTMLElement>('[data-testid="a3-classroom-composer-frame"]');
+    expect(frame?.className).toContain('bottom-0');
+    expect(frame?.className).toContain('px-3');
+    expect(frame?.className).toContain('pb-[calc(.5rem+env(safe-area-inset-bottom))]');
+    expect(frame?.className).toContain('md:px-6');
+    expect(frame?.className).toContain('md:pb-2');
 
     act(() => root.unmount());
     container.remove();

@@ -172,9 +172,11 @@ test.describe('A3 classroom viewport layout', () => {
     await mockClassroomLayoutDependencies(page);
 
     for (const viewport of [
-      { width: 1440, height: 900, minimumDialogueHeight: 360 },
-      { width: 1920, height: 1080, minimumDialogueHeight: 540 },
-      { width: 1366, height: 768, minimumDialogueHeight: 230 },
+      { width: 1920, height: 1080, minimumDialogueHeight: 540, historyVisible: true, drawerVisible: true },
+      { width: 1440, height: 900, minimumDialogueHeight: 360, historyVisible: true, drawerVisible: false },
+      { width: 1366, height: 768, minimumDialogueHeight: 230, historyVisible: true, drawerVisible: false },
+      { width: 1024, height: 768, minimumDialogueHeight: 230, historyVisible: false, drawerVisible: false },
+      { width: 390, height: 844, minimumDialogueHeight: 230, historyVisible: false, drawerVisible: false },
     ]) {
       await page.setViewportSize(viewport);
       await page.goto('/a3/classroom', { waitUntil: 'domcontentloaded' });
@@ -191,13 +193,28 @@ test.describe('A3 classroom viewport layout', () => {
       await expect(page.getByTestId('a3-classroom-message-assistant')).toBeVisible();
       await expect.poll(() => dialogue.evaluate((element) => element.scrollTop)).toBe(0);
       await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+      await expect(page.getByTestId('a3-classroom-history-panel')).toBeVisible({ visible: viewport.historyVisible });
+      await expect(page.getByTestId('a3-classroom-drawer-tab-practice')).toBeVisible({ visible: viewport.drawerVisible });
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= window.innerWidth)).toBe(true);
+
+      const expectedPageScroll = viewport.width >= 1280
+        ? { html: 'hidden', body: 'hidden' }
+        : { html: '', body: '' };
       await expect.poll(() => page.evaluate(() => ({
         html: document.documentElement.style.overflowY,
         body: document.body.style.overflowY,
-      }))).toEqual({ html: 'hidden', body: 'hidden' });
+      }))).toEqual(expectedPageScroll);
 
-      await page.getByRole('button', { name: '收起历史侧栏' }).click();
-      await workspace.getByRole('button', { name: '侧面板', exact: true }).click();
+      await page.screenshot({
+        path: testInfo.outputPath(`a3-classroom-responsive-defaults-${viewport.width}x${viewport.height}.png`),
+        fullPage: true,
+      });
+
+      const closeHistory = page.getByRole('button', { name: '收起历史侧栏' });
+      if (await closeHistory.isVisible()) await closeHistory.click();
+      const drawerToggle = workspace.getByRole('button', { name: '侧面板', exact: true });
+      if (viewport.drawerVisible && await drawerToggle.isVisible()) await drawerToggle.click();
       await expect(page.getByTestId('a3-classroom-history-panel')).toBeHidden();
       await expect(page.getByTestId('a3-classroom-drawer-tab-practice')).toBeHidden();
 
@@ -219,19 +236,29 @@ test.describe('A3 classroom viewport layout', () => {
       expect(composerBox!.y + composerBox!.height).toBeLessThanOrEqual(
         workspaceBox!.y + workspaceBox!.height,
       );
+      expect(composerBox!.height).toBeLessThanOrEqual(96);
       expect(Math.abs(classroomBox!.height - workspaceBox!.height)).toBeLessThanOrEqual(1);
+
+      await dialogue.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+        element.dispatchEvent(new Event('scroll'));
+      });
+      const lastMessageBox = await page.getByTestId('a3-classroom-message-assistant').last().boundingBox();
+      expect(lastMessageBox).not.toBeNull();
+      expect(lastMessageBox!.y + lastMessageBox!.height).toBeLessThanOrEqual(composerBox!.y + 1);
 
       await page.screenshot({
         path: testInfo.outputPath(`a3-classroom-layout-${viewport.width}x${viewport.height}.png`),
         fullPage: true,
       });
+
+      if (viewport.width === 1920) {
+        await page.setViewportSize({ width: 1024, height: 768 });
+        await expect(page.getByTestId('a3-classroom-history-panel')).toBeHidden();
+        await expect(page.getByTestId('a3-classroom-drawer-tab-practice')).toBeHidden();
+      }
     }
 
-    await page.setViewportSize({ width: 1024, height: 768 });
-    await expect.poll(() => page.evaluate(() => ({
-      html: document.documentElement.style.overflowY,
-      body: document.body.style.overflowY,
-    }))).toEqual({ html: '', body: '' });
   });
 
   test('collapses context, reveals the sticky summary, and never covers the last message', async ({ page }) => {

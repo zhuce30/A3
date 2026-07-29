@@ -190,6 +190,15 @@ describe('A3 classroom redesigned workspace contract', () => {
     expect(source).toContain('title={copy.removeImage}');
   });
 
+  it('keeps retrieval controls on one scrollable row and the send action fixed at 44px', () => {
+    const source = fs.readFileSync(redesignPath, 'utf8');
+
+    expect(source).toContain('className="min-w-0 flex-1 overflow-x-auto"');
+    expect(source).toContain('className="flex min-w-max flex-nowrap items-center gap-2" data-testid="a3-classroom-retrieval-controls"');
+    expect(source).toContain('data-testid="a3-classroom-submit"');
+    expect(source).toContain('className="size-11 shrink-0 rounded-lg bg-blue-600 p-0 hover:bg-blue-700"');
+  });
+
   it('keeps classroom context collapse state local to the browser session', () => {
     const contextSource = fs.readFileSync(
       path.resolve(process.cwd(), 'components/a3/features/classroom/classroom-context-shell.tsx'),

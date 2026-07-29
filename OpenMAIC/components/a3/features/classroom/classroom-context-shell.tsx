@@ -12,7 +12,7 @@ import {
   type Ref,
   type RefObject,
 } from 'react';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronUp, MoreHorizontal, PanelRightOpen, RefreshCw } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 
@@ -239,5 +239,82 @@ export function ClassroomStickyContextBar({
       <div className="shrink-0 sm:hidden">{mobileActions}</div>
       <div className="hidden shrink-0 items-center gap-1 sm:flex">{actions}</div>
     </div>
+  );
+}
+
+export function MobileStickyActions({
+  label,
+  retryTutorLabel,
+  refreshLabel,
+  sidePanelLabel,
+  loading,
+  onRetryTutor,
+  onRefresh,
+  onOpenDrawer,
+}: {
+  label: string;
+  retryTutorLabel?: string;
+  refreshLabel: string;
+  sidePanelLabel: string;
+  loading: boolean;
+  onRetryTutor?: () => void;
+  onRefresh: () => void;
+  onOpenDrawer: () => void;
+}) {
+  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const actionClassName = 'flex min-h-11 w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-wait disabled:opacity-50';
+  const runAction = (action: () => void) => {
+    action();
+    detailsRef.current?.removeAttribute('open');
+  };
+
+  return (
+    <details ref={detailsRef} className="relative" data-testid="a3-classroom-mobile-actions">
+      <summary
+        className="flex size-11 cursor-pointer list-none items-center justify-center rounded-lg text-slate-600 transition hover:bg-slate-100 hover:text-blue-700 [&::-webkit-details-marker]:hidden"
+        aria-label={label}
+        title={label}
+      >
+        <MoreHorizontal className="size-5" aria-hidden="true" />
+      </summary>
+      <div className="absolute right-0 top-full z-40 mt-1 w-48 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg" role="menu">
+        {retryTutorLabel && onRetryTutor && (
+          <button
+            type="button"
+            role="menuitem"
+            className={actionClassName}
+            aria-label={retryTutorLabel}
+            title={retryTutorLabel}
+            onClick={() => runAction(onRetryTutor)}
+          >
+            <RefreshCw className="size-4 shrink-0" aria-hidden="true" />
+            {retryTutorLabel}
+          </button>
+        )}
+        <button
+          type="button"
+          role="menuitem"
+          className={actionClassName}
+          aria-label={refreshLabel}
+          title={refreshLabel}
+          disabled={loading}
+          onClick={() => runAction(onRefresh)}
+        >
+          <RefreshCw className={cn('size-4 shrink-0', loading && 'animate-spin')} aria-hidden="true" />
+          {refreshLabel}
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          className={actionClassName}
+          aria-label={sidePanelLabel}
+          title={sidePanelLabel}
+          onClick={() => runAction(onOpenDrawer)}
+        >
+          <PanelRightOpen className="size-4 shrink-0" aria-hidden="true" />
+          {sidePanelLabel}
+        </button>
+      </div>
+    </details>
   );
 }
