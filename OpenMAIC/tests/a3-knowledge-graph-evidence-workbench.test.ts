@@ -72,6 +72,13 @@ describe('A3 knowledge graph evidence workbench', () => {
     expect(view).not.toContain('<A3Card');
   });
 
+  it('does not reload and reset a graph that was already visited when switching tabs', () => {
+    const view = fs.readFileSync(viewPath, 'utf8');
+
+    expect(view).toContain("if (activeTab === 'material' && materialGraph) return");
+    expect(view).toContain("if (activeTab === 'course' && courseGraph) return");
+  });
+
   it('composes the workbench and removes controls that covered graph nodes', () => {
     const view = fs.readFileSync(viewPath, 'utf8');
     const panels = fs.readFileSync(path.join(featureDir, 'material-graph-panels.tsx'), 'utf8');

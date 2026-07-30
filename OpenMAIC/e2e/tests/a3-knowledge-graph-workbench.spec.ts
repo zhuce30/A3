@@ -36,6 +36,14 @@ test('keeps evidence detail inside the graph workspace and can restore full canv
   await expect(workspace).toBeVisible({ timeout: 60_000 });
   await expect(graph).toBeVisible();
   await expect(detail).toBeVisible();
+  const selectedMaterialTitle = (await detail.locator('h3').first().textContent())?.trim();
+  expect(selectedMaterialTitle).toBeTruthy();
+
+  await page.getByRole('tab', { name: '课程路径' }).click();
+  await expect(page.getByText('正在读取课程路径图')).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText('正在读取课程路径图')).not.toBeVisible({ timeout: 60_000 });
+  await page.getByRole('tab', { name: '资料图谱' }).click();
+  await expect(detail.locator('h3').first()).toHaveText(selectedMaterialTitle ?? '');
   await page.screenshot({ path: 'test-results/a3-knowledge-graph-1440.png', fullPage: true });
 
   const workspaceBox = await workspace.boundingBox();

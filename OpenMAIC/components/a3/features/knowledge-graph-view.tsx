@@ -95,11 +95,13 @@ export function KnowledgeGraphView() {
   }, []);
 
   useEffect(() => {
+    if (activeTab === 'material' && materialGraph) return;
+    if (activeTab === 'course' && courseGraph) return;
     const timer = window.setTimeout(() => {
       void (activeTab === 'material' ? loadMaterialGraph() : loadCourseGraph());
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [activeTab, loadCourseGraph, loadMaterialGraph]);
+  }, [activeTab, courseGraph, loadCourseGraph, loadMaterialGraph, materialGraph]);
 
   const materialNodesById = useMemo(() => new Map((materialGraph?.nodes ?? []).map((node) => [node.id, node])), [materialGraph]);
   const materialEdgesById = useMemo(() => new Map((materialGraph?.edges ?? []).map((edge) => [edge.id, edge])), [materialGraph]);
