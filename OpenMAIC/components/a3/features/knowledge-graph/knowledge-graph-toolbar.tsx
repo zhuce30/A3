@@ -138,6 +138,7 @@ function MaterialGraphSearch(props: {
           role="combobox"
           aria-label="搜索当前视图中的实体"
           aria-expanded={open}
+          aria-controls="a3-material-graph-search-results"
           value={props.query}
           disabled={props.disabled}
           onChange={(event) => props.onQueryChange(event.target.value)}
@@ -147,6 +148,7 @@ function MaterialGraphSearch(props: {
       </label>
       {open ? (
         <div
+          id="a3-material-graph-search-results"
           role="listbox"
           className="absolute left-0 right-0 top-full z-30 mt-1 max-h-64 overflow-y-auto rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-1 shadow-lg"
         >

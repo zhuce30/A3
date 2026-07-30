@@ -35,6 +35,7 @@ describe('A3 knowledge graph evidence workbench', () => {
     expect(toolbar).toContain('当前视图没有匹配实体');
     expect(toolbar).toContain('role="tablist"');
     expect(toolbar).toContain('aria-selected');
+    expect(toolbar).toContain('aria-controls="a3-material-graph-search-results"');
     expect(toolbar).toContain('a3-material-graph-depth-one');
     expect(toolbar).toContain('a3-material-graph-depth-two');
     expect(toolbar).toContain('a3-material-graph-depth-all');
