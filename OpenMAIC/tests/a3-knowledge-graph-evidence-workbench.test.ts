@@ -18,4 +18,25 @@ describe('A3 knowledge graph evidence workbench', () => {
     expect(view).toContain('mergeMaterialGraphs');
     expect(view).not.toContain('mockMaterialGraph');
   });
+
+  it('moves graph quality into the explicit data-status popover', () => {
+    const toolbar = fs.readFileSync(path.join(featureDir, 'knowledge-graph-toolbar.tsx'), 'utf8');
+    const panels = fs.readFileSync(path.join(featureDir, 'material-graph-panels.tsx'), 'utf8');
+
+    expect(toolbar).toContain('GraphDataStatusPopover');
+    expect(toolbar).toContain('数据状态');
+    expect(panels).toContain('export function MaterialGraphDataStatus');
+  });
+
+  it('labels material search as current-view search and exposes accessible tabs', () => {
+    const toolbar = fs.readFileSync(path.join(featureDir, 'knowledge-graph-toolbar.tsx'), 'utf8');
+
+    expect(toolbar).toContain('搜索当前视图中的实体');
+    expect(toolbar).toContain('当前视图没有匹配实体');
+    expect(toolbar).toContain('role="tablist"');
+    expect(toolbar).toContain('aria-selected');
+    expect(toolbar).toContain('a3-material-graph-depth-one');
+    expect(toolbar).toContain('a3-material-graph-depth-two');
+    expect(toolbar).toContain('a3-material-graph-depth-all');
+  });
 });

@@ -77,6 +77,47 @@ export function MaterialGraphMiniPanel(props: { node: MaterialNode | null; edge:
   );
 }
 
+export function MaterialGraphDataStatus({ graph }: { graph: MaterialGraph | null }) {
+  const quality = graph?.quality ?? (graph ? deriveVisibleQuality(graph) : {});
+
+  return (
+    <div className="w-[320px] space-y-4" data-testid="a3-material-graph-data-status">
+      <div>
+        <div className="text-sm font-semibold text-[var(--a3-text)]">数据状态</div>
+        <div className="mt-1 text-xs text-[var(--a3-text-muted)]">
+          {graph?.build.status ?? 'empty'} · {graph?.schemaVersion ?? 'a3.material-knowledge-graph.v1'}
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <Stat label="实体" value={graph?.summary.entityCount ?? 0} />
+        <Stat label="关系" value={graph?.summary.relationCount ?? 0} />
+        <Stat label="资料" value={graph?.summary.resourceCount ?? 0} />
+        <Stat label="断言" value={graph?.summary.claimCount ?? 0} />
+      </div>
+      <div className="space-y-2">
+        <Quality label="证据覆盖" value={quality.evidenceCoverage} />
+        <Quality label="孤立实体" value={quality.isolatedEntityRate} reverse />
+        <Quality label="关系密度" value={quality.relationDensity} />
+      </div>
+      <dl className="grid gap-2 text-xs text-[var(--a3-text-muted)]">
+        <div className="flex justify-between gap-4">
+          <dt>最近构建</dt>
+          <dd>{formatBuildTime(graph?.build.lastBuiltAt)}</dd>
+        </div>
+        <div className="flex justify-between gap-4">
+          <dt>别名合并</dt>
+          <dd>{quality.aliasMergeCount ?? 0}</dd>
+        </div>
+        <div className="flex justify-between gap-4">
+          <dt>补抽轮次</dt>
+          <dd>{quality.gleaningRounds ?? 0}</dd>
+        </div>
+      </dl>
+      {graph?.build.reason ? <p className="text-xs leading-5 text-[var(--a3-text-muted)]">{graph.build.reason}</p> : null}
+    </div>
+  );
+}
+
 export function MaterialGraphStatsPanel(props: {
   graph: MaterialGraph | null;
   depth: MaterialGraphDepth;
@@ -188,4 +229,8 @@ function deriveVisibleQuality(graph: MaterialGraph): MaterialGraphQuality {
     evidenceCoverage: evidenceTotal ? evidenceBound / evidenceTotal : 0,
     relationDensity: maxEdges ? graph.edges.length / maxEdges : 0,
   };
+}
+
+function formatBuildTime(value?: string | null) {
+  return value ? new Date(value).toLocaleString() : '暂无';
 }
