@@ -48,6 +48,7 @@ describe('A3 knowledge graph evidence workbench', () => {
     expect(workspace).toContain('overflow-y-auto');
     expect(workspace).toContain('aria-label="关闭详情"');
     expect(workspace).toContain('min-h-[560px]');
+    expect(workspace).toContain('grid-rows-[minmax(0,1fr)]');
   });
 
   it('reports loaded scope instead of full graph quality in the status bar', () => {
