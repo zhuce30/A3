@@ -3,6 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
+import {
+  resolveRealtimeVoice,
+  resolveTurnDetectionType,
+} from './a3-dashscope-realtime-protocol.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadEnvFile(path.resolve(__dirname, '..', '.env.local'));
@@ -12,6 +16,7 @@ const bindHost = process.env.A3_REALTIME_WS_PROXY_HOST || '127.0.0.1';
 const djangoBaseUrl = process.env.A3_API_BASE_URL || process.env.NEXT_PUBLIC_A3_API_BASE_URL || 'http://localhost:8000';
 const dashScopeUrl = process.env.DASHSCOPE_REALTIME_URL || 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime';
 const dashScopeModel = process.env.DASHSCOPE_REALTIME_MODEL || 'qwen3.5-omni-plus-realtime';
+const turnDetectionType = resolveTurnDetectionType(process.env.DASHSCOPE_REALTIME_VAD);
 const dashScopeApiKey = process.env.DASHSCOPE_API_KEY
   || process.env.A3_COACHING_API_KEY
   || process.env.QWEN_API_KEY
@@ -71,6 +76,7 @@ server.on('upgrade', async (request, socket, head) => {
 
 wss.on('connection', (client, request) => {
   const runtime = request.a3TutorRuntime || resolveTutorRuntime('structured-teacher');
+  const resolvedVoice = resolveRealtimeVoice(dashScopeModel, runtime.voice);
   const upstreamUrl = withModel(dashScopeUrl, dashScopeModel);
   const upstream = new WebSocket(upstreamUrl, {
     headers: {
@@ -87,17 +93,19 @@ wss.on('connection', (client, request) => {
       coachingSessionId: request.a3CoachingSessionId || '',
       resolvedPersonaId: runtime.id,
       personaFallbackUsed: runtime.fallbackUsed,
+      turnDetectionType,
+      voice: resolvedVoice,
     }));
     upstream.send(JSON.stringify({
       event_id: `a3_session_${Date.now()}`,
       type: 'session.update',
       session: {
         modalities: ['text', 'audio'],
-        voice: runtime.voice,
+        voice: resolvedVoice,
         input_audio_format: 'pcm',
         output_audio_format: 'pcm',
         turn_detection: {
-          type: process.env.DASHSCOPE_REALTIME_VAD || 'server_vad',
+          type: turnDetectionType,
           threshold: Number(process.env.DASHSCOPE_REALTIME_VAD_THRESHOLD || 0.5),
           silence_duration_ms: Number(process.env.DASHSCOPE_REALTIME_SILENCE_MS || 800),
         },
@@ -108,10 +116,12 @@ wss.on('connection', (client, request) => {
   });
 
   upstream.on('message', (data, isBinary) => {
+    if (!isBinary) logUpstreamProtocolError(data.toString());
     if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
   });
 
   upstream.on('error', (error) => {
+    console.error('[A3 realtime proxy] DashScope transport error:', safeErrorMessage(error));
     if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify({
         type: 'a3.proxy.error',
@@ -121,6 +131,12 @@ wss.on('connection', (client, request) => {
   });
 
   upstream.on('close', (code, reason) => {
+    console.warn('[A3 realtime proxy] DashScope closed:', {
+      code,
+      reason: sanitizeCloseReason(reason.toString()),
+      model: dashScopeModel,
+      personaId: runtime.id,
+    });
     if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify({
         type: 'a3.proxy.closed',
@@ -153,6 +169,28 @@ function withModel(baseUrl, model) {
   const url = new URL(baseUrl);
   if (!url.searchParams.has('model')) url.searchParams.set('model', model);
   return url.toString();
+}
+
+function logUpstreamProtocolError(raw) {
+  try {
+    const event = JSON.parse(raw);
+    if (event?.type !== 'error') return;
+    console.error('[A3 realtime proxy] DashScope protocol error:', {
+      code: String(event?.error?.code || event?.code || 'unknown_error').slice(0, 120),
+      message: String(event?.error?.message || event?.message || 'Unknown provider error').slice(0, 500),
+      model: dashScopeModel,
+    });
+  } catch {
+    // Ignore non-JSON protocol frames. Audio and transcript content are never logged.
+  }
+}
+
+function safeErrorMessage(error) {
+  return String(error instanceof Error ? error.message : 'DashScope WebSocket connection failed').slice(0, 500);
+}
+
+function sanitizeCloseReason(reason) {
+  return String(reason || '').replace(/[\r\n\t]+/g, ' ').slice(0, 300);
 }
 
 async function validateA3Cookie(cookie) {

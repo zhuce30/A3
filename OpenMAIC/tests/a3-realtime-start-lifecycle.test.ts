@@ -4,8 +4,10 @@ import {
   canStartRealtimeCall,
   createRealtimeStartOperationController,
   ensureRealtimeInputAudioContextRunning,
+  getRealtimeTransportFailure,
   runRealtimeEndLifecycle,
   runRealtimeStartStep,
+  shouldScheduleManualAudioCommit,
 } from '@/components/a3/features/coaching/use-realtime-coaching';
 
 describe('A3 realtime start lifecycle', () => {
@@ -125,6 +127,31 @@ describe('A3 realtime start lifecycle', () => {
     await expect(ensureRealtimeInputAudioContextRunning(context)).rejects.toThrow(
       '浏览器暂停了麦克风音频处理',
     );
+  });
+
+  it('lets server VAD own audio commit and response creation', () => {
+    expect(shouldScheduleManualAudioCommit('server_vad')).toBe(false);
+    expect(shouldScheduleManualAudioCommit('semantic_vad')).toBe(false);
+    expect(shouldScheduleManualAudioCommit('manual')).toBe(true);
+  });
+
+  it('surfaces nested provider errors and abnormal proxy closure reasons', () => {
+    expect(getRealtimeTransportFailure({
+      type: 'error',
+      error: { code: 'invalid_value', message: 'Voice Cherry is not supported' },
+    })).toEqual({
+      code: 'invalid_value',
+      message: 'Voice Cherry is not supported',
+    });
+    expect(getRealtimeTransportFailure({
+      type: 'a3.proxy.closed',
+      code: 1008,
+      reason: 'upstream rejected session',
+    })).toEqual({
+      code: '1008',
+      message: 'upstream rejected session',
+    });
+    expect(getRealtimeTransportFailure({ type: 'a3.proxy.closed', code: 1000 })).toBeNull();
   });
 });
 

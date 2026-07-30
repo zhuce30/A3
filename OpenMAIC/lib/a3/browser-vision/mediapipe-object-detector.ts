@@ -12,8 +12,8 @@ type DetectorWorkerMessage =
 
 type DetectorWorkerLike = {
   postMessage: (message: unknown, transfer?: Transferable[]) => void;
-  addEventListener: (type: 'message', listener: (event: MessageEvent<DetectorWorkerMessage>) => void) => void;
-  removeEventListener: (type: 'message', listener: (event: MessageEvent<DetectorWorkerMessage>) => void) => void;
+  addEventListener: (type: string, listener: (event: Event) => void) => void;
+  removeEventListener: (type: string, listener: (event: Event) => void) => void;
   terminate: () => void;
 };
 
@@ -21,7 +21,10 @@ type MediaPipeAdapterOptions = {
   createWorker?: () => DetectorWorkerLike;
   createBitmap?: (video: HTMLVideoElement, width: number, height: number) => Promise<ImageBitmap>;
   detectDocuments?: (video: HTMLVideoElement) => RawBrowserDetectionCandidate[];
+  loadTimeoutMs?: number;
 };
+
+const DEFAULT_MODEL_LOAD_TIMEOUT_MS = 30_000;
 
 export const A3_BROWSER_VISION_ASSETS = {
   modelUrl: '/models/a3-detection/efficientdet-lite0-int8-v1.tflite',
@@ -77,19 +80,61 @@ export function createMediaPipeObjectDetectorAdapter(
   let nextRequestId = 1;
   let loadResolve: ((value: { backend: 'mediapipe-gpu' | 'mediapipe-cpu' }) => void) | null = null;
   let loadReject: ((reason: Error) => void) | null = null;
+  let loadPromise: Promise<{ backend: 'mediapipe-gpu' | 'mediapipe-cpu' }> | null = null;
+  let loadTimeout: ReturnType<typeof setTimeout> | null = null;
   const pending = new Map<number, {
     resolve: (candidates: RawBrowserDetectionCandidate[]) => void;
     reject: (reason: Error) => void;
   }>();
 
-  const handleMessage = (event: MessageEvent<DetectorWorkerMessage>) => {
-    const message = event.data;
+  const clearLoadTimeout = () => {
+    if (loadTimeout !== null) clearTimeout(loadTimeout);
+    loadTimeout = null;
+  };
+
+  const detachWorker = (target: DetectorWorkerLike) => {
+    target.removeEventListener('message', handleMessage);
+    target.removeEventListener('error', handleWorkerError);
+    target.removeEventListener('messageerror', handleWorkerMessageError);
+  };
+
+  const rejectWorker = (error: Error) => {
+    clearLoadTimeout();
+    loadReject?.(error);
+    loadResolve = null;
+    loadReject = null;
+    loadPromise = null;
+    pending.forEach((request) => request.reject(error));
+    pending.clear();
+    if (worker) {
+      const failedWorker = worker;
+      worker = null;
+      detachWorker(failedWorker);
+      failedWorker.terminate();
+    }
+    loaded = false;
+  };
+
+  function handleWorkerError(event: Event) {
+    event.preventDefault?.();
+    const workerError = event as ErrorEvent;
+    rejectWorker(new Error(workerError.message || 'Browser detector worker failed'));
+  }
+
+  function handleWorkerMessageError() {
+    rejectWorker(new Error('Browser detector worker returned an unreadable message'));
+  }
+
+  function handleMessage(event: Event) {
+    const message = (event as MessageEvent<DetectorWorkerMessage>).data;
     if (message.type === 'loaded') {
       loaded = true;
       backend = message.backend;
+      clearLoadTimeout();
       loadResolve?.({ backend });
       loadResolve = null;
       loadReject = null;
+      loadPromise = null;
       return;
     }
     if (message.type === 'error') {
@@ -98,16 +143,14 @@ export function createMediaPipeObjectDetectorAdapter(
         pending.get(message.requestId)?.reject(error);
         pending.delete(message.requestId);
       } else {
-        loadReject?.(error);
-        loadResolve = null;
-        loadReject = null;
+        rejectWorker(error);
       }
       return;
     }
     const request = pending.get(message.requestId);
     request?.resolve(message.candidates);
     pending.delete(message.requestId);
-  };
+  }
 
   const ensureWorker = (): DetectorWorkerLike => {
     if (worker) return worker;
@@ -116,6 +159,8 @@ export function createMediaPipeObjectDetectorAdapter(
       { name: 'a3-object-detector' },
     ) as unknown as DetectorWorkerLike;
     currentWorker.addEventListener('message', handleMessage);
+    currentWorker.addEventListener('error', handleWorkerError);
+    currentWorker.addEventListener('messageerror', handleWorkerMessageError);
     worker = currentWorker;
     return currentWorker;
   };
@@ -132,14 +177,23 @@ export function createMediaPipeObjectDetectorAdapter(
   return {
     async load() {
       if (loaded) return { backend };
+      if (loadPromise) return loadPromise;
       const currentWorker = ensureWorker();
-      const loadPromise = new Promise<{ backend: 'mediapipe-gpu' | 'mediapipe-cpu' }>((resolve, reject) => {
+      loadPromise = new Promise<{ backend: 'mediapipe-gpu' | 'mediapipe-cpu' }>((resolve, reject) => {
         loadResolve = resolve;
         loadReject = reject;
       });
-      currentWorker.postMessage({ type: 'load', assets: A3_BROWSER_VISION_ASSETS });
+      const pendingLoad = loadPromise;
+      loadTimeout = setTimeout(() => {
+        rejectWorker(new Error('Browser detector model loading timed out'));
+      }, Math.max(1_000, options.loadTimeoutMs ?? DEFAULT_MODEL_LOAD_TIMEOUT_MS));
+      try {
+        currentWorker.postMessage({ type: 'load', assets: A3_BROWSER_VISION_ASSETS });
+      } catch (error) {
+        rejectWorker(error instanceof Error ? error : new Error('Unable to start browser detector worker'));
+      }
       if (!options.detectDocuments) void preloadOpenCvDocumentDetector().catch(() => undefined);
-      return loadPromise;
+      return pendingLoad;
     },
 
     async detect(frame: BrowserDetectionFrame, timestampMs: number) {
@@ -172,15 +226,19 @@ export function createMediaPipeObjectDetectorAdapter(
     },
 
     dispose() {
-      if (!worker) return;
-      worker.removeEventListener('message', handleMessage);
-      worker.postMessage({ type: 'dispose' });
-      worker.terminate();
-      worker = null;
+      clearLoadTimeout();
+      if (worker) {
+        const activeWorker = worker;
+        detachWorker(activeWorker);
+        activeWorker.postMessage({ type: 'dispose' });
+        activeWorker.terminate();
+        worker = null;
+      }
       loaded = false;
       loadReject?.(new Error('Detector disposed'));
       loadResolve = null;
       loadReject = null;
+      loadPromise = null;
       pending.forEach((request) => request.reject(new Error('Detector disposed')));
       pending.clear();
     },

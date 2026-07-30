@@ -167,7 +167,7 @@ describe('A3 MediaPipe adapter mapping', () => {
   });
 
   it('runs model inference through a transferable worker protocol', async () => {
-    const listeners = new Set<(event: MessageEvent) => void>();
+    const listeners = new Map<string, Set<(event: Event) => void>>();
     const worker = {
       postMessage: vi.fn((rawMessage: unknown) => {
         const message = rawMessage as { type: string; requestId?: number };
@@ -183,11 +183,15 @@ describe('A3 MediaPipe adapter mapping', () => {
                   region: { x: 0.1, y: 0.1, width: 0.4, height: 0.8 },
                 }],
               };
-          listeners.forEach((listener) => listener({ data } as MessageEvent));
+          listeners.get('message')?.forEach((listener) => listener({ data } as MessageEvent));
         });
       }),
-      addEventListener: vi.fn((_type: string, listener: (event: MessageEvent) => void) => listeners.add(listener)),
-      removeEventListener: vi.fn((_type: string, listener: (event: MessageEvent) => void) => listeners.delete(listener)),
+      addEventListener: vi.fn((type: string, listener: (event: Event) => void) => {
+        const handlers = listeners.get(type) ?? new Set();
+        handlers.add(listener);
+        listeners.set(type, handlers);
+      }),
+      removeEventListener: vi.fn((type: string, listener: (event: Event) => void) => listeners.get(type)?.delete(listener)),
       terminate: vi.fn(),
     };
     const bitmap = { width: 320, height: 180, close: vi.fn() } as unknown as ImageBitmap;
@@ -211,4 +215,57 @@ describe('A3 MediaPipe adapter mapping', () => {
     );
     expect(worker.terminate).toHaveBeenCalledTimes(1);
   });
+
+  it('rejects model loading when the worker crashes', async () => {
+    const listeners = new Map<string, Set<(event: Event) => void>>();
+    const worker = createEventWorker(listeners);
+    const adapter = createMediaPipeObjectDetectorAdapter({
+      createWorker: () => worker,
+      detectDocuments: () => [],
+      loadTimeoutMs: 30_000,
+    });
+
+    const loading = adapter.load();
+    listeners.get('error')?.forEach((listener) => listener({
+      message: 'worker bootstrap failed',
+      preventDefault: vi.fn(),
+    } as unknown as Event));
+
+    await expect(loading).rejects.toThrow('worker bootstrap failed');
+    adapter.dispose();
+  });
+
+  it('times out model loading instead of remaining pending forever', async () => {
+    vi.useFakeTimers();
+    const listeners = new Map<string, Set<(event: Event) => void>>();
+    const worker = createEventWorker(listeners);
+    const adapter = createMediaPipeObjectDetectorAdapter({
+      createWorker: () => worker,
+      detectDocuments: () => [],
+      loadTimeoutMs: 25_000,
+    });
+
+    const loading = adapter.load();
+    const rejection = expect(loading).rejects.toThrow('timed out');
+    await vi.advanceTimersByTimeAsync(25_000);
+
+    await rejection;
+    adapter.dispose();
+    vi.useRealTimers();
+  });
 });
+
+function createEventWorker(listeners: Map<string, Set<(event: Event) => void>>) {
+  return {
+    postMessage: vi.fn(),
+    addEventListener: vi.fn((type: string, listener: (event: Event) => void) => {
+      const handlers = listeners.get(type) ?? new Set();
+      handlers.add(listener);
+      listeners.set(type, handlers);
+    }),
+    removeEventListener: vi.fn((type: string, listener: (event: Event) => void) => {
+      listeners.get(type)?.delete(listener);
+    }),
+    terminate: vi.fn(),
+  };
+}

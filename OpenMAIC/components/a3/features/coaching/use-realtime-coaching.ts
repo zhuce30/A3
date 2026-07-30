@@ -185,6 +185,37 @@ export async function ensureRealtimeInputAudioContextRunning(
   }
 }
 
+export function shouldScheduleManualAudioCommit(turnDetectionType: string | undefined) {
+  const normalized = String(turnDetectionType || 'server_vad').trim().toLowerCase();
+  return normalized !== 'server_vad' && normalized !== 'semantic_vad';
+}
+
+export function getRealtimeTransportFailure(event: unknown): { code: string; message: string } | null {
+  if (!event || typeof event !== 'object') return null;
+  const payload = event as {
+    type?: string;
+    code?: string | number;
+    reason?: string;
+    message?: string;
+    error?: string | { code?: string | number; message?: string };
+  };
+  const eventType = String(payload.type || '');
+  if (eventType === 'a3.proxy.closed') {
+    const closeCode = Number(payload.code || 0);
+    if (closeCode === 1000) return null;
+    return {
+      code: String(payload.code || 'proxy_closed'),
+      message: String(payload.reason || '实时语音连接已被服务端关闭'),
+    };
+  }
+  if (eventType !== 'error' && eventType !== 'a3.proxy.error') return null;
+  const nestedError = typeof payload.error === 'object' ? payload.error : null;
+  return {
+    code: String(nestedError?.code || payload.code || 'realtime_error'),
+    message: String(nestedError?.message || payload.error || payload.message || '实时语音服务返回错误'),
+  };
+}
+
 export async function runRealtimeEndLifecycle<T>({
   operation,
   isCurrent,
@@ -326,6 +357,7 @@ export function useRealtimeCoaching(personaId: string = '') {
   const audioSilenceChunksRef = useRef(0);
   const pendingSpeechCommitRef = useRef(false);
   const speechCommitTimerRef = useRef<number | null>(null);
+  const turnDetectionTypeRef = useRef('server_vad');
   const lastAudioLevelUpdateRef = useRef(0);
 
   const updateAssistantSpeaking = useCallback((speaking: boolean) => {
@@ -556,8 +588,19 @@ export function useRealtimeCoaching(personaId: string = '') {
         duration_ms?: number;
         visemes?: Array<{ viseme?: string; phoneme?: string; start_ms?: number; duration_ms?: number; startMs?: number; durationMs?: number; weights?: Partial<Record<A3DigitalHumanSpeechViseme, number>> }>;
         phonemes?: Array<{ phoneme?: string; start_ms?: number; duration_ms?: number; startMs?: number; durationMs?: number }>;
+        turnDetectionType?: string;
       };
       const eventType = event.type || '';
+      if (eventType === 'a3.proxy.ready') {
+        turnDetectionTypeRef.current = event.turnDetectionType || 'server_vad';
+        return;
+      }
+      const transportFailure = getRealtimeTransportFailure(event);
+      if (transportFailure) {
+        setError(`实时语音服务异常：${transportFailure.message}（${transportFailure.code}）`);
+        setStatus('error');
+        return;
+      }
       if (eventType === 'input_audio_buffer.committed' || eventType === 'response.created') {
         markProviderAudioCommitted();
       }
@@ -798,7 +841,10 @@ export function useRealtimeCoaching(personaId: string = '') {
         clearManualAudioCommitTimer();
       } else if (audioSpeechActiveRef.current) {
         audioSilenceChunksRef.current += 1;
-        if (audioSilenceChunksRef.current >= 5) {
+        if (
+          audioSilenceChunksRef.current >= 5
+          && shouldScheduleManualAudioCommit(turnDetectionTypeRef.current)
+        ) {
           scheduleManualAudioCommit(socket);
         }
       }
@@ -829,6 +875,7 @@ export function useRealtimeCoaching(personaId: string = '') {
       let settled = false;
       let socket: WebSocket | null = null;
       let timeout: number | null = null;
+      let transportFailureReported = false;
       const finish = (connected: boolean) => {
         if (settled) return;
         settled = true;
@@ -898,7 +945,17 @@ export function useRealtimeCoaching(personaId: string = '') {
         };
         socket.onmessage = (event) => {
           if (!isStartOperationCurrent(operation)) return;
-          handleRealtimeEvent(typeof event.data === 'string' ? event.data : '');
+          const raw = typeof event.data === 'string' ? event.data : '';
+          try {
+            transportFailureReported = Boolean(getRealtimeTransportFailure(JSON.parse(raw)));
+          } catch {
+            transportFailureReported = false;
+          }
+          handleRealtimeEvent(raw);
+          if (transportFailureReported) {
+            stopDashScopeAudioStreaming();
+            socket?.close();
+          }
         };
         socket.onerror = () => {
           if (timeout !== null) window.clearTimeout(timeout);
@@ -908,9 +965,13 @@ export function useRealtimeCoaching(personaId: string = '') {
           }
           finish(false);
         };
-        socket.onclose = () => {
+        socket.onclose = (event) => {
           stopDashScopeAudioStreaming();
           if (websocketRef.current === socket) websocketRef.current = null;
+          if (isStartOperationCurrent(operation) && event.code !== 1000 && !transportFailureReported) {
+            setError(`实时语音连接已中断（${event.code || 'unknown'}），请重新开始对话。`);
+            setStatus('error');
+          }
           finish(false);
         };
       } catch (connectError) {
