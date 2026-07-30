@@ -1,55 +1,51 @@
 import { AlertTriangle } from 'lucide-react';
-import { A3Card, A3Pill } from '../../ui/a3-card';
+import { A3Pill } from '../../ui/a3-card';
 import { A3Markdown } from '../../ui/a3-markdown';
 import type { MaterialClaim, MaterialEdge, MaterialEvidence, MaterialNode } from './material-types';
 import { formatMaterialMarkdown, materialEvidenceKey, materialTypeLabel } from './material-types';
 
-export function MaterialDetailPanel(props: {
+type MaterialDetailPanelProps = {
   node: MaterialNode | null;
   edge: MaterialEdge | null;
   claims: MaterialClaim[];
   edges: MaterialEdge[];
   nodesById: Map<string, MaterialNode>;
-}) {
+};
+
+export function MaterialDetailPanel(props: MaterialDetailPanelProps) {
   const { node, edge, claims, edges, nodesById } = props;
   if (edge) {
     const source = nodesById.get(edge.source);
     const target = nodesById.get(edge.target);
     return (
-      <A3Card title="关系证据" action={<A3Pill tone={edge.degraded ? 'orange' : 'green'}>{edge.degraded ? '降级' : '已验证'}</A3Pill>}>
-        <div className="space-y-5" data-testid="a3-material-detail-panel">
-          <div>
-            <h2 className="line-clamp-2 text-lg font-semibold text-[var(--a3-text)]">{edge.label || edge.type}</h2>
-            <p className="mt-1 text-sm text-[var(--a3-text-muted)]">{edge.type} · 权重 {Math.round((edge.weight ?? 0) * 100)}%</p>
-          </div>
-          <ReadablePath source={source?.label ?? edge.source} label={edge.label || edge.type} target={target?.label ?? edge.target} confidence={edge.weight} />
-          <EvidenceList evidence={edge.evidence} />
-        </div>
-      </A3Card>
+      <div className="space-y-5" data-testid="a3-material-detail-panel">
+        <DetailHeading
+          title={edge.label || edge.type}
+          meta={`${edge.type} · 权重 ${Math.round((edge.weight ?? 0) * 100)}%`}
+          state={edge.degraded ? 'degraded' : edge.evidence.length ? 'verified' : 'unverified'}
+        />
+        <ReadablePath source={source?.label ?? edge.source} label={edge.label || edge.type} target={target?.label ?? edge.target} confidence={edge.weight} />
+        <EvidenceList evidence={edge.evidence} />
+      </div>
     );
   }
 
-  return (
-    <A3Card title="实体详情" action={node ? <A3Pill tone={node.degraded ? 'orange' : 'green'}>{node.degraded ? '降级抽取' : '已验证'}</A3Pill> : undefined}>
-      <div data-testid="a3-material-detail-panel">
-        {node ? (
-          <EntityDetail node={node} edges={edges} claims={claims} nodesById={nodesById} />
-        ) : (
-          <div className="py-12 text-center text-sm text-[var(--a3-text-muted)]">请选择一个实体或关系查看定义、关联路径和来源证据。</div>
-        )}
-      </div>
-    </A3Card>
-  );
+  return node ? (
+    <div data-testid="a3-material-detail-panel">
+      <EntityDetail node={node} edges={edges} claims={claims} nodesById={nodesById} />
+    </div>
+  ) : null;
 }
 
 function EntityDetail(props: { node: MaterialNode; claims: MaterialClaim[]; edges: MaterialEdge[]; nodesById: Map<string, MaterialNode> }) {
   const relatedEdges = props.edges.filter((edge) => edge.source === props.node.id || edge.target === props.node.id).slice(0, 8);
   return (
     <div className="space-y-5">
-      <div>
-        <h2 className="line-clamp-2 break-words text-lg font-semibold text-[var(--a3-text)]">{props.node.label}</h2>
-        <p className="mt-1 text-sm text-[var(--a3-text-muted)]">{materialTypeLabel[props.node.type] ?? props.node.type} · 置信度 {Math.round((props.node.confidence ?? 0) * 100)}%</p>
-      </div>
+      <DetailHeading
+        title={props.node.label}
+        meta={`${materialTypeLabel[props.node.type] ?? props.node.type} · 置信度 ${Math.round((props.node.confidence ?? 0) * 100)}%`}
+        state={props.node.degraded ? 'degraded' : props.node.evidence.length ? 'verified' : 'unverified'}
+      />
 
       <section>
         <div className="mb-2 text-sm font-semibold text-[var(--a3-text)]">标准解释</div>
@@ -108,6 +104,24 @@ function EntityDetail(props: { node: MaterialNode; claims: MaterialClaim[]; edge
   );
 }
 
+function DetailHeading(props: { title: string; meta: string; state: 'verified' | 'unverified' | 'degraded' }) {
+  const state = {
+    verified: { label: '已验证', tone: 'green' as const },
+    unverified: { label: '待验证', tone: 'slate' as const },
+    degraded: { label: '降级抽取', tone: 'orange' as const },
+  }[props.state];
+
+  return (
+    <header>
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="min-w-0 break-words text-lg font-semibold text-[var(--a3-text)]">{props.title}</h3>
+        <A3Pill tone={state.tone}>{state.label}</A3Pill>
+      </div>
+      <p className="mt-1 text-sm text-[var(--a3-text-muted)]">{props.meta}</p>
+    </header>
+  );
+}
+
 function ReadablePath({ source, label, target, confidence }: { source: string; label: string; target: string; confidence?: number }) {
   return (
     <div data-testid="a3-material-readable-path" className="rounded-lg bg-[var(--a3-surface-muted)] px-3 py-2 text-sm">
@@ -145,7 +159,7 @@ function EvidenceList({ evidence }: { evidence: MaterialEvidence[] }) {
           )}
         </details>
       ))}
-      {!evidence.length && <p className="text-sm text-[var(--a3-text-muted)]">暂无证据片段。</p>}
+      {!evidence.length && <p className="text-sm text-[var(--a3-text-muted)]">暂无可核验来源。</p>}
     </section>
   );
 }
