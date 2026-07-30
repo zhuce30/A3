@@ -58,4 +58,32 @@ describe('A3 knowledge graph evidence workbench', () => {
     expect(status).toContain('部分内容为降级抽取');
     expect(status).not.toContain('关系密度');
   });
+
+  it('controls contextual detail separately from graph selection', () => {
+    const view = fs.readFileSync(viewPath, 'utf8');
+
+    expect(view).toContain('const [detailOpen, setDetailOpen] = useState(true)');
+    expect(view).toContain('setDetailOpen(true)');
+    expect(view).toContain('onCloseDetail={() => setDetailOpen(false)}');
+    expect(view).toContain('searchMatches={materialSearchMatches}');
+    expect(view).toContain('<section ref={graphRef}');
+    expect(view).not.toContain('<A3Card');
+  });
+
+  it('composes the workbench and removes controls that covered graph nodes', () => {
+    const view = fs.readFileSync(viewPath, 'utf8');
+    const panels = fs.readFileSync(path.join(featureDir, 'material-graph-panels.tsx'), 'utf8');
+
+    expect(view).toContain('<KnowledgeGraphToolbar');
+    expect(view).toContain('<KnowledgeGraphWorkspace');
+    expect(view).toContain('<KnowledgeGraphStatusBar');
+    expect(view).not.toContain('absolute left-4 top-4');
+    expect(view).not.toContain('absolute right-4 top-4');
+    expect(view).not.toContain('MaterialGraphMiniPanel');
+    expect(view).not.toContain('<A3Card title="构建状态">');
+    expect(view).not.toContain('h-[680px]');
+    expect(panels).not.toContain('export function MaterialGraphSearchPanel');
+    expect(panels).not.toContain('export function MaterialGraphMiniPanel');
+    expect(panels).not.toContain('export function MaterialGraphStatsPanel');
+  });
 });

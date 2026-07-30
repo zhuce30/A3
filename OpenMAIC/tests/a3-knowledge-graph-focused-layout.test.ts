@@ -17,13 +17,14 @@ describe('A3 knowledge graph focused layout', () => {
 
   it('keeps the real material graph API contract and exposes focused graph test ids', () => {
     const source = fs.readFileSync(viewPath, 'utf8');
+    const detailSource = fs.readFileSync(path.join(featureDir, 'material-detail-panel.tsx'), 'utf8');
 
     expect(source).toContain('/api/kb/graph/?');
     expect(source).toContain('data-testid="a3-real-knowledge-graph"');
     expect(source).toContain('data-testid="a3-material-focused-graph"');
-    expect(source).toContain('data-testid="a3-material-graph-search"');
-    expect(source).toContain('data-testid="a3-material-graph-quality-panel"');
-    expect(source).toContain('data-testid="a3-material-detail-panel"');
+    expect(detailSource).toContain('data-testid="a3-material-detail-panel"');
+    expect(source).toContain('KnowledgeGraphToolbar');
+    expect(source).toContain('KnowledgeGraphWorkspace');
     expect(source).toContain('MaterialRelationEdge');
     expect(source).not.toContain('mockMaterialGraph');
   });

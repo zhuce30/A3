@@ -1,18 +1,20 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Background, Controls, MiniMap, ReactFlow, type Edge, type Node } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { BookOpen, Database, Loader2, Maximize2, Network, RotateCcw, Sparkles } from 'lucide-react';
+import { BookOpen, Database, Loader2, Maximize2, RotateCcw, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import type { A3ApiResponse, KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphNodeStatus, LearningPath } from '@/lib/a3/learning-types';
 import { cn } from '@/lib/utils';
-import { A3Card, A3Pill } from '../ui/a3-card';
+import { A3Pill } from '../ui/a3-card';
+import { KnowledgeGraphStatusBar } from './knowledge-graph/knowledge-graph-status-bar';
+import { GraphDataStatusPopover, KnowledgeGraphToolbar } from './knowledge-graph/knowledge-graph-toolbar';
+import { KnowledgeGraphWorkspace } from './knowledge-graph/knowledge-graph-workspace';
 import { MaterialDetailPanel } from './knowledge-graph/material-detail-panel';
 import { buildFocusedMaterialFlow, chooseDefaultMaterialCenter, type MaterialGraphDepth } from './knowledge-graph/material-focused-flow';
-import { MaterialGraphMiniPanel, MaterialGraphSearchPanel, MaterialGraphStatsPanel } from './knowledge-graph/material-graph-panels';
 import { MaterialRelationEdge } from './knowledge-graph/material-relation-edge';
 import type { GraphNodeData, MaterialGraph } from './knowledge-graph/material-types';
 
@@ -31,7 +33,7 @@ const statusMeta: Record<KnowledgeGraphNodeStatus, { label: string; dot: string;
 };
 
 export function KnowledgeGraphView() {
-  const graphRef = useRef<HTMLDivElement | null>(null);
+  const graphRef = useRef<HTMLElement | null>(null);
   const [activeTab, setActiveTab] = useState<GraphTab>('material');
   const [materialGraph, setMaterialGraph] = useState<MaterialGraph | null>(null);
   const [courseGraph, setCourseGraph] = useState<KnowledgeGraph | null>(null);
@@ -40,6 +42,7 @@ export function KnowledgeGraphView() {
   const [materialDepth, setMaterialDepth] = useState<MaterialGraphDepth>('one');
   const [materialSearchQuery, setMaterialSearchQuery] = useState('');
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
+  const [detailOpen, setDetailOpen] = useState(true);
   const [loading, setLoading] = useState(true);
   const [planning, setPlanning] = useState(false);
   const [message, setMessage] = useState('');
@@ -117,6 +120,13 @@ export function KnowledgeGraphView() {
   const selectedMaterialNode = effectiveSelectedMaterialNodeId ? materialNodesById.get(effectiveSelectedMaterialNodeId) ?? null : null;
   const selectedMaterialEdge = selectedMaterialEdgeId ? materialEdgesById.get(selectedMaterialEdgeId) ?? null : null;
   const selectedCourseNode = selectedCourseId ? courseNodesById.get(selectedCourseId) ?? null : null;
+  const materialSearchMatches = useMemo(() => {
+    const query = materialSearchQuery.trim().toLowerCase();
+    if (!query) return [];
+    return (materialGraph?.nodes ?? [])
+      .filter((node) => `${node.label} ${node.summary} ${node.type}`.toLowerCase().includes(query))
+      .slice(0, 8);
+  }, [materialGraph, materialSearchQuery]);
   const selectedClaims = useMemo(() => {
     const selectedIds = new Set<string>();
     if (effectiveSelectedMaterialNodeId) selectedIds.add(effectiveSelectedMaterialNodeId);
@@ -156,12 +166,26 @@ export function KnowledgeGraphView() {
     setSelectedMaterialNodeId(chooseDefaultMaterialCenter(materialGraph));
     setSelectedMaterialEdgeId(null);
     setMaterialSearchQuery('');
+    setDetailOpen(true);
   }
 
   function onMaterialNodeClick(nodeId: string) {
     setSelectedMaterialNodeId(nodeId);
     setSelectedMaterialEdgeId(null);
+    setDetailOpen(true);
     void loadMaterialGraphNeighborhood(nodeId, materialDepth);
+  }
+
+  function onMaterialEdgeClick(edgeId: string) {
+    setSelectedMaterialEdgeId(edgeId);
+    const materialEdge = materialEdgesById.get(edgeId);
+    setSelectedMaterialNodeId(materialEdge?.source ?? null);
+    setDetailOpen(true);
+  }
+
+  function onTabChange(tab: GraphTab) {
+    setActiveTab(tab);
+    setDetailOpen(tab === 'material' ? Boolean(selectedMaterialNode || selectedMaterialEdge) : Boolean(selectedCourseNode));
   }
 
   function onMaterialDepthChange(depth: MaterialGraphDepth) {
@@ -170,169 +194,154 @@ export function KnowledgeGraphView() {
     if (centerId) void loadMaterialGraphNeighborhood(centerId, depth);
   }
 
-  const activeFlow = activeTab === 'material' ? materialFlow : courseFlow;
   const isMaterialEmpty = activeTab === 'material' && !loading && !(materialGraph?.nodes.length);
 
-  return (
-    <div className="grid gap-5 2xl:grid-cols-[minmax(0,1fr)_380px]">
-      <div className="space-y-5">
-        <A3Card
-          title="资料知识图谱"
-          subtitle={activeTab === 'material' ? '从已上传资料的多模态解析块抽取实体、关系和证据；默认聚焦最高连接度实体。' : '课程路径图展示课程知识点、先修关系和学习进度，不代表上传资料图谱。'}
-          action={
-            <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={() => void reloadCurrent()} disabled={loading}>
-                {loading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
-                刷新
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => void requestFullscreen()}>
-                <Maximize2 className="size-4" />
-                全屏
-              </Button>
-            </div>
-          }
-        >
-          <div className="mb-4 flex flex-wrap gap-2">
-            <TabButton active={activeTab === 'material'} onClick={() => setActiveTab('material')}>
-              <Database className="size-4" />
-              资料图谱
-            </TabButton>
-            <TabButton active={activeTab === 'course'} onClick={() => setActiveTab('course')}>
-              <Network className="size-4" />
-              课程路径图
-            </TabButton>
+  const graphCanvas = (
+    <div
+      className="a3-material-graph-canvas relative h-full min-h-0 overflow-hidden"
+      data-testid="a3-real-knowledge-graph"
+      style={{
+        background:
+          'radial-gradient(circle at 50% 44%, rgba(255, 255, 255, 0.96) 0%, rgba(239, 246, 255, 0.78) 42%, rgba(248, 250, 252, 0.92) 74%), linear-gradient(135deg, rgba(241, 245, 249, 0.96), rgba(236, 253, 245, 0.28))',
+      }}
+    >
+      {loading && (
+        <div className="absolute inset-0 z-30 grid place-items-center bg-[var(--a3-surface-solid)]/80">
+          <div className="flex items-center gap-2 text-sm text-[var(--a3-text-muted)]">
+            <Loader2 className="size-4 animate-spin" />
+            正在读取{activeTab === 'material' ? '资料知识图谱' : '课程路径图'}
           </div>
+        </div>
+      )}
 
-          {message && <div className="mb-4 rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">{message}</div>}
-
-          <div
-            ref={graphRef}
-            className="a3-material-graph-canvas relative h-[680px] overflow-hidden rounded-xl border border-[var(--a3-border)]"
-            data-testid="a3-real-knowledge-graph"
-            style={{
-              background:
-                'radial-gradient(circle at 50% 44%, rgba(255, 255, 255, 0.96) 0%, rgba(239, 246, 255, 0.78) 42%, rgba(248, 250, 252, 0.92) 74%), linear-gradient(135deg, rgba(241, 245, 249, 0.96), rgba(236, 253, 245, 0.28))',
-            }}
+      {!loading && activeTab === 'material' && materialFlow.nodes.length > 0 && (
+        <div className="h-full" data-testid="a3-material-focused-graph">
+          <ReactFlow
+            nodes={materialFlow.nodes}
+            edges={materialFlow.edges}
+            edgeTypes={materialEdgeTypes}
+            onlyRenderVisibleElements
+            fitView
+            fitViewOptions={{ padding: 0.16 }}
+            nodesDraggable
+            nodesConnectable={false}
+            elementsSelectable
+            onNodeClick={(_, node) => onMaterialNodeClick(node.id)}
+            onEdgeClick={(_, edge) => onMaterialEdgeClick(edge.id)}
           >
-            {loading && (
-              <div className="absolute inset-0 z-30 grid place-items-center bg-[var(--a3-surface-solid)]/80">
-                <div className="flex items-center gap-2 text-sm text-[var(--a3-text-muted)]">
-                  <Loader2 className="size-4 animate-spin" />
-                  正在读取{activeTab === 'material' ? '资料知识图谱' : '课程路径图'}
-                </div>
-              </div>
-            )}
+            <Background gap={24} color="#dbe3ee" />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+        </div>
+      )}
 
-            {!loading && activeTab === 'material' && materialFlow.nodes.length > 0 && (
-              <div className="h-full" data-testid="a3-material-focused-graph">
-                <ReactFlow
-                  nodes={materialFlow.nodes}
-                  edges={materialFlow.edges}
-                  edgeTypes={materialEdgeTypes}
-                  onlyRenderVisibleElements
-                  fitView
-                  fitViewOptions={{ padding: 0.16 }}
-                  nodesDraggable
-                  nodesConnectable={false}
-                  elementsSelectable
-                  onNodeClick={(_, node) => {
-                    onMaterialNodeClick(node.id);
-                  }}
-                  onEdgeClick={(_, edge) => {
-                    setSelectedMaterialEdgeId(edge.id);
-                    const materialEdge = materialEdgesById.get(edge.id);
-                    setSelectedMaterialNodeId(materialEdge?.source ?? null);
-                  }}
-                >
-                  <Background gap={24} color="#dbe3ee" />
-                  <Controls showInteractive={false} />
-                </ReactFlow>
-                <div className="pointer-events-none absolute inset-0 z-20">
-                  <div className="pointer-events-auto absolute left-4 top-4 w-[min(340px,calc(100%-2rem))]" data-testid="a3-material-graph-search">
-                    <MaterialGraphSearchPanel
-                      query={materialSearchQuery}
-                      onQueryChange={setMaterialSearchQuery}
-                      onReset={resetMaterialCenter}
-                      loading={loading}
-                      selectedNode={selectedMaterialNode}
-                      graph={materialGraph}
-                      onSelectNode={(id) => {
-                        onMaterialNodeClick(id);
-                      }}
-                    />
-                    <div className="mt-3">
-                      <MaterialGraphMiniPanel node={selectedMaterialNode} edge={selectedMaterialEdge} />
-                    </div>
-                  </div>
-                  <div className="pointer-events-auto absolute right-4 top-4 hidden w-[280px] lg:block" data-testid="a3-material-graph-quality-panel">
-                    <MaterialGraphStatsPanel graph={materialGraph} depth={materialDepth} onDepthChange={onMaterialDepthChange} quality={materialGraph?.quality} />
-                  </div>
-                </div>
-              </div>
-            )}
+      {!loading && activeTab === 'course' && courseFlow.nodes.length > 0 && (
+        <ReactFlow
+          nodes={courseFlow.nodes}
+          edges={courseFlow.edges}
+          fitView
+          fitViewOptions={{ padding: 0.18 }}
+          nodesDraggable
+          nodesConnectable={false}
+          elementsSelectable
+          onNodeClick={(_, node) => {
+            setSelectedCourseId(node.id);
+            setDetailOpen(true);
+          }}
+        >
+          <Background gap={24} color="#e2e8f0" />
+          <MiniMap pannable zoomable />
+          <Controls showInteractive={false} />
+        </ReactFlow>
+      )}
 
-            {!loading && activeTab === 'course' && activeFlow.nodes.length > 0 && (
-              <ReactFlow
-                nodes={courseFlow.nodes}
-                edges={courseFlow.edges}
-                fitView
-                fitViewOptions={{ padding: 0.18 }}
-                nodesDraggable
-                nodesConnectable={false}
-                elementsSelectable
-                onNodeClick={(_, node) => setSelectedCourseId(node.id)}
-              >
-                <Background gap={24} color="#e2e8f0" />
-                <MiniMap pannable zoomable />
-                <Controls showInteractive={false} />
-              </ReactFlow>
-            )}
-
-            {isMaterialEmpty && (
-              <div className="grid h-full place-items-center p-6 text-center">
-                <div className="max-w-md">
-                  <Database className="mx-auto size-10 text-blue-600" />
-                  <h3 className="mt-3 text-lg font-semibold text-[var(--a3-text)]">还没有生成资料知识图谱</h3>
-                  <p className="mt-2 text-sm leading-7 text-[var(--a3-text-muted)]">
-                    {materialGraph?.build.reason || '请先在知识库上传资料并完成多模态解析，系统会从真实解析块生成实体、关系和来源证据。'}
-                  </p>
-                  <Button asChild className="mt-4 bg-blue-600 hover:bg-blue-700">
-                    <Link href={materialGraph?.nextAction?.href ?? '/a3/knowledge-base'}>{materialGraph?.nextAction?.label ?? '上传资料'}</Link>
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'course' && !loading && !courseGraph?.nodes.length && (
-              <div className="grid h-full place-items-center text-sm text-[var(--a3-text-muted)]">暂无课程路径图，请先完成入学诊断或生成学习路径。</div>
-            )}
+      {isMaterialEmpty && (
+        <div className="grid h-full place-items-center p-6 text-center">
+          <div className="max-w-md">
+            <Database className="mx-auto size-10 text-blue-600" />
+            <h3 className="mt-3 text-lg font-semibold text-[var(--a3-text)]">还没有生成资料知识图谱</h3>
+            <p className="mt-2 text-sm leading-7 text-[var(--a3-text-muted)]">
+              {materialGraph?.build.reason || '请先在知识库上传资料并完成多模态解析，系统会从真实解析块生成实体、关系和来源证据。'}
+            </p>
+            <Button asChild className="mt-4 bg-blue-600 hover:bg-blue-700">
+              <Link href={materialGraph?.nextAction?.href ?? '/a3/knowledge-base'}>{materialGraph?.nextAction?.label ?? '上传资料'}</Link>
+            </Button>
           </div>
-        </A3Card>
+        </div>
+      )}
 
-        {activeTab === 'material' ? (
-          <A3Card title="构建状态">
-            <div className="grid gap-3 md:grid-cols-3">
-              <InfoBox label="Schema" value={materialGraph?.schemaVersion ?? 'a3.material-knowledge-graph.v1'} />
-              <InfoBox label="状态" value={materialGraph?.build.status ?? 'empty'} />
-              <InfoBox label="最近构建" value={materialGraph?.build.lastBuiltAt ? new Date(materialGraph.build.lastBuiltAt).toLocaleString() : '暂无'} />
-            </div>
-            {materialGraph?.build.reason && <p className="mt-3 text-sm leading-7 text-[var(--a3-text-muted)]">{materialGraph.build.reason}</p>}
-          </A3Card>
-        ) : (
-          <A3Card title="课程图谱说明">
-            <p className="text-sm leading-7 text-[var(--a3-text-muted)]">课程路径图来自课程知识点和学习路径进度，只用于解释学习顺序；上传资料形成的实体关系请回到“资料图谱”查看。</p>
-          </A3Card>
-        )}
-      </div>
-
-      <div className="space-y-5" data-testid="a3-material-detail-panel">
-        {activeTab === 'material' ? (
-          <MaterialDetailPanel node={selectedMaterialNode} edge={selectedMaterialEdge} claims={selectedClaims} edges={materialGraph?.edges ?? []} nodesById={materialNodesById} />
-        ) : (
-          <CourseDetail node={selectedCourseNode} planning={planning} onRegenerate={() => void regeneratePath()} />
-        )}
-      </div>
+      {activeTab === 'course' && !loading && !courseGraph?.nodes.length && (
+        <div className="grid h-full place-items-center text-sm text-[var(--a3-text-muted)]">暂无课程路径图，请先完成入学诊断或生成学习路径。</div>
+      )}
     </div>
+  );
+
+  return (
+    <section ref={graphRef}
+      className="overflow-hidden rounded-lg border border-[var(--a3-border)] bg-[var(--a3-surface-solid)]"
+      data-testid="a3-knowledge-graph-workbench"
+    >
+      <header className="flex flex-col gap-3 border-b border-[var(--a3-border)] px-4 py-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-[var(--a3-text)]">知识关系</h1>
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-[var(--a3-text-muted)]">在资料图谱中核验来源证据，或切换课程路径图理解学习顺序并进入下一步学习。</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onClick={() => void reloadCurrent()} disabled={loading}>
+            {loading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
+            刷新
+          </Button>
+          {activeTab === 'material' ? <GraphDataStatusPopover graph={materialGraph} /> : null}
+          <Button size="sm" variant="outline" onClick={() => void requestFullscreen()}>
+            <Maximize2 className="size-4" />
+            全屏
+          </Button>
+        </div>
+      </header>
+
+      <KnowledgeGraphToolbar
+        activeTab={activeTab}
+        onTabChange={onTabChange}
+        query={materialSearchQuery}
+        onQueryChange={setMaterialSearchQuery}
+        searchMatches={materialSearchMatches}
+        onSelectSearchResult={onMaterialNodeClick}
+        depth={materialDepth}
+        onDepthChange={onMaterialDepthChange}
+        onReset={resetMaterialCenter}
+        loading={loading}
+      />
+
+      {message ? (
+        <div role="status" className="border-b border-[var(--a3-border)] px-4 py-2 text-sm text-blue-700">
+          {message}
+        </div>
+      ) : null}
+
+      <KnowledgeGraphWorkspace
+        canvas={graphCanvas}
+        detail={
+          activeTab === 'material' ? (
+            <MaterialDetailPanel
+              node={selectedMaterialNode}
+              edge={selectedMaterialEdge}
+              claims={selectedClaims}
+              edges={materialGraph?.edges ?? []}
+              nodesById={materialNodesById}
+            />
+          ) : (
+            <CourseDetail node={selectedCourseNode} planning={planning} onRegenerate={() => void regeneratePath()} />
+          )
+        }
+        detailOpen={detailOpen}
+        detailTitle={activeTab === 'material' ? (selectedMaterialEdge ? '关系证据' : '实体详情') : '课程节点详情'}
+        onCloseDetail={() => setDetailOpen(false)}
+      />
+
+      {activeTab === 'material' ? (
+        <KnowledgeGraphStatusBar graph={materialGraph} focus={materialGraph?.focus} depth={materialDepth} loading={loading} />
+      ) : null}
+    </section>
   );
 }
 
@@ -406,12 +415,15 @@ function buildCourseFlow(graph: KnowledgeGraph | null, selectedId: string | null
 
 function CourseDetail({ node, planning, onRegenerate }: { node: KnowledgeGraphNode | null; planning: boolean; onRegenerate: () => void }) {
   return (
-    <A3Card title="课程节点详情" action={node ? <A3Pill tone={node.status === 'weak' ? 'red' : node.status === 'mastered' ? 'green' : 'blue'}>{statusMeta[node.status].label}</A3Pill> : undefined}>
+    <div data-testid="a3-course-detail-panel">
       {node ? (
         <div className="space-y-4">
-          <div>
-            <h2 className="text-lg font-semibold text-[var(--a3-text)]">{node.title}</h2>
-            <p className="mt-1 text-sm text-[var(--a3-text-muted)]">第 {node.chapter.order} 章 · {node.chapter.title}</p>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="break-words text-lg font-semibold text-[var(--a3-text)]">{node.title}</h2>
+              <p className="mt-1 text-sm text-[var(--a3-text-muted)]">第 {node.chapter.order} 章 · {node.chapter.title}</p>
+            </div>
+            <A3Pill tone={node.status === 'weak' ? 'red' : node.status === 'mastered' ? 'green' : 'blue'}>{statusMeta[node.status].label}</A3Pill>
           </div>
           <p className="text-sm leading-7 text-[var(--a3-text-muted)]">{node.description || '该课程节点暂无说明。'}</p>
           <div className="rounded-xl bg-[var(--a3-surface-muted)] p-3">
@@ -444,30 +456,6 @@ function CourseDetail({ node, planning, onRegenerate }: { node: KnowledgeGraphNo
       ) : (
         <div className="py-10 text-center text-sm text-[var(--a3-text-muted)]">请选择一个课程节点查看详情。</div>
       )}
-    </A3Card>
-  );
-}
-
-function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        'inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition',
-        active ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-[var(--a3-border)] bg-white text-[var(--a3-text-muted)] hover:bg-[var(--a3-surface-muted)]',
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function InfoBox({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] p-4">
-      <div className="text-xs text-[var(--a3-text-muted)]">{label}</div>
-      <div className="mt-1 truncate text-sm font-semibold text-[var(--a3-text)]">{value}</div>
     </div>
   );
 }
