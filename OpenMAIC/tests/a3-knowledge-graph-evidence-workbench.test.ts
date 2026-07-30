@@ -39,4 +39,23 @@ describe('A3 knowledge graph evidence workbench', () => {
     expect(toolbar).toContain('a3-material-graph-depth-two');
     expect(toolbar).toContain('a3-material-graph-depth-all');
   });
+
+  it('keeps canvas and detail in one bounded workspace', () => {
+    const workspace = fs.readFileSync(path.join(featureDir, 'knowledge-graph-workspace.tsx'), 'utf8');
+
+    expect(workspace).toContain('data-testid="a3-knowledge-graph-workspace"');
+    expect(workspace).toContain("xl:grid-cols-[minmax(0,1fr)_380px]");
+    expect(workspace).toContain('overflow-y-auto');
+    expect(workspace).toContain('aria-label="关闭详情"');
+    expect(workspace).toContain('min-h-[560px]');
+  });
+
+  it('reports loaded scope instead of full graph quality in the status bar', () => {
+    const status = fs.readFileSync(path.join(featureDir, 'knowledge-graph-status-bar.tsx'), 'utf8');
+
+    expect(status).toContain('当前加载');
+    expect(status).toContain('当前为局部视图');
+    expect(status).toContain('部分内容为降级抽取');
+    expect(status).not.toContain('关系密度');
+  });
 });
