@@ -1312,7 +1312,7 @@ def _search_classroom_indexed_blocks(user, question: str, *, top_k: int, source_
         return []
     resource_by_id = {resource.id: resource for resource in resources}
     query_filter = None
-    for term in terms[:8]:
+    for term in terms:
         term_filter = (
             Q(text__icontains=term)
             | Q(markdown__icontains=term)

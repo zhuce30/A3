@@ -424,6 +424,71 @@ class CompatApiTests(CompatApiTestCase):
         self.assertEqual(personal_source["previewUrl"], f"/api/kb/assets/{personal_asset.id}/preview/")
         self.assertEqual(personal_source["asset"]["kind"], "rendered_slide")
 
+    @patch("backend.apps.compat.agent_kernel.generate_tutoring_answer")
+    @patch("backend.apps.compat.agent_kernel.classroom_context")
+    def test_open_api_qa_deep_mode_prefers_slide_evidence_over_same_title_catalog_source(
+        self,
+        classroom_context,
+        generate_tutoring_answer,
+    ):
+        pptx_path = Path(tempfile.gettempdir()) / "a3-classroom-global-deadlock.pptx"
+        pptx_path.write_bytes(b"pptx-global")
+        resource = KnowledgeResource.objects.create(
+            owner=self.user,
+            original_name="global-deadlock.pptx",
+            stored_path=str(pptx_path),
+            file_type=".pptx",
+            file_size=pptx_path.stat().st_size,
+            resource_scope=ResourceScope.GLOBAL,
+            visibility="shared",
+            status=ResourceStatus.INDEXED,
+        )
+        page = KnowledgePage.objects.create(resource=resource, page_number=65, slide_number=65)
+        asset = KnowledgeAsset.objects.create(
+            resource=resource,
+            page=page,
+            kind="rendered_slide",
+            storage_path=str(pptx_path),
+            mime_type="image/png",
+        )
+        KnowledgeBlock.objects.create(
+            resource=resource,
+            page=page,
+            modality="text",
+            text="客户要求分期贷款，如果客户能够得到各期贷款，就一定能够归还贷款。",
+            markdown="客户要求分期贷款，如果客户能够得到各期贷款，就一定能够归还贷款。",
+            confidence=0.95,
+        )
+        classroom_context.return_value = {
+            "target": {"title": "银行家算法"},
+            "sources": [
+                {
+                    "id": "catalog-global-deadlock",
+                    "title": resource.original_name,
+                    "location": resource.original_name,
+                    "type": "教师上传资料",
+                    "snippet": f"教师上传资源已索引：{resource.original_name}。",
+                    "sourceOrigin": "教师上传索引",
+                    "sourceTypeLabel": "PPTX 课件",
+                }
+            ],
+        }
+        generate_tutoring_answer.return_value = {
+            "answer": "该比喻用于说明银行家算法的安全性判断。",
+            "provider": "dashscope",
+            "model": "qwen-plus",
+            "fallback": False,
+        }
+
+        response = self.client.get(
+            "/api/v1/qa/interact/?q=课件原文提到：客户要求分期贷款，如果客户能够得到各期贷款，就一定能够归还贷款。请解释这一页，并引用该课件原图。&mode=deep&scope=global"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        sources = generate_tutoring_answer.call_args.kwargs["sources"]
+        pptx_source = next(item for item in sources if item["title"] == resource.original_name)
+        self.assertEqual(pptx_source.get("previewUrl"), f"/api/kb/assets/{asset.id}/preview/")
+
 
     def test_agent_kernel_fails_when_verify_answer_claim_contract_type_is_wrong(self):
         from backend.apps.compat.agent_kernel import AgentContext, AgentKernel, AgentResult, BaseAgent

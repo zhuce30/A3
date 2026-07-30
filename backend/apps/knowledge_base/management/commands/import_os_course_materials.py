@@ -7,9 +7,9 @@ from pathlib import Path
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
 
 from backend.apps.accounts.models import UserRole
+from backend.apps.knowledge_base import services as knowledge_base_services
 from backend.apps.knowledge_base.models import KnowledgeResource, ResourceScope, ResourceStatus
 from backend.apps.learning.services import DEFAULT_COURSE_CODE, _repair_default_course_catalog
 from backend.core.settings import DATA_ROOT
@@ -38,7 +38,6 @@ class Command(BaseCommand):
         parser.add_argument("--owner-phone", default="13800000002")
         parser.add_argument("--no-copy", action="store_true", help="Register original files in place instead of copying to upload storage.")
 
-    @transaction.atomic
     def handle(self, *args, **options):
         source_dir = Path(options["source_dir"]).resolve()
         if not source_dir.exists() or not source_dir.is_dir():
@@ -56,9 +55,11 @@ class Command(BaseCommand):
         files = sorted(path for path in source_dir.iterdir() if path.suffix.lower() in {".pdf", ".pptx"})
         imported = 0
         updated = 0
+        resources_to_index: list[KnowledgeResource] = []
         for source_path in files:
+            source_stat = source_path.stat()
             target_path = source_path if options["no_copy"] else target_root / source_path.name
-            if not options["no_copy"] and (not target_path.exists() or target_path.stat().st_size != source_path.stat().st_size):
+            if not options["no_copy"] and (not target_path.exists() or target_path.stat().st_size != source_stat.st_size):
                 shutil.copy2(source_path, target_path)
 
             chapter_order = _chapter_order(source_path.name)
@@ -69,6 +70,8 @@ class Command(BaseCommand):
                 "chapterOrder": chapter_order,
                 "materialRole": "courseware" if chapter_order else "textbook",
                 "managedCopy": not options["no_copy"],
+                "sourceSize": source_stat.st_size,
+                "sourceMtimeNs": source_stat.st_mtime_ns,
             }
             resource = KnowledgeResource.objects.filter(
                 course_key=course.code,
@@ -81,12 +84,19 @@ class Command(BaseCommand):
                     resource_scope=ResourceScope.GLOBAL,
                     student_profile_snapshot__materialRole="textbook",
                 ).first()
+            previous_metadata = resource.student_profile_snapshot if resource and isinstance(resource.student_profile_snapshot, dict) else {}
+            needs_index = resource is None or resource.status not in {ResourceStatus.INDEXED, ResourceStatus.INDEXED_WITH_WARNINGS}
+            if resource is not None:
+                needs_index = needs_index or (
+                    previous_metadata.get("sourceSize") != metadata["sourceSize"]
+                    or previous_metadata.get("sourceMtimeNs") != metadata["sourceMtimeNs"]
+                )
             defaults = {
                 "owner": owner,
                 "original_name": display_name,
                 "stored_path": str(target_path.resolve()),
                 "file_type": source_path.suffix.lower(),
-                "file_size": source_path.stat().st_size,
+                "file_size": source_stat.st_size,
                 "visibility": "shared",
                 "student_profile_snapshot": metadata,
             }
@@ -96,15 +106,21 @@ class Command(BaseCommand):
                 resource.save(update_fields=[*defaults.keys(), "updated_at"])
                 updated += 1
             else:
-                KnowledgeResource.objects.create(
+                resource = KnowledgeResource.objects.create(
                     **defaults,
                     course_key=course.code,
                     resource_scope=ResourceScope.GLOBAL,
                     status=ResourceStatus.UPLOADED,
                 )
                 imported += 1
+            if needs_index:
+                resources_to_index.append(resource)
 
-        self.stdout.write(self.style.SUCCESS(f"操作系统课程资料已注册：新增 {imported}，更新 {updated}，共 {len(files)} 个文件。"))
+        job = knowledge_base_services.create_upload_index_job(owner, resources_to_index) if resources_to_index else None
+        summary = f"操作系统课程资料已注册：新增 {imported}，更新 {updated}，共 {len(files)} 个文件。"
+        if job:
+            summary += f" 索引任务 {job.id}"
+        self.stdout.write(self.style.SUCCESS(summary))
 
 
 def _material_owner(phone: str):
