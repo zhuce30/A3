@@ -69,4 +69,14 @@ describe('A3 material knowledge graph view', () => {
     expect(source).toContain('formatMaterialMarkdown(claim.text)');
     expect(source).toContain('formatMaterialMarkdown(item.markdownSnippet || item.snippet)');
   });
+
+  it('renders detail content without its own outer card and distinguishes evidence states', () => {
+    const detail = fs.readFileSync(detailPath, 'utf8');
+
+    expect(detail).not.toContain('<A3Card');
+    expect(detail).toContain('暂无可核验来源');
+    expect(detail).toContain('待验证');
+    expect(detail).toContain('降级抽取');
+    expect(detail).toContain('data-testid="a3-material-detail-panel"');
+  });
 });
