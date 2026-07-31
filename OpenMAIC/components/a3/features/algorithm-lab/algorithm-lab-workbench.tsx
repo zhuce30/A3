@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { ArrowLeft, FlaskConical, RefreshCw, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useMemo, useReducer, useRef } from 'react';
+import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import {
   buildAlgorithmLabCompletionRequest,
   canSubmitAlgorithmLabCompletion,
@@ -309,6 +310,7 @@ export function algorithmLabReducer(
 }
 
 export function AlgorithmLabWorkbench({ labId }: { labId: string }) {
+  const currentUser = useA3CurrentUser();
   const definition = getAlgorithmLabDefinition(labId);
   if (!definition) {
     return (
@@ -322,16 +324,22 @@ export function AlgorithmLabWorkbench({ labId }: { labId: string }) {
       </div>
     );
   }
-  return <KnownAlgorithmLabWorkbench key={definition.id} labId={definition.id} />;
+  if (!currentUser) return null;
+  return <KnownAlgorithmLabWorkbench key={definition.id} labId={definition.id} ownerId={currentUser.id} />;
 }
 
-function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
+function KnownAlgorithmLabWorkbench({ labId, ownerId }: { labId: AlgorithmLabId; ownerId: string }) {
   const definition = getAlgorithmLabDefinition(labId)!;
   const [state, dispatch] = useReducer(algorithmLabReducer, labId, createAlgorithmLabState);
   const canvasRef = useRef<HTMLDivElement>(null);
   const attemptEventStateRef = useRef(createAttemptEventState(0));
   const cpuSimulationRunnerRef = useRef<CpuSimulationWorkerRunner | null>(null);
   const lastStartedAtRef = useRef<string | null>(null);
+  const currentCompletionAttemptRef = useRef<CompletionAttemptIdentity | null>(null);
+  currentCompletionAttemptRef.current = {
+    attemptNumber: state.attemptNumber,
+    eventId: state.completionEventId,
+  };
   attemptEventStateRef.current = renewAttemptEventState(
     attemptEventStateRef.current,
     state.attemptNumber,
@@ -405,7 +413,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   useEffect(() => {
     if (labId === 'cpu-scheduling') {
-      const session = loadLabSession(labId);
+      const session = loadLabSession(labId, ownerId);
       if (!session || !shouldRestoreRuns(session.phase)) {
         dispatch({ type: 'restore', labId, session });
         return;
@@ -420,7 +428,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
         })
         .catch((error) => {
           if (error instanceof CpuSimulationCancelledError) return;
-          clearLabSession(labId);
+          clearLabSession(labId, ownerId);
           dispatch({ type: 'restore', labId, session: null });
           dispatch({
             type: 'simulation_failed',
@@ -429,10 +437,11 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
         });
       return;
     }
-    dispatch({ type: 'restore', labId, session: loadLabSession(labId) });
-  }, [labId]);
+    dispatch({ type: 'restore', labId, session: loadLabSession(labId, ownerId) });
+  }, [labId, ownerId]);
 
   useEffect(() => () => {
+    currentCompletionAttemptRef.current = null;
     cpuSimulationRunnerRef.current?.dispose();
     cpuSimulationRunnerRef.current = null;
   }, []);
@@ -450,21 +459,21 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   useEffect(() => {
     if (!state.hydrated) return;
     if (state.phase === 'submitted' || state.syncState === 'submitted') {
-      clearLabSession(labId);
-      clearAlgorithmLabCompletionEventId(labId);
+      clearLabSession(labId, ownerId);
+      clearAlgorithmLabCompletionEventId(labId, ownerId);
       return;
     }
     if (!state.startedAt) return;
-    saveLabSession(labId, toCompactSession(state));
-  }, [labId, state]);
+    saveLabSession(labId, toCompactSession(state), ownerId);
+  }, [labId, ownerId, state]);
 
   useEffect(() => {
     if (!state.hydrated || state.phase !== 'completed' || !state.startedAt || state.completionEventId) return;
     dispatch({
       type: 'completion_ready',
-      eventId: getOrCreateAlgorithmLabCompletionEventId(labId, state.startedAt),
+      eventId: getOrCreateAlgorithmLabCompletionEventId(labId, state.startedAt, ownerId),
     });
-  }, [labId, state.completionEventId, state.hydrated, state.phase, state.startedAt]);
+  }, [labId, ownerId, state.completionEventId, state.hydrated, state.phase, state.startedAt]);
 
   useEffect(() => {
     for (const checkpointId of Object.keys(state.checkpointAnswers)) {
@@ -529,16 +538,16 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   }
 
   function resetWorkbench() {
-    clearLabSession(labId);
-    clearAlgorithmLabCompletionEventId(labId);
+    clearLabSession(labId, ownerId);
+    clearAlgorithmLabCompletionEventId(labId, ownerId);
     lastStartedAtRef.current = state.startedAt ?? lastStartedAtRef.current;
     cpuSimulationRunnerRef.current?.cancel();
     dispatch({ type: 'reset' });
   }
 
   function configureAttempt(action: ConfigureAction) {
-    clearLabSession(labId);
-    clearAlgorithmLabCompletionEventId(labId);
+    clearLabSession(labId, ownerId);
+    clearAlgorithmLabCompletionEventId(labId, ownerId);
     lastStartedAtRef.current = state.startedAt ?? lastStartedAtRef.current;
     cpuSimulationRunnerRef.current?.cancel();
     dispatch(action);
@@ -619,6 +628,10 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   async function submitCompletion() {
     if (!completionReady || !state.completionEventId || !state.prediction || !state.startedAt) return;
+    const submittedAttempt: CompletionAttemptIdentity = {
+      attemptNumber: state.attemptNumber,
+      eventId: state.completionEventId,
+    };
     const checkpointItems = requiredCheckpoints.map((checkpoint) => ({
       id: checkpoint.id,
       correct: state.checkpointAnswers[checkpoint.id] === checkpoint.correctAnswer,
@@ -663,13 +676,11 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
             fingerprint: run.resultFingerprint,
           })),
         });
-    const outcome = await synchronizeAlgorithmLabCompletion(request, {
-      onSubmitted: () => {
-        clearLabSession(labId);
-        clearAlgorithmLabCompletionEventId(labId);
-      },
-    });
+    const outcome = await synchronizeAlgorithmLabCompletion(request);
+    if (!isCurrentCompletionAttempt(currentCompletionAttemptRef.current, submittedAttempt)) return;
     if (outcome.syncState === 'submitted') {
+      clearLabSession(labId, ownerId);
+      clearAlgorithmLabCompletionEventId(labId, ownerId);
       dispatch({ type: 'submitted', completion: outcome.completion });
       return;
     }
@@ -944,6 +955,20 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
       />
     </div>
   );
+}
+
+export interface CompletionAttemptIdentity {
+  attemptNumber: number;
+  eventId: string | null;
+}
+
+export function isCurrentCompletionAttempt(
+  current: CompletionAttemptIdentity | null,
+  submitted: CompletionAttemptIdentity,
+): boolean {
+  return current !== null
+    && current.attemptNumber === submitted.attemptNumber
+    && current.eventId === submitted.eventId;
 }
 
 function configureState(state: AlgorithmLabState, action: ConfigureAction): AlgorithmLabState {

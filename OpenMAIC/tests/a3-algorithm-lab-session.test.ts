@@ -11,9 +11,9 @@ import {
   type AlgorithmLabCompletionRequest,
 } from '@/lib/a3/algorithm-lab/client';
 import {
-  clearLabSession,
-  loadLabSession,
-  saveLabSession,
+  clearLabSession as clearOwnedLabSession,
+  loadLabSession as loadOwnedLabSession,
+  saveLabSession as saveOwnedLabSession,
   type AlgorithmLabSession,
 } from '@/lib/a3/algorithm-lab/session';
 
@@ -24,6 +24,24 @@ vi.mock('@/lib/a3/api-client', () => ({
 
 const getJson = vi.mocked(a3GetJson);
 const postJson = vi.mocked(a3PostJson);
+const OWNER_ID = 'student-1';
+const OWNED_CPU_KEY = `a3.algorithmLab.${OWNER_ID}.cpu-scheduling`;
+const OWNED_PAGE_KEY = `a3.algorithmLab.${OWNER_ID}.page-replacement`;
+
+function saveLabSession<TLabId extends AlgorithmLabSession['labId']>(
+  labId: TLabId,
+  session: AlgorithmLabSession<TLabId>,
+) {
+  return saveOwnedLabSession(labId, session, OWNER_ID);
+}
+
+function loadLabSession<TLabId extends AlgorithmLabSession['labId']>(labId: TLabId) {
+  return loadOwnedLabSession(labId, OWNER_ID);
+}
+
+function clearLabSession(labId: AlgorithmLabSession['labId']) {
+  return clearOwnedLabSession(labId, OWNER_ID);
+}
 const workbenchSource = readFileSync(
   join(process.cwd(), 'components/a3/features/algorithm-lab/algorithm-lab-workbench.tsx'),
   'utf8',
@@ -217,10 +235,20 @@ describe('algorithm lab session recovery', () => {
 
     expect(saveLabSession('cpu-scheduling', session)).toBe(true);
     expect(loadLabSession('cpu-scheduling')?.currentStepIndex).toBe(3);
-    expect(storage.getItem('a3.algorithmLab.cpu-scheduling')).not.toContain('steps');
+    expect(storage.getItem(OWNED_CPU_KEY)).not.toContain('steps');
 
     clearLabSession('cpu-scheduling');
     expect(loadLabSession('cpu-scheduling')).toBeNull();
+  });
+
+  it('does not expose an unfinished session to another authenticated user', () => {
+    expect(saveOwnedLabSession('cpu-scheduling', createSession(), 'student-a')).toBe(true);
+
+    expect(loadOwnedLabSession('cpu-scheduling', 'student-b')).toBeNull();
+    expect(loadOwnedLabSession('cpu-scheduling', 'student-a')).toMatchObject({
+      labId: 'cpu-scheduling',
+      currentStepIndex: 3,
+    });
   });
 
   it.each([
@@ -235,10 +263,10 @@ describe('algorithm lab session recovery', () => {
     JSON.stringify({ ...createSession(), input: { processes: Array.from({ length: 13 }, (_, index) => ({ processId: `P${index}`, arrivalTime: 0, burstTime: 1, priority: 1 })), timeQuantum: 2 } }),
     JSON.stringify({ ...createSession(), input: { processes: [{ processId: 'P1', arrivalTime: 0, burstTime: 1, priority: 1 }], timeQuantum: 21 } }),
   ])('drops malformed, submitted, or invalid sessions', (raw) => {
-    storage.setItem('a3.algorithmLab.cpu-scheduling', raw);
+    storage.setItem(OWNED_CPU_KEY, raw);
 
     expect(loadLabSession('cpu-scheduling')).toBeNull();
-    expect(storage.getItem('a3.algorithmLab.cpu-scheduling')).toBeNull();
+    expect(storage.getItem(OWNED_CPU_KEY)).toBeNull();
   });
 
   it.each([
@@ -246,13 +274,13 @@ describe('algorithm lab session recovery', () => {
     { referenceString: [1, 1000], frameCount: 3 },
     { referenceString: [1, 2], frameCount: 9 },
   ])('drops page replacement sessions rejected by the official validator', (input) => {
-    storage.setItem('a3.algorithmLab.page-replacement', JSON.stringify({
+    storage.setItem(OWNED_PAGE_KEY, JSON.stringify({
       ...createPageSession(),
       input,
     }));
 
     expect(loadLabSession('page-replacement')).toBeNull();
-    expect(storage.getItem('a3.algorithmLab.page-replacement')).toBeNull();
+    expect(storage.getItem(OWNED_PAGE_KEY)).toBeNull();
   });
 
   it('rejects sessions whose UTF-8 serialization is not below 32 KB', () => {
@@ -262,7 +290,7 @@ describe('algorithm lab session recovery', () => {
     };
 
     expect(saveLabSession('cpu-scheduling', oversized)).toBe(false);
-    expect(storage.getItem('a3.algorithmLab.cpu-scheduling')).toBeNull();
+    expect(storage.getItem(OWNED_CPU_KEY)).toBeNull();
   });
 
   it('rejects nested simulation steps and non-serializable session records', () => {
@@ -277,7 +305,7 @@ describe('algorithm lab session recovery', () => {
       ...createSession(),
       prediction: circular,
     })).toBe(false);
-    expect(storage.getItem('a3.algorithmLab.cpu-scheduling')).toBeNull();
+    expect(storage.getItem(OWNED_CPU_KEY)).toBeNull();
   });
 
   it('does not throw when browser storage is unavailable', () => {
@@ -293,7 +321,7 @@ describe('algorithm lab session recovery', () => {
   });
 
   it('removes a stale session when setItem fails', () => {
-    storage.setItem('a3.algorithmLab.cpu-scheduling', JSON.stringify({ ...createSession(), currentStepIndex: 1 }));
+    storage.setItem(OWNED_CPU_KEY, JSON.stringify({ ...createSession(), currentStepIndex: 1 }));
     vi.stubGlobal('sessionStorage', {
       getItem: storage.getItem,
       setItem: () => { throw new Error('quota exceeded'); },
@@ -301,7 +329,7 @@ describe('algorithm lab session recovery', () => {
     });
 
     expect(saveLabSession('cpu-scheduling', { ...createSession(), currentStepIndex: 4 })).toBe(false);
-    expect(storage.getItem('a3.algorithmLab.cpu-scheduling')).toBeNull();
+    expect(storage.getItem(OWNED_CPU_KEY)).toBeNull();
   });
 });
 
@@ -362,18 +390,46 @@ describe('retry-safe algorithm lab completion', () => {
     const getOrCreateEventId = task10Export<(
       labId: 'cpu-scheduling',
       startedAt: string,
+      ownerId: string,
     ) => string>('getOrCreateAlgorithmLabCompletionEventId');
     expect(typeof getOrCreateEventId).toBe('function');
 
     const startedAt = '2026-07-31T00:00:00.000Z';
-    const first = getOrCreateEventId('cpu-scheduling', startedAt);
-    const retry = getOrCreateEventId('cpu-scheduling', startedAt);
-    const nextAttempt = getOrCreateEventId('cpu-scheduling', '2026-08-01T00:00:00.000Z');
+    const first = getOrCreateEventId('cpu-scheduling', startedAt, OWNER_ID);
+    const retry = getOrCreateEventId('cpu-scheduling', startedAt, OWNER_ID);
+    const nextAttempt = getOrCreateEventId('cpu-scheduling', '2026-08-01T00:00:00.000Z', OWNER_ID);
 
     expect(first).toMatch(/^a3lab_complete_cpu_scheduling_/);
     expect(retry).toBe(first);
     expect(nextAttempt).not.toBe(first);
-    expect(storage.getItem('a3.algorithmLab.cpu-scheduling.completionEventId')).toBe(nextAttempt);
+    expect(storage.getItem(`${OWNED_CPU_KEY}.completionEventId`)).toBe(nextAttempt);
+  });
+
+  it('isolates completion event storage between authenticated users', () => {
+    const getOrCreateEventId = task10Export<(
+      labId: 'cpu-scheduling',
+      startedAt: string,
+      ownerId: string,
+    ) => string>('getOrCreateAlgorithmLabCompletionEventId');
+
+    const first = getOrCreateEventId('cpu-scheduling', '2026-07-31T00:00:00.000Z', 'student-a');
+    const second = getOrCreateEventId('cpu-scheduling', '2026-08-01T00:00:00.000Z', 'student-b');
+
+    expect(storage.getItem('a3.algorithmLab.student-a.cpu-scheduling.completionEventId')).toBe(first);
+    expect(storage.getItem('a3.algorithmLab.student-b.cpu-scheduling.completionEventId')).toBe(second);
+  });
+
+  it('ignores a completion response after reset or unmount changes the active attempt', () => {
+    const isCurrent = workbenchExport<(
+      current: { attemptNumber: number; eventId: string | null } | null,
+      submitted: { attemptNumber: number; eventId: string | null },
+    ) => boolean>('isCurrentCompletionAttempt');
+    const submitted = { attemptNumber: 3, eventId: 'completion-3' };
+
+    expect(isCurrent(submitted, submitted)).toBe(true);
+    expect(isCurrent({ attemptNumber: 4, eventId: null }, submitted)).toBe(false);
+    expect(isCurrent({ attemptNumber: 3, eventId: 'completion-4' }, submitted)).toBe(false);
+    expect(isCurrent(null, submitted)).toBe(false);
   });
 
   it.each(['accepted', 'duplicate'] as const)('clears the compact session after a %s response', async (status) => {
@@ -384,15 +440,15 @@ describe('retry-safe algorithm lab completion', () => {
         onSubmitted: () => void;
       },
     ) => Promise<{ syncState: string }>>('synchronizeAlgorithmLabCompletion');
-    const clearEventId = task10Export<(labId: 'cpu-scheduling') => void>(
+    const clearEventId = task10Export<(labId: 'cpu-scheduling', ownerId: string) => void>(
       'clearAlgorithmLabCompletionEventId',
     );
     expect(typeof synchronize).toBe('function');
     expect(typeof clearEventId).toBe('function');
     saveLabSession('cpu-scheduling', { ...createSession(), phase: 'completed' });
-    const eventId = task10Export<(labId: 'cpu-scheduling', startedAt: string) => string>(
+    const eventId = task10Export<(labId: 'cpu-scheduling', startedAt: string, ownerId: string) => string>(
       'getOrCreateAlgorithmLabCompletionEventId',
-    )('cpu-scheduling', '2026-07-31T00:00:00.000Z');
+    )('cpu-scheduling', '2026-07-31T00:00:00.000Z', OWNER_ID);
 
     const outcome = await synchronize(
       { ...createCompletionRequest(), eventId },
@@ -415,14 +471,14 @@ describe('retry-safe algorithm lab completion', () => {
         }),
         onSubmitted: () => {
           clearLabSession('cpu-scheduling');
-          clearEventId('cpu-scheduling');
+          clearEventId('cpu-scheduling', OWNER_ID);
         },
       },
     );
 
     expect(outcome.syncState).toBe('submitted');
     expect(loadLabSession('cpu-scheduling')).toBeNull();
-    expect(storage.getItem('a3.algorithmLab.cpu-scheduling.completionEventId')).toBeNull();
+    expect(storage.getItem(`${OWNED_CPU_KEY}.completionEventId`)).toBeNull();
   });
 
   it.each([

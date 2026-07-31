@@ -308,7 +308,7 @@ describe('algorithm lab UI', () => {
     const source = readFileSync(workbenchPath, 'utf8');
 
     expect(source).toContain('function resetWorkbench()');
-    expect(source).toContain('clearLabSession(labId);');
+    expect(source).toContain('clearLabSession(labId, ownerId);');
     expect(source).toContain('cpuSimulationRunnerRef.current?.cancel();');
     const started = algorithmLabReducer(createAlgorithmLabState('page-replacement'), {
       type: 'start',

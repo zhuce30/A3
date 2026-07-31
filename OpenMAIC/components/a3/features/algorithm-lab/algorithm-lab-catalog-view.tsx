@@ -13,6 +13,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import type { AlgorithmLabId } from '@/lib/a3/algorithm-lab/contracts';
 import {
   fetchAlgorithmLabCatalog,
@@ -114,6 +115,8 @@ export function selectLatestResumeLabId(
 }
 
 export function AlgorithmLabCatalogView() {
+  const currentUser = useA3CurrentUser();
+  const ownerId = currentUser?.id;
   const { locale } = useA3Locale();
   const copy = catalogMessages[locale];
   const [labs, setLabs] = useState<CatalogLab[]>([]);
@@ -131,13 +134,13 @@ export function AlgorithmLabCatalogView() {
     }
 
     setLabs(result.labs);
-    setSessions(Object.fromEntries(
+    setSessions(ownerId ? Object.fromEntries(
       result.labs
-        .map((lab) => [lab.id, loadLabSession(lab.id)] as const)
+        .map((lab) => [lab.id, loadLabSession(lab.id, ownerId)] as const)
         .filter((entry): entry is [AlgorithmLabId, AlgorithmLabSession] => entry[1] !== null),
-    ));
+    ) : {});
     setLoading(false);
-  }, []);
+  }, [ownerId]);
 
   const loadCatalog = useCallback(async () => {
     setLoading(true);
@@ -166,7 +169,8 @@ export function AlgorithmLabCatalogView() {
   const resumeLab = sortedLabs.find((lab) => lab.id === resumeLabId);
 
   function clearResume(labId: AlgorithmLabId) {
-    clearLabSession(labId);
+    if (!ownerId) return;
+    clearLabSession(labId, ownerId);
     setSessions((current) => {
       const next = { ...current };
       delete next[labId];

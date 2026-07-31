@@ -43,55 +43,57 @@ export interface AlgorithmLabSession<TLabId extends AlgorithmLabId = AlgorithmLa
 export function saveLabSession<TLabId extends AlgorithmLabId>(
   labId: TLabId,
   session: AlgorithmLabSession<TLabId>,
+  ownerId: string,
 ): boolean {
   const storage = getStorage();
   if (!storage) return false;
   const normalized = normalizeSession(labId, session);
   if (!normalized) {
-    removeKey(storage, labId);
+    removeKey(storage, labId, ownerId);
     return false;
   }
   try {
     const serialized = JSON.stringify(normalized);
     if (utf8ByteLength(serialized) >= MAX_SESSION_BYTES) {
-      removeKey(storage, labId);
+      removeKey(storage, labId, ownerId);
       return false;
     }
-    storage.setItem(storageKey(labId), serialized);
+    storage.setItem(storageKey(labId, ownerId), serialized);
     return true;
   } catch {
-    removeKey(storage, labId);
+    removeKey(storage, labId, ownerId);
     return false;
   }
 }
 
 export function loadLabSession<TLabId extends AlgorithmLabId>(
   labId: TLabId,
+  ownerId: string,
 ): AlgorithmLabSession<TLabId> | null {
   const storage = getStorage();
   if (!storage) return null;
   try {
-    const raw = storage.getItem(storageKey(labId));
+    const raw = storage.getItem(storageKey(labId, ownerId));
     if (!raw) return null;
     if (utf8ByteLength(raw) >= MAX_SESSION_BYTES) {
-      removeKey(storage, labId);
+      removeKey(storage, labId, ownerId);
       return null;
     }
     const normalized = normalizeSession(labId, JSON.parse(raw));
     if (!normalized) {
-      removeKey(storage, labId);
+      removeKey(storage, labId, ownerId);
       return null;
     }
     return normalized;
   } catch {
-    removeKey(storage, labId);
+    removeKey(storage, labId, ownerId);
     return null;
   }
 }
 
-export function clearLabSession(labId: AlgorithmLabId): void {
+export function clearLabSession(labId: AlgorithmLabId, ownerId: string): void {
   const storage = getStorage();
-  if (storage) removeKey(storage, labId);
+  if (storage) removeKey(storage, labId, ownerId);
 }
 
 function normalizeSession<TLabId extends AlgorithmLabId>(
@@ -190,16 +192,16 @@ function getStorage(): Storage | null {
   }
 }
 
-function removeKey(storage: Storage, labId: AlgorithmLabId): void {
+function removeKey(storage: Storage, labId: AlgorithmLabId, ownerId: string): void {
   try {
-    storage.removeItem(storageKey(labId));
+    storage.removeItem(storageKey(labId, ownerId));
   } catch {
     // Storage can be blocked by browser privacy settings.
   }
 }
 
-function storageKey(labId: AlgorithmLabId): string {
-  return `a3.algorithmLab.${labId}`;
+function storageKey(labId: AlgorithmLabId, ownerId: string): string {
+  return `a3.algorithmLab.${encodeURIComponent(ownerId)}.${labId}`;
 }
 
 function utf8ByteLength(value: string): number {

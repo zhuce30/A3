@@ -264,9 +264,10 @@ export function buildAlgorithmLabResultFingerprint(input: {
 export function getOrCreateAlgorithmLabCompletionEventId(
   labId: AlgorithmLabId,
   startedAt: string,
+  ownerId: string,
 ): string {
   const storage = getSessionStorage();
-  const key = completionEventIdStorageKey(labId);
+  const key = completionEventIdStorageKey(labId, ownerId);
   const parsedStartedAt = Date.parse(startedAt);
   const stableTime = Number.isFinite(parsedStartedAt) ? parsedStartedAt : 0;
   const eventId = `a3lab_complete_${labId.replaceAll('-', '_')}_${stableTime}`;
@@ -285,9 +286,9 @@ export function getOrCreateAlgorithmLabCompletionEventId(
   return eventId;
 }
 
-export function clearAlgorithmLabCompletionEventId(labId: AlgorithmLabId): void {
+export function clearAlgorithmLabCompletionEventId(labId: AlgorithmLabId, ownerId: string): void {
   try {
-    getSessionStorage()?.removeItem(completionEventIdStorageKey(labId));
+    getSessionStorage()?.removeItem(completionEventIdStorageKey(labId, ownerId));
   } catch {
     // Browser privacy settings may block session storage.
   }
@@ -343,6 +344,6 @@ function getSessionStorage(): Storage | null {
   }
 }
 
-function completionEventIdStorageKey(labId: AlgorithmLabId): string {
-  return `a3.algorithmLab.${labId}.completionEventId`;
+function completionEventIdStorageKey(labId: AlgorithmLabId, ownerId: string): string {
+  return `a3.algorithmLab.${encodeURIComponent(ownerId)}.${labId}.completionEventId`;
 }
