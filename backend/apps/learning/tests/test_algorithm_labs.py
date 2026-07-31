@@ -26,6 +26,13 @@ CPU_FOUNDATION_FINGERPRINT = (
     "sjf=cpu:7958460a04842ebeb1e53aebf42d471a"
 )
 
+PAGE_FOUNDATION_FINGERPRINT = (
+    "a3lab-result.v1|page-replacement|page-foundation|1.0.0|"
+    "fifo=page:ddb7ec42ee7271e8f2b64b3598b02071|"
+    "lru=page:e6261a9ff4c93c9e155d46b7ac3d2c4f|"
+    "opt=page:6a2a2b63a239393fc7e42ae9f272b050"
+)
+
 
 def known_cpu_completion(event_id="lab-event-1", **overrides):
     payload = {
@@ -50,6 +57,25 @@ def known_cpu_completion(event_id="lab-event-1", **overrides):
             "reviewedStepIndexes": [0, 3],
         },
         "resultFingerprint": CPU_FOUNDATION_FINGERPRINT,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def known_page_completion(event_id="page-event-1", **overrides):
+    payload = {
+        "schemaVersion": ALGORITHM_LAB_COMPLETION_SCHEMA_VERSION,
+        "eventId": event_id,
+        "labId": "page-replacement",
+        "labVersion": "1.0.0",
+        "presetId": "page-foundation",
+        "presetVersion": "1.0.0",
+        "customInput": False,
+        "selectedAlgorithms": ["fifo", "lru", "opt"],
+        "prediction": {"answer": "lru", "skipped": False},
+        "checkpoints": {"answered": 1, "correct": 1, "items": [{"id": "checkpoint-1", "correct": True}]},
+        "metrics": {"score": 75, "durationSec": 12, "replayCount": 0, "reviewedStepIndexes": [0]},
+        "resultFingerprint": PAGE_FOUNDATION_FINGERPRINT,
     }
     payload.update(overrides)
     return payload
@@ -122,7 +148,17 @@ class AlgorithmLabApiTests(TestCase):
         completion = response.json()["completion"]
         self.assertTrue(completion["verified"])
         self.assertTrue(completion["masteryEvidenceAccepted"])
-        self.assertEqual(completion["nextAction"]["type"], "assessment")
+        self.assertEqual(completion["score"], 100)
+        self.assertEqual(completion["metrics"]["score"], 100)
+        self.assertEqual(
+            completion["nextAction"],
+            {
+                "type": "assessment",
+                "label": "开始处理机调度算法专项测评",
+                "href": "/a3/assessment?practice=处理机调度算法",
+                "reason": "实验结果已验证且得分不低于 80 分，建议进行处理机调度算法专项测评。",
+            },
+        )
         event = LearningEvent.objects.get(user=self.user, event_id="lab-event-1")
         self.assertEqual(event.event_type, "algorithm_lab_completed")
         self.assertEqual(event.target_type, "algorithm_lab")
@@ -135,6 +171,22 @@ class AlgorithmLabApiTests(TestCase):
         self.assertNotIn("items", event.metadata)
         self.assertEqual(event.metadata["metrics"]["reviewedStepIndexes"], [0, 3])
         self.assertEqual(event.quality["verified"], True)
+
+    def test_page_completion_uses_page_replacement_assessment_route(self):
+        self.client.force_login(self.user)
+
+        response = self.post_complete(known_page_completion())
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.json()["completion"]["nextAction"],
+            {
+                "type": "assessment",
+                "label": "开始虚拟内存与页面置换专项测评",
+                "href": "/a3/assessment?practice=虚拟内存与页面置换",
+                "reason": "实验结果已验证且得分不低于 80 分，建议进行虚拟内存与页面置换专项测评。",
+            },
+        )
 
     def test_completion_locks_the_current_user_before_idempotent_write(self):
         with patch.object(User.objects, "select_for_update", wraps=User.objects.select_for_update) as row_lock:
@@ -236,7 +288,16 @@ class AlgorithmLabApiTests(TestCase):
         self.assertFalse(custom_response.json()["completion"]["verified"])
         self.assertEqual(forged_response.status_code, 201)
         self.assertFalse(forged_response.json()["completion"]["verified"])
-        self.assertEqual(forged_response.json()["completion"]["nextAction"]["type"], "replay_lab")
+        self.assertEqual(forged_response.json()["completion"]["score"], 100)
+        self.assertEqual(
+            forged_response.json()["completion"]["nextAction"],
+            {
+                "type": "replay_lab",
+                "label": "重新完成 CPU 调度算法实验",
+                "href": "/a3/labs/cpu-scheduling",
+                "reason": "需要获得已验证且不低于 80 分的实验结果后再进入专项测评。",
+            },
+        )
         custom_event = LearningEvent.objects.get(user=self.user, event_id="custom-event")
         self.assertNotIn("correct", custom_event.metadata["prediction"])
         self.assertEqual(build_algorithm_lab_effect(self.user)["prediction"], {"answered": 0, "correct": 0})

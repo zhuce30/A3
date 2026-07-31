@@ -16,6 +16,11 @@ ALGORITHM_LAB_SCHEMA_VERSION = "a3.algorithm-labs.catalog.v1"
 ALGORITHM_LAB_COMPLETION_SCHEMA_VERSION = "a3.algorithm-lab.completion.v1"
 ALGORITHM_LAB_EFFECT_SCHEMA_VERSION = "a3.algorithm-lab.effect.v1"
 
+_LAB_ASSESSMENT_TOPICS = {
+    "cpu-scheduling": "处理机调度算法",
+    "page-replacement": "虚拟内存与页面置换",
+}
+
 
 class AlgorithmLabCompletionConflict(Exception):
     pass
@@ -400,7 +405,8 @@ def _is_same_completion(event: LearningEvent, normalized: dict) -> bool:
 def _serialize_completion(event: LearningEvent) -> dict:
     metadata = event.metadata if isinstance(event.metadata, dict) else {}
     quality = event.quality if isinstance(event.quality, dict) else {}
-    next_action = quality.get("nextAction") if quality.get("nextAction") in {"assessment", "replay_lab"} else "replay_lab"
+    score = float(event.score) if event.score is not None else 0
+    verified = bool(quality.get("verified", False))
     return {
         "schemaVersion": metadata.get("schemaVersion", ALGORITHM_LAB_COMPLETION_SCHEMA_VERSION),
         "eventId": event.event_id,
@@ -412,11 +418,31 @@ def _serialize_completion(event: LearningEvent) -> dict:
         "selectedAlgorithms": metadata.get("selectedAlgorithms", []),
         "prediction": metadata.get("prediction", {}),
         "checkpoints": metadata.get("checkpoints", {"answered": 0, "correct": 0}),
-        "metrics": {"score": event.score if event.score is not None else 0, **(metadata.get("metrics", {}))},
-        "verified": bool(quality.get("verified", False)),
+        "score": score,
+        "metrics": {"score": score, **(metadata.get("metrics", {}))},
+        "verified": verified,
         "masteryEvidenceAccepted": bool(quality.get("masteryEvidenceAccepted", False)),
-        "nextAction": {"type": next_action},
+        "nextAction": _completion_next_action(event.target_id, verified, score),
         "completedAt": event.created_at.isoformat(),
+    }
+
+
+def _completion_next_action(lab_id: str, verified: bool, score: float) -> dict:
+    topic = _LAB_ASSESSMENT_TOPICS.get(lab_id)
+    if verified and score >= 80 and topic:
+        return {
+            "type": "assessment",
+            "label": f"开始{topic}专项测评",
+            "href": f"/a3/assessment?practice={topic}",
+            "reason": f"实验结果已验证且得分不低于 80 分，建议进行{topic}专项测评。",
+        }
+    lab = _get_lab(lab_id)
+    title = lab["title"] if lab else "当前实验"
+    return {
+        "type": "replay_lab",
+        "label": f"重新完成 {title}",
+        "href": f"/a3/labs/{lab_id}",
+        "reason": "需要获得已验证且不低于 80 分的实验结果后再进入专项测评。",
     }
 
 
