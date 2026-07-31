@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import timedelta
 from math import isfinite
 from typing import Any
@@ -143,7 +143,18 @@ def recommend_algorithm_lab(knowledge_point: str, weak_points: list[str] | None 
     normalized = " ".join(
         [str(knowledge_point or ""), *[str(item) for item in (weak_points or [])]]
     ).lower()
-    if any(token in normalized for token in ("调度", "cpu", "进程调度", "processor scheduling")):
+    if any(
+        token in normalized
+        for token in (
+            "cpu 调度",
+            "cpu调度",
+            "处理机调度",
+            "处理器调度",
+            "进程调度",
+            "processor scheduling",
+            "process scheduling",
+        )
+    ):
         return {
             "kind": "interactive_lab",
             "label": "进入 CPU 调度实验",
@@ -289,6 +300,89 @@ def build_algorithm_lab_effect(user, days=30) -> dict:
         "timeWindowDays": safe_days,
         **totals,
         "byLab": sorted(by_lab.values(), key=lambda item: item["labId"]),
+    }
+
+
+def build_algorithm_lab_report_effect(user, *, start_at=None, end_at=None) -> dict:
+    known_lab_ids = {lab["id"] for lab in _LABS}
+    events = LearningEvent.objects.filter(
+        user=user,
+        event_type="algorithm_lab_completed",
+        target_id__in=known_lab_ids,
+    )
+    if start_at is not None:
+        events = events.filter(created_at__gte=start_at)
+    if end_at is not None:
+        events = events.filter(created_at__lt=end_at)
+
+    completed_runs = 0
+    verified_runs = 0
+    prediction_answered = 0
+    prediction_correct = 0
+    checkpoint_answered = 0
+    checkpoint_correct = 0
+    reviewed_step_count = 0
+    review_signals: Counter[int] = Counter()
+    lab_totals: dict[str, dict] = {}
+
+    for event in events.only("target_id", "score", "quality", "metadata"):
+        completed_runs += 1
+        verified = bool(_event_verified(event))
+        verified_runs += int(verified)
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        prediction = metadata.get("prediction") if isinstance(metadata.get("prediction"), dict) else {}
+        checkpoints = metadata.get("checkpoints") if isinstance(metadata.get("checkpoints"), dict) else {}
+        metrics = metadata.get("metrics") if isinstance(metadata.get("metrics"), dict) else {}
+
+        if verified and prediction.get("skipped") is False:
+            prediction_answered += 1
+            prediction_correct += int(prediction.get("correct") is True)
+
+        answered = _bounded_count(checkpoints.get("answered"), maximum=20)
+        correct = min(answered, _bounded_count(checkpoints.get("correct"), maximum=20))
+        checkpoint_answered += answered
+        checkpoint_correct += correct
+
+        reviewed_indexes = _reviewed_step_indexes(metrics.get("reviewedStepIndexes"))
+        reviewed_step_count += len(reviewed_indexes)
+        review_signals.update(reviewed_indexes)
+
+        lab_total = lab_totals.setdefault(
+            event.target_id,
+            {"labId": event.target_id, "completedRuns": 0, "bestScore": None},
+        )
+        lab_total["completedRuns"] += 1
+        score = _bounded_score(event.score)
+        if score is not None and (lab_total["bestScore"] is None or score > lab_total["bestScore"]):
+            lab_total["bestScore"] = score
+
+    by_lab = []
+    for lab in _LABS:
+        lab_total = lab_totals.get(lab["id"])
+        if lab_total is None:
+            continue
+        by_lab.append(
+            {
+                **lab_total,
+                "bestScore": round(float(lab_total["bestScore"] or 0), 1),
+            }
+        )
+
+    return {
+        "completedRuns": completed_runs,
+        "verifiedRuns": verified_runs,
+        "predictionAccuracy": _accuracy(prediction_correct, prediction_answered),
+        "checkpointAccuracy": _accuracy(checkpoint_correct, checkpoint_answered),
+        "reviewedStepCount": reviewed_step_count,
+        "byLab": by_lab,
+        "commonReviewSignals": [
+            {"stepIndex": step_index, "count": count}
+            for step_index, count in sorted(review_signals.items(), key=lambda item: (-item[1], item[0]))[:5]
+        ],
+        "nextAction": {
+            "label": "继续交互实验" if completed_runs else "开始交互实验",
+            "href": "/a3/labs",
+        },
     }
 
 
@@ -516,6 +610,32 @@ def _add_effect_event(counts: dict, event: LearningEvent) -> None:
     counts["checkpoints"]["answered"] += _integer(checkpoints.get("answered"), 0)
     counts["checkpoints"]["correct"] += _integer(checkpoints.get("correct"), 0)
     counts["reviewed"] += _integer(metrics.get("reviewedCount"), 0)
+
+
+def _bounded_count(value: Any, *, maximum: int) -> int:
+    return value if type(value) is int and 0 <= value <= maximum else 0
+
+
+def _bounded_score(value: Any) -> float | None:
+    if type(value) not in {int, float} or not isfinite(value) or value < 0 or value > 100:
+        return None
+    return float(value)
+
+
+def _reviewed_step_indexes(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    return sorted(
+        {
+            index
+            for index in value[:50]
+            if type(index) is int and 0 <= index <= 10000
+        }
+    )
+
+
+def _accuracy(correct: int, answered: int) -> float:
+    return round(correct * 100 / answered, 1) if answered else 0.0
 
 
 def _required_string(value: Any, field: str, max_length: int) -> str:

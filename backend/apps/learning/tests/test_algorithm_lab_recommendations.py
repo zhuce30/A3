@@ -77,6 +77,8 @@ class AlgorithmLabRecommendationTests(TestCase):
         mapper = getattr(algorithm_labs, "recommend_algorithm_lab", None)
         self.assertTrue(callable(mapper), "algorithm_labs must expose the shared mapper")
         self.assertIsNone(mapper("进程与 PCB", ["同步互斥与信号量"]))
+        self.assertIsNone(mapper("生产调度与物流调度"))
+        self.assertIsNone(mapper("分布式任务调度"))
 
     def test_recommendation_uses_interactive_lab_action_for_cpu_weakness(self):
         payload = build_recommendation_payload(self.user, top_k=6)
@@ -138,9 +140,9 @@ class AlgorithmLabRecommendationTests(TestCase):
     def test_code_lab_resource_gets_a_deterministic_related_lab_action(self):
         resource = _build_resource_item(
             "code_lab",
-            "CPU 璋冨害绠楁硶",
+            "CPU 调度算法",
             self.profile,
-            [{"id": "S1", "title": "CPU 璋冨害", "snippet": "CPU 璋冨害绛栫暐瀵规瘮", "type": "RAG"}],
+            [{"id": "S1", "title": "CPU 调度", "snippet": "CPU 调度策略对比", "type": "RAG"}],
             allow_llm=False,
         )
 
@@ -150,9 +152,9 @@ class AlgorithmLabRecommendationTests(TestCase):
     def test_unrelated_code_lab_resource_does_not_fabricate_a_lab_action(self):
         resource = _build_resource_item(
             "code_lab",
-            "杩涚▼鎺у埗鍧?PCB",
-            None,
-            [{"id": "S1", "title": "PCB", "snippet": "PCB 璁板綍杩涚▼鐘舵€?", "type": "RAG"}],
+            "数据库索引与查询优化",
+            self.profile,
+            [{"id": "S1", "title": "数据库索引", "snippet": "索引记录查询路径", "type": "RAG"}],
             allow_llm=False,
         )
 

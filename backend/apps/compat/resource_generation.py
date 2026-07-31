@@ -1842,8 +1842,7 @@ def _build_resource_item(resource_type: str, goal: str, profile: LearnerProfile 
     if resource_type == "code_lab":
         from backend.apps.learning.algorithm_labs import recommend_algorithm_lab
 
-        weak_points = list(profile.weak_points or []) if profile is not None else []
-        related_lab = recommend_algorithm_lab(goal, weak_points)
+        related_lab = recommend_algorithm_lab(goal)
         if related_lab:
             resource["relatedLab"] = related_lab
     return resource
