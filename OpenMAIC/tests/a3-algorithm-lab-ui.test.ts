@@ -5,6 +5,8 @@ import { selectLatestResumeLabId } from '@/components/a3/features/algorithm-lab/
 import {
   algorithmLabReducer,
   buildSimulationRuns,
+  canStartAlgorithmLabRun,
+  claimCheckpointSubmission,
   createAlgorithmLabStartedEventId,
   createAlgorithmLabState,
   createStartedEventGate,
@@ -12,7 +14,19 @@ import {
   type AlgorithmLabRunRequest,
 } from '@/components/a3/features/algorithm-lab/algorithm-lab-workbench';
 import { getNextMobilePanel } from '@/components/a3/features/algorithm-lab/algorithm-lab-layout';
+import {
+  buildCpuCheckpoints,
+  deriveCpuPredictionResult,
+  findCpuSegmentStepIndex,
+  getCpuProcessVisual,
+} from '@/components/a3/features/algorithm-lab/cpu-scheduling-visualizer';
+import {
+  addCpuProcess,
+  removeCpuProcess,
+  updateCpuProcess,
+} from '@/components/a3/features/algorithm-lab/algorithm-lab-input-panel';
 import type { SimulationRun } from '@/lib/a3/algorithm-lab/contracts';
+import { simulateCpuScheduling } from '@/lib/a3/algorithm-lab/cpu-scheduling';
 
 const root = process.cwd();
 const catalogPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-catalog-view.tsx');
@@ -21,6 +35,10 @@ const workbenchPath = join(root, 'components/a3/features/algorithm-lab/algorithm
 const layoutPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-layout.tsx');
 const controlsPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-controls.tsx');
 const explanationPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-step-explanation.tsx');
+const cpuVisualizerPath = join(root, 'components/a3/features/algorithm-lab/cpu-scheduling-visualizer.tsx');
+const checkpointPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-checkpoint.tsx');
+const inputPanelPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-input-panel.tsx');
+const statusPanelPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-status-panel.tsx');
 
 describe('algorithm lab UI', () => {
   it('has catalog loading, error, empty, progress and resume states', () => {
@@ -275,5 +293,133 @@ describe('algorithm lab UI', () => {
     }
     expect(explanation).toContain('<details');
     expect(explanation).toContain('overflow-y-auto');
+  });
+
+  it('renders the complete CPU scheduling comparison canvas without layout animation', () => {
+    const visualizer = readFileSync(cpuVisualizerPath, 'utf8');
+    const workbench = readFileSync(workbenchPath, 'utf8');
+
+    expect(visualizer).toContain('data-testid="cpu-scheduling-canvas"');
+    expect(visualizer).toContain('时间标尺');
+    expect(visualizer).toContain('runs.map');
+    expect(visualizer).toContain('getCpuProcessVisual');
+    expect(visualizer).toContain('当前时间');
+    expect(visualizer).toContain('就绪队列');
+    expect(visualizer).toContain('运行进程');
+    expect(visualizer).toContain('onSeek');
+    expect(visualizer).toContain('duration-200');
+    expect(visualizer).not.toContain('transition-all');
+    expect(workbench).toContain('<CpuSchedulingVisualizer');
+  });
+
+  it('keeps process visuals and segment seeking deterministic across algorithms', () => {
+    expect(getCpuProcessVisual('P2')).toEqual(getCpuProcessVisual('P2'));
+    expect(getCpuProcessVisual('idle').label).toBe('空闲');
+
+    const run = simulateCpuScheduling({
+      processes: [
+        { processId: 'P1', arrivalTime: 0, burstTime: 3, priority: 1 },
+        { processId: 'P2', arrivalTime: 1, burstTime: 2, priority: 0 },
+      ],
+      timeQuantum: 1,
+    }, 'rr');
+    const segment = run.finalMetrics.completionOrder.length > 0
+      ? run.steps.at(-1)!.state.timeline[1]
+      : run.steps.at(-1)!.state.timeline[0];
+    const stepIndex = findCpuSegmentStepIndex(run, segment);
+
+    expect(stepIndex).toBeGreaterThanOrEqual(0);
+    expect(run.steps[stepIndex].state.timeline).toContainEqual(segment);
+  });
+
+  it('edits CPU rows within 1..12 and preserves official validation errors', () => {
+    const base = { processes: [{ processId: 'P1', arrivalTime: 0, burstTime: 2, priority: 0 }], timeQuantum: 2 };
+    expect(removeCpuProcess(base, 0).processes).toHaveLength(1);
+
+    let expanded = base;
+    for (let index = 0; index < 20; index += 1) expanded = addCpuProcess(expanded);
+    expect(expanded.processes).toHaveLength(12);
+
+    const invalid = updateCpuProcess(base, 0, 'burstTime', 0);
+    expect(invalid.processes[0].burstTime).toBe(0);
+
+    const inputPanel = readFileSync(inputPanelPath, 'utf8');
+    expect(inputPanel).toContain('validateCpuSchedulingInput');
+    expect(inputPanel).toContain('disabled={input.processes.length >= 12}');
+    expect(inputPanel).toContain('disabled={input.processes.length <= 1}');
+    expect(inputPanel).toContain('到达时间');
+    expect(inputPanel).toContain('运行时间');
+    expect(inputPanel).toContain('优先级');
+    expect(inputPanel).toContain('时间片');
+    expect(inputPanel).toContain('自定义配置');
+  });
+
+  it('requires an answer or explicit skip and reveals prediction correctness only at completion', () => {
+    const runs = (['fcfs', 'sjf', 'rr'] as const).map((algorithm) => simulateCpuScheduling({
+      processes: [
+        { processId: 'P1', arrivalTime: 0, burstTime: 5, priority: 1 },
+        { processId: 'P2', arrivalTime: 0, burstTime: 1, priority: 0 },
+      ],
+      timeQuantum: 2,
+    }, algorithm));
+
+    expect(deriveCpuPredictionResult({ answer: 'sjf', skipped: false }, runs, false)).toBeNull();
+    expect(deriveCpuPredictionResult({ answer: 'sjf', skipped: false }, runs, true)).toMatchObject({
+      correct: true,
+      winners: ['sjf'],
+    });
+
+    const inputPanel = readFileSync(inputPanelPath, 'utf8');
+    const workbench = readFileSync(workbenchPath, 'utf8');
+    expect(inputPanel).toContain('哪种算法的平均等待时间最低');
+    expect(inputPanel).toContain('跳过预测');
+    expect(workbench).toContain('predictionReady');
+    expect(workbench).toContain('predictionResult');
+  });
+
+  it('builds two once-only CPU checkpoints with correctness and step indexes', () => {
+    const run = simulateCpuScheduling({
+      processes: [
+        { processId: 'P1', arrivalTime: 0, burstTime: 4, priority: 1 },
+        { processId: 'P2', arrivalTime: 0, burstTime: 2, priority: 0 },
+        { processId: 'P3', arrivalTime: 1, burstTime: 1, priority: 2 },
+      ],
+      timeQuantum: 2,
+    }, 'rr');
+    const checkpoints = buildCpuCheckpoints(run);
+
+    expect(checkpoints.map((checkpoint) => checkpoint.id)).toEqual([
+      'cpu-ready-queue',
+      'cpu-completion-order',
+    ]);
+    expect(checkpoints.every((checkpoint) => Number.isInteger(checkpoint.stepIndex))).toBe(true);
+
+    const submissionGate = new Set<string>();
+    expect(claimCheckpointSubmission(submissionGate, 'cpu-ready-queue')).toBe(true);
+    expect(claimCheckpointSubmission(submissionGate, 'cpu-ready-queue')).toBe(false);
+    expect(claimCheckpointSubmission(submissionGate, 'cpu-completion-order')).toBe(true);
+
+    const checkpoint = readFileSync(checkpointPath, 'utf8');
+    const workbench = readFileSync(workbenchPath, 'utf8');
+    expect(checkpoint).toContain('aria-live="polite"');
+    expect(workbench).toContain('trackAlgorithmLabCheckpoint');
+    expect(workbench).toContain("resourceType: 'interactive_lab'");
+    expect(workbench).toContain('checkpointEventGate');
+    expect(workbench).toContain('correct');
+    expect(workbench).toContain('stepIndex');
+  });
+
+  it('shows all five CPU metrics in the status panel', () => {
+    const source = readFileSync(statusPanelPath, 'utf8');
+    for (const metric of ['平均等待', '平均周转', '平均响应', '上下文切换', '完成顺序']) {
+      expect(source).toContain(metric);
+    }
+  });
+
+  it('disables the first run until CPU input is valid and prediction is answered or skipped', () => {
+    expect(canStartAlgorithmLabRun('cpu-scheduling', false, true)).toBe(false);
+    expect(canStartAlgorithmLabRun('cpu-scheduling', true, false)).toBe(false);
+    expect(canStartAlgorithmLabRun('cpu-scheduling', true, true)).toBe(true);
+    expect(canStartAlgorithmLabRun('page-replacement', true, false)).toBe(true);
   });
 });

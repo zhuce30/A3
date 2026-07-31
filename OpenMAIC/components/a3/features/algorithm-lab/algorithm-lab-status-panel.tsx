@@ -1,5 +1,8 @@
 import { Activity, CircleCheck, Clock3 } from 'lucide-react';
-import type { AlgorithmLabPhase } from '@/lib/a3/algorithm-lab/contracts';
+import type { AlgorithmLabPhase, SimulationRun } from '@/lib/a3/algorithm-lab/contracts';
+import type { CpuSchedulingMetrics, CpuSchedulingState } from '@/lib/a3/algorithm-lab/cpu-scheduling';
+
+type CpuRun = SimulationRun<CpuSchedulingState, CpuSchedulingMetrics>;
 
 const phaseLabels: Record<AlgorithmLabPhase, string> = {
   idle: '等待配置',
@@ -19,6 +22,7 @@ interface AlgorithmLabStatusPanelProps {
   replayCount: number;
   syncState: 'idle' | 'pending' | 'failed' | 'submitted';
   syncError: string;
+  cpuRuns?: CpuRun[];
   onSpeedChange: (speed: number) => void;
 }
 
@@ -30,6 +34,7 @@ export function AlgorithmLabStatusPanel({
   replayCount,
   syncState,
   syncError,
+  cpuRuns = [],
   onSpeedChange,
 }: AlgorithmLabStatusPanelProps) {
   return (
@@ -50,6 +55,8 @@ export function AlgorithmLabStatusPanel({
         <StatusMetric icon={CircleCheck} label="重新运行" value={`${replayCount} 次`} />
       </div>
 
+      {cpuRuns.length > 0 ? <CpuMetricsTable runs={cpuRuns} currentStepIndex={currentStepIndex} /> : null}
+
       <label className="block text-xs font-medium text-[var(--a3-text-muted)]">
         播放速度
         <select
@@ -68,6 +75,44 @@ export function AlgorithmLabStatusPanel({
         {syncState === 'failed' ? syncError : syncState === 'submitted' ? '学习证据已写回' : '完成实验后将验证并写回学习报告'}
       </div>
     </section>
+  );
+}
+
+function CpuMetricsTable({ runs, currentStepIndex }: { runs: CpuRun[]; currentStepIndex: number }) {
+  return (
+    <div>
+      <div className="text-xs font-semibold text-[var(--a3-text)]">调度指标</div>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full min-w-[520px] border-collapse text-left text-[11px]">
+          <thead className="text-[var(--a3-text-muted)]">
+            <tr className="border-b border-[var(--a3-border)]">
+              <th className="px-2 py-2 font-medium">算法</th>
+              <th className="px-2 py-2 font-medium">平均等待</th>
+              <th className="px-2 py-2 font-medium">平均周转</th>
+              <th className="px-2 py-2 font-medium">平均响应</th>
+              <th className="px-2 py-2 font-medium">上下文切换</th>
+              <th className="px-2 py-2 font-medium">完成顺序</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map((run) => {
+              const step = run.steps[Math.max(0, Math.min(currentStepIndex, run.steps.length - 1))];
+              const metrics = step?.metrics ?? run.finalMetrics;
+              return (
+                <tr key={run.algorithm} className="border-b border-[var(--a3-border)]/70 text-[var(--a3-text)] last:border-0">
+                  <th className="px-2 py-2 font-semibold uppercase">{run.algorithm}</th>
+                  <td className="px-2 py-2 tabular-nums">{metrics.averageWaitingTime}</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.averageTurnaroundTime}</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.averageResponseTime}</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.contextSwitches}</td>
+                  <td className="px-2 py-2 whitespace-nowrap">{metrics.completionOrder.join(' → ') || '尚未完成'}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

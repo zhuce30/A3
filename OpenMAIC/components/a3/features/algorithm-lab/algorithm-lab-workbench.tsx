@@ -9,9 +9,14 @@ import type {
   AlgorithmLabId,
   AlgorithmLabInputById,
   AlgorithmLabPhase,
+  CpuSchedulingInput,
   SimulationRun,
 } from '@/lib/a3/algorithm-lab/contracts';
-import { simulateCpuScheduling } from '@/lib/a3/algorithm-lab/cpu-scheduling';
+import {
+  simulateCpuScheduling,
+  type CpuSchedulingMetrics,
+  type CpuSchedulingState,
+} from '@/lib/a3/algorithm-lab/cpu-scheduling';
 import { simulatePageReplacement } from '@/lib/a3/algorithm-lab/page-replacement';
 import { getAlgorithmLabDefinition } from '@/lib/a3/algorithm-lab/registry';
 import { validateCpuSchedulingInput, validatePageReplacementInput } from '@/lib/a3/algorithm-lab/validators';
@@ -22,12 +27,19 @@ import {
   saveLabSession,
   type AlgorithmLabSession,
 } from '@/lib/a3/algorithm-lab/session';
-import { trackAlgorithmLabStarted } from '@/lib/a3/learning-event-client';
+import { trackAlgorithmLabCheckpoint, trackAlgorithmLabStarted } from '@/lib/a3/learning-event-client';
+import { AlgorithmLabCheckpoint } from './algorithm-lab-checkpoint';
 import { AlgorithmLabControls } from './algorithm-lab-controls';
 import { AlgorithmLabInputPanel } from './algorithm-lab-input-panel';
 import { AlgorithmLabLayout } from './algorithm-lab-layout';
 import { AlgorithmLabStatusPanel } from './algorithm-lab-status-panel';
 import { AlgorithmLabStepExplanation } from './algorithm-lab-step-explanation';
+import {
+  buildCpuCheckpoints,
+  CpuSchedulingVisualizer,
+  deriveCpuPredictionResult,
+  type CpuCheckpointDefinition,
+} from './cpu-scheduling-visualizer';
 
 type SyncState = 'idle' | 'pending' | 'failed' | 'submitted';
 
@@ -231,8 +243,26 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   const [state, dispatch] = useReducer(algorithmLabReducer, labId, createAlgorithmLabState);
   const canvasRef = useRef<HTMLDivElement>(null);
   const startedEventGate = useRef(createStartedEventGate());
+  const checkpointEventGate = useRef(new Set<string>());
   const finalStepIndex = useMemo(() => getFinalStepIndex(state.runs), [state.runs]);
   const currentStep = state.runs[0]?.steps[state.currentStepIndex];
+  const inputValidation = state.labId === 'cpu-scheduling'
+    ? validateCpuSchedulingInput(state.input)
+    : validatePageReplacementInput(state.input);
+  const predictionReady = state.labId !== 'cpu-scheduling' || state.prediction !== null || state.runs.length > 0;
+  const canStartRun = canStartAlgorithmLabRun(state.labId, inputValidation.valid, predictionReady);
+  const cpuRuns = useMemo(
+    () => state.labId === 'cpu-scheduling' ? state.runs.filter(isCpuSchedulingRun) : [],
+    [state.labId, state.runs],
+  );
+  const completed = state.phase === 'completed' || state.phase === 'submitted';
+  const predictionResult = state.labId === 'cpu-scheduling'
+    ? deriveCpuPredictionResult(state.prediction, cpuRuns, completed)
+    : null;
+  const cpuCheckpoints = useMemo(
+    () => completed && cpuRuns[0] ? buildCpuCheckpoints(cpuRuns[0]) : [],
+    [completed, cpuRuns],
+  );
 
   useEffect(() => {
     if (labId === 'cpu-scheduling') {
@@ -262,7 +292,14 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
     saveLabSession(labId, toCompactSession(state));
   }, [labId, state]);
 
+  useEffect(() => {
+    for (const checkpointId of Object.keys(state.checkpointAnswers)) {
+      checkpointEventGate.current.add(checkpointId);
+    }
+  }, [state.checkpointAnswers]);
+
   function play() {
+    if (!canStartRun) return;
     const runs = state.phase === 'paused' && state.runs.length > 0
       ? state.runs
       : state.labId === 'cpu-scheduling'
@@ -305,7 +342,44 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   function resetWorkbench() {
     clearLabSession(labId);
     startedEventGate.current = createStartedEventGate();
+    checkpointEventGate.current.clear();
     dispatch({ type: 'reset' });
+  }
+
+  function updateCpuInput(input: CpuSchedulingInput) {
+    if (state.labId !== 'cpu-scheduling') return;
+    dispatch({
+      type: 'configure',
+      labId: state.labId,
+      input,
+      algorithms: state.selectedAlgorithms,
+    });
+  }
+
+  function submitCpuCheckpoint(checkpoint: CpuCheckpointDefinition, answer: string) {
+    if (state.labId !== 'cpu-scheduling' || !claimCheckpointSubmission(checkpointEventGate.current, checkpoint.id)) return;
+    const correct = answer === checkpoint.correctAnswer;
+    dispatch({ type: 'answer_checkpoint', checkpointId: checkpoint.id, answer });
+    void trackAlgorithmLabCheckpoint({
+      eventId: createAlgorithmLabCheckpointEventId(state.labId, checkpoint.id, state.startedAt),
+      targetType: 'algorithm_lab_checkpoint',
+      targetId: `${state.labId}:${checkpoint.id}`,
+      resourceType: 'interactive_lab',
+      knowledgePointId: definition.knowledgePointCodes[0] ?? '',
+      sourcePage: `/a3/labs/${state.labId}`,
+      score: correct ? 100 : 0,
+      quality: { correct },
+      metadata: {
+        labId: state.labId,
+        labVersion: definition.version,
+        presetId: state.presetId,
+        checkpointId: checkpoint.id,
+        answer,
+        correct,
+        stepIndex: checkpoint.stepIndex,
+        algorithm: cpuRuns[0]?.algorithm ?? '',
+      },
+    });
   }
 
   function selectPreset(presetId: string) {
@@ -362,35 +436,56 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
       definition={definition}
       presetId={state.presetId}
       selectedAlgorithms={state.selectedAlgorithms}
+      cpuInput={state.labId === 'cpu-scheduling' ? state.input : undefined}
+      prediction={state.labId === 'cpu-scheduling' ? state.prediction : null}
+      predictionResult={predictionResult}
+      predictionLocked={state.runs.length > 0}
       onSelectPreset={selectPreset}
       onToggleAlgorithm={toggleAlgorithm}
+      onCpuInputChange={updateCpuInput}
+      onPredict={(answer) => dispatch({ type: 'predict', answer, skipped: false })}
+      onSkipPrediction={() => dispatch({ type: 'predict', answer: null, skipped: true })}
     />
   );
   const statusPanel = (
-    <AlgorithmLabStatusPanel
-      phase={state.phase}
-      speed={state.speed}
-      currentStepIndex={state.currentStepIndex}
-      finalStepIndex={finalStepIndex}
-      replayCount={state.replayCount}
-      syncState={state.syncState}
-      syncError={state.syncError}
-      onSpeedChange={(speed) => dispatch({ type: 'set_speed', speed })}
-    />
+    <div className="space-y-5">
+      <AlgorithmLabStatusPanel
+        phase={state.phase}
+        speed={state.speed}
+        currentStepIndex={state.currentStepIndex}
+        finalStepIndex={finalStepIndex}
+        replayCount={state.replayCount}
+        syncState={state.syncState}
+        syncError={state.syncError}
+        cpuRuns={cpuRuns}
+        onSpeedChange={(speed) => dispatch({ type: 'set_speed', speed })}
+      />
+      {cpuCheckpoints.map((checkpoint) => (
+        <AlgorithmLabCheckpoint
+          key={checkpoint.id}
+          checkpoint={checkpoint}
+          submittedAnswer={state.checkpointAnswers[checkpoint.id]}
+          onSubmit={(answer) => submitCpuCheckpoint(checkpoint, answer)}
+        />
+      ))}
+    </div>
   );
   const controls = (
-    <AlgorithmLabControls
-      phase={state.phase}
-      hasRuns={state.runs.length > 0}
-      currentStepIndex={state.currentStepIndex}
-      finalStepIndex={finalStepIndex}
-      onPlay={play}
-      onPause={() => dispatch({ type: 'pause' })}
-      onRewind={() => dispatch({ type: 'rewind' })}
-      onAdvance={() => dispatch({ type: 'advance' })}
-      onReset={resetWorkbench}
-      onFullscreen={fullscreen}
-    />
+    <fieldset className="min-w-0 border-0 p-0" disabled={state.runs.length === 0 && !canStartRun}>
+      <legend className="sr-only">实验播放控制</legend>
+      <AlgorithmLabControls
+        phase={state.phase}
+        hasRuns={state.runs.length > 0}
+        currentStepIndex={state.currentStepIndex}
+        finalStepIndex={finalStepIndex}
+        onPlay={play}
+        onPause={() => dispatch({ type: 'pause' })}
+        onRewind={() => dispatch({ type: 'rewind' })}
+        onAdvance={() => dispatch({ type: 'advance' })}
+        onReset={resetWorkbench}
+        onFullscreen={fullscreen}
+      />
+    </fieldset>
   );
   const explanation = (
     <AlgorithmLabStepExplanation
@@ -418,7 +513,13 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
         statusPanel={statusPanel}
         controls={controls}
         explanation={explanation}
-        canvas={(
+        canvas={state.labId === 'cpu-scheduling' ? (
+          <CpuSchedulingVisualizer
+            runs={cpuRuns}
+            currentStepIndex={state.currentStepIndex}
+            onSeek={(index) => dispatch({ type: 'seek', index })}
+          />
+        ) : (
           <div className="flex min-h-[430px] flex-col items-center justify-center px-6 text-center">
             <FlaskConical className="size-10 text-amber-600" />
             <h2 className="mt-4 text-lg font-semibold text-[var(--a3-text)]">算法运行画布</h2>
@@ -651,6 +752,36 @@ export function createAlgorithmLabStartedEventId(labId: AlgorithmLabId, startedA
   const timestamp = Date.parse(startedAt);
   const stableTime = Number.isFinite(timestamp) ? timestamp : 0;
   return `a3lab_started_${labId.replaceAll('-', '_')}_${stableTime}`;
+}
+
+export function createAlgorithmLabCheckpointEventId(
+  labId: AlgorithmLabId,
+  checkpointId: string,
+  startedAt: string | null,
+): string {
+  const timestamp = Date.parse(startedAt ?? '');
+  const stableTime = Number.isFinite(timestamp) ? timestamp : 0;
+  return `a3lab_checkpoint_${labId.replaceAll('-', '_')}_${checkpointId.replaceAll('-', '_')}_${stableTime}`;
+}
+
+export function canStartAlgorithmLabRun(
+  labId: AlgorithmLabId,
+  inputValid: boolean,
+  predictionReady: boolean,
+): boolean {
+  return inputValid && (labId !== 'cpu-scheduling' || predictionReady);
+}
+
+export function claimCheckpointSubmission(gate: Set<string>, checkpointId: string): boolean {
+  if (gate.has(checkpointId)) return false;
+  gate.add(checkpointId);
+  return true;
+}
+
+function isCpuSchedulingRun(
+  run: SimulationRun<unknown, unknown>,
+): run is SimulationRun<CpuSchedulingState, CpuSchedulingMetrics> {
+  return isCpuAlgorithm(run.algorithm);
 }
 
 function getFinalStepIndex(runs: SimulationRun<unknown, unknown>[]): number {
