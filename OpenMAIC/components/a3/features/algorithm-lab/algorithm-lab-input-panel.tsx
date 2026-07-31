@@ -1,24 +1,32 @@
+'use client';
+
 import { Check, Plus, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { useState } from 'react';
 import type {
   AlgorithmLabAlgorithm,
   AlgorithmLabDefinition,
   CpuProcessInput,
   CpuSchedulingInput,
+  PageReplacementInput,
 } from '@/lib/a3/algorithm-lab/contracts';
-import { validateCpuSchedulingInput } from '@/lib/a3/algorithm-lab/validators';
+import { validateCpuSchedulingInput, validatePageReplacementInput } from '@/lib/a3/algorithm-lab/validators';
 import type { CpuPredictionResult } from './cpu-scheduling-visualizer';
+import type { PagePredictionResult } from './page-replacement-visualizer';
 
 interface AlgorithmLabInputPanelProps {
   definition: AlgorithmLabDefinition;
   presetId: string;
   selectedAlgorithms: AlgorithmLabAlgorithm[];
   cpuInput?: CpuSchedulingInput;
+  pageInput?: PageReplacementInput;
   prediction?: { answer: string | null; skipped: boolean } | null;
   predictionResult?: CpuPredictionResult | null;
+  pagePredictionResult?: PagePredictionResult | null;
   predictionLocked?: boolean;
   onSelectPreset: (presetId: string) => void;
   onToggleAlgorithm: (algorithm: AlgorithmLabAlgorithm) => void;
   onCpuInputChange?: (input: CpuSchedulingInput) => void;
+  onPageInputChange?: (input: PageReplacementInput) => void;
   onPredict?: (answer: string) => void;
   onSkipPrediction?: () => void;
 }
@@ -28,16 +36,21 @@ export function AlgorithmLabInputPanel({
   presetId,
   selectedAlgorithms,
   cpuInput,
+  pageInput,
   prediction,
   predictionResult,
+  pagePredictionResult,
   predictionLocked = false,
   onSelectPreset,
   onToggleAlgorithm,
   onCpuInputChange,
+  onPageInputChange,
   onPredict,
   onSkipPrediction,
 }: AlgorithmLabInputPanelProps) {
+  const [pageEditorRevision, setPageEditorRevision] = useState(0);
   const cpuValidation = cpuInput ? validateCpuSchedulingInput(cpuInput) : null;
+  const pageValidation = pageInput ? validatePageReplacementInput(pageInput) : null;
   const isCustom = presetId === 'custom';
 
   return (
@@ -60,7 +73,10 @@ export function AlgorithmLabInputPanel({
         <select
           id="algorithm-lab-preset"
           value={presetId}
-          onChange={(event) => onSelectPreset(event.target.value)}
+          onChange={(event) => {
+            onSelectPreset(event.target.value);
+            setPageEditorRevision((revision) => revision + 1);
+          }}
           className="mt-2 h-10 w-full rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-3 text-sm text-[var(--a3-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
         >
           {presetId === 'custom' ? <option value="custom">自定义配置</option> : null}
@@ -97,6 +113,10 @@ export function AlgorithmLabInputPanel({
         <CpuProcessEditor input={cpuInput} onChange={onCpuInputChange} />
       ) : null}
 
+      {definition.id === 'page-replacement' && pageInput && onPageInputChange ? (
+        <PageReplacementEditor key={`${pageEditorRevision}:${presetId}`} input={pageInput} onChange={onPageInputChange} />
+      ) : null}
+
       {cpuValidation && !cpuValidation.valid ? (
         <div className="rounded-md border border-rose-300 bg-rose-50 px-3 py-2 dark:border-rose-900 dark:bg-rose-950/30" role="alert">
           <div className="text-xs font-semibold text-rose-800 dark:text-rose-200">请修正输入后再运行</div>
@@ -104,6 +124,10 @@ export function AlgorithmLabInputPanel({
             {cpuValidation.errors.map((error) => <li key={error}>{error}</li>)}
           </ul>
         </div>
+      ) : null}
+
+      {pageValidation && !pageValidation.valid ? (
+        <ValidationErrors errors={pageValidation.errors} />
       ) : null}
 
       {definition.id === 'cpu-scheduling' ? (
@@ -116,7 +140,68 @@ export function AlgorithmLabInputPanel({
           onSkip={onSkipPrediction}
         />
       ) : null}
+
+      {definition.id === 'page-replacement' ? (
+        <PagePrediction
+          algorithms={selectedAlgorithms}
+          prediction={prediction ?? null}
+          result={pagePredictionResult ?? null}
+          locked={predictionLocked}
+          onPredict={onPredict}
+          onSkip={onSkipPrediction}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function PageReplacementEditor({
+  input,
+  onChange,
+}: {
+  input: PageReplacementInput;
+  onChange: (input: PageReplacementInput) => void;
+}) {
+  const [draft, setDraft] = useState(input.referenceString.join(', '));
+
+  return (
+    <fieldset className="space-y-3 border-t border-[var(--a3-border)] pt-4">
+      <legend className="sr-only">页面置换参数</legend>
+      <label className="block text-xs font-medium text-[var(--a3-text-muted)]">
+        页面引用序列
+        <textarea
+          value={draft}
+          rows={3}
+          spellCheck={false}
+          placeholder="例如：7, 0, 1, 2, 0, 3"
+          onChange={(event) => {
+            setDraft(event.target.value);
+            onChange({ ...input, referenceString: parsePageReferenceString(event.target.value) });
+          }}
+          className="mt-2 w-full resize-y rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-3 py-2 text-sm leading-6 tabular-nums text-[var(--a3-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+        />
+        <span className="mt-1 block text-[10px] leading-4">使用逗号或空格分隔，最多 60 个非负整数。</span>
+      </label>
+      <NumericField
+        label="页框数量"
+        value={input.frameCount}
+        min={1}
+        max={8}
+        onChange={(frameCount) => onChange({ ...input, frameCount })}
+        wide
+      />
+    </fieldset>
+  );
+}
+
+function ValidationErrors({ errors }: { errors: string[] }) {
+  return (
+    <div className="rounded-md border border-rose-300 bg-rose-50 px-3 py-2 dark:border-rose-900 dark:bg-rose-950/30" role="alert">
+      <div className="text-xs font-semibold text-rose-800 dark:text-rose-200">请修正输入后再运行</div>
+      <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs leading-5 text-rose-700 dark:text-rose-300">
+        {errors.map((error) => <li key={error}>{error}</li>)}
+      </ul>
+    </div>
   );
 }
 
@@ -273,6 +358,69 @@ function CpuPrediction({
       ) : null}
     </section>
   );
+}
+
+function PagePrediction({
+  algorithms,
+  prediction,
+  result,
+  locked,
+  onPredict,
+  onSkip,
+}: {
+  algorithms: AlgorithmLabAlgorithm[];
+  prediction: { answer: string | null; skipped: boolean } | null;
+  result: PagePredictionResult | null;
+  locked: boolean;
+  onPredict?: (answer: string) => void;
+  onSkip?: () => void;
+}) {
+  return (
+    <section className="border-t border-[var(--a3-border)] pt-4" aria-labelledby="page-prediction-title">
+      <h3 id="page-prediction-title" className="text-xs font-semibold leading-5 text-[var(--a3-text)]">
+        运行前预测：哪种算法的缺页次数最少？
+      </h3>
+      <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="选择缺页最少的算法">
+        {algorithms.map((algorithm) => (
+          <button
+            key={algorithm}
+            type="button"
+            disabled={locked}
+            onClick={() => onPredict?.(algorithm)}
+            className={`h-8 rounded-md border px-2.5 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-default ${prediction?.answer === algorithm ? 'border-amber-500 bg-amber-100 text-amber-900 dark:bg-amber-950/40 dark:text-amber-100' : 'border-[var(--a3-border)] text-[var(--a3-text)] hover:bg-[var(--a3-surface-muted)]'}`}
+          >
+            {algorithm.toUpperCase()}
+          </button>
+        ))}
+        <button
+          type="button"
+          disabled={locked}
+          onClick={() => onSkip?.()}
+          className={`h-8 rounded-md px-2.5 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-default ${prediction?.skipped ? 'bg-[var(--a3-surface-muted)] text-[var(--a3-text)]' : 'text-[var(--a3-text-muted)] hover:bg-[var(--a3-surface-muted)]'}`}
+        >
+          跳过预测
+        </button>
+      </div>
+      {!prediction ? (
+        <p className="mt-2 text-[11px] leading-5 text-[var(--a3-text-muted)]">选择答案或明确跳过后才能开始运行；完成前不会显示正确答案。</p>
+      ) : null}
+      {result ? (
+        <div className="mt-3 rounded-md bg-[var(--a3-surface-muted)] px-3 py-2 text-xs leading-5 text-[var(--a3-text)]" aria-live="polite">
+          {result.correct === null
+            ? `你跳过了预测。当前序列缺页最少的是 ${result.winners.map((item) => item.toUpperCase()).join('、')}，共 ${result.fewestFaults} 次。`
+            : result.correct
+              ? `预测正确。${result.winners.map((item) => item.toUpperCase()).join('、')} 在当前序列中缺页最少。`
+              : `预测未命中。当前序列缺页最少的是 ${result.winners.map((item) => item.toUpperCase()).join('、')}，共 ${result.fewestFaults} 次。`}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+export function parsePageReferenceString(value: string): number[] {
+  const normalized = value.trim();
+  if (!normalized) return [];
+  return normalized.split(/[\s,]+/).map((token) => Number(token));
 }
 
 export function addCpuProcess(input: CpuSchedulingInput): CpuSchedulingInput {

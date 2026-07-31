@@ -1,9 +1,12 @@
 import { Activity, CircleCheck, Clock3 } from 'lucide-react';
 import type { AlgorithmLabPhase, SimulationRun } from '@/lib/a3/algorithm-lab/contracts';
 import type { CpuSchedulingMetrics, CpuSchedulingState } from '@/lib/a3/algorithm-lab/cpu-scheduling';
+import type { PageReplacementMetrics, PageReplacementState } from '@/lib/a3/algorithm-lab/page-replacement';
 import { deriveCpuGlobalCurrentTime, selectCpuStepAtTime } from './cpu-scheduling-visualizer';
+import { derivePageGlobalCurrentIndex, selectPageStepAtIndex } from './page-replacement-visualizer';
 
 type CpuRun = SimulationRun<CpuSchedulingState, CpuSchedulingMetrics>;
+type PageRun = SimulationRun<PageReplacementState, PageReplacementMetrics>;
 
 const phaseLabels: Record<AlgorithmLabPhase, string> = {
   idle: '等待配置',
@@ -24,6 +27,7 @@ interface AlgorithmLabStatusPanelProps {
   syncState: 'idle' | 'pending' | 'failed' | 'submitted';
   syncError: string;
   cpuRuns?: CpuRun[];
+  pageRuns?: PageRun[];
   revealCompletionOrder?: boolean;
   onSpeedChange: (speed: number) => void;
 }
@@ -37,6 +41,7 @@ export function AlgorithmLabStatusPanel({
   syncState,
   syncError,
   cpuRuns = [],
+  pageRuns = [],
   revealCompletionOrder = false,
   onSpeedChange,
 }: AlgorithmLabStatusPanelProps) {
@@ -66,6 +71,14 @@ export function AlgorithmLabStatusPanel({
         />
       ) : null}
 
+      {pageRuns.length > 0 ? (
+        <PageMetricsTable
+          runs={pageRuns}
+          currentStepIndex={currentStepIndex}
+          completed={phase === 'completed' || phase === 'submitted'}
+        />
+      ) : null}
+
       <label className="block text-xs font-medium text-[var(--a3-text-muted)]">
         播放速度
         <select
@@ -84,6 +97,57 @@ export function AlgorithmLabStatusPanel({
         {syncState === 'failed' ? syncError : syncState === 'submitted' ? '学习证据已写回' : '完成实验后将验证并写回学习报告'}
       </div>
     </section>
+  );
+}
+
+function PageMetricsTable({
+  runs,
+  currentStepIndex,
+  completed,
+}: {
+  runs: PageRun[];
+  currentStepIndex: number;
+  completed: boolean;
+}) {
+  const currentReferenceIndex = derivePageGlobalCurrentIndex(runs, currentStepIndex);
+  const fewestFaults = Math.min(...runs.map((run) => run.finalMetrics.pageFaults));
+  const winners = runs.filter((run) => run.finalMetrics.pageFaults === fewestFaults);
+  return (
+    <div>
+      <div className="text-xs font-semibold text-[var(--a3-text)]">页面置换指标</div>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full min-w-[360px] border-collapse text-left text-[11px]">
+          <thead className="text-[var(--a3-text-muted)]">
+            <tr className="border-b border-[var(--a3-border)]">
+              <th className="px-2 py-2 font-medium">算法</th>
+              <th className="px-2 py-2 font-medium">缺页次数</th>
+              <th className="px-2 py-2 font-medium">命中次数</th>
+              <th className="px-2 py-2 font-medium">缺页率</th>
+              <th className="px-2 py-2 font-medium">淘汰次数</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map((run) => {
+              const metrics = selectPageStepAtIndex(run, currentReferenceIndex)?.metrics ?? run.finalMetrics;
+              return (
+                <tr key={run.algorithm} className="border-b border-[var(--a3-border)]/70 text-[var(--a3-text)] last:border-0">
+                  <th className="px-2 py-2 font-semibold uppercase">{run.algorithm}</th>
+                  <td className="px-2 py-2 tabular-nums">{metrics.pageFaults}</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.hits}</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.faultRate}%</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.evictions}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {completed ? (
+        <p className="mt-2 text-[11px] leading-5 text-[var(--a3-text-muted)]">
+          {winners.map((run) => run.algorithm.toUpperCase()).join('、')} 在本次比较中缺页最少；该结论仅代表当前引用序列。
+        </p>
+      ) : null}
+    </div>
   );
 }
 

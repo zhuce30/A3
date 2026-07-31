@@ -10,6 +10,7 @@ import type {
   AlgorithmLabInputById,
   AlgorithmLabPhase,
   CpuSchedulingInput,
+  PageReplacementInput,
   SimulationRun,
 } from '@/lib/a3/algorithm-lab/contracts';
 import {
@@ -17,7 +18,11 @@ import {
   type CpuSchedulingMetrics,
   type CpuSchedulingState,
 } from '@/lib/a3/algorithm-lab/cpu-scheduling';
-import { simulatePageReplacement } from '@/lib/a3/algorithm-lab/page-replacement';
+import {
+  simulatePageReplacement,
+  type PageReplacementMetrics,
+  type PageReplacementState,
+} from '@/lib/a3/algorithm-lab/page-replacement';
 import { getAlgorithmLabDefinition } from '@/lib/a3/algorithm-lab/registry';
 import { validateCpuSchedulingInput, validatePageReplacementInput } from '@/lib/a3/algorithm-lab/validators';
 import {
@@ -45,6 +50,17 @@ import {
   selectCpuStepAtTime,
   type CpuCheckpointDefinition,
 } from './cpu-scheduling-visualizer';
+import {
+  buildPageCheckpoints,
+  buildPageGlobalIndexAxis,
+  derivePageGlobalCurrentIndex,
+  derivePagePredictionResult,
+  getAvailablePageCheckpoints,
+  isPageCheckpointRevealed,
+  PageReplacementVisualizer,
+  selectPageStepAtIndex,
+  type PageCheckpointDefinition,
+} from './page-replacement-visualizer';
 
 type SyncState = 'idle' | 'pending' | 'failed' | 'submitted';
 
@@ -256,19 +272,30 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   const inputValidation = state.labId === 'cpu-scheduling'
     ? validateCpuSchedulingInput(state.input)
     : validatePageReplacementInput(state.input);
-  const predictionReady = state.labId !== 'cpu-scheduling' || state.prediction !== null || state.runs.length > 0;
+  const predictionReady = state.prediction !== null || state.runs.length > 0;
   const canStartRun = canStartAlgorithmLabRun(state.labId, inputValidation.valid, predictionReady);
   const cpuRuns = useMemo(
     () => state.labId === 'cpu-scheduling' ? state.runs.filter(isCpuSchedulingRun) : [],
     [state.labId, state.runs],
   );
   const cpuTimeAxis = useMemo(() => buildCpuGlobalTimeAxis(cpuRuns), [cpuRuns]);
+  const pageRuns = useMemo(
+    () => state.labId === 'page-replacement' ? state.runs.filter(isPageReplacementRun) : [],
+    [state.labId, state.runs],
+  );
+  const pageIndexAxis = useMemo(() => buildPageGlobalIndexAxis(pageRuns), [pageRuns]);
   const currentStep = state.labId === 'cpu-scheduling'
     ? selectCpuStepAtTime(cpuRuns[0], deriveCpuGlobalCurrentTime(cpuRuns, state.currentStepIndex))
-    : state.runs[0]?.steps[state.currentStepIndex];
+    : selectPageStepAtIndex(
+        pageRuns[0],
+        derivePageGlobalCurrentIndex(pageRuns, state.currentStepIndex),
+      );
   const completed = state.phase === 'completed' || state.phase === 'submitted';
   const predictionResult = state.labId === 'cpu-scheduling'
     ? deriveCpuPredictionResult(state.prediction, cpuRuns, completed)
+    : null;
+  const pagePredictionResult = state.labId === 'page-replacement'
+    ? derivePagePredictionResult(state.prediction, pageRuns, completed)
     : null;
   const cpuCheckpoints = useMemo(
     () => cpuRuns[0] ? buildCpuCheckpoints(cpuRuns[0], cpuTimeAxis) : [],
@@ -281,6 +308,17 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   );
   const revealReadyQueue = isCpuCheckpointRevealed('cpu-ready-queue', state.checkpointAnswers);
   const revealCompletionOrder = isCpuCheckpointRevealed('cpu-completion-order', state.checkpointAnswers);
+  const pageCheckpoints = useMemo(
+    () => pageRuns[0] ? buildPageCheckpoints(pageRuns[0], pageIndexAxis) : [],
+    [pageIndexAxis, pageRuns],
+  );
+  const availablePageCheckpoints = getAvailablePageCheckpoints(
+    pageCheckpoints,
+    state.currentStepIndex,
+    state.checkpointAnswers,
+  );
+  const revealPageVictim = isPageCheckpointRevealed('page-victim', state.checkpointAnswers);
+  const revealPagePolicyReason = isPageCheckpointRevealed('page-policy-reason', state.checkpointAnswers);
 
   useEffect(() => {
     if (labId === 'cpu-scheduling') {
@@ -374,6 +412,16 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
     });
   }
 
+  function updatePageInput(input: PageReplacementInput) {
+    if (state.labId !== 'page-replacement') return;
+    dispatch({
+      type: 'configure',
+      labId: state.labId,
+      input,
+      algorithms: state.selectedAlgorithms,
+    });
+  }
+
   function submitCpuCheckpoint(checkpoint: CpuCheckpointDefinition, answer: string) {
     if (state.labId !== 'cpu-scheduling' || !claimCheckpointSubmission(checkpointEventGate.current, checkpoint.id)) return;
     const correct = answer === checkpoint.correctAnswer;
@@ -396,6 +444,32 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
         correct,
         stepIndex: checkpoint.stepIndex,
         algorithm: cpuRuns[0]?.algorithm ?? '',
+      },
+    });
+  }
+
+  function submitPageCheckpoint(checkpoint: PageCheckpointDefinition, answer: string) {
+    if (state.labId !== 'page-replacement' || !claimCheckpointSubmission(checkpointEventGate.current, checkpoint.id)) return;
+    const correct = answer === checkpoint.correctAnswer;
+    dispatch({ type: 'answer_checkpoint', checkpointId: checkpoint.id, answer });
+    void trackAlgorithmLabCheckpoint({
+      eventId: createAlgorithmLabCheckpointEventId(state.labId, checkpoint.id, state.startedAt),
+      targetType: 'algorithm_lab_checkpoint',
+      targetId: `${state.labId}:${checkpoint.id}`,
+      resourceType: 'interactive_lab',
+      knowledgePointId: definition.knowledgePointCodes[0] ?? '',
+      sourcePage: `/a3/labs/${state.labId}`,
+      score: correct ? 100 : 0,
+      quality: { correct },
+      metadata: {
+        labId: state.labId,
+        labVersion: definition.version,
+        presetId: state.presetId,
+        checkpointId: checkpoint.id,
+        answer,
+        correct,
+        stepIndex: checkpoint.stepIndex,
+        algorithm: pageRuns[0]?.algorithm ?? '',
       },
     });
   }
@@ -455,12 +529,15 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
       presetId={state.presetId}
       selectedAlgorithms={state.selectedAlgorithms}
       cpuInput={state.labId === 'cpu-scheduling' ? state.input : undefined}
-      prediction={state.labId === 'cpu-scheduling' ? state.prediction : null}
+      pageInput={state.labId === 'page-replacement' ? state.input : undefined}
+      prediction={state.prediction}
       predictionResult={predictionResult}
+      pagePredictionResult={pagePredictionResult}
       predictionLocked={state.runs.length > 0}
       onSelectPreset={selectPreset}
       onToggleAlgorithm={toggleAlgorithm}
       onCpuInputChange={updateCpuInput}
+      onPageInputChange={updatePageInput}
       onPredict={(answer) => dispatch({ type: 'predict', answer, skipped: false })}
       onSkipPrediction={() => dispatch({ type: 'predict', answer: null, skipped: true })}
     />
@@ -476,6 +553,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
         syncState={state.syncState}
         syncError={state.syncError}
         cpuRuns={cpuRuns}
+        pageRuns={pageRuns}
         revealCompletionOrder={revealCompletionOrder}
         onSpeedChange={(speed) => dispatch({ type: 'set_speed', speed })}
       />
@@ -485,6 +563,14 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
           checkpoint={checkpoint}
           submittedAnswer={state.checkpointAnswers[checkpoint.id]}
           onSubmit={(answer) => submitCpuCheckpoint(checkpoint, answer)}
+        />
+      ))}
+      {availablePageCheckpoints.map((checkpoint) => (
+        <AlgorithmLabCheckpoint
+          key={checkpoint.id}
+          checkpoint={checkpoint as unknown as CpuCheckpointDefinition}
+          submittedAnswer={state.checkpointAnswers[checkpoint.id]}
+          onSubmit={(answer) => submitPageCheckpoint(checkpoint, answer)}
         />
       ))}
     </div>
@@ -540,15 +626,16 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
             onSeek={(index) => dispatch({ type: 'seek', index })}
           />
         ) : (
-          <div className="flex min-h-[430px] flex-col items-center justify-center px-6 text-center">
-            <FlaskConical className="size-10 text-amber-600" />
-            <h2 className="mt-4 text-lg font-semibold text-[var(--a3-text)]">算法运行画布</h2>
-            <p className="mt-2 max-w-md text-sm leading-6 text-[var(--a3-text-muted)]">
-              {state.runs.length > 0
-                ? `已生成 ${state.runs.length} 组确定性运行结果，当前位于第 ${state.currentStepIndex + 1} 步。`
-                : '选择输入和算法后点击播放。具体过程画布将在下一阶段接入。'}
-            </p>
-          </div>
+          <PageReplacementVisualizer
+            runs={pageRuns}
+            referenceString={state.input.referenceString}
+            frameCount={state.input.frameCount}
+            currentStepIndex={state.currentStepIndex}
+            completed={completed}
+            revealVictim={revealPageVictim}
+            revealPolicyReason={revealPagePolicyReason}
+            onSeek={(index) => dispatch({ type: 'seek', index })}
+          />
         )}
       />
     </div>
@@ -788,11 +875,11 @@ export function createAlgorithmLabCheckpointEventId(
 }
 
 export function canStartAlgorithmLabRun(
-  labId: AlgorithmLabId,
+  _labId: AlgorithmLabId,
   inputValid: boolean,
   predictionReady: boolean,
 ): boolean {
-  return inputValid && (labId !== 'cpu-scheduling' || predictionReady);
+  return inputValid && predictionReady;
 }
 
 export function claimCheckpointSubmission(gate: Set<string>, checkpointId: string): boolean {
@@ -807,6 +894,12 @@ function isCpuSchedulingRun(
   return isCpuAlgorithm(run.algorithm);
 }
 
+function isPageReplacementRun(
+  run: SimulationRun<unknown, unknown>,
+): run is SimulationRun<PageReplacementState, PageReplacementMetrics> {
+  return isPageAlgorithm(run.algorithm);
+}
+
 export function getAlgorithmLabFinalStepIndex(
   labId: AlgorithmLabId,
   runs: SimulationRun<unknown, unknown>[],
@@ -814,11 +907,7 @@ export function getAlgorithmLabFinalStepIndex(
   if (labId === 'cpu-scheduling') {
     return buildCpuGlobalTimeAxis(runs.filter(isCpuSchedulingRun)).length - 1;
   }
-  return getFinalStepIndex(runs);
-}
-
-function getFinalStepIndex(runs: SimulationRun<unknown, unknown>[]): number {
-  return runs.length === 0 ? -1 : Math.max(...runs.map((run) => run.steps.length - 1));
+  return buildPageGlobalIndexAxis(runs.filter(isPageReplacementRun)).length - 1;
 }
 
 function clampStep(index: number, finalStepIndex: number): number {

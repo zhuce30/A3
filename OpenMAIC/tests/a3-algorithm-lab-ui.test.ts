@@ -31,11 +31,23 @@ import {
 } from '@/components/a3/features/algorithm-lab/cpu-scheduling-visualizer';
 import {
   addCpuProcess,
+  parsePageReferenceString,
   removeCpuProcess,
   updateCpuProcess,
 } from '@/components/a3/features/algorithm-lab/algorithm-lab-input-panel';
+import {
+  buildPageCheckpoints,
+  buildPageGlobalIndexAxis,
+  derivePageGlobalCurrentIndex,
+  derivePagePredictionResult,
+  findPageGlobalIndexPosition,
+  getAvailablePageCheckpoints,
+  isPageCheckpointRevealed,
+  selectPageStepAtIndex,
+} from '@/components/a3/features/algorithm-lab/page-replacement-visualizer';
 import type { SimulationRun } from '@/lib/a3/algorithm-lab/contracts';
 import { simulateCpuScheduling } from '@/lib/a3/algorithm-lab/cpu-scheduling';
+import { simulatePageReplacement } from '@/lib/a3/algorithm-lab/page-replacement';
 
 const root = process.cwd();
 const catalogPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-catalog-view.tsx');
@@ -48,6 +60,7 @@ const cpuVisualizerPath = join(root, 'components/a3/features/algorithm-lab/cpu-s
 const checkpointPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-checkpoint.tsx');
 const inputPanelPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-input-panel.tsx');
 const statusPanelPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-status-panel.tsx');
+const pageVisualizerPath = join(root, 'components/a3/features/algorithm-lab/page-replacement-visualizer.tsx');
 
 describe('algorithm lab UI', () => {
   it('has catalog loading, error, empty, progress and resume states', () => {
@@ -560,6 +573,134 @@ describe('algorithm lab UI', () => {
     expect(canStartAlgorithmLabRun('cpu-scheduling', false, true)).toBe(false);
     expect(canStartAlgorithmLabRun('cpu-scheduling', true, false)).toBe(false);
     expect(canStartAlgorithmLabRun('cpu-scheduling', true, true)).toBe(true);
-    expect(canStartAlgorithmLabRun('page-replacement', true, false)).toBe(true);
+    expect(canStartAlgorithmLabRun('page-replacement', true, false)).toBe(false);
+    expect(canStartAlgorithmLabRun('page-replacement', true, true)).toBe(true);
+  });
+
+  it('renders a complete page replacement canvas with fixed frames and explicit state cues', () => {
+    const visualizer = readFileSync(pageVisualizerPath, 'utf8');
+    const workbench = readFileSync(workbenchPath, 'utf8');
+
+    expect(visualizer).toContain('data-testid="page-replacement-canvas"');
+    expect(visualizer).toContain('引用序列');
+    expect(visualizer).toContain('页框矩阵');
+    expect(visualizer).toContain('当前列');
+    for (const cue of ['命中', '缺页', '淘汰', '调入', '保持不变']) {
+      expect(visualizer).toContain(cue);
+    }
+    for (const evidence of ['FIFO 队列', 'LRU 最近使用顺序', 'OPT 下次访问距离']) {
+      expect(visualizer).toContain(evidence);
+    }
+    expect(visualizer).toContain('onSeek');
+    expect(visualizer).not.toContain('transition-all');
+    expect(workbench).toContain('<PageReplacementVisualizer');
+  });
+
+  it('parses editable page references and retains official shared validation', () => {
+    expect(parsePageReferenceString('7, 0  1,2')).toEqual([7, 0, 1, 2]);
+    expect(parsePageReferenceString('')).toEqual([]);
+    expect(parsePageReferenceString('1, nope')).toEqual([1, Number.NaN]);
+
+    const inputPanel = readFileSync(inputPanelPath, 'utf8');
+    expect(inputPanel).toContain('validatePageReplacementInput');
+    expect(inputPanel).toContain('页面引用序列');
+    expect(inputPanel).toContain('页框数量');
+    expect(inputPanel).toContain('标准预设');
+    expect(inputPanel).toContain('自定义配置');
+  });
+
+  it('drives page rows and column seeking from the shared global reference-index axis', () => {
+    const input = { referenceString: [1, 2, 3, 1, 4, 2], frameCount: 3 };
+    const fifo = simulatePageReplacement(input, 'fifo');
+    const lru = simulatePageReplacement(input, 'lru');
+    const runs = [fifo, lru];
+    const indexAxis = buildPageGlobalIndexAxis(runs);
+
+    expect(indexAxis).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(getAlgorithmLabFinalStepIndex('page-replacement', runs)).toBe(5);
+    expect(derivePageGlobalCurrentIndex(runs, 4)).toBe(4);
+    expect(selectPageStepAtIndex(fifo, 4)).toBe(fifo.steps[4]);
+    expect(findPageGlobalIndexPosition(indexAxis, 4)).toBe(4);
+
+    let state = algorithmLabReducer(createAlgorithmLabState('page-replacement'), {
+      type: 'start',
+      runs,
+      startedAt: '2026-07-31T12:00:00.000Z',
+    });
+    const originalRuns = state.runs;
+    state = algorithmLabReducer(state, { type: 'seek', index: findPageGlobalIndexPosition(indexAxis, 2) });
+    expect(state.currentStepIndex).toBe(2);
+    expect(state.runs).toBe(originalRuns);
+  });
+
+  it('reveals the fewest-fault prediction and tie evidence only after completion', () => {
+    const input = { referenceString: [7, 0, 1, 2, 0, 3, 0, 4], frameCount: 3 };
+    const runs = (['fifo', 'lru', 'opt'] as const).map((algorithm) => simulatePageReplacement(input, algorithm));
+
+    expect(derivePagePredictionResult({ answer: 'opt', skipped: false }, runs, false)).toBeNull();
+    expect(derivePagePredictionResult({ answer: 'opt', skipped: false }, runs, true)).toMatchObject({
+      correct: true,
+      winners: ['lru', 'opt'],
+    });
+    const tieRuns = (['fifo', 'lru'] as const).map((algorithm) => simulatePageReplacement({
+      referenceString: [1, 2, 1, 2],
+      frameCount: 2,
+    }, algorithm));
+    expect(derivePagePredictionResult({ answer: 'fifo', skipped: false }, tieRuns, true)).toMatchObject({
+      correct: true,
+      winners: ['fifo', 'lru'],
+      fewestFaults: 2,
+    });
+
+    const inputPanel = readFileSync(inputPanelPath, 'utf8');
+    const statusPanel = readFileSync(statusPanelPath, 'utf8');
+    expect(inputPanel).toContain('哪种算法的缺页次数最少');
+    expect(inputPanel).toContain('跳过预测');
+    expect(statusPanel).toContain('仅代表当前引用序列');
+  });
+
+  it('shows four page metrics and policy-specific comparison evidence', () => {
+    const source = readFileSync(statusPanelPath, 'utf8');
+    for (const metric of ['缺页次数', '命中次数', '缺页率', '淘汰次数']) {
+      expect(source).toContain(metric);
+    }
+    expect(source).toContain('pageRuns');
+    expect(source).toContain('selectPageStepAtIndex');
+  });
+
+  it('builds deterministic victim and policy checkpoints and gates each event once', () => {
+    const input = { referenceString: [1, 2, 3, 4, 1, 5], frameCount: 3 };
+    const run = simulatePageReplacement(input, 'fifo');
+    const indexAxis = buildPageGlobalIndexAxis([run]);
+    const checkpoints = buildPageCheckpoints(run, indexAxis);
+
+    expect(checkpoints.map(({ id }) => id)).toEqual(['page-victim', 'page-policy-reason']);
+    expect(checkpoints.map(({ stepIndex }) => stepIndex)).toEqual([3, 5]);
+    expect(checkpoints.every(({ correctAnswer }) => typeof correctAnswer === 'string' && correctAnswer.length > 0)).toBe(true);
+    expect(getAvailablePageCheckpoints(checkpoints, 2, {})).toEqual([]);
+    expect(getAvailablePageCheckpoints(checkpoints, 3, {}).map(({ id }) => id)).toEqual(['page-victim']);
+    expect(isPageCheckpointRevealed('page-victim', {})).toBe(false);
+    expect(isPageCheckpointRevealed('page-victim', { 'page-victim': '1' })).toBe(true);
+
+    const gate = new Set<string>();
+    expect(claimCheckpointSubmission(gate, 'page-victim')).toBe(true);
+    expect(claimCheckpointSubmission(gate, 'page-victim')).toBe(false);
+    expect(claimCheckpointSubmission(gate, 'page-policy-reason')).toBe(true);
+
+    const workbench = readFileSync(workbenchPath, 'utf8');
+    expect(workbench).toContain('submitPageCheckpoint');
+    expect(workbench).toContain("checkpointId: checkpoint.id");
+    expect(workbench).toContain('correct');
+    expect(workbench).toContain('stepIndex: checkpoint.stepIndex');
+  });
+
+  it('keeps both page checkpoint IDs when a custom run needs no eviction', () => {
+    const run = simulatePageReplacement({ referenceString: [1, 1, 2], frameCount: 3 }, 'lru');
+    const checkpoints = buildPageCheckpoints(run);
+
+    expect(checkpoints.map(({ id }) => id)).toEqual(['page-victim', 'page-policy-reason']);
+    expect(checkpoints[0].correctAnswer).toBe('未淘汰页面');
+    expect(checkpoints[1].correctAnswer).toBe('当前步骤没有发生淘汰');
+    expect(checkpoints.every(({ stepIndex }) => stepIndex === 2)).toBe(true);
   });
 });
