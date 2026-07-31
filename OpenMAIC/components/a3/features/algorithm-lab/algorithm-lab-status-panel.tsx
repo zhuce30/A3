@@ -1,6 +1,7 @@
 import { Activity, CircleCheck, Clock3 } from 'lucide-react';
 import type { AlgorithmLabPhase, SimulationRun } from '@/lib/a3/algorithm-lab/contracts';
 import type { CpuSchedulingMetrics, CpuSchedulingState } from '@/lib/a3/algorithm-lab/cpu-scheduling';
+import { deriveCpuGlobalCurrentTime, selectCpuStepAtTime } from './cpu-scheduling-visualizer';
 
 type CpuRun = SimulationRun<CpuSchedulingState, CpuSchedulingMetrics>;
 
@@ -79,6 +80,7 @@ export function AlgorithmLabStatusPanel({
 }
 
 function CpuMetricsTable({ runs, currentStepIndex }: { runs: CpuRun[]; currentStepIndex: number }) {
+  const currentTime = deriveCpuGlobalCurrentTime(runs, currentStepIndex);
   return (
     <div>
       <div className="text-xs font-semibold text-[var(--a3-text)]">调度指标</div>
@@ -96,7 +98,7 @@ function CpuMetricsTable({ runs, currentStepIndex }: { runs: CpuRun[]; currentSt
           </thead>
           <tbody>
             {runs.map((run) => {
-              const step = run.steps[Math.max(0, Math.min(currentStepIndex, run.steps.length - 1))];
+              const step = selectCpuStepAtTime(run, currentTime);
               const metrics = step?.metrics ?? run.finalMetrics;
               return (
                 <tr key={run.algorithm} className="border-b border-[var(--a3-border)]/70 text-[var(--a3-text)] last:border-0">

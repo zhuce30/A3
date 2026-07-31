@@ -16,9 +16,12 @@ import {
 import { getNextMobilePanel } from '@/components/a3/features/algorithm-lab/algorithm-lab-layout';
 import {
   buildCpuCheckpoints,
+  deriveCpuGlobalCurrentTime,
   deriveCpuPredictionResult,
   findCpuSegmentStepIndex,
+  getCpuTimelineLayout,
   getCpuProcessVisual,
+  selectCpuStepAtTime,
 } from '@/components/a3/features/algorithm-lab/cpu-scheduling-visualizer';
 import {
   addCpuProcess,
@@ -310,6 +313,45 @@ describe('algorithm lab UI', () => {
     expect(visualizer).toContain('duration-200');
     expect(visualizer).not.toContain('transition-all');
     expect(workbench).toContain('<CpuSchedulingVisualizer');
+  });
+
+  it('keeps the ruler, current-time line, and Gantt rows in one track after the 78px label', () => {
+    const visualizer = readFileSync(cpuVisualizerPath, 'utf8');
+    const layout = getCpuTimelineLayout(680);
+
+    expect(layout).toEqual({
+      columnGap: 12,
+      gridTemplateColumns: '78px 680px',
+      width: 770,
+    });
+    expect(visualizer).toContain('data-testid="cpu-timeline-coordinate-space"');
+    expect(visualizer).toContain('data-testid="cpu-time-ruler"');
+    expect(visualizer).toContain('data-testid="cpu-current-time-line"');
+    expect(visualizer).toContain('data-testid="cpu-gantt-track"');
+  });
+
+  it('projects every algorithm to the controlling run time when third-step times differ', () => {
+    const input = {
+      processes: [
+        { processId: 'P1', arrivalTime: 0, burstTime: 5, priority: 1 },
+        { processId: 'P2', arrivalTime: 0, burstTime: 1, priority: 0 },
+      ],
+      timeQuantum: 2,
+    };
+    const rr = simulateCpuScheduling(input, 'rr');
+    const fcfs = simulateCpuScheduling(input, 'fcfs');
+
+    expect(rr.steps[2].time).toBe(3);
+    expect(fcfs.steps[2].time).toBe(6);
+
+    const currentTime = deriveCpuGlobalCurrentTime([rr, fcfs], 2);
+    expect(currentTime).toBe(3);
+    expect(selectCpuStepAtTime(rr, currentTime)).toBe(rr.steps[2]);
+    expect(selectCpuStepAtTime(fcfs, currentTime)).toBe(fcfs.steps[0]);
+
+    const statusPanel = readFileSync(statusPanelPath, 'utf8');
+    expect(statusPanel).toContain('deriveCpuGlobalCurrentTime');
+    expect(statusPanel).toContain('selectCpuStepAtTime');
   });
 
   it('keeps process visuals and segment seeking deterministic across algorithms', () => {

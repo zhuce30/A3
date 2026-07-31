@@ -16,6 +16,9 @@ const algorithmLabels: Record<CpuSchedulingAlgorithm, string> = {
   rr: 'RR',
 };
 
+const CPU_ALGORITHM_LABEL_WIDTH_PX = 78;
+const CPU_TIMELINE_COLUMN_GAP_PX = 12;
+
 const processVisuals = [
   { barClass: 'border-emerald-500/60 bg-emerald-100 text-emerald-950 dark:bg-emerald-900/55 dark:text-emerald-100', dotClass: 'bg-emerald-500' },
   { barClass: 'border-sky-500/60 bg-sky-100 text-sky-950 dark:bg-sky-900/55 dark:text-sky-100', dotClass: 'bg-sky-500' },
@@ -74,10 +77,11 @@ export function CpuSchedulingVisualizer({
 
   const totalTime = getTotalElapsedTime(runs);
   const focusedRun = runs[0];
-  const focusedStep = getVisibleStep(focusedRun, currentStepIndex);
-  const currentTime = focusedStep?.time ?? 0;
+  const currentTime = deriveCpuGlobalCurrentTime(runs, currentStepIndex);
+  const visibleSteps = new Map(runs.map((run) => [run, selectCpuStepAtTime(run, currentTime)]));
+  const focusedStep = visibleSteps.get(focusedRun);
   const rulerTicks = buildTimeRuler(totalTime);
-  const canvasWidth = Math.max(680, totalTime * 38);
+  const timelineTrackWidth = Math.max(680, totalTime * 38);
   const processIds = uniqueStrings(
     runs.flatMap((run) => run.steps.at(-1)?.state.processes.map((process) => process.processId) ?? []),
   );
@@ -99,35 +103,47 @@ export function CpuSchedulingVisualizer({
       </div>
 
       <div className="overflow-x-auto px-4 pb-4 pt-3" tabIndex={0} role="region" aria-label="可横向滚动的甘特图">
-        <div className="relative" style={{ width: canvasWidth }}>
-          <div className="mb-2 grid h-7 items-end text-[10px] text-[var(--a3-text-muted)]" aria-label="时间标尺">
-            {rulerTicks.map((tick) => (
-              <span
-                key={tick}
-                className="absolute bottom-0 -translate-x-1/2 border-l border-[var(--a3-border)] pl-1"
-                style={{ left: `${timeToPercent(tick, totalTime)}%` }}
-              >
-                {tick}
-              </span>
+        <div className="grid items-start" style={getCpuTimelineLayout(timelineTrackWidth)}>
+          <div className="space-y-3 pt-9" aria-label="算法标签">
+            {runs.map((run) => (
+              <div key={run.algorithm} className="flex h-12 items-center text-xs font-semibold text-[var(--a3-text)]">
+                {algorithmLabels[run.algorithm as CpuSchedulingAlgorithm]}
+              </div>
             ))}
           </div>
+          <div className="relative" data-testid="cpu-timeline-coordinate-space">
+            <div
+              className="relative mb-2 h-7 text-[10px] text-[var(--a3-text-muted)]"
+              data-testid="cpu-time-ruler"
+              aria-label="时间标尺"
+            >
+              {rulerTicks.map((tick) => (
+                <span
+                  key={tick}
+                  className="absolute bottom-0 -translate-x-1/2 border-l border-[var(--a3-border)] pl-1"
+                  style={{ left: `${timeToPercent(tick, totalTime)}%` }}
+                >
+                  {tick}
+                </span>
+              ))}
+            </div>
 
-          <div
-            className="pointer-events-none absolute bottom-0 top-7 z-20 w-px bg-amber-600 transition-[left] duration-200 ease-out"
-            style={{ left: `${timeToPercent(currentTime, totalTime)}%` }}
-            aria-hidden="true"
-          />
+            <div
+              className="pointer-events-none absolute bottom-0 top-7 z-20 w-px bg-amber-600 transition-[left] duration-200 ease-out"
+              data-testid="cpu-current-time-line"
+              style={{ left: `${timeToPercent(currentTime, totalTime)}%` }}
+              aria-hidden="true"
+            />
 
-          <div className="space-y-3">
-            {runs.map((run) => {
-              const visibleStep = getVisibleStep(run, currentStepIndex);
-              const visibleSegments = visibleStep?.state.timeline ?? [];
-              return (
-                <div key={run.algorithm} className="grid grid-cols-[78px_minmax(0,1fr)] items-center gap-3">
-                  <div className="text-xs font-semibold text-[var(--a3-text)]">
-                    {algorithmLabels[run.algorithm as CpuSchedulingAlgorithm]}
-                  </div>
-                  <div className="relative h-12 overflow-hidden rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-muted)]">
+            <div className="space-y-3">
+              {runs.map((run) => {
+                const visibleSegments = visibleSteps.get(run)?.state.timeline ?? [];
+                return (
+                  <div
+                    key={run.algorithm}
+                    className="relative h-12 overflow-hidden rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-muted)]"
+                    data-testid="cpu-gantt-track"
+                  >
                     {buildTimeCells(totalTime).map((time) => (
                       <span
                         key={time}
@@ -156,9 +172,9 @@ export function CpuSchedulingVisualizer({
                       );
                     })}
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
         </div>
       </div>
@@ -251,6 +267,32 @@ export function findCpuSegmentStepIndex(run: CpuRun, segment: CpuSegment): numbe
   return Math.max(0, index);
 }
 
+export function getCpuTimelineLayout(trackWidth: number) {
+  const stableTrackWidth = Math.max(1, trackWidth);
+  return {
+    columnGap: CPU_TIMELINE_COLUMN_GAP_PX,
+    gridTemplateColumns: `${CPU_ALGORITHM_LABEL_WIDTH_PX}px ${stableTrackWidth}px`,
+    width: CPU_ALGORITHM_LABEL_WIDTH_PX + CPU_TIMELINE_COLUMN_GAP_PX + stableTrackWidth,
+  };
+}
+
+export function deriveCpuGlobalCurrentTime(runs: CpuRun[], currentStepIndex: number): number {
+  const controllingRun = runs[0];
+  if (!controllingRun || controllingRun.steps.length === 0) return 0;
+  const index = Math.max(0, Math.min(Math.trunc(currentStepIndex), controllingRun.steps.length - 1));
+  return controllingRun.steps[index].time;
+}
+
+export function selectCpuStepAtTime(run: CpuRun, currentTime: number) {
+  let visibleStep: CpuRun['steps'][number] | undefined;
+  for (const step of run.steps) {
+    if (step.time <= currentTime && (!visibleStep || step.time >= visibleStep.time)) {
+      visibleStep = step;
+    }
+  }
+  return visibleStep;
+}
+
 export function deriveCpuPredictionResult(
   prediction: { answer: string | null; skipped: boolean } | null,
   runs: CpuRun[],
@@ -301,11 +343,6 @@ export function buildCpuCheckpoints(run: CpuRun): CpuCheckpointDefinition[] {
       context: '按完成时刻从早到晚排列全部进程。',
     },
   ];
-}
-
-function getVisibleStep(run: CpuRun, currentStepIndex: number) {
-  if (run.steps.length === 0) return undefined;
-  return run.steps[Math.max(0, Math.min(currentStepIndex, run.steps.length - 1))];
 }
 
 function getTotalElapsedTime(runs: CpuRun[]) {
