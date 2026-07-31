@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 from django.test import TestCase
 from django.urls import reverse
@@ -10,6 +11,8 @@ from backend.apps.learning.algorithm_labs import (
     ALGORITHM_LAB_COMPLETION_SCHEMA_VERSION,
     ALGORITHM_LAB_SCHEMA_VERSION,
     build_algorithm_lab_effect,
+    complete_algorithm_lab,
+    list_algorithm_labs,
 )
 from backend.apps.learning.effect_events import ingest_learning_event_v2
 from backend.apps.learning.models import LearningEvent
@@ -91,6 +94,12 @@ class AlgorithmLabApiTests(TestCase):
         })
         self.assertIsNone(payload["labs"][0]["recentSession"])
 
+    def test_list_algorithm_labs_returns_catalog_contract(self):
+        catalog = list_algorithm_labs(self.user)
+
+        self.assertEqual(catalog["schemaVersion"], ALGORITHM_LAB_SCHEMA_VERSION)
+        self.assertEqual([lab["id"] for lab in catalog["labs"]], ["cpu-scheduling", "page-replacement"])
+
     def test_catalog_progress_and_recent_session_are_scoped_to_user(self):
         self.client.force_login(self.user)
         self.assertEqual(self.post_complete(known_cpu_completion()).status_code, 201)
@@ -124,7 +133,18 @@ class AlgorithmLabApiTests(TestCase):
         self.assertEqual(event.score, 100)
         self.assertNotIn("steps", event.metadata)
         self.assertNotIn("items", event.metadata)
+        self.assertEqual(event.metadata["metrics"]["reviewedStepIndexes"], [0, 3])
         self.assertEqual(event.quality["verified"], True)
+
+    def test_completion_locks_the_current_user_before_idempotent_write(self):
+        with patch.object(User.objects, "select_for_update", wraps=User.objects.select_for_update) as row_lock:
+            first = complete_algorithm_lab(self.user, known_cpu_completion("locked-event"))
+            duplicate = complete_algorithm_lab(self.user, known_cpu_completion("locked-event"))
+
+        self.assertEqual(first["status"], "accepted")
+        self.assertEqual(duplicate["status"], "duplicate")
+        self.assertEqual(row_lock.call_count, 2)
+        self.assertEqual(LearningEvent.objects.filter(user=self.user, event_id="locked-event").count(), 1)
 
     def test_custom_and_forged_submissions_are_accepted_but_unverified(self):
         self.client.force_login(self.user)
@@ -203,6 +223,32 @@ class AlgorithmLabApiTests(TestCase):
         event = LearningEvent.objects.get(user=self.user, event_id="no-steps")
         self.assertEqual(response.status_code, 201)
         self.assertNotIn("steps", json.dumps({"quality": event.quality, "metadata": event.metadata}))
+
+    def test_validation_rejects_more_than_twenty_checkpoint_items(self):
+        self.client.force_login(self.user)
+        payload = known_cpu_completion(
+            checkpoints={
+                "answered": 20,
+                "correct": 20,
+                "items": [{"id": f"checkpoint-{index}", "correct": True} for index in range(21)],
+            }
+        )
+
+        response = self.post_complete(payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["success"])
+
+    def test_validation_rejects_more_than_fifty_reviewed_step_indexes(self):
+        self.client.force_login(self.user)
+        payload = known_cpu_completion(
+            metrics={"score": 75, "durationSec": 1, "replayCount": 0, "reviewedStepIndexes": list(range(51))}
+        )
+
+        response = self.post_complete(payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["success"])
 
     def test_event_allowlist_accepts_algorithm_lab_events(self):
         result = ingest_learning_event_v2(

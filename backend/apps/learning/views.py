@@ -7,7 +7,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_http_methods
 
-from backend.apps.learning.algorithm_labs import ALGORITHM_LAB_SCHEMA_VERSION, complete_algorithm_lab, list_algorithm_labs
+from backend.apps.learning.algorithm_labs import complete_algorithm_lab, list_algorithm_labs
 from backend.apps.learning.effect_events import aggregate_learning_events, ingest_learning_event_v2, ingest_learning_events_batch_v2, list_recent_learning_events, serialize_learning_event
 from backend.apps.learning.report_summaries import create_learning_summary_document, get_learning_summary_document, list_learning_summary_documents
 from backend.apps.learning.resource_attribution import build_resource_effect_attribution
@@ -130,8 +130,7 @@ def algorithm_labs(request):
     return JsonResponse(
         {
             "success": True,
-            "schemaVersion": ALGORITHM_LAB_SCHEMA_VERSION,
-            "labs": list_algorithm_labs(request.user),
+            **list_algorithm_labs(request.user),
         }
     )
 

@@ -5,6 +5,7 @@ from datetime import timedelta
 from math import isfinite
 from typing import Any
 
+from django.db import transaction
 from django.utils import timezone
 
 from backend.apps.learning.effect_events import LEARNING_EVENT_SCHEMA_V2, ingest_learning_event_v2
@@ -118,7 +119,7 @@ _LABS = (
 )
 
 
-def list_algorithm_labs(user) -> list[dict]:
+def list_algorithm_labs(user) -> dict:
     events = list(
         LearningEvent.objects.filter(user=user, event_type="algorithm_lab_completed")
         .order_by("-created_at", "-id")
@@ -144,7 +145,7 @@ def list_algorithm_labs(user) -> list[dict]:
                 "recentSession": _serialize_completion(latest) if latest else None,
             }
         )
-    return labs
+    return {"schemaVersion": ALGORITHM_LAB_SCHEMA_VERSION, "labs": labs}
 
 
 def complete_algorithm_lab(user, payload) -> dict:
@@ -179,6 +180,7 @@ def complete_algorithm_lab(user, payload) -> dict:
             "durationSec": normalized["metrics"]["durationSec"],
             "replayCount": normalized["metrics"]["replayCount"],
             "reviewedCount": len(normalized["metrics"]["reviewedStepIndexes"]),
+            "reviewedStepIndexes": normalized["metrics"]["reviewedStepIndexes"],
         },
         "resultFingerprint": normalized["resultFingerprint"],
     }
@@ -187,22 +189,27 @@ def complete_algorithm_lab(user, payload) -> dict:
         "masteryEvidenceAccepted": verified,
         "nextAction": "assessment" if verified and score >= 80 else "replay_lab",
     }
-    event_result = ingest_learning_event_v2(
-        user,
-        {
-            "schemaVersion": LEARNING_EVENT_SCHEMA_V2,
-            "eventId": normalized["eventId"],
-            "eventType": "algorithm_lab_completed",
-            "targetType": "algorithm_lab",
-            "targetId": normalized["labId"],
-            "resourceType": "interactive_lab",
-            "durationSec": normalized["metrics"]["durationSec"],
-            "score": score,
-            "quality": quality,
-            "metadata": metadata,
-            "sourcePage": f"/a3/labs/{normalized['labId']}",
-        },
-    )
+    with transaction.atomic():
+        locked_user = user.__class__.objects.select_for_update().get(pk=user.pk)
+        existing = LearningEvent.objects.filter(user=locked_user, event_id=normalized["eventId"]).first()
+        if existing:
+            return {"status": "duplicate", "completion": _serialize_completion(existing)}
+        event_result = ingest_learning_event_v2(
+            locked_user,
+            {
+                "schemaVersion": LEARNING_EVENT_SCHEMA_V2,
+                "eventId": normalized["eventId"],
+                "eventType": "algorithm_lab_completed",
+                "targetType": "algorithm_lab",
+                "targetId": normalized["labId"],
+                "resourceType": "interactive_lab",
+                "durationSec": normalized["metrics"]["durationSec"],
+                "score": score,
+                "quality": quality,
+                "metadata": metadata,
+                "sourcePage": f"/a3/labs/{normalized['labId']}",
+            },
+        )
     return {"status": event_result["status"], "completion": _serialize_completion(event_result["event"])}
 
 
