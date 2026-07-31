@@ -40,7 +40,7 @@ export type AlgorithmLabCatalogResponse =
   | {
       success: false;
       error: string;
-      status: number;
+      status?: number;
       schemaVersion?: never;
       labs?: never;
     };

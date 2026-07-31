@@ -80,9 +80,21 @@ describe('algorithm lab API client', () => {
 
     expect(result.success).toBe(false);
     if (!result.success) {
-      const status: number = result.status;
-      expect(status).toBe(401);
+      expect(result.status).toBe(401);
       expect(result.error).toBe('请先登录');
+      expect(result).not.toHaveProperty('labs');
+    }
+  });
+
+  it('narrows a catalog network failure without requiring an HTTP status', async () => {
+    getJson.mockResolvedValue({ success: false, error: '网络连接失败' });
+
+    const result = await fetchAlgorithmLabCatalog();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.status).toBeUndefined();
+      expect(result.error).toBe('网络连接失败');
       expect(result).not.toHaveProperty('labs');
     }
   });
