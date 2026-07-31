@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
+from docx import Document
+from pypdf import PdfReader
 
 from backend.apps.accounts.models import User
 from backend.apps.assessments.models import Question, WrongQuestion
 from backend.apps.learning.models import Chapter, Course, KnowledgePoint
 from backend.apps.profiles.models import LearnerProfile
+from backend.domains.knowledge_base.schemas import KnowledgeBaseSearchResult
 
 
 class ReviewHandoutDomainTests(TestCase):
@@ -104,3 +110,70 @@ class ReviewHandoutDomainTests(TestCase):
         self.assertNotIn("D:/private", rendered)
         self.assertTrue(payload["docxDownloadUrl"].endswith("/download/docx/"))
         self.assertTrue(payload["pdfDownloadUrl"].endswith("/download/pdf/"))
+
+    @patch("backend.apps.assessments.review_handouts.search_knowledge_base")
+    def test_generate_review_handout_creates_verified_docx_and_pdf(self, search):
+        from backend.apps.assessments.review_handouts import create_review_handout_job, generate_review_handout
+
+        search.return_value = [
+            KnowledgeBaseSearchResult(
+                score=0.91,
+                text="死锁形成需要互斥、请求保持、不可剥夺和循环等待四个必要条件。",
+                metadata={"title": "操作系统课程讲义", "page_number": 18, "source_path": "course/os.pdf"},
+            )
+        ]
+        job, _ = create_review_handout_job(self.user, "active")
+        with TemporaryDirectory() as artifact_root, override_settings(A3_REVIEW_HANDOUT_ROOT=artifact_root):
+            result = generate_review_handout(str(job.id))
+            job.refresh_from_db()
+
+            self.assertTrue(result["success"])
+            self.assertEqual(job.status, "succeeded")
+            self.assertEqual(job.progress, 100)
+            self.assertTrue(job.verified)
+            self.assertFalse(job.degraded)
+            self.assertEqual(len(job.citations), 2)
+            self.assertTrue(Path(job.docx_path).is_file())
+            self.assertTrue(Path(job.pdf_path).is_file())
+            text = "\n".join(paragraph.text for paragraph in Document(job.docx_path).paragraphs)
+            self.assertIn("个性化复习讲义", text)
+            self.assertIn("核心概念", text)
+            self.assertIn("答案与解析", text)
+            self.assertGreaterEqual(len(PdfReader(job.pdf_path).pages), 1)
+        search.assert_called()
+
+    @patch("backend.apps.assessments.review_handouts.search_knowledge_base", side_effect=RuntimeError("retriever offline"))
+    def test_generate_review_handout_degrades_to_trusted_question_explanations(self, _search):
+        from backend.apps.assessments.review_handouts import create_review_handout_job, generate_review_handout
+
+        job, _ = create_review_handout_job(self.user, "active")
+        with TemporaryDirectory() as artifact_root, override_settings(A3_REVIEW_HANDOUT_ROOT=artifact_root):
+            result = generate_review_handout(str(job.id))
+            job.refresh_from_db()
+
+            self.assertTrue(result["success"])
+            self.assertEqual(job.status, "succeeded")
+            self.assertTrue(job.degraded)
+            self.assertFalse(job.verified)
+            self.assertIn("资料检索暂不可用", job.message)
+            text = "\n".join(paragraph.text for paragraph in Document(job.docx_path).paragraphs)
+            self.assertIn("可信题目解析", text)
+
+    @patch("backend.apps.assessments.review_handouts.search_knowledge_base")
+    def test_cancelled_job_is_terminal_and_late_worker_writes_nothing(self, search):
+        from backend.apps.assessments.review_handouts import create_review_handout_job, generate_review_handout
+
+        job, _ = create_review_handout_job(self.user, "active")
+        job.status = "cancelled"
+        job.progress = 100
+        job.save(update_fields=["status", "progress", "updated_at"])
+        with TemporaryDirectory() as artifact_root, override_settings(A3_REVIEW_HANDOUT_ROOT=artifact_root):
+            result = generate_review_handout(str(job.id))
+            job.refresh_from_db()
+
+            self.assertTrue(result["cancelled"])
+            self.assertEqual(job.status, "cancelled")
+            self.assertFalse(job.docx_path)
+            self.assertFalse(job.pdf_path)
+            self.assertEqual(list(Path(artifact_root).rglob("*")), [])
+        search.assert_not_called()
