@@ -12,6 +12,7 @@ import {
   ClipboardCheck,
   Clock,
   FileQuestion,
+  FlaskConical,
   Layers3,
   Lightbulb,
   Loader2,
@@ -208,10 +209,18 @@ export function AssessmentView() {
             </p>
           </div>
         </div>
-        <Button variant="outline" onClick={restart} disabled={submitting} className="self-start lg:self-center">
-          {submitting ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
-          重新测评
-        </Button>
+        <div className="flex flex-wrap gap-2 self-start lg:self-center">
+          <Button asChild variant="outline" className="border-amber-200 bg-amber-50 text-amber-900 hover:bg-amber-100 hover:text-amber-950">
+            <Link href="/a3/labs">
+              <FlaskConical className="size-4" />
+              交互实验
+            </Link>
+          </Button>
+          <Button variant="outline" onClick={restart} disabled={submitting}>
+            {submitting ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
+            重新测评
+          </Button>
+        </div>
       </section>
 
       {reportSource ? (
