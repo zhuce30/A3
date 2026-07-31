@@ -46,6 +46,7 @@ import {
   derivePagePredictionResult,
   findPageGlobalIndexPosition,
   getAvailablePageCheckpoints,
+  getPageStepExplanation,
   isPageCheckpointRevealed,
   selectPageStepAtIndex,
 } from '@/components/a3/features/algorithm-lab/page-replacement-visualizer';
@@ -717,6 +718,63 @@ describe('algorithm lab UI', () => {
     state = algorithmLabReducer(state, { type: 'seek', index: findPageGlobalIndexPosition(indexAxis, 2) });
     expect(state.currentStepIndex).toBe(2);
     expect(state.runs).toBe(originalRuns);
+  });
+
+  it('clears submitted page checkpoints when the page lab is reconfigured', () => {
+    const input = { referenceString: [1, 2, 3, 4], frameCount: 3 };
+    const runs = [simulatePageReplacement(input, 'fifo')];
+    let state = algorithmLabReducer(createAlgorithmLabState('page-replacement'), {
+      type: 'start',
+      runs,
+      startedAt: '2026-07-31T12:00:00.000Z',
+    });
+    state = algorithmLabReducer(state, {
+      type: 'answer_checkpoint',
+      checkpointId: 'page-victim',
+      answer: '1',
+    });
+    state = algorithmLabReducer(state, {
+      type: 'answer_checkpoint',
+      checkpointId: 'page-policy-reason',
+      answer: '选择最早进入内存且仍驻留的页面',
+    });
+
+    const configured = algorithmLabReducer(state, {
+      type: 'configure',
+      labId: 'page-replacement',
+      input: { referenceString: [4, 3, 2, 1], frameCount: 2 },
+      algorithms: ['fifo'],
+    });
+
+    expect(configured.phase).toBe('configured');
+    expect(configured.runs).toEqual([]);
+    expect(configured.checkpointAnswers).toEqual({});
+    expect(configured.currentStepIndex).toBe(0);
+  });
+
+  it('sanitizes page step explanations until each answer-bearing checkpoint is submitted', () => {
+    const run = simulatePageReplacement(
+      { referenceString: [1, 2, 3, 4, 1, 5], frameCount: 3 },
+      'fifo',
+    );
+    const victimStep = run.steps[3];
+
+    const hidden = getPageStepExplanation(run, victimStep, false, false);
+    expect(hidden).toContain('页面 4');
+    expect(hidden).toContain('缺页');
+    expect(hidden).not.toContain('淘汰页 1');
+    expect(hidden).not.toContain('FIFO 队列');
+
+    const victimRevealed = getPageStepExplanation(run, victimStep, true, false);
+    expect(victimRevealed).toContain('淘汰页 1');
+    expect(victimRevealed).not.toContain('FIFO 队列');
+
+    const policyRevealed = getPageStepExplanation(run, victimStep, false, true);
+    expect(policyRevealed).not.toContain('淘汰页 1');
+    expect(policyRevealed).toContain('FIFO 队列');
+
+    const workbench = readFileSync(workbenchPath, 'utf8');
+    expect(workbench).toContain('getPageStepExplanation');
   });
 
   it('reveals the fewest-fault prediction and tie evidence only after completion', () => {

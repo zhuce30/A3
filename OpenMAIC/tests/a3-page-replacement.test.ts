@@ -4,7 +4,7 @@ import {
   type PageReplacementMetrics,
   type PageReplacementState,
 } from '@/lib/a3/algorithm-lab/page-replacement';
-import type { PageReplacementAlgorithm, PageReplacementInput, SimulationRun } from '@/lib/a3/algorithm-lab/contracts';
+import type { PageReplacementInput, SimulationRun } from '@/lib/a3/algorithm-lab/contracts';
 
 const canonicalInput = (): PageReplacementInput => ({
   referenceString: [7, 0, 1, 2, 0, 3, 0, 4, 2, 3, 0, 3, 2],
@@ -47,6 +47,15 @@ describe('deterministic page replacement kernel', () => {
     expect(run.steps.map((step) => step.metrics.pageFaults)).toEqual([
       1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10, 10, 10,
     ]);
+  });
+
+  it('calculates each in-progress fault rate from references processed so far', () => {
+    const run = simulatePageReplacement(canonicalInput(), 'fifo');
+
+    expect(run.steps.map((step) => step.metrics.faultRate)).toEqual([
+      100, 100, 100, 100, 80, 83.33, 85.71, 87.5, 88.89, 90, 90.91, 83.33, 76.92,
+    ]);
+    expect(run.steps.at(-1)!.metrics.faultRate).toBe(run.finalMetrics.faultRate);
   });
 
   it('records policy-specific eviction evidence and deterministic tie breaks', () => {

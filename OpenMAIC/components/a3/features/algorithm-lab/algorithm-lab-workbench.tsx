@@ -59,6 +59,7 @@ import {
   buildPageGlobalIndexAxis,
   derivePageGlobalCurrentIndex,
   derivePagePredictionResult,
+  getPageStepExplanation,
   getAvailablePageCheckpoints,
   isPageCheckpointRevealed,
   PageReplacementVisualizer,
@@ -312,12 +313,15 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
     [state.labId, state.runs],
   );
   const pageIndexAxis = useMemo(() => buildPageGlobalIndexAxis(pageRuns), [pageRuns]);
-  const currentStep = state.labId === 'cpu-scheduling'
-    ? selectCpuStepAtTime(cpuRuns[0], deriveCpuGlobalCurrentTime(cpuRuns, state.currentStepIndex))
-    : selectPageStepAtIndex(
-        pageRuns[0],
-        derivePageGlobalCurrentIndex(pageRuns, state.currentStepIndex),
-      );
+  const currentCpuStep = selectCpuStepAtTime(
+    cpuRuns[0],
+    deriveCpuGlobalCurrentTime(cpuRuns, state.currentStepIndex),
+  );
+  const currentPageStep = selectPageStepAtIndex(
+    pageRuns[0],
+    derivePageGlobalCurrentIndex(pageRuns, state.currentStepIndex),
+  );
+  const currentStep = state.labId === 'cpu-scheduling' ? currentCpuStep : currentPageStep;
   const completed = state.phase === 'completed' || state.phase === 'submitted';
   const predictionResult = state.labId === 'cpu-scheduling'
     ? deriveCpuPredictionResult(state.prediction, cpuRuns, completed)
@@ -671,7 +675,14 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   const explanation = (
     <AlgorithmLabStepExplanation
       label={currentStep?.label ?? ''}
-      explanation={currentStep?.explanation ?? ''}
+      explanation={state.labId === 'page-replacement'
+        ? getPageStepExplanation(
+            pageRuns[0],
+            currentPageStep,
+            revealPageVictim,
+            revealPagePolicyReason,
+          )
+        : currentStep?.explanation ?? ''}
       reviewed={state.reviewedStepIndexes.includes(state.currentStepIndex)}
       onReview={() => dispatch({ type: 'review_step', index: state.currentStepIndex })}
     />

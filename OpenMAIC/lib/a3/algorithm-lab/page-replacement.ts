@@ -181,7 +181,7 @@ export function simulatePageReplacement(
     const metrics: PageReplacementMetrics = {
       pageFaults,
       hits,
-      faultRate: roundToTwo((pageFaults / references.length) * 100),
+      faultRate: roundToTwo((pageFaults / (referenceIndex + 1)) * 100),
       evictions,
       finalFrames: [...frames],
     };

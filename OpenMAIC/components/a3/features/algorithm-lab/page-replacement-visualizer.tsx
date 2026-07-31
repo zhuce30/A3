@@ -68,6 +68,9 @@ export function PageReplacementVisualizer({
 }: PageReplacementVisualizerProps) {
   const indexAxis = buildPageGlobalIndexAxis(runs);
   const currentReferenceIndex = derivePageGlobalCurrentIndex(runs, currentStepIndex);
+  const visibleIndexAxis = indexAxis.filter((referenceIndex) => (
+    referenceIndex <= currentReferenceIndex
+  ));
 
   if (runs.length === 0) {
     return (
@@ -107,12 +110,14 @@ export function PageReplacementVisualizer({
           <div className="grid grid-cols-[76px_auto] gap-3">
             <div className="flex items-center text-xs font-semibold text-[var(--a3-text-muted)]">引用序列</div>
             <div className="flex gap-2">
-              {indexAxis.map((referenceIndex) => {
+              {visibleIndexAxis.map((referenceIndex) => {
                 const current = referenceIndex === currentReferenceIndex;
                 return (
                   <button
                     key={referenceIndex}
                     type="button"
+                    data-testid="page-reference-column"
+                    data-reference-index={referenceIndex}
                     onClick={() => onSeek(findPageGlobalIndexPosition(indexAxis, referenceIndex))}
                     className={`flex h-12 w-[76px] shrink-0 flex-col items-center justify-center rounded-md border text-sm font-semibold tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${current ? 'border-amber-500 bg-amber-100 text-amber-950 ring-2 ring-amber-300 dark:bg-amber-950/45 dark:text-amber-100' : 'border-[var(--a3-border)] bg-[var(--a3-surface-solid)] text-[var(--a3-text)] hover:bg-[var(--a3-surface-muted)]'}`}
                     aria-label={`定位到引用索引 ${referenceIndex}，页面 ${referenceString[referenceIndex]}`}
@@ -131,7 +136,7 @@ export function PageReplacementVisualizer({
               <PageAlgorithmRow
                 key={run.algorithm}
                 run={run}
-                indexAxis={indexAxis}
+                indexAxis={visibleIndexAxis}
                 frameCount={frameCount}
                 currentReferenceIndex={currentReferenceIndex}
                 revealVictim={revealVictim}
@@ -201,6 +206,8 @@ function PageAlgorithmRow({
             <button
               key={referenceIndex}
               type="button"
+              data-testid="page-state-column"
+              data-reference-index={referenceIndex}
               onClick={() => onSeek(referenceIndex)}
               className={`w-[76px] shrink-0 rounded-md border p-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${current ? 'border-amber-500 bg-amber-50 ring-2 ring-amber-200 dark:bg-amber-950/30' : 'border-[var(--a3-border)] bg-[var(--a3-surface-solid)] hover:bg-[var(--a3-surface-muted)]'}`}
               aria-label={`${algorithmLabels[run.algorithm as PageReplacementAlgorithm]} 引用索引 ${referenceIndex}，${step?.state.hit ? '命中' : '缺页'}`}
@@ -295,6 +302,26 @@ function describePolicyEvidence(
     `${page}: ${nextIndex === null ? '不再访问' : `${nextIndex - referenceIndex} 列后`}`
   ));
   return `OPT 下次访问距离：${distances.join('；') || '无驻留页'}`;
+}
+
+export function getPageStepExplanation(
+  run: PageRun | undefined,
+  step: PageRun['steps'][number] | undefined,
+  revealVictim: boolean,
+  revealPolicyReason: boolean,
+): string {
+  if (!run || !step || !(run.algorithm in algorithmLabels)) return '';
+  const algorithm = run.algorithm as PageReplacementAlgorithm;
+  const outcome = step.state.hit ? '命中' : '缺页';
+  const victim = step.state.evictedPage === null
+    ? '无淘汰页'
+    : revealVictim
+      ? `淘汰页 ${step.state.evictedPage}`
+      : '淘汰页将在提交检查点后显示';
+  const policyEvidence = revealPolicyReason
+    ? describePolicyEvidence(algorithm, step.state, step.state.referenceIndex)
+    : '策略依据将在提交检查点后显示';
+  return `页面 ${step.state.currentPage}：${outcome}；${victim}；${policyEvidence}。`;
 }
 
 export function buildPageGlobalIndexAxis(runs: PageRun[]): number[] {
