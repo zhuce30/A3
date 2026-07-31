@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Image from 'next/image';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Loader2, RotateCcw, Sparkles, FileText } from 'lucide-react';
+import { ArrowRight, FileText, FlaskConical, Loader2, RotateCcw, ShieldCheck, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import type { DynamicProfileInsight } from '@/components/a3/profile/dynamic-profile-insight-panel';
@@ -14,7 +15,7 @@ import type { A3ApiResponse, StudyPlan } from '@/lib/a3/learning-types';
 import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
 import { buildLearningReportCsv } from '@/lib/a3/report-export';
 import { buildStudentReportViewModel } from '@/lib/a3/report-view-model';
-import type { LearningEffectReport } from '@/lib/a3/report-view-model';
+import type { AlgorithmLabReportSection, LearningEffectReport } from '@/lib/a3/report-view-model';
 import { ReportOverviewPanel } from './report/report-overview-panel';
 import { ReportChangeSummary } from './report/report-change-summary';
 import { ReportWeakPoints } from './report/report-weak-points';
@@ -203,6 +204,7 @@ export function ReportView() {
       <ReportOverviewPanel overview={studentReport.overview} evidenceState={studentReport.evidenceState} updating={reportLoading} />
       <ReportChangeSummary changes={studentReport.changes} />
       <ReportWeakPoints weakKnowledgePoints={studentReport.weakKnowledgePoints} />
+      <ReportAlgorithmLabEffect effect={studentReport.algorithmLabEffect} />
       <ReportSevenDayPlan plan={studentReport.sevenDayPlan} />
       <ReportMethodEffect methods={studentReport.effectiveMethods} />
       <ReportDetails
@@ -243,6 +245,52 @@ function PeriodSegmentedControl({ value, loading, onChange }: { value: ReportPer
       ))}
       {loading && <Loader2 className="mx-2 size-4 animate-spin text-blue-600" />}
     </div>
+  );
+}
+
+function ReportAlgorithmLabEffect({ effect }: { effect: AlgorithmLabReportSection | null }) {
+  if (!effect) return null;
+
+  return (
+    <section
+      data-testid="a3-report-algorithm-lab-effect"
+      className="w-full border-y border-emerald-200 bg-emerald-50/60 py-6 dark:border-emerald-900 dark:bg-emerald-950/20"
+    >
+      <div className="flex flex-col gap-4 px-1 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-emerald-800 dark:text-emerald-300">
+            <FlaskConical className="size-5 shrink-0" aria-hidden="true" />
+            <h2 className="text-base font-semibold text-[var(--a3-text)]">{effect.title}</h2>
+          </div>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--a3-text-muted)]">{effect.conclusion}</p>
+        </div>
+        <span className="inline-flex w-fit shrink-0 items-center gap-1.5 text-xs font-semibold text-emerald-800 dark:text-emerald-300">
+          <ShieldCheck className="size-4" aria-hidden="true" />
+          {effect.evidenceLabel}
+        </span>
+      </div>
+
+      <dl className="mt-5 grid grid-cols-2 gap-y-4 sm:grid-cols-4 sm:gap-y-0 sm:divide-x sm:divide-[var(--a3-border)]">
+        {effect.metrics.map((metric) => (
+          <div key={metric.label} className="min-w-0 px-3 first:pl-1 sm:px-5 sm:first:pl-1">
+            <dt className="text-xs text-[var(--a3-text-muted)]">{metric.label}</dt>
+            <dd className="mt-1 text-xl font-semibold text-[var(--a3-text)]">{metric.value}</dd>
+          </div>
+        ))}
+      </dl>
+
+      <div className="mt-5 flex flex-col gap-3 border-t border-emerald-200 pt-4 dark:border-emerald-900 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-[var(--a3-text-muted)]">
+          {effect.reviewSignal ? `高频复查：${effect.reviewSignal}` : '本周期没有重复复查步骤。'}
+        </p>
+        <Button asChild className="a3-report-no-print w-full sm:w-auto">
+          <Link href={effect.action.href}>
+            {effect.action.label}
+            <ArrowRight className="size-4" aria-hidden="true" />
+          </Link>
+        </Button>
+      </div>
+    </section>
   );
 }
 

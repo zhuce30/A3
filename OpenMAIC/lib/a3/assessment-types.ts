@@ -211,6 +211,27 @@ export type StudentReportDataQuality = {
   lastUpdatedAt: string;
 };
 
+export type AlgorithmLabEffect = {
+  completedRuns: number;
+  verifiedRuns: number;
+  predictionAccuracy: number;
+  checkpointAccuracy: number;
+  reviewedStepCount: number;
+  byLab: Array<{
+    labId: string;
+    completedRuns: number;
+    bestScore: number;
+  }>;
+  commonReviewSignals: Array<{
+    stepIndex: number;
+    count: number;
+  }>;
+  nextAction: {
+    label: string;
+    href: string;
+  };
+};
+
 export type LearningReport = {
   period: { key?: '7d' | '30d' | 'term'; label?: string; start: string; end: string };
   metrics: {
@@ -292,6 +313,7 @@ export type LearningReport = {
       reason: string;
     };
   };
+  algorithmLabEffect?: AlgorithmLabEffect;
   weeklySummary?: {
     reflectionCount: number;
     averageConfidence: number;

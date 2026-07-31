@@ -9,7 +9,7 @@ from backend.apps.accounts.models import User
 from backend.apps.assessments.models import AssessmentAnswer, AssessmentSession, Question, QuestionReviewStatus, QuestionSourceType, WrongQuestion
 from backend.apps.engagement.models import UserNotification
 from backend.apps.knowledge_base.models import KnowledgeBlock, KnowledgeResource, ResourceScope, ResourceStatus
-from backend.apps.learning.models import Course, ResourcePackLog
+from backend.apps.learning.models import Course, LearningEvent, ResourcePackLog
 from backend.apps.learning.services import default_course, generate_learning_path
 from backend.apps.profiles.models import LearnerProfile
 
@@ -182,6 +182,102 @@ class AssessmentFlowTests(TestCase):
         self.assertEqual(week_report["metrics"]["answeredQuestions"], 1)
         self.assertEqual(week_report["metrics"]["accuracy"], 100)
         self.assertEqual(len(week_report["trends"]), 7)
+
+    def test_report_aggregates_bounded_algorithm_lab_evidence_for_period(self):
+        now = timezone.now()
+        event_defaults = {
+            "user": self.user,
+            "event_type": "algorithm_lab_completed",
+            "target_type": "algorithm_lab",
+            "resource_type": "interactive_lab",
+        }
+        LearningEvent.objects.create(
+            **event_defaults,
+            event_id="report-lab-verified",
+            target_id="cpu-scheduling",
+            score=100,
+            quality={"verified": True, "masteryEvidenceAccepted": True},
+            metadata={
+                "prediction": {"skipped": False, "correct": True},
+                "checkpoints": {"answered": 2, "correct": 2},
+                "metrics": {"reviewedStepIndexes": [7, 3]},
+            },
+            created_at=now - timedelta(days=1),
+        )
+        LearningEvent.objects.create(
+            **event_defaults,
+            event_id="report-lab-exploration",
+            target_id="cpu-scheduling",
+            score=50,
+            quality={"verified": False, "masteryEvidenceAccepted": False},
+            metadata={
+                "prediction": {"skipped": False},
+                "checkpoints": {"answered": 2, "correct": 1},
+                "metrics": {"reviewedStepIndexes": [7]},
+            },
+            created_at=now - timedelta(days=2),
+        )
+        LearningEvent.objects.create(
+            **event_defaults,
+            event_id="report-lab-outside-period",
+            target_id="page-replacement",
+            score=100,
+            quality={"verified": True, "masteryEvidenceAccepted": True},
+            metadata={
+                "prediction": {"skipped": False, "correct": False},
+                "checkpoints": {"answered": 2, "correct": 0},
+                "metrics": {"reviewedStepIndexes": [9]},
+            },
+            created_at=now - timedelta(days=8),
+        )
+        LearningEvent.objects.create(
+            **event_defaults,
+            event_id="report-lab-unknown",
+            target_id="unregistered-lab",
+            score=100,
+            quality={"verified": True, "masteryEvidenceAccepted": True},
+            metadata={
+                "prediction": {"skipped": False, "correct": True},
+                "checkpoints": {"answered": 1, "correct": 1},
+                "metrics": {"reviewedStepIndexes": [7]},
+            },
+            created_at=now - timedelta(days=1),
+        )
+
+        report = self.client.get("/api/assessments/report/?period=7d").json()["report"]
+
+        self.assertEqual(
+            report["algorithmLabEffect"],
+            {
+                "completedRuns": 2,
+                "verifiedRuns": 1,
+                "predictionAccuracy": 100.0,
+                "checkpointAccuracy": 75.0,
+                "reviewedStepCount": 3,
+                "byLab": [{"labId": "cpu-scheduling", "completedRuns": 2, "bestScore": 100.0}],
+                "commonReviewSignals": [{"stepIndex": 7, "count": 2}, {"stepIndex": 3, "count": 1}],
+                "nextAction": {"label": "继续交互实验", "href": "/a3/labs"},
+            },
+        )
+        self.assertEqual(report["algorithmLabEffect"]["completedRuns"], 2)
+        self.assertEqual(report["algorithmLabEffect"]["verifiedRuns"], 1)
+
+    def test_report_returns_complete_empty_algorithm_lab_effect(self):
+        report = self.client.get("/api/assessments/report/?period=7d").json()["report"]
+
+        self.assertEqual(
+            report["algorithmLabEffect"],
+            {
+                "completedRuns": 0,
+                "verifiedRuns": 0,
+                "predictionAccuracy": 0.0,
+                "checkpointAccuracy": 0.0,
+                "reviewedStepCount": 0,
+                "byLab": [],
+                "commonReviewSignals": [],
+                "nextAction": {"label": "开始交互实验", "href": "/a3/labs"},
+            },
+        )
 
     def test_report_includes_wrong_review_insight(self):
         session = self.client.get("/api/assessments/current/").json()["session"]

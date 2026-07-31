@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { LearningReport } from '@/lib/a3/assessment-types';
 import type { StudyPlan } from '@/lib/a3/learning-types';
@@ -207,6 +209,85 @@ describe('buildStudentReportViewModel', () => {
     for (const internalLabel of ['eventStream', 'decisionHistory', 'schemaVersion', 'v2 事件', '候选数', '决策分', 'pending']) {
       expect(serialized).not.toContain(internalLabel);
     }
+  });
+
+  it('derives verified algorithm lab evidence with separate accuracy metrics and a specific weak-lab action', () => {
+    const viewModel = buildStudentReportViewModel({
+      report: reportFixture({
+        algorithmLabEffect: {
+          completedRuns: 2,
+          verifiedRuns: 1,
+          predictionAccuracy: 100,
+          checkpointAccuracy: 75,
+          reviewedStepCount: 3,
+          byLab: [
+            { labId: 'cpu-scheduling', completedRuns: 1, bestScore: 60 },
+            { labId: 'page-replacement', completedRuns: 1, bestScore: 100 },
+          ],
+          commonReviewSignals: [{ stepIndex: 7, count: 2 }],
+          nextAction: { label: '继续交互实验', href: '/a3/labs' },
+        },
+      }),
+    });
+
+    expect(viewModel.algorithmLabEffect?.conclusion).toBe(
+      '你完成了 2 次算法实验，其中 1 次使用标准案例，可作为掌握证据。',
+    );
+    expect(viewModel.algorithmLabEffect?.evidenceLabel).toContain('1 次已验证掌握证据');
+    expect(viewModel.algorithmLabEffect?.evidenceLabel).toContain('1 次探索活动');
+    expect(viewModel.algorithmLabEffect?.metrics).toEqual([
+      { label: '完成实验', value: '2 次' },
+      { label: '预测准确率', value: '100.0%' },
+      { label: '检查题正确率', value: '75.0%' },
+      { label: '复查步骤', value: '3 个' },
+    ]);
+    expect(viewModel.algorithmLabEffect?.reviewSignal).toBe('第 7 步复查 2 次');
+    expect(viewModel.algorithmLabEffect?.action).toEqual({
+      label: '复练 CPU 调度算法实验',
+      href: '/a3/labs/cpu-scheduling',
+    });
+  });
+
+  it('omits the algorithm lab section when the report has no completed runs', () => {
+    const viewModel = buildStudentReportViewModel({
+      report: reportFixture({
+        algorithmLabEffect: {
+          completedRuns: 0,
+          verifiedRuns: 0,
+          predictionAccuracy: 0,
+          checkpointAccuracy: 0,
+          reviewedStepCount: 0,
+          byLab: [],
+          commonReviewSignals: [],
+          nextAction: { label: '开始交互实验', href: '/a3/labs' },
+        },
+      }),
+    });
+
+    expect(viewModel.algorithmLabEffect).toBeNull();
+    expect(JSON.stringify(viewModel)).not.toContain('算法实验学习证据');
+  });
+
+  it('places the algorithm lab evidence in an un-nested full-width band after knowledge insights', () => {
+    const source = fs.readFileSync(
+      path.resolve(process.cwd(), 'components/a3/features/report-view.tsx'),
+      'utf8',
+    );
+    const weakPointSection = source.indexOf('<ReportWeakPoints');
+    const algorithmSection = source.indexOf('<ReportAlgorithmLabEffect');
+    const planSection = source.indexOf('<ReportSevenDayPlan');
+    const componentStart = source.indexOf('function ReportAlgorithmLabEffect');
+    const componentEnd = source.indexOf('function LearningSummaryPanel');
+    const component = source.slice(componentStart, componentEnd);
+
+    expect(weakPointSection).toBeGreaterThan(-1);
+    expect(algorithmSection).toBeGreaterThan(weakPointSection);
+    expect(planSection).toBeGreaterThan(algorithmSection);
+    expect(component).toContain('data-testid="a3-report-algorithm-lab-effect"');
+    expect(component).toContain('w-full border-y');
+    expect(component).not.toContain('<Card');
+    expect(component).toContain('effect.metrics.map');
+    expect(component).toContain('<Link href={effect.action.href}');
   });
 
   it('does not invent percentages or progress for an empty report', () => {
