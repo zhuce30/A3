@@ -10,6 +10,7 @@ from celery import current_app
 from django.conf import settings
 from django.core.cache import cache
 from django.core.management import call_command
+from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
@@ -165,6 +166,7 @@ def dispatch_resource_generation_job(job: ResourceGenerationJob) -> ResourceGene
         async_result = current_app.send_task(
             "compat.run_resource_generation_job",
             args=[job.job_id],
+            queue="resource-generation",
         )
         metadata = dict(job.metadata or {})
         metadata["celeryTaskId"] = async_result.id or ""
@@ -282,7 +284,8 @@ def serialize_resource_generation_job(job: ResourceGenerationJob) -> dict:
         "agentProgress": _resource_job_agent_progress(job),
         "agentPlan": _resource_job_agent_plan(job),
         "error": job.error_message,
-        "done": job.status in {"succeeded", "failed"},
+        "done": job.status in {"succeeded", "failed", "cancelled"},
+        "canCancel": job.status in {"queued", "running"},
         "actionUrl": f"/a3/resources/{job.resource_pack_id}" if job.resource_pack_id else "/a3/recommendations",
         "createdAt": job.created_at.isoformat(),
         "startedAt": job.started_at.isoformat() if job.started_at else None,
@@ -364,6 +367,69 @@ def resource_generation_job_detail(request, job_id):
         return JsonResponse({"success": True, "job": serialize_resource_generation_job(job)})
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["POST"])
+def cancel_resource_generation_job(request, job_id):
+    rejected = require_authenticated(request)
+    if rejected:
+        return rejected
+    try:
+        payload = _body(request)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+    reason = str(payload.get("reason") or "用户主动取消")[:255]
+    with transaction.atomic():
+        job = get_object_or_404(
+            ResourceGenerationJob.objects.select_for_update(),
+            job_id=str(job_id),
+            user=request.user,
+        )
+        if job.status == "cancelled":
+            return JsonResponse({"success": True, "job": serialize_resource_generation_job(job)})
+        if job.status not in {"queued", "running"}:
+            return JsonResponse({"success": False, "error": "当前任务已经结束，无法取消"}, status=409)
+        metadata = dict(job.metadata or {})
+        celery_task_id = str(metadata.get("celeryTaskId") or "").strip()
+        metadata.update(
+            {
+                "cancelledBy": "owner",
+                "cancelReason": reason,
+                "cancelledAt": timezone.now().isoformat(),
+            }
+        )
+        job.status = "cancelled"
+        job.stage = "cancelled"
+        job.progress = 100
+        job.message = "任务已取消"
+        job.error_message = ""
+        job.finished_at = timezone.now()
+        job.metadata = metadata
+        job.save(
+            update_fields=[
+                "status",
+                "stage",
+                "progress",
+                "message",
+                "error_message",
+                "finished_at",
+                "metadata",
+                "updated_at",
+            ]
+        )
+    revoke_warning = ""
+    if celery_task_id:
+        try:
+            current_app.control.revoke(celery_task_id, terminate=True)
+        except Exception:
+            revoke_warning = "任务已标记取消，Worker 将在下一个检查点停止"
+    return JsonResponse(
+        {
+            "success": True,
+            "job": serialize_resource_generation_job(job),
+            **({"warning": revoke_warning} if revoke_warning else {}),
+        }
+    )
 
 
 @require_http_methods(["POST"])

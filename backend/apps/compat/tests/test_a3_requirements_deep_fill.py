@@ -28,6 +28,7 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         send_task.assert_called_once_with(
             "compat.run_resource_generation_job",
             args=["job-resource-generation-celery-001"],
+            queue="resource-generation",
         )
         job = ResourceGenerationJob.objects.get(job_id="job-resource-generation-celery-001")
         self.assertEqual(job.metadata["celeryTaskId"], "celery-resource-generation-001")
@@ -111,6 +112,113 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
         self.assertEqual(jobs[celery_job.job_id]["status"], "queued")
         stale_job.refresh_from_db()
         self.assertIsNotNone(stale_job.finished_at)
+
+    @patch("celery.current_app.control.revoke")
+    def test_resource_generation_owner_can_cancel_queued_job(self, revoke):
+        job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-generation-owner-cancel",
+            user=self.user,
+            status="queued",
+            progress=0,
+            stage="queued",
+            message="等待 Celery 执行",
+            metadata={"executionBackend": "celery", "celeryTaskId": "owner-resource-task-id"},
+        )
+
+        response = self.client.post(
+            f"/api/resources/jobs/{job.job_id}/cancel/",
+            data=json.dumps({"reason": "不再需要该资源"}, ensure_ascii=False),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["success"])
+        job.refresh_from_db()
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(job.stage, "cancelled")
+        self.assertEqual(job.progress, 100)
+        self.assertIsNotNone(job.finished_at)
+        revoke.assert_called_once_with("owner-resource-task-id", terminate=True)
+
+    @patch("celery.current_app.control.revoke")
+    def test_resource_generation_owner_can_cancel_legacy_job_without_celery_id(self, revoke):
+        job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-generation-owner-cancel-no-task-id",
+            user=self.user,
+            status="queued",
+            stage="queued",
+            metadata={"executionBackend": "celery"},
+        )
+
+        response = self.client.post(
+            f"/api/resources/jobs/{job.job_id}/cancel/",
+            data=json.dumps({"reason": "清理旧排队任务"}, ensure_ascii=False),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        job.refresh_from_db()
+        self.assertEqual(job.status, "cancelled")
+        self.assertFalse(response.json()["job"]["canCancel"])
+        revoke.assert_not_called()
+
+    def test_resource_generation_cancel_enforces_owner_and_terminal_state(self):
+        other_user = User.objects.create_user(phone="13800139901", password="secure-pass-123")
+        other_job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-generation-other-owner",
+            user=other_user,
+            status="queued",
+        )
+        completed_job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-generation-completed",
+            user=self.user,
+            status="succeeded",
+            stage="completed",
+            progress=100,
+        )
+
+        forbidden = self.client.post(
+            f"/api/resources/jobs/{other_job.job_id}/cancel/",
+            data="{}",
+            content_type="application/json",
+        )
+        conflict = self.client.post(
+            f"/api/resources/jobs/{completed_job.job_id}/cancel/",
+            data="{}",
+            content_type="application/json",
+        )
+
+        self.assertEqual(forbidden.status_code, 404)
+        self.assertEqual(conflict.status_code, 409)
+        other_job.refresh_from_db()
+        completed_job.refresh_from_db()
+        self.assertEqual(other_job.status, "queued")
+        self.assertEqual(completed_job.status, "succeeded")
+
+    @patch("celery.current_app.control.revoke")
+    def test_resource_generation_cancel_is_idempotent(self, revoke):
+        job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-generation-cancel-idempotent",
+            user=self.user,
+            status="cancelled",
+            stage="cancelled",
+            progress=100,
+        )
+
+        response = self.client.post(
+            f"/api/resources/jobs/{job.job_id}/cancel/",
+            data="{}",
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["job"]["status"], "cancelled")
+        revoke.assert_not_called()
+
+    def test_resource_generation_uses_dedicated_worker_queue(self):
+        compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+        self.assertIn("--queues=resource-generation", compose)
 
     def test_resource_generation_has_single_kernel_entrypoint(self):
         source = Path("backend/apps/compat/resource_generation.py").read_text(encoding="utf-8")

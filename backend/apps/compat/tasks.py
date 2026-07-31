@@ -3,13 +3,17 @@ from __future__ import annotations
 import logging
 
 from celery import shared_task
-from django.db import InterfaceError, OperationalError, close_old_connections
+from django.db import InterfaceError, OperationalError, close_old_connections, transaction
 from django.utils import timezone
 
 from backend.apps.compat.models import ResourceGenerationJob
 
 
 logger = logging.getLogger(__name__)
+
+
+class ResourceGenerationCancelled(Exception):
+    pass
 
 
 def _user_facing_resource_generation_error(exc: Exception) -> str:
@@ -19,14 +23,26 @@ def _user_facing_resource_generation_error(exc: Exception) -> str:
 
 
 def _save_job_state(job: ResourceGenerationJob, **changes) -> None:
-    for field, value in changes.items():
-        setattr(job, field, value)
-    update_fields = [*changes.keys(), "updated_at"]
+    def persist() -> None:
+        with transaction.atomic():
+            current_status = (
+                ResourceGenerationJob.objects.select_for_update()
+                .filter(pk=job.pk)
+                .values_list("status", flat=True)
+                .first()
+            )
+            if current_status == "cancelled" and changes.get("status") != "cancelled":
+                raise ResourceGenerationCancelled
+            for field, value in changes.items():
+                setattr(job, field, value)
+            update_fields = [*changes.keys(), "updated_at"]
+            job.save(update_fields=update_fields)
+
     try:
-        job.save(update_fields=update_fields)
+        persist()
     except (InterfaceError, OperationalError):
         close_old_connections()
-        job.save(update_fields=update_fields)
+        persist()
 
 
 @shared_task(
@@ -40,23 +56,26 @@ def _save_job_state(job: ResourceGenerationJob, **changes) -> None:
 def run_resource_generation_job(self, job_id: str) -> dict:
     close_old_connections()
     job = ResourceGenerationJob.objects.select_related("user").get(job_id=job_id)
-    if job.status in {"succeeded", "failed"}:
+    if job.status in {"succeeded", "failed", "cancelled"}:
         return job.result if isinstance(job.result, dict) else {}
 
     metadata = dict(job.metadata or {})
     metadata["celeryTaskId"] = self.request.id or metadata.get("celeryTaskId") or ""
     metadata["executionBackend"] = "celery"
-    _save_job_state(
-        job,
-        status="running",
-        stage="retrieval",
-        progress=15,
-        message="正在检索本地知识库和课程资料",
-        error_message="",
-        metadata=metadata,
-        started_at=job.started_at or timezone.now(),
-        finished_at=None,
-    )
+    try:
+        _save_job_state(
+            job,
+            status="running",
+            stage="retrieval",
+            progress=15,
+            message="正在检索本地知识库和课程资料",
+            error_message="",
+            metadata=metadata,
+            started_at=job.started_at or timezone.now(),
+            finished_at=None,
+        )
+    except ResourceGenerationCancelled:
+        return {"success": False, "cancelled": True}
 
     try:
         _save_job_state(
@@ -145,21 +164,26 @@ def run_resource_generation_job(self, job_id: str) -> dict:
             finished_at=timezone.now(),
         )
         return payload
+    except ResourceGenerationCancelled:
+        return {"success": False, "cancelled": True}
     except Exception as exc:
         logger.exception(
             "Resource generation job failed",
             extra={"resource_generation_job_id": job.job_id},
         )
         error_message = _user_facing_resource_generation_error(exc)
-        _save_job_state(
-            job,
-            status="failed",
-            stage="failed",
-            progress=100,
-            message=error_message[:255],
-            error_message=error_message[:4000],
-            finished_at=timezone.now(),
-        )
+        try:
+            _save_job_state(
+                job,
+                status="failed",
+                stage="failed",
+                progress=100,
+                message=error_message[:255],
+                error_message=error_message[:4000],
+                finished_at=timezone.now(),
+            )
+        except ResourceGenerationCancelled:
+            return {"success": False, "cancelled": True}
         return {"success": False, "error": error_message}
     finally:
         close_old_connections()

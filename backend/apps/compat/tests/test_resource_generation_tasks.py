@@ -89,6 +89,85 @@ class ResourceGenerationTaskTests(TransactionTestCase):
         self.assertIsNotNone(job.finished_at)
 
     @patch("backend.apps.compat.resource_generation.generate_resource_pack_v2")
+    def test_cancelled_task_is_not_started_by_late_worker_delivery(self, generate):
+        job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-task-cancelled-before-start",
+            user=self.user,
+            status="cancelled",
+            stage="cancelled",
+            progress=100,
+            message="任务已取消",
+            finished_at=timezone.now(),
+        )
+
+        result = self._load_task().run(job.job_id)
+
+        job.refresh_from_db()
+        self.assertEqual(result, {})
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(job.stage, "cancelled")
+        generate.assert_not_called()
+
+    @patch("backend.apps.compat.resource_generation.generate_resource_pack_v2")
+    def test_running_task_does_not_overwrite_concurrent_cancellation(self, generate):
+        job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-task-cancelled-during-agent",
+            user=self.user,
+            goal="生成案例拆解",
+            resource_type="case_study",
+        )
+
+        def cancel_during_generation(*_args, **kwargs):
+            ResourceGenerationJob.objects.filter(pk=job.pk).update(
+                status="cancelled",
+                stage="cancelled",
+                progress=100,
+                message="任务已取消",
+                finished_at=timezone.now(),
+            )
+            kwargs["on_step"](
+                {"order": 1, "total": 1, "name": "RetrieverAgent", "phase": "started"}
+            )
+
+        generate.side_effect = cancel_during_generation
+
+        result = self._load_task().run(job.job_id)
+
+        job.refresh_from_db()
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(job.stage, "cancelled")
+        self.assertEqual(job.progress, 100)
+
+    @patch("backend.apps.compat.resource_generation.generate_resource_pack_v2")
+    def test_generation_failure_does_not_overwrite_concurrent_cancellation(self, generate):
+        job = ResourceGenerationJob.objects.create(
+            job_id="job-resource-task-cancelled-before-failure-write",
+            user=self.user,
+            goal="生成案例拆解",
+            resource_type="case_study",
+        )
+
+        def cancel_then_fail(*_args, **_kwargs):
+            ResourceGenerationJob.objects.filter(pk=job.pk).update(
+                status="cancelled",
+                stage="cancelled",
+                progress=100,
+                message="任务已取消",
+                finished_at=timezone.now(),
+            )
+            raise RuntimeError("上游调用已中止")
+
+        generate.side_effect = cancel_then_fail
+
+        result = self._load_task().run(job.job_id)
+
+        job.refresh_from_db()
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(job.stage, "cancelled")
+
+    @patch("backend.apps.compat.resource_generation.generate_resource_pack_v2")
     def test_task_reconnects_before_persisting_failure_after_database_disconnect(self, generate):
         generate.side_effect = InterfaceError(0, "")
         job = ResourceGenerationJob.objects.create(

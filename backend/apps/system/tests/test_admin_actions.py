@@ -484,18 +484,45 @@ class AdminActionApiTests(TestCase):
             success=False,
         )
 
-        unsupported = ResourceGenerationJob.objects.create(
-            job_id="unsupported-resource-cancel",
+        resource_job = ResourceGenerationJob.objects.create(
+            job_id="admin-resource-cancel",
             user=self.student,
             status="queued",
+            stage="queued",
+            metadata={"executionBackend": "celery", "celeryTaskId": "resource-generation-task-id"},
         )
-        unsupported_response = self.post_json(
-            f"/api/admin/tasks/resource_generation/{unsupported.pk}/cancel/",
-            {"reason": "不应支持取消"},
+        resource_response = self.post_json(
+            f"/api/admin/tasks/resource_generation/{resource_job.pk}/cancel/",
+            {"reason": "排队时间异常，管理员终止任务"},
         )
-        self.assertEqual(unsupported_response.status_code, 409)
-        unsupported.refresh_from_db()
-        self.assertEqual(unsupported.status, "queued")
+        self.assertEqual(resource_response.status_code, 200)
+        resource_job.refresh_from_db()
+        self.assertEqual(resource_job.status, "cancelled")
+        self.assertEqual(resource_job.stage, "cancelled")
+        self.assertIsNotNone(resource_job.finished_at)
+        revoke.assert_any_call("resource-generation-task-id", terminate=True)
+        self.assert_audit(
+            action="task.cancel",
+            target_id=resource_job.pk,
+            reason="排队时间异常，管理员终止任务",
+            success=True,
+        )
+
+        legacy_resource_job = ResourceGenerationJob.objects.create(
+            job_id="admin-resource-cancel-without-task-id",
+            user=self.student,
+            status="queued",
+            stage="queued",
+            metadata={"executionBackend": "celery"},
+        )
+        legacy_response = self.post_json(
+            f"/api/admin/tasks/resource_generation/{legacy_resource_job.pk}/cancel/",
+            {"reason": "清理缺少任务编号的旧排队任务"},
+        )
+        self.assertEqual(legacy_response.status_code, 200)
+        legacy_resource_job.refresh_from_db()
+        self.assertEqual(legacy_resource_job.status, "cancelled")
+        self.assertEqual(legacy_resource_job.progress, 100)
 
     @patch("backend.apps.system.admin_task_services.current_app.control.revoke")
     def test_video_generation_is_never_cancellable_from_parent_task(self, revoke):

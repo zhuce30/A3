@@ -28,6 +28,15 @@ describe('A3 top task center panel', () => {
     expect(source).toContain('recentEvents');
   });
 
+  it('lets owners cancel queued or running resource generation tasks', () => {
+    const source = fs.readFileSync(topActionsPath, 'utf8');
+
+    expect(source).toContain('canCancel?: boolean');
+    expect(source).toContain('data-testid="a3-top-task-cancel"');
+    expect(source).toContain('`/api/resources/jobs/${encodeURIComponent(task.id)}/cancel/`');
+    expect(source).toContain('取消任务');
+  });
+
   it('keeps the task list scrollable inside the viewport', () => {
     const source = fs.readFileSync(topActionsPath, 'utf8');
 

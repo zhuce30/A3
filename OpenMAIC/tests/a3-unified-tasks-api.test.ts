@@ -33,6 +33,7 @@ describe('A3 unified task APIs', () => {
     expect(source).toContain('actionUrl');
     expect(source).toContain('safeDjangoTaskRequest');
     expect(source).toContain('degraded');
+    expect(source).toContain('canCancel: Boolean(job.canCancel)');
     expect(source).not.toMatch(/[�]|锟|鍥|璇|瀹|涓€|闄|鏆|绯|鎬|杩|浠诲姟|璧勬簮|鐭ヨ瘑|瑙嗛|鐢熸垚/);
   });
 

@@ -13,6 +13,7 @@ urlpatterns = [
     path("resources/generate/", views.resource_generate, name="compat-resource-generate"),
     path("resources/jobs/", views.resource_generation_jobs, name="compat-resource-generation-jobs"),
     path("resources/jobs/<str:job_id>/", views.resource_generation_job_detail, name="compat-resource-generation-job-detail"),
+    path("resources/jobs/<str:job_id>/cancel/", views.cancel_resource_generation_job, name="compat-resource-generation-job-cancel"),
     path("resources/video-jobs/", views.video_generation_jobs, name="compat-video-generation-jobs"),
     path("resources/video-jobs/<str:job_id>/", views.video_generation_job_detail, name="compat-video-generation-job-detail"),
     path("resources/video-jobs/<str:job_id>/retry-failed/", views.retry_failed_video_generation_segments, name="compat-video-generation-job-retry-failed"),

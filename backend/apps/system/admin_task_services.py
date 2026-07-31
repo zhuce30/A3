@@ -60,6 +60,7 @@ _STATUS_ALIASES = {
     "error": "failed",
 }
 _CANCELLABLE_RUNTIME_STATES = {
+    "resource_generation": {"queued", "running"},
     "knowledge_index": {"queued", "running"},
     "video_composition": {"queued", "generating_narration", "composing"},
 }
@@ -183,7 +184,10 @@ def _task_stage(kind: str, task) -> str:
 
 
 def _task_celery_id(kind: str, task) -> str:
-    return "" if kind == "resource_generation" else task.celery_task_id
+    if kind == "resource_generation":
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        return str(metadata.get("celeryTaskId") or "").strip()
+    return task.celery_task_id
 
 
 def _retry_evidence(kind: str, task) -> tuple[bool, str, dict[str, bool]]:
@@ -203,7 +207,7 @@ def _eligibility(kind: str, task) -> dict[str, Any]:
     retry, retry_reason, retry_evidence = _retry_evidence(kind, task)
     cancel = (
         task.status in _CANCELLABLE_RUNTIME_STATES.get(kind, set())
-        and bool(_task_celery_id(kind, task))
+        and (kind == "resource_generation" or bool(_task_celery_id(kind, task)))
     )
     return {
         "retry": retry,
@@ -455,6 +459,10 @@ def _mark_task_cancelled(kind: str, task) -> None:
     task.finished_at = now
     task.message = "任务已由管理员取消"
     update_fields = ["status", "stage", "finished_at", "message", "updated_at"]
+    if kind == "resource_generation":
+        task.progress = 100
+        task.error_message = ""
+        update_fields.extend(["progress", "error_message"])
     task.save(update_fields=update_fields)
 
 
@@ -479,14 +487,15 @@ def cancel_task(
                 )
             task_id = _task_celery_id(kind, task)
             before = {"status": task.status, "stage": _task_stage(kind, task), "progress": task.progress}
-            try:
-                current_app.control.revoke(task_id, terminate=True)
-            except Exception as exc:
-                raise AdminActionError(
-                    "任务撤销请求失败，请稍后重试",
-                    status_code=503,
-                    error_code="revoke_failed",
-                ) from exc
+            if task_id:
+                try:
+                    current_app.control.revoke(task_id, terminate=True)
+                except Exception as exc:
+                    raise AdminActionError(
+                        "任务撤销请求失败，请稍后重试",
+                        status_code=503,
+                        error_code="revoke_failed",
+                    ) from exc
             _mark_task_cancelled(kind, task)
             record_admin_audit(
                 actor=actor,

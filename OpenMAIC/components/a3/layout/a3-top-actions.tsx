@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
-import { Activity, ArrowRight, Bell, CheckCheck, ChevronDown, CircleHelp, Clock3, Globe2, Loader2, Moon, Search, Sun, XCircle } from 'lucide-react';
+import { Activity, ArrowRight, Bell, CheckCheck, ChevronDown, CircleHelp, CircleStop, Clock3, Globe2, Loader2, Moon, Search, Sun, XCircle } from 'lucide-react';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { A3_TOUR_START_EVENT } from '@/components/a3/guided-tour/guided-tour-provider';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
@@ -53,6 +53,7 @@ type A3UnifiedTask = {
   actionUrl: string;
   updatedAt: string;
   error?: string;
+  canCancel?: boolean;
   progressDetail?: A3TaskProgressDetail;
 };
 
@@ -81,6 +82,7 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
   const [tasks, setTasks] = useState<A3UnifiedTask[]>([]);
   const [taskSummary, setTaskSummary] = useState<A3TasksResponse['summary'] | null>(null);
   const [taskError, setTaskError] = useState('');
+  const [cancellingTaskId, setCancellingTaskId] = useState('');
   const [taskStreamState, setTaskStreamState] = useState<'connecting' | 'live' | 'fallback'>('connecting');
 
   useEffect(() => {
@@ -181,6 +183,35 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
     closePanel();
   }
 
+  async function cancelTask(task: A3UnifiedTask) {
+    if (!task.canCancel || cancellingTaskId) return;
+    if (!window.confirm(`确定取消“${task.title}”吗？`)) return;
+    setCancellingTaskId(task.id);
+    setTaskError('');
+    const result = await a3PostJson<{
+      success: boolean;
+      error?: string;
+      warning?: string;
+      job?: { status?: string; stage?: string; progress?: number; message?: string; canCancel?: boolean };
+    }>(`/api/resources/jobs/${encodeURIComponent(task.id)}/cancel/`, { reason: '用户从任务中心取消' });
+    setCancellingTaskId('');
+    if (!result.success) {
+      setTaskError(result.error || '任务取消失败，请稍后重试');
+      return;
+    }
+    setTasks((items) => items.map((item) => item.id === task.id ? {
+      ...item,
+      status: result.job?.status || 'cancelled',
+      stage: result.job?.stage || 'cancelled',
+      progress: result.job?.progress ?? 100,
+      message: result.job?.message || '任务已取消',
+      canCancel: false,
+      updatedAt: new Date().toISOString(),
+    } : item));
+    setTaskSummary((summary) => summary ? { ...summary, running: Math.max(0, summary.running - 1) } : summary);
+    if (result.warning) setTaskError(result.warning);
+  }
+
   return (
     <div className="relative flex min-w-0 items-center gap-1 text-[var(--a3-text)] sm:gap-2 md:gap-4">
       <div className="relative">
@@ -227,13 +258,16 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
             <div data-testid="a3-top-tasks-scroll" aria-label="任务列表" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
               <div className="space-y-2">
               {visibleTasks.map((task) => (
-                <Link
+                <div
                   key={`${task.type}:${task.id}`}
-                  href={task.actionUrl || '/a3/recommendations'}
-                  onClick={closePanel}
                   data-testid="a3-top-task-item"
-                  className="block rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] px-3 py-3 transition-colors hover:border-blue-200 hover:bg-blue-50 dark:hover:bg-blue-950/40"
+                  className="overflow-hidden rounded-xl border border-[var(--a3-border)] bg-[var(--a3-surface-muted)] transition-colors hover:border-blue-200 hover:bg-blue-50 dark:hover:bg-blue-950/40"
                 >
+                  <Link
+                    href={task.actionUrl || '/a3/recommendations'}
+                    onClick={closePanel}
+                    className="block px-3 py-3"
+                  >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
@@ -279,7 +313,22 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
                       {formatTaskTime(task.updatedAt)}
                     </span>
                   </div>
-                </Link>
+                  </Link>
+                  {task.canCancel && (
+                    <div className="flex justify-end border-t border-[var(--a3-border)] px-3 py-2">
+                      <button
+                        type="button"
+                        data-testid="a3-top-task-cancel"
+                        disabled={Boolean(cancellingTaskId)}
+                        onClick={() => void cancelTask(task)}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-rose-300 dark:hover:bg-rose-950/40"
+                      >
+                        {cancellingTaskId === task.id ? <Loader2 className="size-3.5 animate-spin" /> : <CircleStop className="size-3.5" />}
+                        取消任务
+                      </button>
+                    </div>
+                  )}
+                </div>
               ))}
 
               {!visibleTasks.length && !taskError && (
@@ -541,6 +590,7 @@ function formatTaskStatus(status: string) {
   if (status === 'succeeded') return '已完成';
   if (status === 'partial') return '部分完成';
   if (status === 'failed') return '失败';
+  if (status === 'cancelled') return '已取消';
   return status || '未知';
 }
 
@@ -548,6 +598,7 @@ function taskStatusClassName(status: string) {
   if (status === 'failed') return 'bg-rose-50 text-rose-700';
   if (status === 'succeeded') return 'bg-emerald-50 text-emerald-700';
   if (status === 'partial') return 'bg-amber-50 text-amber-700';
+  if (status === 'cancelled') return 'bg-slate-100 text-slate-600';
   if (isTaskRunning(status)) return 'bg-blue-50 text-blue-700';
   return 'bg-slate-100 text-slate-600';
 }

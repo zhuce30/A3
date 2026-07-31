@@ -21,6 +21,7 @@ type UnifiedTask = {
   actionUrl: string;
   updatedAt: string;
   error?: string;
+  canCancel?: boolean;
   progressDetail?: ProgressDetail;
 };
 
@@ -147,6 +148,7 @@ function normalizeResourceGenerationTask(job: Record<string, unknown>): UnifiedT
     actionUrl: text(job.actionUrl, resourcePackId ? `/a3/resources/${resourcePackId}` : '/a3/recommendations'),
     updatedAt: text(job.updatedAt || job.createdAt, new Date(0).toISOString()),
     error: text(job.error),
+    canCancel: Boolean(job.canCancel),
   };
 }
 

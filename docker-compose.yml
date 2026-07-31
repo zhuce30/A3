@@ -102,6 +102,48 @@ services:
       redis:
         condition: service_healthy
 
+  resource-worker:
+    build:
+      context: ./backend
+    command: ["celery", "-A", "backend.config", "worker", "-l", "info", "--queues=resource-generation", "--concurrency=1", "--prefetch-multiplier=1", "--max-tasks-per-child=10"]
+    environment:
+      DJANGO_DEBUG: "1"
+      DJANGO_SECRET_KEY: a3-docker-dev-secret-change-before-production
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      MYSQL_DATABASE: a3_learning
+      MYSQL_USER: a3
+      MYSQL_PASSWORD: a3_password
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      A3_LLM_API_KEY: ${A3_LLM_API_KEY:-}
+      A3_LLM_BASE_URL: ${A3_LLM_BASE_URL:-}
+      A3_LLM_MODEL: ${A3_LLM_MODEL:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      A3_RESOURCE_LLM_ENABLED: ${A3_RESOURCE_LLM_ENABLED:-auto}
+      A3_RESOURCE_LLM_FULL_PACK_ENABLED: ${A3_RESOURCE_LLM_FULL_PACK_ENABLED:-0}
+      A3_VISUAL_EMBED_PROVIDER: ${A3_VISUAL_EMBED_PROVIDER:-local}
+      A3_VISUAL_EMBED_API_KEY: ${A3_VISUAL_EMBED_API_KEY:-}
+      A3_VISUAL_EMBED_BASE_URL: ${A3_VISUAL_EMBED_BASE_URL:-}
+      A3_VISUAL_EMBED_MODEL: ${A3_VISUAL_EMBED_MODEL:-}
+      A3_WAIT_FOR_DB: "1"
+      A3_RUN_MIGRATIONS: "0"
+      A3_SEED_DEMO_DATA: "0"
+    volumes:
+      - ./data:/app/data
+      - ./backend/knowledge_base:/app/backend/knowledge_base
+      - ./backend/tmp:/app/backend/tmp
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
   video-worker:
     build:
       context: ./backend
