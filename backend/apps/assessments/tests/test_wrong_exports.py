@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from io import BytesIO
 
 from django.test import TestCase
 from django.utils import timezone
+from docx import Document
+from openpyxl import load_workbook
+from pypdf import PdfReader
 
 from backend.apps.accounts.models import User
 from backend.apps.assessments.models import Question, WrongQuestion
@@ -118,3 +122,58 @@ class WrongExportDomainTests(TestCase):
         self.assertEqual(row["course"], "操作系统导出测试")
         self.assertNotIn("phone", snapshot)
 
+    def test_build_docx_export_produces_openable_chinese_document(self):
+        from backend.apps.assessments.wrong_exports import build_wrong_export
+
+        artifact = build_wrong_export(self.user, "active", "docx")
+        document = Document(BytesIO(artifact.content))
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+        self.assertEqual(
+            artifact.content_type,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertTrue(artifact.filename.endswith(".docx"))
+        self.assertNotIn("/", artifact.filename)
+        self.assertIn("错题复习清单", text)
+        self.assertIn("今日到期题", text)
+        self.assertIn("正确答案：B", text)
+        self.assertIn("时间片轮转", text)
+
+    def test_build_xlsx_export_has_exact_headers_and_typed_dates(self):
+        from backend.apps.assessments.wrong_exports import build_wrong_export
+
+        artifact = build_wrong_export(self.user, "active", "xlsx")
+        workbook = load_workbook(BytesIO(artifact.content))
+        sheet = workbook["错题明细"]
+        headers = [cell.value for cell in sheet[1]]
+
+        self.assertEqual(artifact.content_type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertEqual(headers[0:5], ["错题ID", "知识点", "章节", "题干", "选项"])
+        self.assertIn("正确答案", headers)
+        self.assertIn("下次复习时间", headers)
+        self.assertEqual(sheet.max_row, 3)
+        review_column = headers.index("下次复习时间") + 1
+        self.assertIsNotNone(sheet.cell(row=2, column=review_column).value)
+        self.assertEqual(sheet.freeze_panes, "A2")
+
+    def test_build_pdf_export_is_parseable_and_has_metadata(self):
+        from backend.apps.assessments.wrong_exports import build_wrong_export
+
+        artifact = build_wrong_export(self.user, "active", "pdf")
+        reader = PdfReader(BytesIO(artifact.content))
+
+        self.assertEqual(artifact.content_type, "application/pdf")
+        self.assertTrue(artifact.filename.endswith(".pdf"))
+        self.assertGreaterEqual(len(reader.pages), 1)
+        self.assertEqual(reader.metadata.title, "智学引擎错题复习清单")
+        self.assertGreater(len(artifact.content), 1000)
+
+    def test_build_wrong_export_rejects_invalid_format_and_empty_scope(self):
+        from backend.apps.assessments.wrong_exports import WrongExportRequestError, build_wrong_export
+
+        with self.assertRaisesMessage(WrongExportRequestError, "导出格式"):
+            build_wrong_export(self.user, "active", "csv")
+        WrongQuestion.objects.filter(user=self.user).update(mastered=False)
+        with self.assertRaisesMessage(WrongExportRequestError, "没有可导出的错题"):
+            build_wrong_export(self.user, "mastered", "docx")

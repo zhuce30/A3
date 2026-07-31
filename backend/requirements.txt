@@ -33,6 +33,7 @@ cryptography>=3.1
 python-pptx
 python-docx
 openpyxl
+reportlab
 rapidocr-onnxruntime
 requests
 pywin32; sys_platform == "win32"
