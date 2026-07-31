@@ -63,6 +63,7 @@ describe('algorithm lab API client', () => {
     });
 
     const result = await fetchAlgorithmLabCatalog();
+    if (!result.success) throw new Error('expected algorithm lab catalog');
     expect(result).not.toHaveProperty('recentSession');
     expect(result.labs[0].recentSession).toMatchObject({
       eventId: 'a3lab-event-1',
@@ -70,6 +71,20 @@ describe('algorithm lab API client', () => {
       nextAction: { type: 'assessment', href: '/a3/assessment' },
     });
     expect(getJson).toHaveBeenCalledWith('/api/learning/algorithm-labs/');
+  });
+
+  it('narrows a catalog 401 response without requiring labs', async () => {
+    getJson.mockResolvedValue({ success: false, error: '请先登录', status: 401 });
+
+    const result = await fetchAlgorithmLabCatalog();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const status: number = result.status;
+      expect(status).toBe(401);
+      expect(result.error).toBe('请先登录');
+      expect(result).not.toHaveProperty('labs');
+    }
   });
 
   it('submits completion through the verified completion endpoint', async () => {
@@ -98,6 +113,24 @@ describe('algorithm lab API client', () => {
       nextActionType: 'assessment',
     });
     expect(postJson).toHaveBeenCalledWith('/api/learning/algorithm-labs/complete/', request);
+  });
+
+  it('keeps completion algorithms correlated with the selected lab', () => {
+    const cpuRequest: AlgorithmLabCompletionRequest<'cpu-scheduling'> = createCompletionRequest();
+    const pageRequest: AlgorithmLabCompletionRequest<'page-replacement'> = {
+      ...createCompletionRequest(),
+      labId: 'page-replacement',
+      selectedAlgorithms: ['fifo', 'lru', 'opt'],
+    };
+    expect(cpuRequest.selectedAlgorithms).toEqual(['fcfs', 'sjf', 'priority', 'rr']);
+    expect(pageRequest.selectedAlgorithms).toEqual(['fifo', 'lru', 'opt']);
+
+    if (false) {
+      void submitAlgorithmLabCompletion(cpuRequest);
+      void submitAlgorithmLabCompletion(pageRequest);
+      // @ts-expect-error FIFO is not a CPU scheduling algorithm.
+      void submitAlgorithmLabCompletion({ ...cpuRequest, selectedAlgorithms: ['fifo'] });
+    }
   });
 
   it.each([400, 409])('preserves numeric HTTP status %s on completion failures', async (httpStatus) => {
@@ -258,7 +291,7 @@ function createPageSession(): AlgorithmLabSession<'page-replacement'> {
   };
 }
 
-function createCompletionRequest(): AlgorithmLabCompletionRequest {
+function createCompletionRequest(): AlgorithmLabCompletionRequest<'cpu-scheduling'> {
   return {
     schemaVersion: 'a3.algorithm-lab.completion.v1',
     eventId: 'a3lab-event-1',

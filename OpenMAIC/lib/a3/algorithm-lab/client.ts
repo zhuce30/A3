@@ -1,6 +1,7 @@
 import { a3GetJson, a3PostJson } from '../api-client';
 import type {
   AlgorithmLabAlgorithm,
+  AlgorithmLabAlgorithmById,
   AlgorithmLabDifficulty,
   AlgorithmLabId,
 } from './contracts';
@@ -28,12 +29,21 @@ export interface AlgorithmLabCatalogItem {
   recentSession: AlgorithmLabRecentSession | null;
 }
 
-export interface AlgorithmLabCatalogResponse {
-  success: boolean;
-  error?: string;
-  schemaVersion?: 'a3.algorithm-labs.catalog.v1';
-  labs: AlgorithmLabCatalogItem[];
-}
+export type AlgorithmLabCatalogResponse =
+  | {
+      success: true;
+      schemaVersion: 'a3.algorithm-labs.catalog.v1';
+      labs: AlgorithmLabCatalogItem[];
+      error?: never;
+      status?: never;
+    }
+  | {
+      success: false;
+      error: string;
+      status: number;
+      schemaVersion?: never;
+      labs?: never;
+    };
 
 export interface AlgorithmLabNextAction {
   type: 'assessment' | 'replay_lab';
@@ -66,15 +76,13 @@ export interface AlgorithmLabRecentSession extends AlgorithmLabCompletionResult 
   completedAt?: string;
 }
 
-export interface AlgorithmLabCompletionRequest {
+interface AlgorithmLabCompletionRequestFields {
   schemaVersion: 'a3.algorithm-lab.completion.v1';
   eventId: string;
-  labId: AlgorithmLabId;
   labVersion: string;
   presetId: string;
   presetVersion: string;
   customInput: boolean;
-  selectedAlgorithms: AlgorithmLabAlgorithm[];
   prediction: {
     answer: string;
     skipped: boolean;
@@ -93,6 +101,14 @@ export interface AlgorithmLabCompletionRequest {
   };
   resultFingerprint: string;
 }
+
+export type AlgorithmLabCompletionRequest<TLabId extends AlgorithmLabId = AlgorithmLabId> =
+  TLabId extends AlgorithmLabId
+    ? AlgorithmLabCompletionRequestFields & {
+        labId: TLabId;
+        selectedAlgorithms: AlgorithmLabAlgorithmById[TLabId][];
+      }
+    : never;
 
 export type AlgorithmLabCompletionResponse =
   | {
