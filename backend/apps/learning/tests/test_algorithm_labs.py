@@ -46,9 +46,12 @@ def known_cpu_completion(event_id="lab-event-1", **overrides):
         "selectedAlgorithms": ["fcfs", "sjf", "priority", "rr"],
         "prediction": {"answer": "SJF", "skipped": False, "correct": True},
         "checkpoints": {
-            "answered": 4,
-            "correct": 4,
-            "items": [{"id": f"checkpoint-{index}", "correct": True} for index in range(4)],
+            "answered": 2,
+            "correct": 2,
+            "items": [
+                {"id": "cpu-ready-queue", "correct": True},
+                {"id": "cpu-completion-order", "correct": True},
+            ],
         },
         "metrics": {
             "score": 75,
@@ -73,7 +76,14 @@ def known_page_completion(event_id="page-event-1", **overrides):
         "customInput": False,
         "selectedAlgorithms": ["fifo", "lru", "opt"],
         "prediction": {"answer": "lru", "skipped": False},
-        "checkpoints": {"answered": 1, "correct": 1, "items": [{"id": "checkpoint-1", "correct": True}]},
+        "checkpoints": {
+            "answered": 2,
+            "correct": 2,
+            "items": [
+                {"id": "page-victim", "correct": True},
+                {"id": "page-policy-reason", "correct": True},
+            ],
+        },
         "metrics": {"score": 75, "durationSec": 12, "replayCount": 0, "reviewedStepIndexes": [0]},
         "resultFingerprint": PAGE_FOUNDATION_FINGERPRINT,
     }
@@ -257,6 +267,42 @@ class AlgorithmLabApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertFalse(response.json()["success"])
+
+    def test_verified_completion_requires_both_registered_checkpoints(self):
+        self.client.force_login(self.user)
+        cases = (
+            {
+                "answered": 1,
+                "correct": 1,
+                "items": [{"id": "cpu-ready-queue", "correct": True}],
+            },
+            {
+                "answered": 2,
+                "correct": 2,
+                "items": [
+                    {"id": "checkpoint-0", "correct": True},
+                    {"id": "checkpoint-1", "correct": True},
+                ],
+            },
+            {
+                "answered": 2,
+                "correct": 2,
+                "items": [
+                    {"id": "cpu-ready-queue", "correct": True},
+                    {"id": "cpu-ready-queue", "correct": True},
+                ],
+            },
+        )
+
+        for index, checkpoints in enumerate(cases):
+            response = self.post_complete(
+                known_cpu_completion(f"incomplete-checkpoints-{index}", checkpoints=checkpoints)
+            )
+
+            self.assertEqual(response.status_code, 201)
+            completion = response.json()["completion"]
+            self.assertFalse(completion["verified"])
+            self.assertFalse(completion["masteryEvidenceAccepted"])
         self.assertFalse(LearningEvent.objects.filter(user=self.user, event_id="lab-event-1").exists())
 
     def test_verified_prediction_correctness_is_computed_server_side(self):
@@ -452,7 +498,7 @@ class AlgorithmLabApiTests(TestCase):
         self.assertEqual(effect["completed"], 2)
         self.assertEqual(effect["verified"], 1)
         self.assertEqual(effect["prediction"], {"answered": 1, "correct": 1})
-        self.assertEqual(effect["checkpoints"], {"answered": 8, "correct": 8})
+        self.assertEqual(effect["checkpoints"], {"answered": 4, "correct": 4})
         self.assertEqual(effect["reviewed"], 4)
         self.assertEqual(effect["byLab"][0]["labId"], "cpu-scheduling")
         self.assertEqual(effect["byLab"][0]["verified"], 1)

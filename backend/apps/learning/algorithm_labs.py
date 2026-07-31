@@ -21,6 +21,11 @@ _LAB_ASSESSMENT_TOPICS = {
     "page-replacement": "虚拟内存与页面置换",
 }
 
+_LAB_REQUIRED_CHECKPOINT_IDS = {
+    "cpu-scheduling": frozenset({"cpu-ready-queue", "cpu-completion-order"}),
+    "page-replacement": frozenset({"page-victim", "page-policy-reason"}),
+}
+
 
 class AlgorithmLabCompletionConflict(Exception):
     pass
@@ -174,11 +179,18 @@ def complete_algorithm_lab(user, payload) -> dict:
     if not normalized["customInput"] and preset is None:
         raise ValueError("标准预设或版本不存在")
 
+    required_checkpoint_ids = _LAB_REQUIRED_CHECKPOINT_IDS.get(normalized["labId"], frozenset())
+    submitted_checkpoint_ids = [item["id"] for item in normalized["checkpoints"]["items"]]
+    checkpoints_complete = bool(
+        len(submitted_checkpoint_ids) == len(required_checkpoint_ids)
+        and set(submitted_checkpoint_ids) == required_checkpoint_ids
+    )
     verified = bool(
         not normalized["customInput"]
         and preset is not None
         and set(normalized["selectedAlgorithms"]) == set(supported_algorithms)
         and normalized["resultFingerprint"] == preset["expectedFingerprint"]
+        and checkpoints_complete
     )
     score = _derived_score(normalized["checkpoints"], normalized["metrics"])
     prediction = _server_prediction(normalized["prediction"], preset, verified)
