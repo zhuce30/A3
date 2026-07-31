@@ -1,11 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { selectLatestResumeLabId } from '@/components/a3/features/algorithm-lab/algorithm-lab-catalog-view';
 import {
   algorithmLabReducer,
+  buildSimulationRuns,
+  createAlgorithmLabStartedEventId,
   createAlgorithmLabState,
+  createStartedEventGate,
+  emitAlgorithmLabStartedOnce,
+  type AlgorithmLabRunRequest,
 } from '@/components/a3/features/algorithm-lab/algorithm-lab-workbench';
+import { getNextMobilePanel } from '@/components/a3/features/algorithm-lab/algorithm-lab-layout';
 import type { SimulationRun } from '@/lib/a3/algorithm-lab/contracts';
 
 const root = process.cwd();
@@ -91,12 +97,98 @@ describe('algorithm lab UI', () => {
 
     const configured = algorithmLabReducer(sought, {
       type: 'configure',
+      labId: 'cpu-scheduling',
       input: { processes: [{ processId: 'P1', arrivalTime: 0, burstTime: 1, priority: 0 }], timeQuantum: 1 },
       algorithms: ['fcfs'],
     });
     expect(configured.phase).toBe('configured');
     expect(configured.runs).toEqual([]);
     expect(configured.currentStepIndex).toBe(0);
+  });
+
+  it('initializes deterministically and restores only through an explicit hydrated action', () => {
+    const source = readFileSync(workbenchPath, 'utf8');
+    const initial = createAlgorithmLabState('cpu-scheduling');
+
+    expect(initial.hydrated).toBe(false);
+    expect(source).toContain('useReducer(algorithmLabReducer, labId, createAlgorithmLabState)');
+    expect(source).toContain("type: 'restore'");
+    expect(source).toContain('if (!state.hydrated) return;');
+    expect(source).not.toContain('useReducer(algorithmLabReducer, labId, restoreAlgorithmLabState)');
+
+    const restored = algorithmLabReducer(initial, {
+      type: 'restore',
+      labId: 'cpu-scheduling',
+      session: {
+        schemaVersion: 'a3.algorithm-lab.session.v1',
+        labId: 'cpu-scheduling',
+        phase: 'paused',
+        presetId: 'custom',
+        presetVersion: '1.0.0',
+        selectedAlgorithms: ['fcfs'],
+        input: { processes: [{ processId: 'P1', arrivalTime: 0, burstTime: 2, priority: 0 }], timeQuantum: 1 },
+        prediction: null,
+        checkpointAnswers: {},
+        currentStepIndex: 1,
+        replayCount: 0,
+        reviewedStepIndexes: [],
+        startedAt: '2026-07-31T12:00:00.000Z',
+      },
+    });
+    expect(restored).toMatchObject({ hydrated: true, phase: 'paused', presetId: 'custom' });
+    expect(restored.runs.length).toBe(1);
+  });
+
+  it('keeps lab input and algorithms correlated at compile time and runtime', () => {
+    const cpuRequest: AlgorithmLabRunRequest = {
+      labId: 'cpu-scheduling',
+      input: { processes: [{ processId: 'P1', arrivalTime: 0, burstTime: 1, priority: 0 }], timeQuantum: 1 },
+      algorithms: ['fcfs'],
+    };
+    expect(buildSimulationRuns(cpuRequest)[0].algorithm).toBe('fcfs');
+
+    expect(() => buildSimulationRuns({
+      ...cpuRequest,
+      algorithms: ['fifo'],
+    } as unknown as AlgorithmLabRunRequest)).toThrow('算法与实验类型不匹配');
+
+    if (false) {
+      // @ts-expect-error FIFO cannot be paired with CPU scheduling input.
+      void buildSimulationRuns({ ...cpuRequest, algorithms: ['fifo'] });
+    }
+  });
+
+  it('retries a failed started event and stops after a successful write', async () => {
+    const gate = createStartedEventGate();
+    const send = vi.fn()
+      .mockResolvedValueOnce({ success: false, error: 'offline' })
+      .mockResolvedValueOnce({ success: true, status: 'accepted' });
+
+    await expect(emitAlgorithmLabStartedOnce(gate, send)).resolves.toBe(false);
+    expect(gate.status).toBe('idle');
+    await expect(emitAlgorithmLabStartedOnce(gate, send)).resolves.toBe(true);
+    expect(gate.status).toBe('sent');
+    await expect(emitAlgorithmLabStartedOnce(gate, send)).resolves.toBe(false);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it('guards duplicate in-flight started events and uses a stable retry event id', async () => {
+    const gate = createStartedEventGate();
+    let resolveSend: ((value: { success: true; status: 'duplicate' }) => void) | undefined;
+    const send = vi.fn(() => new Promise<{ success: true; status: 'duplicate' }>((resolve) => {
+      resolveSend = resolve;
+    }));
+
+    const first = emitAlgorithmLabStartedOnce(gate, send);
+    await expect(emitAlgorithmLabStartedOnce(gate, send)).resolves.toBe(false);
+    expect(send).toHaveBeenCalledTimes(1);
+    resolveSend?.({ success: true, status: 'duplicate' });
+    await expect(first).resolves.toBe(true);
+
+    const startedAt = '2026-07-31T12:00:00.000Z';
+    expect(createAlgorithmLabStartedEventId('cpu-scheduling', startedAt)).toBe(
+      createAlgorithmLabStartedEventId('cpu-scheduling', startedAt),
+    );
   });
 
   it('renders a safe dynamic route and a real unknown-lab recovery link', () => {
@@ -120,7 +212,9 @@ describe('algorithm lab UI', () => {
     expect(source).toContain('simulateCpuScheduling');
     expect(source).toContain('simulatePageReplacement');
     expect(source).toContain('trackAlgorithmLabStarted');
+    expect(source).toContain("resourceType: 'interactive_lab'");
     expect(source).not.toContain('steps: state.runs');
+    expect(source).not.toContain('as never');
   });
 
   it('clears persisted recovery and started-event state on reset', () => {
@@ -128,7 +222,7 @@ describe('algorithm lab UI', () => {
 
     expect(source).toContain('function resetWorkbench()');
     expect(source).toContain('clearLabSession(labId);');
-    expect(source).toContain('startedEventSent.current = false;');
+    expect(source).toContain('startedEventGate.current = createStartedEventGate();');
     expect(source).toContain('onReset={resetWorkbench}');
   });
 
@@ -141,6 +235,35 @@ describe('algorithm lab UI', () => {
     expect(source).toContain('运行');
     expect(source).toContain('结果');
     expect(source).toContain('details');
+  });
+
+  it('shows a visible custom preset after restoring edited input', () => {
+    const inputPanel = readFileSync(
+      join(root, 'components/a3/features/algorithm-lab/algorithm-lab-input-panel.tsx'),
+      'utf8',
+    );
+
+    expect(inputPanel).toContain('自定义配置');
+    expect(inputPanel).toContain("presetId === 'custom'");
+  });
+
+  it('implements the complete keyboard-operable ARIA tabs pattern', () => {
+    const source = readFileSync(layoutPath, 'utf8');
+
+    expect(source).toContain('aria-controls');
+    expect(source).toContain('aria-labelledby');
+    expect(source).toContain('role="tabpanel"');
+    expect(source).toContain('tabIndex={mobilePanel === value ? 0 : -1}');
+    expect(source).toContain('ArrowLeft');
+    expect(source).toContain('ArrowRight');
+    expect(source).toContain('Home');
+    expect(source).toContain('End');
+
+    expect(getNextMobilePanel('input', 'ArrowRight')).toBe('run');
+    expect(getNextMobilePanel('input', 'ArrowLeft')).toBe('result');
+    expect(getNextMobilePanel('result', 'Home')).toBe('input');
+    expect(getNextMobilePanel('input', 'End')).toBe('result');
+    expect(getNextMobilePanel('run', 'Enter')).toBe('run');
   });
 
   it('exposes accessible playback controls and a collapsed scrolling explanation', () => {

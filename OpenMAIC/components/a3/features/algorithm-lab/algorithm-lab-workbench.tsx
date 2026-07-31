@@ -5,14 +5,16 @@ import { ArrowLeft, FlaskConical } from 'lucide-react';
 import { useEffect, useMemo, useReducer, useRef } from 'react';
 import type {
   AlgorithmLabAlgorithm,
+  AlgorithmLabAlgorithmById,
   AlgorithmLabId,
-  AlgorithmLabInput,
+  AlgorithmLabInputById,
   AlgorithmLabPhase,
   SimulationRun,
 } from '@/lib/a3/algorithm-lab/contracts';
 import { simulateCpuScheduling } from '@/lib/a3/algorithm-lab/cpu-scheduling';
 import { simulatePageReplacement } from '@/lib/a3/algorithm-lab/page-replacement';
 import { getAlgorithmLabDefinition } from '@/lib/a3/algorithm-lab/registry';
+import { validateCpuSchedulingInput, validatePageReplacementInput } from '@/lib/a3/algorithm-lab/validators';
 import {
   ALGORITHM_LAB_SESSION_SCHEMA_VERSION,
   clearLabSession,
@@ -29,14 +31,12 @@ import { AlgorithmLabStepExplanation } from './algorithm-lab-step-explanation';
 
 type SyncState = 'idle' | 'pending' | 'failed' | 'submitted';
 
-export interface AlgorithmLabState {
-  labId: AlgorithmLabId;
+interface AlgorithmLabStateBase {
   phase: AlgorithmLabPhase;
+  hydrated: boolean;
   presetId: string;
   presetVersion: string;
   customInput: boolean;
-  input: AlgorithmLabInput;
-  selectedAlgorithms: AlgorithmLabAlgorithm[];
   prediction: { answer: string | null; skipped: boolean } | null;
   runs: SimulationRun<unknown, unknown>[];
   currentStepIndex: number;
@@ -49,10 +49,38 @@ export interface AlgorithmLabState {
   startedAt: string | null;
 }
 
+export type AlgorithmLabStateFor<TLabId extends AlgorithmLabId> = AlgorithmLabStateBase & {
+  labId: TLabId;
+  input: AlgorithmLabInputById[TLabId];
+  selectedAlgorithms: AlgorithmLabAlgorithmById[TLabId][];
+};
+
+export type AlgorithmLabState =
+  | AlgorithmLabStateFor<'cpu-scheduling'>
+  | AlgorithmLabStateFor<'page-replacement'>;
+
+type ConfigureAction = {
+  [TLabId in AlgorithmLabId]: {
+    type: 'configure';
+    labId: TLabId;
+    input: AlgorithmLabInputById[TLabId];
+    algorithms: AlgorithmLabAlgorithmById[TLabId][];
+  }
+}[AlgorithmLabId];
+
+type RestoreAction = {
+  [TLabId in AlgorithmLabId]: {
+    type: 'restore';
+    labId: TLabId;
+    session: AlgorithmLabSession<TLabId> | null;
+  }
+}[AlgorithmLabId];
+
 export type AlgorithmLabAction =
-  | { type: 'configure'; input: AlgorithmLabInput; algorithms: AlgorithmLabAlgorithm[] }
+  | ConfigureAction
+  | RestoreAction
   | { type: 'predict'; answer: string | null; skipped: boolean }
-  | { type: 'start'; runs: SimulationRun<unknown, unknown>[] }
+  | { type: 'start'; runs: SimulationRun<unknown, unknown>[]; startedAt?: string }
   | { type: 'pause' }
   | { type: 'seek'; index: number }
   | { type: 'advance' }
@@ -66,17 +94,42 @@ export type AlgorithmLabAction =
   | { type: 'set_speed'; speed: number }
   | { type: 'review_step'; index: number };
 
+export function createAlgorithmLabState(
+  labId: 'cpu-scheduling',
+): AlgorithmLabStateFor<'cpu-scheduling'>;
+export function createAlgorithmLabState(
+  labId: 'page-replacement',
+): AlgorithmLabStateFor<'page-replacement'>;
+export function createAlgorithmLabState(labId: AlgorithmLabId): AlgorithmLabState;
 export function createAlgorithmLabState(labId: AlgorithmLabId): AlgorithmLabState {
-  const definition = getAlgorithmLabDefinition(labId)!;
+  if (labId === 'cpu-scheduling') {
+    const definition = getAlgorithmLabDefinition('cpu-scheduling');
+    if (!definition) throw new Error('CPU 调度实验未注册');
+    const preset = definition.presets[0];
+    return createStateForLab(labId, preset.input, definition.algorithms, preset.id, preset.version);
+  }
+  const definition = getAlgorithmLabDefinition('page-replacement');
+  if (!definition) throw new Error('页面置换实验未注册');
   const preset = definition.presets[0];
+  return createStateForLab(labId, preset.input, definition.algorithms, preset.id, preset.version);
+}
+
+function createStateForLab<TLabId extends AlgorithmLabId>(
+  labId: TLabId,
+  input: AlgorithmLabInputById[TLabId],
+  algorithms: AlgorithmLabAlgorithmById[TLabId][],
+  presetId: string,
+  presetVersion: string,
+): AlgorithmLabStateFor<TLabId> {
   return {
     labId,
     phase: 'idle',
-    presetId: preset.id,
-    presetVersion: preset.version,
+    hydrated: false,
+    presetId,
+    presetVersion,
     customInput: false,
-    input: structuredClone(preset.input),
-    selectedAlgorithms: [...definition.algorithms],
+    input: structuredClone(input),
+    selectedAlgorithms: [...algorithms],
     prediction: null,
     runs: [],
     currentStepIndex: 0,
@@ -96,24 +149,10 @@ export function algorithmLabReducer(
 ): AlgorithmLabState {
   const finalStepIndex = getFinalStepIndex(state.runs);
   switch (action.type) {
+    case 'restore':
+      return restoreState(state, action);
     case 'configure': {
-      const preset = findMatchingPreset(state.labId, action.input);
-      return {
-        ...state,
-        phase: 'configured',
-        presetId: preset?.id ?? 'custom',
-        presetVersion: preset?.version ?? getAlgorithmLabDefinition(state.labId)!.version,
-        customInput: !preset,
-        input: structuredClone(action.input),
-        selectedAlgorithms: [...action.algorithms],
-        prediction: null,
-        runs: [],
-        currentStepIndex: 0,
-        checkpointAnswers: {},
-        reviewedStepIndexes: [],
-        syncState: 'idle',
-        syncError: '',
-      };
+      return configureState(state, action);
     }
     case 'predict':
       return { ...state, phase: 'predicted', prediction: { answer: action.answer, skipped: action.skipped } };
@@ -126,7 +165,7 @@ export function algorithmLabReducer(
         runs: action.runs,
         currentStepIndex: resuming ? state.currentStepIndex : 0,
         replayCount: replaying ? state.replayCount + 1 : state.replayCount,
-        startedAt: state.startedAt ?? new Date().toISOString(),
+        startedAt: state.startedAt ?? action.startedAt ?? new Date().toISOString(),
         syncState: 'idle',
         syncError: '',
       };
@@ -166,7 +205,7 @@ export function algorithmLabReducer(
     case 'review_step':
       return { ...state, reviewedStepIndexes: uniqueIndexes([...state.reviewedStepIndexes, action.index]) };
     case 'reset':
-      return createAlgorithmLabState(state.labId);
+      return { ...createAlgorithmLabState(state.labId), hydrated: true };
   }
 }
 
@@ -184,16 +223,24 @@ export function AlgorithmLabWorkbench({ labId }: { labId: string }) {
       </div>
     );
   }
-  return <KnownAlgorithmLabWorkbench labId={definition.id} />;
+  return <KnownAlgorithmLabWorkbench key={definition.id} labId={definition.id} />;
 }
 
 function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   const definition = getAlgorithmLabDefinition(labId)!;
-  const [state, dispatch] = useReducer(algorithmLabReducer, labId, restoreAlgorithmLabState);
+  const [state, dispatch] = useReducer(algorithmLabReducer, labId, createAlgorithmLabState);
   const canvasRef = useRef<HTMLDivElement>(null);
-  const startedEventSent = useRef(Boolean(state.startedAt));
+  const startedEventGate = useRef(createStartedEventGate());
   const finalStepIndex = useMemo(() => getFinalStepIndex(state.runs), [state.runs]);
   const currentStep = state.runs[0]?.steps[state.currentStepIndex];
+
+  useEffect(() => {
+    if (labId === 'cpu-scheduling') {
+      dispatch({ type: 'restore', labId, session: loadLabSession(labId) });
+      return;
+    }
+    dispatch({ type: 'restore', labId, session: loadLabSession(labId) });
+  }, [labId]);
 
   useEffect(() => {
     if (state.phase !== 'running') return;
@@ -206,6 +253,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   }, [finalStepIndex, state.phase, state.speed]);
 
   useEffect(() => {
+    if (!state.hydrated) return;
     if (state.phase === 'submitted' || state.syncState === 'submitted') {
       clearLabSession(labId);
       return;
@@ -214,22 +262,29 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
     saveLabSession(labId, toCompactSession(state));
   }, [labId, state]);
 
-  useEffect(() => {
-    if (!state.startedAt && state.phase === 'idle') startedEventSent.current = false;
-  }, [state.phase, state.startedAt]);
-
   function play() {
     const runs = state.phase === 'paused' && state.runs.length > 0
       ? state.runs
-      : buildSimulationRuns(labId, state.input, state.selectedAlgorithms);
+      : state.labId === 'cpu-scheduling'
+        ? buildSimulationRuns({
+            labId: state.labId,
+            input: state.input,
+            algorithms: state.selectedAlgorithms,
+          })
+        : buildSimulationRuns({
+            labId: state.labId,
+            input: state.input,
+            algorithms: state.selectedAlgorithms,
+          });
     if (runs.length === 0) return;
-    dispatch({ type: 'start', runs });
-    if (!startedEventSent.current) {
-      startedEventSent.current = true;
-      void trackAlgorithmLabStarted({
+    const startedAt = state.startedAt ?? new Date().toISOString();
+    dispatch({ type: 'start', runs, startedAt });
+    void emitAlgorithmLabStartedOnce(startedEventGate.current, () => (
+      trackAlgorithmLabStarted({
+        eventId: createAlgorithmLabStartedEventId(labId, startedAt),
         targetType: 'algorithm_lab',
         targetId: labId,
-        resourceType: 'interactive_algorithm_lab',
+        resourceType: 'interactive_lab',
         knowledgePointId: definition.knowledgePointCodes[0] ?? '',
         sourcePage: `/a3/labs/${labId}`,
         metadata: {
@@ -239,8 +294,8 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
           presetVersion: state.presetVersion,
           selectedAlgorithms: state.selectedAlgorithms,
         },
-      });
-    }
+      })
+    ));
   }
 
   function fullscreen() {
@@ -249,17 +304,66 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   function resetWorkbench() {
     clearLabSession(labId);
-    startedEventSent.current = false;
+    startedEventGate.current = createStartedEventGate();
     dispatch({ type: 'reset' });
+  }
+
+  function selectPreset(presetId: string) {
+    if (presetId === 'custom') return;
+    if (state.labId === 'cpu-scheduling') {
+      const preset = getAlgorithmLabDefinition('cpu-scheduling')?.presets.find((item) => item.id === presetId);
+      if (preset) dispatch({
+        type: 'configure',
+        labId: state.labId,
+        input: structuredClone(preset.input),
+        algorithms: state.selectedAlgorithms,
+      });
+      return;
+    }
+    const preset = getAlgorithmLabDefinition('page-replacement')?.presets.find((item) => item.id === presetId);
+    if (preset) dispatch({
+      type: 'configure',
+      labId: state.labId,
+      input: structuredClone(preset.input),
+      algorithms: state.selectedAlgorithms,
+    });
+  }
+
+  function toggleAlgorithm(algorithm: AlgorithmLabAlgorithm) {
+    if (state.labId === 'cpu-scheduling') {
+      if (!isCpuAlgorithm(algorithm)) return;
+      const selected = state.selectedAlgorithms.includes(algorithm);
+      if (selected && state.selectedAlgorithms.length === 1) return;
+      dispatch({
+        type: 'configure',
+        labId: state.labId,
+        input: state.input,
+        algorithms: selected
+          ? state.selectedAlgorithms.filter((item) => item !== algorithm)
+          : [...state.selectedAlgorithms, algorithm],
+      });
+      return;
+    }
+    if (!isPageAlgorithm(algorithm)) return;
+    const selected = state.selectedAlgorithms.includes(algorithm);
+    if (selected && state.selectedAlgorithms.length === 1) return;
+    dispatch({
+      type: 'configure',
+      labId: state.labId,
+      input: state.input,
+      algorithms: selected
+        ? state.selectedAlgorithms.filter((item) => item !== algorithm)
+        : [...state.selectedAlgorithms, algorithm],
+    });
   }
 
   const inputPanel = (
     <AlgorithmLabInputPanel
       definition={definition}
       presetId={state.presetId}
-      input={state.input}
       selectedAlgorithms={state.selectedAlgorithms}
-      onConfigure={(input, algorithms) => dispatch({ type: 'configure', input, algorithms })}
+      onSelectPreset={selectPreset}
+      onToggleAlgorithm={toggleAlgorithm}
     />
   );
   const statusPanel = (
@@ -330,15 +434,69 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   );
 }
 
-function restoreAlgorithmLabState(labId: AlgorithmLabId): AlgorithmLabState {
-  const base = createAlgorithmLabState(labId);
-  const session = loadLabSession(labId);
-  if (!session) return base;
-  const runs = session.phase === 'running' || session.phase === 'paused' || session.phase === 'completed'
-    ? buildSimulationRuns(labId, session.input, session.selectedAlgorithms)
-    : [];
+function configureState(state: AlgorithmLabState, action: ConfigureAction): AlgorithmLabState {
+  if (state.labId === 'cpu-scheduling' && action.labId === 'cpu-scheduling') {
+    const definition = getAlgorithmLabDefinition('cpu-scheduling')!;
+    const preset = definition.presets.find(
+      (candidate) => JSON.stringify(candidate.input) === JSON.stringify(action.input),
+    );
+    return configuredState(state, action.input, action.algorithms, preset?.id, preset?.version, definition.version);
+  }
+  if (state.labId === 'page-replacement' && action.labId === 'page-replacement') {
+    const definition = getAlgorithmLabDefinition('page-replacement')!;
+    const preset = definition.presets.find(
+      (candidate) => JSON.stringify(candidate.input) === JSON.stringify(action.input),
+    );
+    return configuredState(state, action.input, action.algorithms, preset?.id, preset?.version, definition.version);
+  }
+  return state;
+}
+
+function configuredState<TLabId extends AlgorithmLabId>(
+  state: AlgorithmLabStateFor<TLabId>,
+  input: AlgorithmLabInputById[TLabId],
+  algorithms: AlgorithmLabAlgorithmById[TLabId][],
+  presetId: string | undefined,
+  presetVersion: string | undefined,
+  labVersion: string,
+): AlgorithmLabStateFor<TLabId> {
+  return {
+    ...state,
+    phase: 'configured',
+    presetId: presetId ?? 'custom',
+    presetVersion: presetVersion ?? labVersion,
+    customInput: !presetId,
+    input: structuredClone(input),
+    selectedAlgorithms: [...algorithms],
+    prediction: null,
+    runs: [],
+    currentStepIndex: 0,
+    checkpointAnswers: {},
+    reviewedStepIndexes: [],
+    syncState: 'idle',
+    syncError: '',
+  };
+}
+
+function restoreState(state: AlgorithmLabState, action: RestoreAction): AlgorithmLabState {
+  if (state.labId === 'cpu-scheduling' && action.labId === 'cpu-scheduling') {
+    return restoredState(state, action.session, action.session ? buildRestoredCpuRuns(action.session) : []);
+  }
+  if (state.labId === 'page-replacement' && action.labId === 'page-replacement') {
+    return restoredState(state, action.session, action.session ? buildRestoredPageRuns(action.session) : []);
+  }
+  return state;
+}
+
+function restoredState<TLabId extends AlgorithmLabId>(
+  base: AlgorithmLabStateFor<TLabId>,
+  session: AlgorithmLabSession<TLabId> | null,
+  runs: SimulationRun<unknown, unknown>[],
+): AlgorithmLabStateFor<TLabId> {
+  if (!session) return { ...base, hydrated: true };
   return {
     ...base,
+    hydrated: true,
     phase: session.phase === 'running' ? 'paused' : session.phase,
     presetId: session.presetId,
     presetVersion: session.presetVersion,
@@ -355,15 +513,47 @@ function restoreAlgorithmLabState(labId: AlgorithmLabId): AlgorithmLabState {
   };
 }
 
-function toCompactSession(state: AlgorithmLabState): AlgorithmLabSession {
-  return {
+function buildRestoredCpuRuns(session: AlgorithmLabSession<'cpu-scheduling'>) {
+  return shouldRestoreRuns(session.phase)
+    ? buildSimulationRuns({ labId: session.labId, input: session.input, algorithms: session.selectedAlgorithms })
+    : [];
+}
+
+function buildRestoredPageRuns(session: AlgorithmLabSession<'page-replacement'>) {
+  return shouldRestoreRuns(session.phase)
+    ? buildSimulationRuns({ labId: session.labId, input: session.input, algorithms: session.selectedAlgorithms })
+    : [];
+}
+
+function shouldRestoreRuns(phase: AlgorithmLabSession['phase']) {
+  return phase === 'running' || phase === 'paused' || phase === 'completed';
+}
+
+type CompactAlgorithmLabSession =
+  | AlgorithmLabSession<'cpu-scheduling'>
+  | AlgorithmLabSession<'page-replacement'>;
+
+type CompactSessionCommon = Pick<
+  AlgorithmLabSession<'cpu-scheduling'>,
+  | 'schemaVersion'
+  | 'phase'
+  | 'presetId'
+  | 'presetVersion'
+  | 'prediction'
+  | 'checkpointAnswers'
+  | 'currentStepIndex'
+  | 'replayCount'
+  | 'reviewedStepIndexes'
+  | 'startedAt'
+>;
+
+function toCompactSession(state: AlgorithmLabState): CompactAlgorithmLabSession {
+  const phase = state.phase === 'submitted' ? 'completed' : state.phase;
+  const common: CompactSessionCommon = {
     schemaVersion: ALGORITHM_LAB_SESSION_SCHEMA_VERSION,
-    labId: state.labId,
-    phase: state.phase === 'submitted' ? 'completed' : state.phase,
+    phase,
     presetId: state.presetId,
     presetVersion: state.presetVersion,
-    selectedAlgorithms: state.selectedAlgorithms as never,
-    input: state.input as never,
     prediction: state.prediction,
     checkpointAnswers: state.checkpointAnswers,
     currentStepIndex: state.currentStepIndex,
@@ -371,26 +561,96 @@ function toCompactSession(state: AlgorithmLabState): AlgorithmLabSession {
     reviewedStepIndexes: state.reviewedStepIndexes,
     startedAt: state.startedAt!,
   };
+  if (state.labId === 'cpu-scheduling') {
+    return {
+      ...common,
+      labId: state.labId,
+      input: structuredClone(state.input),
+      selectedAlgorithms: [...state.selectedAlgorithms],
+    };
+  }
+  return {
+    ...common,
+    labId: state.labId,
+    input: structuredClone(state.input),
+    selectedAlgorithms: [...state.selectedAlgorithms],
+  };
 }
 
-function buildSimulationRuns(
-  labId: AlgorithmLabId,
-  input: AlgorithmLabInput,
-  algorithms: AlgorithmLabAlgorithm[],
+export type AlgorithmLabRunRequest = {
+  [TLabId in AlgorithmLabId]: {
+    labId: TLabId;
+    input: AlgorithmLabInputById[TLabId];
+    algorithms: AlgorithmLabAlgorithmById[TLabId][];
+  }
+}[AlgorithmLabId];
+
+const cpuAlgorithmIds: ReadonlySet<AlgorithmLabAlgorithm> = new Set(['fcfs', 'sjf', 'priority', 'rr']);
+const pageAlgorithmIds: ReadonlySet<AlgorithmLabAlgorithm> = new Set(['fifo', 'lru', 'opt']);
+
+function isCpuAlgorithm(
+  algorithm: AlgorithmLabAlgorithm,
+): algorithm is AlgorithmLabAlgorithmById['cpu-scheduling'] {
+  return cpuAlgorithmIds.has(algorithm);
+}
+
+function isPageAlgorithm(
+  algorithm: AlgorithmLabAlgorithm,
+): algorithm is AlgorithmLabAlgorithmById['page-replacement'] {
+  return pageAlgorithmIds.has(algorithm);
+}
+
+export function buildSimulationRuns(
+  request: AlgorithmLabRunRequest,
 ): SimulationRun<unknown, unknown>[] {
-  if (labId === 'cpu-scheduling' && 'processes' in input) {
-    return algorithms.map((algorithm) => simulateCpuScheduling(input, algorithm as 'fcfs' | 'sjf' | 'priority' | 'rr'));
+  if (request.labId === 'cpu-scheduling') {
+    if (!request.algorithms.every(isCpuAlgorithm)) {
+      throw new Error('算法与实验类型不匹配');
+    }
+    if (!validateCpuSchedulingInput(request.input).valid) throw new Error('输入与实验类型不匹配');
+    return request.algorithms.map((algorithm) => simulateCpuScheduling(request.input, algorithm));
   }
-  if (labId === 'page-replacement' && 'referenceString' in input) {
-    return algorithms.map((algorithm) => simulatePageReplacement(input, algorithm as 'fifo' | 'lru' | 'opt'));
+  if (!request.algorithms.every(isPageAlgorithm)) {
+    throw new Error('算法与实验类型不匹配');
   }
-  return [];
+  if (!validatePageReplacementInput(request.input).valid) throw new Error('输入与实验类型不匹配');
+  return request.algorithms.map((algorithm) => simulatePageReplacement(request.input, algorithm));
 }
 
-function findMatchingPreset(labId: AlgorithmLabId, input: AlgorithmLabInput) {
-  return getAlgorithmLabDefinition(labId)!.presets.find(
-    (preset) => JSON.stringify(preset.input) === JSON.stringify(input),
-  );
+export interface StartedEventGate {
+  status: 'idle' | 'in_flight' | 'sent';
+}
+
+interface StartedEventResult {
+  success: boolean;
+  status?: string | number;
+}
+
+export function createStartedEventGate(): StartedEventGate {
+  return { status: 'idle' };
+}
+
+export async function emitAlgorithmLabStartedOnce(
+  gate: StartedEventGate,
+  send: () => Promise<StartedEventResult>,
+): Promise<boolean> {
+  if (gate.status !== 'idle') return false;
+  gate.status = 'in_flight';
+  try {
+    const result = await send();
+    const accepted = result.success || result.status === 'duplicate';
+    gate.status = accepted ? 'sent' : 'idle';
+    return accepted;
+  } catch {
+    gate.status = 'idle';
+    return false;
+  }
+}
+
+export function createAlgorithmLabStartedEventId(labId: AlgorithmLabId, startedAt: string): string {
+  const timestamp = Date.parse(startedAt);
+  const stableTime = Number.isFinite(timestamp) ? timestamp : 0;
+  return `a3lab_started_${labId.replaceAll('-', '_')}_${stableTime}`;
 }
 
 function getFinalStepIndex(runs: SimulationRun<unknown, unknown>[]): number {

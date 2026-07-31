@@ -2,40 +2,23 @@ import { Check, SlidersHorizontal } from 'lucide-react';
 import type {
   AlgorithmLabAlgorithm,
   AlgorithmLabDefinition,
-  AlgorithmLabInput,
 } from '@/lib/a3/algorithm-lab/contracts';
 
 interface AlgorithmLabInputPanelProps {
   definition: AlgorithmLabDefinition;
   presetId: string;
-  input: AlgorithmLabInput;
   selectedAlgorithms: AlgorithmLabAlgorithm[];
-  onConfigure: (input: AlgorithmLabInput, algorithms: AlgorithmLabAlgorithm[]) => void;
+  onSelectPreset: (presetId: string) => void;
+  onToggleAlgorithm: (algorithm: AlgorithmLabAlgorithm) => void;
 }
 
 export function AlgorithmLabInputPanel({
   definition,
   presetId,
-  input,
   selectedAlgorithms,
-  onConfigure,
+  onSelectPreset,
+  onToggleAlgorithm,
 }: AlgorithmLabInputPanelProps) {
-  function selectPreset(nextPresetId: string) {
-    const preset = definition.presets.find((item) => item.id === nextPresetId);
-    if (preset) onConfigure(structuredClone(preset.input), selectedAlgorithms);
-  }
-
-  function toggleAlgorithm(algorithm: AlgorithmLabAlgorithm) {
-    const selected = selectedAlgorithms.includes(algorithm);
-    if (selected && selectedAlgorithms.length === 1) return;
-    onConfigure(
-      input,
-      selected
-        ? selectedAlgorithms.filter((item) => item !== algorithm)
-        : [...selectedAlgorithms, algorithm],
-    );
-  }
-
   return (
     <section className="space-y-5" aria-label="实验输入设置">
       <div>
@@ -50,9 +33,10 @@ export function AlgorithmLabInputPanel({
         实验预设
         <select
           value={presetId}
-          onChange={(event) => selectPreset(event.target.value)}
+          onChange={(event) => onSelectPreset(event.target.value)}
           className="mt-2 h-10 w-full rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-3 text-sm text-[var(--a3-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
         >
+          {presetId === 'custom' ? <option value="custom">自定义配置</option> : null}
           {definition.presets.map((preset) => (
             <option key={preset.id} value={preset.id}>{preset.title}</option>
           ))}
@@ -69,7 +53,7 @@ export function AlgorithmLabInputPanel({
                 <input
                   type="checkbox"
                   checked={checked}
-                  onChange={() => toggleAlgorithm(algorithm)}
+                  onChange={() => onToggleAlgorithm(algorithm)}
                   className="sr-only"
                 />
                 <span className={`flex size-4 items-center justify-center rounded border ${checked ? 'border-amber-500 bg-amber-500 text-slate-950' : 'border-[var(--a3-border)]'}`}>
