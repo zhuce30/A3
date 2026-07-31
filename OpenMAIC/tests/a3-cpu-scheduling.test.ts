@@ -375,4 +375,11 @@ describe('deterministic CPU scheduling kernel', () => {
     expect(finalState(upper).processes.every((process) => process.remainingTime === 0)).toBe(true);
     expect(upper.steps.at(-1)?.time).toBe(1300);
   });
+
+  it.each(['idle', 'IDLE', ' Idle '])('rejects reserved process ID %s before simulation', (processId) => {
+    expect(() => simulateCpuScheduling({
+      processes: [{ processId, arrivalTime: 0, burstTime: 1, priority: 0 }],
+      timeQuantum: 1,
+    }, 'fcfs')).toThrowError(new Error('进程编号不能使用保留值 idle'));
+  });
 });

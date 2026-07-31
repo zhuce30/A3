@@ -197,6 +197,13 @@ describe('CPU scheduling input validation', () => {
     expect(validateCpuSchedulingInput(duplicate).errors).toContain('进程编号不能重复');
   });
 
+  it.each(['idle', 'IDLE', ' Idle '])('rejects the reserved CPU process ID %s', (processId) => {
+    const input = validCpuInput();
+    input.processes[0].processId = processId;
+
+    expect(validateCpuSchedulingInput(input).errors).toContain('进程编号不能使用保留值 idle');
+  });
+
   it.each([
     ['arrivalTime', -1, '到达时间必须是 0 到 100 之间的整数'],
     ['arrivalTime', 101, '到达时间必须是 0 到 100 之间的整数'],

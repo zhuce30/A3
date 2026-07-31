@@ -7,11 +7,15 @@ import {
   buildSimulationRuns,
   canStartAlgorithmLabRun,
   claimCheckpointSubmission,
+  createAlgorithmLabCheckpointEventId,
   createAlgorithmLabStartedEventId,
   createAlgorithmLabState,
+  createAttemptEventState,
+  createNextAttemptStartedAt,
   createStartedEventGate,
   emitAlgorithmLabStartedOnce,
   getAlgorithmLabFinalStepIndex,
+  renewAttemptEventState,
   type AlgorithmLabRunRequest,
 } from '@/components/a3/features/algorithm-lab/algorithm-lab-workbench';
 import { getNextMobilePanel } from '@/components/a3/features/algorithm-lab/algorithm-lab-layout';
@@ -61,6 +65,8 @@ const checkpointPath = join(root, 'components/a3/features/algorithm-lab/algorith
 const inputPanelPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-input-panel.tsx');
 const statusPanelPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-status-panel.tsx');
 const pageVisualizerPath = join(root, 'components/a3/features/algorithm-lab/page-replacement-visualizer.tsx');
+const cpuWorkerClientPath = join(root, 'lib/a3/algorithm-lab/cpu-simulation-worker-client.ts');
+const cpuWorkerPath = join(root, 'workers/a3-cpu-scheduling.worker.ts');
 
 describe('algorithm lab UI', () => {
   it('has catalog loading, error, empty, progress and resume states', () => {
@@ -144,6 +150,22 @@ describe('algorithm lab UI', () => {
     expect(configured.phase).toBe('configured');
     expect(configured.runs).toEqual([]);
     expect(configured.currentStepIndex).toBe(0);
+    expect(configured.startedAt).toBeNull();
+    expect(configured.checkpointAnswers).toEqual({});
+    expect(configured.attemptNumber).toBe(running.attemptNumber + 1);
+  });
+
+  it('gives a configured attempt fresh started and checkpoint event gates', async () => {
+    const firstAttempt = createAttemptEventState(0);
+    firstAttempt.startedEventGate.status = 'in_flight';
+    firstAttempt.checkpointEventGate.add('cpu-ready-queue');
+
+    const nextAttempt = renewAttemptEventState(firstAttempt, 1);
+
+    expect(nextAttempt).not.toBe(firstAttempt);
+    expect(nextAttempt.startedEventGate.status).toBe('idle');
+    expect(nextAttempt.checkpointEventGate.size).toBe(0);
+    expect(renewAttemptEventState(nextAttempt, 1)).toBe(nextAttempt);
   });
 
   it('initializes deterministically and restores only through an explicit hydrated action', () => {
@@ -174,6 +196,11 @@ describe('algorithm lab UI', () => {
         reviewedStepIndexes: [],
         startedAt: '2026-07-31T12:00:00.000Z',
       },
+      runs: buildSimulationRuns({
+        labId: 'cpu-scheduling',
+        input: { processes: [{ processId: 'P1', arrivalTime: 0, burstTime: 2, priority: 0 }], timeQuantum: 1 },
+        algorithms: ['fcfs'],
+      }),
     });
     expect(restored).toMatchObject({ hydrated: true, phase: 'paused', presetId: 'custom' });
     expect(restored.runs.length).toBe(1);
@@ -257,13 +284,56 @@ describe('algorithm lab UI', () => {
     expect(source).not.toContain('as never');
   });
 
-  it('clears persisted recovery and started-event state on reset', () => {
+  it('runs CPU simulation in a cancellable module worker with visible async states', () => {
+    const workbench = readFileSync(workbenchPath, 'utf8');
+    const workerClient = readFileSync(cpuWorkerClientPath, 'utf8');
+    const worker = readFileSync(cpuWorkerPath, 'utf8');
+
+    expect(workerClient).toContain('new Worker(');
+    expect(workerClient).toContain("new URL('../../../workers/a3-cpu-scheduling.worker.ts', import.meta.url)");
+    expect(workerClient).toContain("{ type: 'module' }");
+    expect(workerClient).toContain('response.requestId !== requestId');
+    expect(workerClient).not.toContain('setTimeout');
+    expect(worker).toContain('simulateCpuScheduling');
+    expect(workbench).toContain('正在后台计算调度结果');
+    expect(workbench).toContain('role="alert"');
+    expect(workbench).toContain('cpuSimulationRunnerRef.current?.dispose();');
+    expect(workbench).toContain('cpuSimulationRunnerRef.current?.cancel();');
+    expect(workbench).toContain('runner.run(session.input, session.selectedAlgorithms)');
+    expect(workbench).not.toContain('buildRestoredCpuRuns');
+  });
+
+  it('clears persisted recovery, active CPU work, and attempt event state on reset', () => {
     const source = readFileSync(workbenchPath, 'utf8');
 
     expect(source).toContain('function resetWorkbench()');
     expect(source).toContain('clearLabSession(labId);');
-    expect(source).toContain('startedEventGate.current = createStartedEventGate();');
+    expect(source).toContain('cpuSimulationRunnerRef.current?.cancel();');
+    const started = algorithmLabReducer(createAlgorithmLabState('page-replacement'), {
+      type: 'start',
+      runs: [],
+      startedAt: '2026-07-31T12:00:00.000Z',
+    });
+    const reset = algorithmLabReducer(started, { type: 'reset' });
+    expect(reset.startedAt).toBeNull();
+    expect(reset.attemptNumber).toBe(started.attemptNumber + 1);
     expect(source).toContain('onReset={resetWorkbench}');
+  });
+
+  it('creates distinct stable event IDs for a new page-replacement attempt', () => {
+    const firstStartedAt = '2026-07-31T12:00:00.000Z';
+    const nextStartedAt = createNextAttemptStartedAt(firstStartedAt, Date.parse(firstStartedAt));
+
+    expect(nextStartedAt).toBe('2026-07-31T12:00:00.001Z');
+
+    expect(createAlgorithmLabStartedEventId('page-replacement', firstStartedAt)).not.toBe(
+      createAlgorithmLabStartedEventId('page-replacement', nextStartedAt),
+    );
+    expect(createAlgorithmLabCheckpointEventId(
+      'page-replacement', 'page-victim', firstStartedAt,
+    )).not.toBe(createAlgorithmLabCheckpointEventId(
+      'page-replacement', 'page-victim', nextStartedAt,
+    ));
   });
 
   it('provides the desktop, tablet and mobile workbench layouts', () => {
@@ -274,7 +344,10 @@ describe('algorithm lab UI', () => {
     expect(source).toContain('输入');
     expect(source).toContain('运行');
     expect(source).toContain('结果');
-    expect(source).toContain('details');
+    expect(source).toContain('aria-expanded={inputExpanded}');
+    expect(source).toContain('aria-expanded={statusExpanded}');
+    expect(source.match(/\{inputPanel\}/g)).toHaveLength(1);
+    expect(source.match(/\{statusPanel\}/g)).toHaveLength(1);
   });
 
   it('shows a visible custom preset after restoring edited input', () => {
@@ -560,6 +633,19 @@ describe('algorithm lab UI', () => {
     expect(statusPanel).toContain('提交完成顺序检查点后显示');
     expect(workbench).toContain('getAvailableCpuCheckpoints');
     expect(workbench).toContain('isCpuCheckpointRevealed');
+  });
+
+  it('offers a non-answer completion-order distractor without leaking a single process answer', () => {
+    const run = simulateCpuScheduling({
+      processes: [{ processId: 'OnlyProcess', arrivalTime: 0, burstTime: 1, priority: 0 }],
+      timeQuantum: 1,
+    }, 'fcfs');
+    const checkpoint = buildCpuCheckpoints(run).find(({ id }) => id === 'cpu-completion-order');
+
+    expect(checkpoint).toBeDefined();
+    expect(checkpoint!.options).toContain(checkpoint!.correctAnswer);
+    expect(checkpoint!.options.some((option) => option !== checkpoint!.correctAnswer)).toBe(true);
+    expect(`${checkpoint!.question}${checkpoint!.context}`).not.toContain(checkpoint!.correctAnswer);
   });
 
   it('shows all five CPU metrics in the status panel', () => {

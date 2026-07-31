@@ -25,6 +25,7 @@ export function validateCpuSchedulingInput(input: unknown): ValidationResult {
   const processIds = new Set<string>();
   let hasBlankProcessId = false;
   let hasDuplicateProcessId = false;
+  let hasReservedProcessId = false;
   let hasInvalidArrivalTime = false;
   let hasInvalidBurstTime = false;
   let hasInvalidPriority = false;
@@ -41,6 +42,8 @@ export function validateCpuSchedulingInput(input: unknown): ValidationResult {
       const normalizedId = typeof process.processId === 'string' ? process.processId.trim() : '';
       if (!normalizedId) {
         hasBlankProcessId = true;
+      } else if (normalizedId.toLowerCase() === 'idle') {
+        hasReservedProcessId = true;
       } else if (processIds.has(normalizedId)) {
         hasDuplicateProcessId = true;
       } else {
@@ -55,6 +58,7 @@ export function validateCpuSchedulingInput(input: unknown): ValidationResult {
 
   if (hasInvalidProcessRow) errors.push('每个进程必须是对象');
   if (hasBlankProcessId) errors.push('进程编号不能为空');
+  if (hasReservedProcessId) errors.push('进程编号不能使用保留值 idle');
   if (hasDuplicateProcessId) errors.push('进程编号不能重复');
   if (hasInvalidArrivalTime) errors.push('到达时间必须是 0 到 100 之间的整数');
   if (hasInvalidBurstTime) errors.push('运行时间必须是 1 到 100 之间的整数');

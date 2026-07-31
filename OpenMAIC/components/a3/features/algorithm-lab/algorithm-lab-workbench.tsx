@@ -19,6 +19,10 @@ import {
   type CpuSchedulingState,
 } from '@/lib/a3/algorithm-lab/cpu-scheduling';
 import {
+  CpuSimulationCancelledError,
+  CpuSimulationWorkerRunner,
+} from '@/lib/a3/algorithm-lab/cpu-simulation-worker-client';
+import {
   simulatePageReplacement,
   type PageReplacementMetrics,
   type PageReplacementState,
@@ -80,6 +84,9 @@ interface AlgorithmLabStateBase {
   syncState: SyncState;
   syncError: string;
   startedAt: string | null;
+  attemptNumber: number;
+  simulationStatus: 'idle' | 'loading' | 'error';
+  simulationError: string;
 }
 
 export type AlgorithmLabStateFor<TLabId extends AlgorithmLabId> = AlgorithmLabStateBase & {
@@ -106,6 +113,7 @@ type RestoreAction = {
     type: 'restore';
     labId: TLabId;
     session: AlgorithmLabSession<TLabId> | null;
+    runs?: SimulationRun<unknown, unknown>[];
   }
 }[AlgorithmLabId];
 
@@ -125,7 +133,9 @@ export type AlgorithmLabAction =
   | { type: 'submitted' }
   | { type: 'reset' }
   | { type: 'set_speed'; speed: number }
-  | { type: 'review_step'; index: number };
+  | { type: 'review_step'; index: number }
+  | { type: 'simulation_pending' }
+  | { type: 'simulation_failed'; message: string };
 
 export function createAlgorithmLabState(
   labId: 'cpu-scheduling',
@@ -173,6 +183,9 @@ function createStateForLab<TLabId extends AlgorithmLabId>(
     syncState: 'idle',
     syncError: '',
     startedAt: null,
+    attemptNumber: 0,
+    simulationStatus: 'idle',
+    simulationError: '',
   };
 }
 
@@ -201,6 +214,8 @@ export function algorithmLabReducer(
         startedAt: state.startedAt ?? action.startedAt ?? new Date().toISOString(),
         syncState: 'idle',
         syncError: '',
+        simulationStatus: 'idle',
+        simulationError: '',
       };
     }
     case 'pause':
@@ -237,8 +252,16 @@ export function algorithmLabReducer(
       return { ...state, speed: [0.5, 1, 1.5, 2].includes(action.speed) ? action.speed : 1 };
     case 'review_step':
       return { ...state, reviewedStepIndexes: uniqueIndexes([...state.reviewedStepIndexes, action.index]) };
+    case 'simulation_pending':
+      return { ...state, simulationStatus: 'loading', simulationError: '' };
+    case 'simulation_failed':
+      return { ...state, simulationStatus: 'error', simulationError: action.message };
     case 'reset':
-      return { ...createAlgorithmLabState(state.labId), hydrated: true };
+      return {
+        ...createAlgorithmLabState(state.labId),
+        hydrated: true,
+        attemptNumber: state.attemptNumber + 1,
+      };
   }
 }
 
@@ -263,8 +286,13 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   const definition = getAlgorithmLabDefinition(labId)!;
   const [state, dispatch] = useReducer(algorithmLabReducer, labId, createAlgorithmLabState);
   const canvasRef = useRef<HTMLDivElement>(null);
-  const startedEventGate = useRef(createStartedEventGate());
-  const checkpointEventGate = useRef(new Set<string>());
+  const attemptEventStateRef = useRef(createAttemptEventState(0));
+  const cpuSimulationRunnerRef = useRef<CpuSimulationWorkerRunner | null>(null);
+  const lastStartedAtRef = useRef<string | null>(null);
+  attemptEventStateRef.current = renewAttemptEventState(
+    attemptEventStateRef.current,
+    state.attemptNumber,
+  );
   const finalStepIndex = useMemo(
     () => getAlgorithmLabFinalStepIndex(state.labId, state.runs),
     [state.labId, state.runs],
@@ -322,11 +350,37 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   useEffect(() => {
     if (labId === 'cpu-scheduling') {
-      dispatch({ type: 'restore', labId, session: loadLabSession(labId) });
+      const session = loadLabSession(labId);
+      if (!session || !shouldRestoreRuns(session.phase)) {
+        dispatch({ type: 'restore', labId, session });
+        return;
+      }
+      dispatch({ type: 'simulation_pending' });
+      cpuSimulationRunnerRef.current ??= new CpuSimulationWorkerRunner();
+      const runner = cpuSimulationRunnerRef.current;
+      void runner.run(session.input, session.selectedAlgorithms)
+        .then((runs) => {
+          if (runs.length === 0) throw new Error('未生成可恢复的调度结果');
+          dispatch({ type: 'restore', labId, session, runs });
+        })
+        .catch((error) => {
+          if (error instanceof CpuSimulationCancelledError) return;
+          clearLabSession(labId);
+          dispatch({ type: 'restore', labId, session: null });
+          dispatch({
+            type: 'simulation_failed',
+            message: error instanceof Error ? error.message : 'CPU 调度恢复失败，请重新运行',
+          });
+        });
       return;
     }
     dispatch({ type: 'restore', labId, session: loadLabSession(labId) });
   }, [labId]);
+
+  useEffect(() => () => {
+    cpuSimulationRunnerRef.current?.dispose();
+    cpuSimulationRunnerRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (state.phase !== 'running') return;
@@ -350,29 +404,44 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   useEffect(() => {
     for (const checkpointId of Object.keys(state.checkpointAnswers)) {
-      checkpointEventGate.current.add(checkpointId);
+      attemptEventStateRef.current.checkpointEventGate.add(checkpointId);
     }
   }, [state.checkpointAnswers]);
 
-  function play() {
+  async function play() {
     if (!canStartRun) return;
-    const runs = state.phase === 'paused' && state.runs.length > 0
-      ? state.runs
-      : state.labId === 'cpu-scheduling'
-        ? buildSimulationRuns({
-            labId: state.labId,
-            input: state.input,
-            algorithms: state.selectedAlgorithms,
-          })
-        : buildSimulationRuns({
-            labId: state.labId,
-            input: state.input,
-            algorithms: state.selectedAlgorithms,
-          });
-    if (runs.length === 0) return;
-    const startedAt = state.startedAt ?? new Date().toISOString();
+    const attemptEvents = attemptEventStateRef.current;
+    let runs: SimulationRun<unknown, unknown>[];
+    if (state.phase === 'paused' && state.runs.length > 0) {
+      runs = state.runs;
+    } else if (state.labId === 'cpu-scheduling') {
+      dispatch({ type: 'simulation_pending' });
+      cpuSimulationRunnerRef.current ??= new CpuSimulationWorkerRunner();
+      try {
+        runs = await cpuSimulationRunnerRef.current.run(state.input, state.selectedAlgorithms);
+      } catch (error) {
+        if (error instanceof CpuSimulationCancelledError) return;
+        dispatch({
+          type: 'simulation_failed',
+          message: error instanceof Error ? error.message : 'CPU 调度计算失败，请重试',
+        });
+        return;
+      }
+    } else {
+      runs = buildSimulationRuns({
+        labId: state.labId,
+        input: state.input,
+        algorithms: state.selectedAlgorithms,
+      });
+    }
+    if (runs.length === 0) {
+      dispatch({ type: 'simulation_failed', message: '未生成可播放的调度结果，请重试' });
+      return;
+    }
+    const startedAt = state.startedAt ?? createNextAttemptStartedAt(lastStartedAtRef.current);
+    lastStartedAtRef.current = startedAt;
     dispatch({ type: 'start', runs, startedAt });
-    void emitAlgorithmLabStartedOnce(startedEventGate.current, () => (
+    void emitAlgorithmLabStartedOnce(attemptEvents.startedEventGate, () => (
       trackAlgorithmLabStarted({
         eventId: createAlgorithmLabStartedEventId(labId, startedAt),
         targetType: 'algorithm_lab',
@@ -397,14 +466,21 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   function resetWorkbench() {
     clearLabSession(labId);
-    startedEventGate.current = createStartedEventGate();
-    checkpointEventGate.current.clear();
+    lastStartedAtRef.current = state.startedAt ?? lastStartedAtRef.current;
+    cpuSimulationRunnerRef.current?.cancel();
     dispatch({ type: 'reset' });
+  }
+
+  function configureAttempt(action: ConfigureAction) {
+    clearLabSession(labId);
+    lastStartedAtRef.current = state.startedAt ?? lastStartedAtRef.current;
+    cpuSimulationRunnerRef.current?.cancel();
+    dispatch(action);
   }
 
   function updateCpuInput(input: CpuSchedulingInput) {
     if (state.labId !== 'cpu-scheduling') return;
-    dispatch({
+    configureAttempt({
       type: 'configure',
       labId: state.labId,
       input,
@@ -414,7 +490,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   function updatePageInput(input: PageReplacementInput) {
     if (state.labId !== 'page-replacement') return;
-    dispatch({
+    configureAttempt({
       type: 'configure',
       labId: state.labId,
       input,
@@ -423,7 +499,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   }
 
   function submitCpuCheckpoint(checkpoint: CpuCheckpointDefinition, answer: string) {
-    if (state.labId !== 'cpu-scheduling' || !claimCheckpointSubmission(checkpointEventGate.current, checkpoint.id)) return;
+    if (state.labId !== 'cpu-scheduling' || !claimCheckpointSubmission(attemptEventStateRef.current.checkpointEventGate, checkpoint.id)) return;
     const correct = answer === checkpoint.correctAnswer;
     dispatch({ type: 'answer_checkpoint', checkpointId: checkpoint.id, answer });
     void trackAlgorithmLabCheckpoint({
@@ -449,7 +525,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   }
 
   function submitPageCheckpoint(checkpoint: PageCheckpointDefinition, answer: string) {
-    if (state.labId !== 'page-replacement' || !claimCheckpointSubmission(checkpointEventGate.current, checkpoint.id)) return;
+    if (state.labId !== 'page-replacement' || !claimCheckpointSubmission(attemptEventStateRef.current.checkpointEventGate, checkpoint.id)) return;
     const correct = answer === checkpoint.correctAnswer;
     dispatch({ type: 'answer_checkpoint', checkpointId: checkpoint.id, answer });
     void trackAlgorithmLabCheckpoint({
@@ -478,7 +554,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
     if (presetId === 'custom') return;
     if (state.labId === 'cpu-scheduling') {
       const preset = getAlgorithmLabDefinition('cpu-scheduling')?.presets.find((item) => item.id === presetId);
-      if (preset) dispatch({
+      if (preset) configureAttempt({
         type: 'configure',
         labId: state.labId,
         input: structuredClone(preset.input),
@@ -487,7 +563,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
       return;
     }
     const preset = getAlgorithmLabDefinition('page-replacement')?.presets.find((item) => item.id === presetId);
-    if (preset) dispatch({
+    if (preset) configureAttempt({
       type: 'configure',
       labId: state.labId,
       input: structuredClone(preset.input),
@@ -500,7 +576,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
       if (!isCpuAlgorithm(algorithm)) return;
       const selected = state.selectedAlgorithms.includes(algorithm);
       if (selected && state.selectedAlgorithms.length === 1) return;
-      dispatch({
+      configureAttempt({
         type: 'configure',
         labId: state.labId,
         input: state.input,
@@ -513,7 +589,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
     if (!isPageAlgorithm(algorithm)) return;
     const selected = state.selectedAlgorithms.includes(algorithm);
     if (selected && state.selectedAlgorithms.length === 1) return;
-    dispatch({
+    configureAttempt({
       type: 'configure',
       labId: state.labId,
       input: state.input,
@@ -576,7 +652,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
     </div>
   );
   const controls = (
-    <fieldset className="min-w-0 border-0 p-0" disabled={state.runs.length === 0 && !canStartRun}>
+    <fieldset className="min-w-0 border-0 p-0" disabled={state.simulationStatus === 'loading' || (state.runs.length === 0 && !canStartRun)}>
       <legend className="sr-only">实验播放控制</legend>
       <AlgorithmLabControls
         phase={state.phase}
@@ -619,12 +695,24 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
         controls={controls}
         explanation={explanation}
         canvas={state.labId === 'cpu-scheduling' ? (
-          <CpuSchedulingVisualizer
-            runs={cpuRuns}
-            currentStepIndex={state.currentStepIndex}
-            revealReadyQueue={revealReadyQueue}
-            onSeek={(index) => dispatch({ type: 'seek', index })}
-          />
+          <div className="relative min-h-[430px]">
+            <CpuSchedulingVisualizer
+              runs={cpuRuns}
+              currentStepIndex={state.currentStepIndex}
+              revealReadyQueue={revealReadyQueue}
+              onSeek={(index) => dispatch({ type: 'seek', index })}
+            />
+            {state.simulationStatus === 'loading' ? (
+              <div className="absolute inset-0 flex items-center justify-center bg-[var(--a3-surface-solid)]/90 px-6" role="status" aria-live="polite">
+                <p className="text-sm font-medium text-[var(--a3-text)]">正在后台计算调度结果…</p>
+              </div>
+            ) : null}
+            {state.simulationStatus === 'error' ? (
+              <div className="absolute inset-x-4 top-4 rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200" role="alert">
+                {state.simulationError}
+              </div>
+            ) : null}
+          </div>
         ) : (
           <PageReplacementVisualizer
             runs={pageRuns}
@@ -683,15 +771,23 @@ function configuredState<TLabId extends AlgorithmLabId>(
     reviewedStepIndexes: [],
     syncState: 'idle',
     syncError: '',
+    startedAt: null,
+    attemptNumber: state.attemptNumber + 1,
+    simulationStatus: 'idle',
+    simulationError: '',
   };
 }
 
 function restoreState(state: AlgorithmLabState, action: RestoreAction): AlgorithmLabState {
   if (state.labId === 'cpu-scheduling' && action.labId === 'cpu-scheduling') {
-    return restoredState(state, action.session, action.session ? buildRestoredCpuRuns(action.session) : []);
+    return restoredState(state, action.session, action.runs ?? []);
   }
   if (state.labId === 'page-replacement' && action.labId === 'page-replacement') {
-    return restoredState(state, action.session, action.session ? buildRestoredPageRuns(action.session) : []);
+    return restoredState(
+      state,
+      action.session,
+      action.runs ?? (action.session ? buildRestoredPageRuns(action.session) : []),
+    );
   }
   return state;
 }
@@ -701,7 +797,12 @@ function restoredState<TLabId extends AlgorithmLabId>(
   session: AlgorithmLabSession<TLabId> | null,
   runs: SimulationRun<unknown, unknown>[],
 ): AlgorithmLabStateFor<TLabId> {
-  if (!session) return { ...base, hydrated: true };
+  if (!session) return {
+    ...base,
+    hydrated: true,
+    simulationStatus: 'idle',
+    simulationError: '',
+  };
   return {
     ...base,
     hydrated: true,
@@ -721,13 +822,9 @@ function restoredState<TLabId extends AlgorithmLabId>(
     replayCount: session.replayCount,
     reviewedStepIndexes: [...session.reviewedStepIndexes],
     startedAt: session.startedAt,
+    simulationStatus: 'idle',
+    simulationError: '',
   };
-}
-
-function buildRestoredCpuRuns(session: AlgorithmLabSession<'cpu-scheduling'>) {
-  return shouldRestoreRuns(session.phase)
-    ? buildSimulationRuns({ labId: session.labId, input: session.input, algorithms: session.selectedAlgorithms })
-    : [];
 }
 
 function buildRestoredPageRuns(session: AlgorithmLabSession<'page-replacement'>) {
@@ -841,6 +938,29 @@ export function createStartedEventGate(): StartedEventGate {
   return { status: 'idle' };
 }
 
+export interface AttemptEventState {
+  attemptNumber: number;
+  startedEventGate: StartedEventGate;
+  checkpointEventGate: Set<string>;
+}
+
+export function createAttemptEventState(attemptNumber: number): AttemptEventState {
+  return {
+    attemptNumber,
+    startedEventGate: createStartedEventGate(),
+    checkpointEventGate: new Set<string>(),
+  };
+}
+
+export function renewAttemptEventState(
+  current: AttemptEventState,
+  attemptNumber: number,
+): AttemptEventState {
+  return current.attemptNumber === attemptNumber
+    ? current
+    : createAttemptEventState(attemptNumber);
+}
+
 export async function emitAlgorithmLabStartedOnce(
   gate: StartedEventGate,
   send: () => Promise<StartedEventResult>,
@@ -862,6 +982,12 @@ export function createAlgorithmLabStartedEventId(labId: AlgorithmLabId, startedA
   const timestamp = Date.parse(startedAt);
   const stableTime = Number.isFinite(timestamp) ? timestamp : 0;
   return `a3lab_started_${labId.replaceAll('-', '_')}_${stableTime}`;
+}
+
+export function createNextAttemptStartedAt(previousStartedAt: string | null, now = Date.now()): string {
+  const previousTime = Date.parse(previousStartedAt ?? '');
+  const nextTime = Number.isFinite(previousTime) ? Math.max(now, previousTime + 1) : now;
+  return new Date(nextTime).toISOString();
 }
 
 export function createAlgorithmLabCheckpointEventId(

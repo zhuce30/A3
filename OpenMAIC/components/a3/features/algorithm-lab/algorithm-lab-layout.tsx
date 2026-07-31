@@ -1,5 +1,6 @@
 'use client';
 
+import { ChevronDown } from 'lucide-react';
 import { useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 
 export type MobilePanel = 'input' | 'run' | 'result';
@@ -37,6 +38,8 @@ export function AlgorithmLabLayout({
   canvasRef,
 }: AlgorithmLabLayoutProps) {
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>('run');
+  const [inputExpanded, setInputExpanded] = useState(false);
+  const [statusExpanded, setStatusExpanded] = useState(false);
   const tabRefs = useRef<Partial<Record<MobilePanel, HTMLButtonElement | null>>>({});
 
   function handleTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, current: MobilePanel) {
@@ -69,50 +72,62 @@ export function AlgorithmLabLayout({
         ))}
       </div>
 
-      <div className="hidden grid-cols-2 border-b border-[var(--a3-border)] md:grid xl:hidden">
-          <details className="border-r border-[var(--a3-border)] p-4">
-            <summary className="cursor-pointer text-sm font-semibold text-[var(--a3-text)]">输入设置</summary>
-            <div className="pt-4">{inputPanel}</div>
-          </details>
-          <details className="p-4">
-            <summary className="cursor-pointer text-sm font-semibold text-[var(--a3-text)]">运行结果</summary>
-            <div className="pt-4">{statusPanel}</div>
-          </details>
-      </div>
+      <div className="md:grid md:grid-cols-2 xl:grid-cols-[280px_minmax(0,1fr)_300px]">
+        <aside
+          id="algorithm-lab-panel-input"
+          role="tabpanel"
+          aria-labelledby="algorithm-lab-tab-input"
+          className={`${mobilePanel === 'input' ? 'block' : 'hidden'} border-r border-[var(--a3-border)] p-4 md:order-1 md:block xl:order-1`}
+        >
+          <button
+            type="button"
+            aria-expanded={inputExpanded}
+            aria-controls="algorithm-lab-input-content"
+            onClick={() => setInputExpanded((expanded) => !expanded)}
+            className="hidden w-full items-center justify-between text-sm font-semibold text-[var(--a3-text)] md:flex xl:hidden"
+          >
+            输入设置
+            <ChevronDown className={`size-4 transition-transform duration-200 ${inputExpanded ? 'rotate-180' : ''}`} />
+          </button>
+          <div id="algorithm-lab-input-content" className={`pt-0 md:pt-4 ${inputExpanded ? 'md:block' : 'md:hidden'} xl:block xl:pt-0`}>
+            {inputPanel}
+          </div>
+        </aside>
 
-      <div
-        id="algorithm-lab-panel-input"
-        role="tabpanel"
-        aria-labelledby="algorithm-lab-tab-input"
-        className={`${mobilePanel === 'input' ? 'block' : 'hidden'} p-4 md:hidden`}
-      >
-        {inputPanel}
-      </div>
-      <div
-        id="algorithm-lab-panel-result"
-        role="tabpanel"
-        aria-labelledby="algorithm-lab-tab-result"
-        className={`${mobilePanel === 'result' ? 'block' : 'hidden'} p-4 md:hidden`}
-      >
-        {statusPanel}
-      </div>
-
-      <div className="xl:grid xl:grid-cols-[280px_minmax(0,1fr)_300px]">
-        <aside className="hidden border-r border-[var(--a3-border)] p-4 xl:block">{inputPanel}</aside>
         <div
           id="algorithm-lab-panel-run"
           role="tabpanel"
           aria-labelledby="algorithm-lab-tab-run"
-          className={`${mobilePanel === 'run' ? 'block' : 'hidden'} min-w-0 md:block`}
+          className={`${mobilePanel === 'run' ? 'block' : 'hidden'} min-w-0 md:order-3 md:col-span-2 md:block xl:order-2 xl:col-span-1`}
         >
           <p className="border-b border-[var(--a3-border)] px-4 py-2 text-xs text-[var(--a3-text-muted)] md:hidden">移动端每次显示一个算法</p>
           <section ref={canvasRef} className="min-h-[430px] min-w-0 bg-[var(--a3-surface-solid)]" aria-label="算法运行画布">
             {canvas}
           </section>
-            {controls}
-            {explanation}
+          {controls}
+          {explanation}
         </div>
-        <aside className="hidden border-l border-[var(--a3-border)] p-4 xl:block">{statusPanel}</aside>
+
+        <aside
+          id="algorithm-lab-panel-result"
+          role="tabpanel"
+          aria-labelledby="algorithm-lab-tab-result"
+          className={`${mobilePanel === 'result' ? 'block' : 'hidden'} p-4 md:order-2 md:block xl:order-3 xl:border-l xl:border-[var(--a3-border)]`}
+        >
+          <button
+            type="button"
+            aria-expanded={statusExpanded}
+            aria-controls="algorithm-lab-status-content"
+            onClick={() => setStatusExpanded((expanded) => !expanded)}
+            className="hidden w-full items-center justify-between text-sm font-semibold text-[var(--a3-text)] md:flex xl:hidden"
+          >
+            运行结果
+            <ChevronDown className={`size-4 transition-transform duration-200 ${statusExpanded ? 'rotate-180' : ''}`} />
+          </button>
+          <div id="algorithm-lab-status-content" className={`pt-0 md:pt-4 ${statusExpanded ? 'md:block' : 'md:hidden'} xl:block xl:pt-0`}>
+            {statusPanel}
+          </div>
+        </aside>
       </div>
     </div>
   );

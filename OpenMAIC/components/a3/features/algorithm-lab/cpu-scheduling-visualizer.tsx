@@ -358,6 +358,7 @@ export function buildCpuCheckpoints(
     [...completionOrder].reverse().join(' → '),
     [...completionOrder.slice(1), completionOrder[0]].filter(Boolean).join(' → '),
     processIds.join(' → '),
+    '无法根据当前运行确定',
   ]);
 
   return [
