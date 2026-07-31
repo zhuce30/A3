@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import timedelta
 from io import BytesIO
 
-from django.test import TestCase
+import json
+
+from django.test import Client, TestCase
 from django.utils import timezone
 from docx import Document
 from openpyxl import load_workbook
@@ -177,3 +179,57 @@ class WrongExportDomainTests(TestCase):
         WrongQuestion.objects.filter(user=self.user).update(mastered=False)
         with self.assertRaisesMessage(WrongExportRequestError, "没有可导出的错题"):
             build_wrong_export(self.user, "mastered", "docx")
+
+
+class WrongExportApiTests(WrongExportDomainTests):
+    def setUp(self):
+        super().setUp()
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def test_export_requires_authentication(self):
+        self.client.logout()
+        response = self.client.post(
+            "/api/assessments/wrong-questions/export/",
+            data=json.dumps({"scope": "active", "format": "docx"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(response.json()["success"])
+
+    def test_export_rejects_invalid_payload_and_empty_scope(self):
+        invalid = self.client.post(
+            "/api/assessments/wrong-questions/export/",
+            data=json.dumps({"scope": "private", "format": "csv"}),
+            content_type="application/json",
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertFalse(invalid.json()["success"])
+        WrongQuestion.objects.filter(user=self.user).update(mastered=False)
+        empty = self.client.post(
+            "/api/assessments/wrong-questions/export/",
+            data=json.dumps({"scope": "mastered", "format": "pdf"}),
+            content_type="application/json",
+        )
+        self.assertEqual(empty.status_code, 409)
+        self.assertIn("没有可导出的错题", empty.json()["error"])
+
+    def test_export_returns_real_binary_files_with_safe_headers(self):
+        expected = {
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "pdf": "application/pdf",
+        }
+        for export_format, content_type in expected.items():
+            with self.subTest(export_format=export_format):
+                response = self.client.post(
+                    "/api/assessments/wrong-questions/export/",
+                    data=json.dumps({"scope": "active", "format": export_format}),
+                    content_type="application/json",
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response["Content-Type"], content_type)
+                self.assertIn(f".{export_format}", response["Content-Disposition"])
+                self.assertNotIn("D:\\", response["Content-Disposition"])
+                self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+                self.assertGreater(len(response.content), 1000)

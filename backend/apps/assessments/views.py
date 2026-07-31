@@ -4,7 +4,7 @@ import json
 from uuid import UUID
 
 from django.db import models, transaction
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_http_methods
 
@@ -15,6 +15,7 @@ from backend.apps.assessments.generation import (
 )
 from backend.apps.assessments.models import AssessmentSession, Question, QuestionReviewStatus, WrongQuestion
 from backend.apps.assessments.services import answer_assessment_question, build_learning_report, create_assessment, practice_suggestions, resolve_practice_knowledge_point, retry_wrong, serialize_question_bank_item, serialize_session, serialize_wrong_question, wrong_retry_feedback, wrong_review_summary
+from backend.apps.assessments.wrong_exports import WrongExportRequestError, build_wrong_export
 from backend.apps.compat.agent_kernel import run_question_generation_workflow
 
 
@@ -140,6 +141,31 @@ def wrong_questions(request):
         "wrongQuestions": [serialize_wrong_question(item) for item in items],
         "reviewSummary": wrong_review_summary(items),
     })
+
+
+@require_http_methods(["POST"])
+def wrong_question_export(request):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    try:
+        payload = _body(request)
+        artifact = build_wrong_export(
+            request.user,
+            str(payload.get("scope") or "active"),
+            str(payload.get("format") or ""),
+        )
+    except WrongExportRequestError as exc:
+        message = str(exc)
+        status = 409 if "没有可导出的错题" in message else 400
+        return JsonResponse({"success": False, "error": message}, status=status)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+    response = HttpResponse(artifact.content, content_type=artifact.content_type)
+    response["Content-Disposition"] = f'attachment; filename="{artifact.filename}"'
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @require_http_methods(["POST"])

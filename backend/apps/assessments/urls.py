@@ -8,6 +8,7 @@ urlpatterns = [
     path("start/", views.start_assessment, name="assessment-start"),
     path("sessions/<uuid:session_id>/answer/", views.submit_answer, name="assessment-answer"),
     path("wrong-questions/", views.wrong_questions, name="wrong-questions"),
+    path("wrong-questions/export/", views.wrong_question_export, name="wrong-question-export"),
     path("wrong-questions/<uuid:wrong_id>/retry/", views.retry_wrong_question, name="wrong-question-retry"),
     path("report/", views.learning_report, name="learning-report"),
     path("questions/", views.questions, name="question-list"),
