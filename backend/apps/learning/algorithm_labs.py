@@ -17,6 +17,10 @@ ALGORITHM_LAB_COMPLETION_SCHEMA_VERSION = "a3.algorithm-lab.completion.v1"
 ALGORITHM_LAB_EFFECT_SCHEMA_VERSION = "a3.algorithm-lab.effect.v1"
 
 
+class AlgorithmLabCompletionConflict(Exception):
+    pass
+
+
 _LABS = (
     {
         "id": "cpu-scheduling",
@@ -42,6 +46,7 @@ _LABS = (
                     "timeQuantum": 2,
                 },
                 "expectedFingerprint": "a3lab-result.v1|cpu-scheduling|cpu-foundation|1.0.0|fcfs=cpu:30f71277755e0281d134aa1ca82e049c|priority=cpu:4aae8cbcb315ec683110dcf7aa793990|rr=cpu:7a045a7da6352c4488d7a567d0ff26c2|sjf=cpu:7958460a04842ebeb1e53aebf42d471a",
+                "expectedPredictionAnswers": ["fcfs", "sjf", "priority"],
             },
             {
                 "id": "cpu-misconception",
@@ -58,6 +63,7 @@ _LABS = (
                     "timeQuantum": 2,
                 },
                 "expectedFingerprint": "a3lab-result.v1|cpu-scheduling|cpu-misconception|1.0.0|fcfs=cpu:ff7344b6f31930e4b42709226d8c8577|priority=cpu:db26b868e76574744f2e2f28a8a996ed|rr=cpu:8e8bb02d9ec3de4401286d715e268199|sjf=cpu:359d2c5ae192f9b7d5979469d99f8a2a",
+                "expectedPredictionAnswers": ["rr"],
             },
             {
                 "id": "cpu-comparison",
@@ -75,6 +81,7 @@ _LABS = (
                     "timeQuantum": 3,
                 },
                 "expectedFingerprint": "a3lab-result.v1|cpu-scheduling|cpu-comparison|1.0.0|fcfs=cpu:c520046f25bbe4058d2c61bb25cf3993|priority=cpu:57d269d19173abad556bee5c445df657|rr=cpu:44f8caf514cdb0142bb833f80448a7c3|sjf=cpu:c5a8240ff2540e9cfb5327992901740a",
+                "expectedPredictionAnswers": ["sjf", "priority"],
             },
         ],
     },
@@ -95,6 +102,7 @@ _LABS = (
                 "difficulty": "foundation",
                 "input": {"referenceString": [7, 0, 1, 2, 0, 3, 0, 4], "frameCount": 3},
                 "expectedFingerprint": "a3lab-result.v1|page-replacement|page-foundation|1.0.0|fifo=page:ddb7ec42ee7271e8f2b64b3598b02071|lru=page:e6261a9ff4c93c9e155d46b7ac3d2c4f|opt=page:6a2a2b63a239393fc7e42ae9f272b050",
+                "expectedPredictionAnswers": ["lru", "opt"],
             },
             {
                 "id": "page-misconception",
@@ -104,6 +112,7 @@ _LABS = (
                 "difficulty": "misconception",
                 "input": {"referenceString": [1, 2, 3, 4, 1, 2, 5, 1, 2, 3, 4, 5], "frameCount": 3},
                 "expectedFingerprint": "a3lab-result.v1|page-replacement|page-misconception|1.0.0|fifo=page:df3134e293ed4900e05c770dca6d45d2|lru=page:fa5becb4f88650e18823419b40c516a0|opt=page:2aca00a926f42393b0a113ddc296f493",
+                "expectedPredictionAnswers": ["opt"],
             },
             {
                 "id": "page-comparison",
@@ -113,6 +122,7 @@ _LABS = (
                 "difficulty": "comparison",
                 "input": {"referenceString": [2, 3, 2, 1, 5, 2, 4, 5, 3, 2, 5, 2], "frameCount": 3},
                 "expectedFingerprint": "a3lab-result.v1|page-replacement|page-comparison|1.0.0|fifo=page:bccf1310cb40cf798f55f0f3485294cb|lru=page:2016723a3a830b028d97be8b2d1d6477|opt=page:653fe5f21922da90794bfb2e467c9c08",
+                "expectedPredictionAnswers": ["opt"],
             },
         ],
     },
@@ -166,7 +176,7 @@ def complete_algorithm_lab(user, payload) -> dict:
         and normalized["resultFingerprint"] == preset["expectedFingerprint"]
     )
     score = _derived_score(normalized["checkpoints"], normalized["metrics"])
-    prediction = normalized["prediction"]
+    prediction = _server_prediction(normalized["prediction"], preset, verified)
     metadata = {
         "schemaVersion": ALGORITHM_LAB_COMPLETION_SCHEMA_VERSION,
         "labVersion": normalized["labVersion"],
@@ -193,7 +203,9 @@ def complete_algorithm_lab(user, payload) -> dict:
         locked_user = user.__class__.objects.select_for_update().get(pk=user.pk)
         existing = LearningEvent.objects.filter(user=locked_user, event_id=normalized["eventId"]).first()
         if existing:
-            return {"status": "duplicate", "completion": _serialize_completion(existing)}
+            if _is_same_completion(existing, normalized):
+                return {"status": "duplicate", "completion": _serialize_completion(existing)}
+            raise AlgorithmLabCompletionConflict("该事件 ID 已用于其他学习操作")
         event_result = ingest_learning_event_v2(
             locked_user,
             {
@@ -209,6 +221,7 @@ def complete_algorithm_lab(user, payload) -> dict:
                 "metadata": metadata,
                 "sourcePage": f"/a3/labs/{normalized['labId']}",
             },
+            trusted=True,
         )
     return {"status": event_result["status"], "completion": _serialize_completion(event_result["event"])}
 
@@ -244,7 +257,7 @@ def _public_lab(lab: dict) -> dict:
         if key != "presets"
     } | {
         "presets": [
-            {key: value for key, value in preset.items() if key != "expectedFingerprint"}
+            {key: value for key, value in preset.items() if not key.startswith("expected")}
             for preset in lab["presets"]
         ]
     }
@@ -298,12 +311,10 @@ def _normalize_prediction(value: Any) -> dict:
         raise ValueError("预测答案必须是不超过 32 个字符的字符串")
     if type(skipped) is not bool:
         raise ValueError("预测跳过状态必须是布尔值")
-    result = {"answer": answer, "skipped": skipped}
     if "correct" in value:
         if type(value["correct"]) is not bool:
             raise ValueError("预测正确性必须是布尔值")
-        result["correct"] = value["correct"]
-    return result
+    return {"answer": answer.strip(), "skipped": skipped}
 
 
 def _normalize_checkpoints(value: Any) -> dict:
@@ -323,7 +334,11 @@ def _normalize_checkpoints(value: Any) -> dict:
             raise ValueError("检查点 ID 必须是不超过 64 个字符的字符串")
         if type(item.get("correct")) is not bool:
             raise ValueError("检查点正确性必须是布尔值")
-    return {"answered": answered, "correct": correct, "items": items}
+    derived_answered = len(items)
+    derived_correct = sum(item["correct"] for item in items)
+    if answered != derived_answered or correct != derived_correct:
+        raise ValueError("检查点汇总必须与明细一致")
+    return {"answered": derived_answered, "correct": derived_correct, "items": items}
 
 
 def _normalize_metrics(value: Any) -> dict:
@@ -355,6 +370,30 @@ def _get_preset(lab: dict, preset_id: str, preset_version: str) -> dict | None:
     return next(
         (preset for preset in lab["presets"] if preset["id"] == preset_id and preset["version"] == preset_version),
         None,
+    )
+
+
+def _server_prediction(prediction: dict, preset: dict | None, verified: bool) -> dict:
+    result = {"answer": prediction["answer"], "skipped": prediction["skipped"]}
+    if verified and preset is not None:
+        expected_answers = set(preset["expectedPredictionAnswers"])
+        result["correct"] = not prediction["skipped"] and _prediction_answer_key(prediction["answer"]) in expected_answers
+    return result
+
+
+def _prediction_answer_key(answer: str) -> str:
+    return answer.strip().casefold()
+
+
+def _is_same_completion(event: LearningEvent, normalized: dict) -> bool:
+    metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    return (
+        event.event_type == "algorithm_lab_completed"
+        and event.target_type == "algorithm_lab"
+        and event.target_id == normalized["labId"]
+        and metadata.get("labVersion") == normalized["labVersion"]
+        and metadata.get("presetId") == normalized["presetId"]
+        and metadata.get("presetVersion") == normalized["presetVersion"]
     )
 
 
@@ -408,7 +447,7 @@ def _add_effect_event(counts: dict, event: LearningEvent) -> None:
     metrics = metadata.get("metrics") if isinstance(metadata.get("metrics"), dict) else {}
     counts["completed"] += 1
     counts["verified"] += _event_verified(event)
-    if prediction.get("skipped") is False:
+    if _event_verified(event) and prediction.get("skipped") is False:
         counts["prediction"]["answered"] += 1
         counts["prediction"]["correct"] += int(prediction.get("correct") is True)
     counts["checkpoints"]["answered"] += _integer(checkpoints.get("answered"), 0)

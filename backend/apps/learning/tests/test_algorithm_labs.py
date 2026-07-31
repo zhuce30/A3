@@ -41,7 +41,7 @@ def known_cpu_completion(event_id="lab-event-1", **overrides):
         "checkpoints": {
             "answered": 4,
             "correct": 4,
-            "items": [{"id": "checkpoint-1", "correct": True}],
+            "items": [{"id": f"checkpoint-{index}", "correct": True} for index in range(4)],
         },
         "metrics": {
             "score": 75,
@@ -146,6 +146,82 @@ class AlgorithmLabApiTests(TestCase):
         self.assertEqual(row_lock.call_count, 2)
         self.assertEqual(LearningEvent.objects.filter(user=self.user, event_id="locked-event").count(), 1)
 
+    def test_generic_completion_cannot_forge_verified_lab_evidence(self):
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse("learning-events-ingest"),
+            data=json.dumps(
+                {
+                    "schemaVersion": "a3.learning-event.v2",
+                    "eventId": "forged-generic-completion",
+                    "eventType": "algorithm_lab_completed",
+                    "targetType": "algorithm_lab",
+                    "targetId": "cpu-scheduling",
+                    "quality": {"verified": True, "masteryEvidenceAccepted": True},
+                    "metadata": {"labVersion": "1.0.0"},
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["success"])
+        self.assertFalse(list_algorithm_labs(self.user)["labs"][0]["progress"]["completed"])
+        self.assertEqual(list_algorithm_labs(self.user)["labs"][0]["progress"]["verifiedRuns"], 0)
+        self.assertFalse(LearningEvent.objects.filter(user=self.user, event_id="forged-generic-completion").exists())
+
+    def test_event_id_collision_with_another_operation_returns_conflict(self):
+        self.client.force_login(self.user)
+        started = ingest_learning_event_v2(
+            self.user,
+            {
+                "schemaVersion": "a3.learning-event.v2",
+                "eventId": "operation-collision",
+                "eventType": "algorithm_lab_started",
+                "targetType": "algorithm_lab",
+                "targetId": "cpu-scheduling",
+            },
+        )
+
+        response = self.post_complete(known_cpu_completion("operation-collision"))
+
+        self.assertEqual(started["status"], "accepted")
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.json()["success"])
+        self.assertEqual(LearningEvent.objects.filter(user=self.user, event_id="operation-collision").count(), 1)
+
+    def test_checkpoint_summaries_must_match_validated_items(self):
+        self.client.force_login(self.user)
+        payload = known_cpu_completion(
+            checkpoints={
+                "answered": 4,
+                "correct": 4,
+                "items": [{"id": f"checkpoint-{index}", "correct": False} for index in range(4)],
+            }
+        )
+
+        response = self.post_complete(payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["success"])
+        self.assertFalse(LearningEvent.objects.filter(user=self.user, event_id="lab-event-1").exists())
+
+    def test_verified_prediction_correctness_is_computed_server_side(self):
+        self.client.force_login(self.user)
+        response = self.post_complete(
+            known_cpu_completion(
+                "forged-prediction",
+                prediction={"answer": "rr", "skipped": False, "correct": True},
+            )
+        )
+
+        self.assertEqual(response.status_code, 201)
+        event = LearningEvent.objects.get(user=self.user, event_id="forged-prediction")
+        self.assertTrue(event.quality["verified"])
+        self.assertFalse(event.metadata["prediction"]["correct"])
+        self.assertEqual(build_algorithm_lab_effect(self.user)["prediction"], {"answered": 1, "correct": 0})
+
     def test_custom_and_forged_submissions_are_accepted_but_unverified(self):
         self.client.force_login(self.user)
         custom = known_cpu_completion(
@@ -161,6 +237,9 @@ class AlgorithmLabApiTests(TestCase):
         self.assertEqual(forged_response.status_code, 201)
         self.assertFalse(forged_response.json()["completion"]["verified"])
         self.assertEqual(forged_response.json()["completion"]["nextAction"]["type"], "replay_lab")
+        custom_event = LearningEvent.objects.get(user=self.user, event_id="custom-event")
+        self.assertNotIn("correct", custom_event.metadata["prediction"])
+        self.assertEqual(build_algorithm_lab_effect(self.user)["prediction"], {"answered": 0, "correct": 0})
 
     def test_duplicate_is_stable_and_same_event_id_is_independent_between_users(self):
         self.client.force_login(self.user)
@@ -250,18 +329,19 @@ class AlgorithmLabApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(response.json()["success"])
 
-    def test_event_allowlist_accepts_algorithm_lab_events(self):
-        result = ingest_learning_event_v2(
-            self.user,
-            {
-                "schemaVersion": "a3.learning-event.v2",
-                "eventId": "generic-lab-started",
-                "eventType": "algorithm_lab_started",
-                "sourcePage": "/a3/labs/cpu-scheduling",
-            },
-        )
+    def test_event_allowlist_keeps_algorithm_lab_started_and_checkpoint_events(self):
+        for event_type in ("algorithm_lab_started", "algorithm_lab_checkpoint_submitted"):
+            result = ingest_learning_event_v2(
+                self.user,
+                {
+                    "schemaVersion": "a3.learning-event.v2",
+                    "eventId": f"generic-{event_type}",
+                    "eventType": event_type,
+                    "sourcePage": "/a3/labs/cpu-scheduling",
+                },
+            )
 
-        self.assertEqual(result["status"], "accepted")
+            self.assertEqual(result["status"], "accepted")
 
     def test_effect_aggregation_empty_and_populated(self):
         self.assertEqual(
@@ -285,7 +365,7 @@ class AlgorithmLabApiTests(TestCase):
 
         self.assertEqual(effect["completed"], 2)
         self.assertEqual(effect["verified"], 1)
-        self.assertEqual(effect["prediction"], {"answered": 2, "correct": 2})
+        self.assertEqual(effect["prediction"], {"answered": 1, "correct": 1})
         self.assertEqual(effect["checkpoints"], {"answered": 8, "correct": 8})
         self.assertEqual(effect["reviewed"], 4)
         self.assertEqual(effect["byLab"][0]["labId"], "cpu-scheduling")
