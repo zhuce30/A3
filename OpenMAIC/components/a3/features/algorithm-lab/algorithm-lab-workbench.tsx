@@ -1,8 +1,16 @@
 'use client';
 
 import Link from 'next/link';
-import { ArrowLeft, FlaskConical } from 'lucide-react';
+import { ArrowLeft, FlaskConical, RefreshCw, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useEffect, useMemo, useReducer, useRef } from 'react';
+import {
+  buildAlgorithmLabCompletionRequest,
+  canSubmitAlgorithmLabCompletion,
+  clearAlgorithmLabCompletionEventId,
+  getOrCreateAlgorithmLabCompletionEventId,
+  synchronizeAlgorithmLabCompletion,
+  type AlgorithmLabCompletionResult,
+} from '@/lib/a3/algorithm-lab/client';
 import type {
   AlgorithmLabAlgorithm,
   AlgorithmLabAlgorithmById,
@@ -67,7 +75,8 @@ import {
   type PageCheckpointDefinition,
 } from './page-replacement-visualizer';
 
-type SyncState = 'idle' | 'pending' | 'failed' | 'submitted';
+type SyncState = 'idle' | 'pending' | 'event_sync_failed' | 'submitted';
+type CheckpointSyncState = 'pending' | 'event_sync_failed' | 'submitted';
 
 interface AlgorithmLabStateBase {
   phase: AlgorithmLabPhase;
@@ -80,10 +89,13 @@ interface AlgorithmLabStateBase {
   currentStepIndex: number;
   speed: number;
   checkpointAnswers: Record<string, string>;
+  checkpointSyncStates: Record<string, CheckpointSyncState>;
   replayCount: number;
   reviewedStepIndexes: number[];
   syncState: SyncState;
   syncError: string;
+  completionEventId: string | null;
+  completionResult: AlgorithmLabCompletionResult | null;
   startedAt: string | null;
   attemptNumber: number;
   simulationStatus: 'idle' | 'loading' | 'error';
@@ -129,9 +141,13 @@ export type AlgorithmLabAction =
   | { type: 'rewind' }
   | { type: 'finish' }
   | { type: 'answer_checkpoint'; checkpointId: string; answer: string }
+  | { type: 'checkpoint_sync_pending'; checkpointId: string }
+  | { type: 'checkpoint_sync_failed'; checkpointId: string }
+  | { type: 'checkpoint_synced'; checkpointId: string }
+  | { type: 'completion_ready'; eventId: string }
   | { type: 'sync_pending' }
   | { type: 'sync_failed'; message: string }
-  | { type: 'submitted' }
+  | { type: 'submitted'; completion: AlgorithmLabCompletionResult }
   | { type: 'reset' }
   | { type: 'set_speed'; speed: number }
   | { type: 'review_step'; index: number }
@@ -179,10 +195,13 @@ function createStateForLab<TLabId extends AlgorithmLabId>(
     currentStepIndex: 0,
     speed: 1,
     checkpointAnswers: {},
+    checkpointSyncStates: {},
     replayCount: 0,
     reviewedStepIndexes: [],
     syncState: 'idle',
     syncError: '',
+    completionEventId: null,
+    completionResult: null,
     startedAt: null,
     attemptNumber: 0,
     simulationStatus: 'idle',
@@ -243,12 +262,35 @@ export function algorithmLabReducer(
         ...state,
         checkpointAnswers: { ...state.checkpointAnswers, [action.checkpointId]: action.answer },
       };
+    case 'checkpoint_sync_pending':
+      return {
+        ...state,
+        checkpointSyncStates: { ...state.checkpointSyncStates, [action.checkpointId]: 'pending' },
+      };
+    case 'checkpoint_sync_failed':
+      return {
+        ...state,
+        checkpointSyncStates: { ...state.checkpointSyncStates, [action.checkpointId]: 'event_sync_failed' },
+      };
+    case 'checkpoint_synced':
+      return {
+        ...state,
+        checkpointSyncStates: { ...state.checkpointSyncStates, [action.checkpointId]: 'submitted' },
+      };
+    case 'completion_ready':
+      return state.completionEventId ? state : { ...state, completionEventId: action.eventId };
     case 'sync_pending':
       return { ...state, syncState: 'pending', syncError: '' };
     case 'sync_failed':
-      return { ...state, syncState: 'failed', syncError: action.message };
+      return { ...state, syncState: 'event_sync_failed', syncError: action.message };
     case 'submitted':
-      return { ...state, phase: 'submitted', syncState: 'submitted', syncError: '' };
+      return {
+        ...state,
+        phase: 'submitted',
+        syncState: 'submitted',
+        syncError: '',
+        completionResult: action.completion,
+      };
     case 'set_speed':
       return { ...state, speed: [0.5, 1, 1.5, 2].includes(action.speed) ? action.speed : 1 };
     case 'review_step':
@@ -351,6 +393,15 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   );
   const revealPageVictim = isPageCheckpointRevealed('page-victim', state.checkpointAnswers);
   const revealPagePolicyReason = isPageCheckpointRevealed('page-policy-reason', state.checkpointAnswers);
+  const requiredCheckpoints = state.labId === 'cpu-scheduling' ? cpuCheckpoints : pageCheckpoints;
+  const completionReady = canSubmitAlgorithmLabCompletion({
+    phase: state.phase,
+    currentStepIndex: state.currentStepIndex,
+    finalStepIndex,
+    requiredCheckpointIds: requiredCheckpoints.map(({ id }) => id),
+    checkpointAnswers: state.checkpointAnswers,
+    syncState: state.syncState,
+  });
 
   useEffect(() => {
     if (labId === 'cpu-scheduling') {
@@ -400,11 +451,20 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
     if (!state.hydrated) return;
     if (state.phase === 'submitted' || state.syncState === 'submitted') {
       clearLabSession(labId);
+      clearAlgorithmLabCompletionEventId(labId);
       return;
     }
     if (!state.startedAt) return;
     saveLabSession(labId, toCompactSession(state));
   }, [labId, state]);
+
+  useEffect(() => {
+    if (!state.hydrated || state.phase !== 'completed' || !state.startedAt || state.completionEventId) return;
+    dispatch({
+      type: 'completion_ready',
+      eventId: getOrCreateAlgorithmLabCompletionEventId(labId, state.startedAt),
+    });
+  }, [labId, state.completionEventId, state.hydrated, state.phase, state.startedAt]);
 
   useEffect(() => {
     for (const checkpointId of Object.keys(state.checkpointAnswers)) {
@@ -470,6 +530,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   function resetWorkbench() {
     clearLabSession(labId);
+    clearAlgorithmLabCompletionEventId(labId);
     lastStartedAtRef.current = state.startedAt ?? lastStartedAtRef.current;
     cpuSimulationRunnerRef.current?.cancel();
     dispatch({ type: 'reset' });
@@ -477,6 +538,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   function configureAttempt(action: ConfigureAction) {
     clearLabSession(labId);
+    clearAlgorithmLabCompletionEventId(labId);
     lastStartedAtRef.current = state.startedAt ?? lastStartedAtRef.current;
     cpuSimulationRunnerRef.current?.cancel();
     dispatch(action);
@@ -504,54 +566,114 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   function submitCpuCheckpoint(checkpoint: CpuCheckpointDefinition, answer: string) {
     if (state.labId !== 'cpu-scheduling' || !claimCheckpointSubmission(attemptEventStateRef.current.checkpointEventGate, checkpoint.id)) return;
-    const correct = answer === checkpoint.correctAnswer;
     dispatch({ type: 'answer_checkpoint', checkpointId: checkpoint.id, answer });
-    void trackAlgorithmLabCheckpoint({
-      eventId: createAlgorithmLabCheckpointEventId(state.labId, checkpoint.id, state.startedAt),
-      targetType: 'algorithm_lab_checkpoint',
-      targetId: `${state.labId}:${checkpoint.id}`,
-      resourceType: 'interactive_lab',
-      knowledgePointId: definition.knowledgePointCodes[0] ?? '',
-      sourcePage: `/a3/labs/${state.labId}`,
-      score: correct ? 100 : 0,
-      quality: { correct },
-      metadata: {
-        labId: state.labId,
-        labVersion: definition.version,
-        presetId: state.presetId,
-        checkpointId: checkpoint.id,
-        answer,
-        correct,
-        stepIndex: checkpoint.stepIndex,
-        algorithm: cpuRuns[0]?.algorithm ?? '',
-      },
-    });
+    void syncCheckpointEvent(checkpoint, answer, cpuRuns[0]?.algorithm ?? '');
   }
 
   function submitPageCheckpoint(checkpoint: PageCheckpointDefinition, answer: string) {
     if (state.labId !== 'page-replacement' || !claimCheckpointSubmission(attemptEventStateRef.current.checkpointEventGate, checkpoint.id)) return;
-    const correct = answer === checkpoint.correctAnswer;
     dispatch({ type: 'answer_checkpoint', checkpointId: checkpoint.id, answer });
-    void trackAlgorithmLabCheckpoint({
-      eventId: createAlgorithmLabCheckpointEventId(state.labId, checkpoint.id, state.startedAt),
-      targetType: 'algorithm_lab_checkpoint',
-      targetId: `${state.labId}:${checkpoint.id}`,
-      resourceType: 'interactive_lab',
-      knowledgePointId: definition.knowledgePointCodes[0] ?? '',
-      sourcePage: `/a3/labs/${state.labId}`,
-      score: correct ? 100 : 0,
-      quality: { correct },
-      metadata: {
-        labId: state.labId,
-        labVersion: definition.version,
-        presetId: state.presetId,
-        checkpointId: checkpoint.id,
-        answer,
-        correct,
-        stepIndex: checkpoint.stepIndex,
-        algorithm: pageRuns[0]?.algorithm ?? '',
+    void syncCheckpointEvent(checkpoint, answer, pageRuns[0]?.algorithm ?? '');
+  }
+
+  async function syncCheckpointEvent(
+    checkpoint: CpuCheckpointDefinition | PageCheckpointDefinition,
+    answer: string,
+    algorithm: string,
+  ) {
+    const correct = answer === checkpoint.correctAnswer;
+    const eventId = createAlgorithmLabCheckpointEventId(state.labId, checkpoint.id, state.startedAt);
+    const gate = getOrCreateCheckpointEventGate(
+      attemptEventStateRef.current.checkpointSyncGates,
+      checkpoint.id,
+      eventId,
+    );
+    dispatch({ type: 'checkpoint_sync_pending', checkpointId: checkpoint.id });
+    const synced = await synchronizeAlgorithmLabCheckpointEvent(gate, (stableEventId) => (
+      trackAlgorithmLabCheckpoint({
+        eventId: stableEventId,
+        targetType: 'algorithm_lab_checkpoint',
+        targetId: `${state.labId}:${checkpoint.id}`,
+        resourceType: 'interactive_lab',
+        knowledgePointId: definition.knowledgePointCodes[0] ?? '',
+        sourcePage: `/a3/labs/${state.labId}`,
+        score: correct ? 100 : 0,
+        quality: { correct },
+        metadata: {
+          labId: state.labId,
+          labVersion: definition.version,
+          presetId: state.presetId,
+          checkpointId: checkpoint.id,
+          answer,
+          correct,
+          stepIndex: checkpoint.stepIndex,
+          algorithm,
+        },
+      })
+    ));
+    dispatch({
+      type: synced ? 'checkpoint_synced' : 'checkpoint_sync_failed',
+      checkpointId: checkpoint.id,
+    });
+  }
+
+  async function submitCompletion() {
+    if (!completionReady || !state.completionEventId || !state.prediction || !state.startedAt) return;
+    const checkpointItems = requiredCheckpoints.map((checkpoint) => ({
+      id: checkpoint.id,
+      correct: state.checkpointAnswers[checkpoint.id] === checkpoint.correctAnswer,
+    }));
+    const durationSec = Math.max(0, Math.floor((Date.now() - Date.parse(state.startedAt)) / 1000));
+    dispatch({ type: 'sync_pending' });
+
+    const common = {
+      eventId: state.completionEventId,
+      labVersion: definition.version,
+      presetId: state.presetId,
+      presetVersion: state.presetVersion,
+      customInput: state.customInput,
+      prediction: {
+        answer: state.prediction.answer,
+        skipped: state.prediction.skipped,
+        correct: state.labId === 'cpu-scheduling'
+          ? predictionResult?.correct ?? null
+          : pagePredictionResult?.correct ?? null,
+      },
+      checkpointItems,
+      durationSec,
+      replayCount: state.replayCount,
+      reviewedStepIndexes: state.reviewedStepIndexes,
+    };
+    const request = state.labId === 'cpu-scheduling'
+      ? buildAlgorithmLabCompletionRequest({
+          ...common,
+          labId: state.labId,
+          selectedAlgorithms: state.selectedAlgorithms,
+          resultFingerprints: cpuRuns.map((run) => ({
+            algorithm: run.algorithm as AlgorithmLabAlgorithmById['cpu-scheduling'],
+            fingerprint: run.resultFingerprint,
+          })),
+        })
+      : buildAlgorithmLabCompletionRequest({
+          ...common,
+          labId: state.labId,
+          selectedAlgorithms: state.selectedAlgorithms,
+          resultFingerprints: pageRuns.map((run) => ({
+            algorithm: run.algorithm as AlgorithmLabAlgorithmById['page-replacement'],
+            fingerprint: run.resultFingerprint,
+          })),
+        });
+    const outcome = await synchronizeAlgorithmLabCompletion(request, {
+      onSubmitted: () => {
+        clearLabSession(labId);
+        clearAlgorithmLabCompletionEventId(labId);
       },
     });
+    if (outcome.syncState === 'submitted') {
+      dispatch({ type: 'submitted', completion: outcome.completion });
+      return;
+    }
+    dispatch({ type: 'sync_failed', message: outcome.error });
   }
 
   function selectPreset(presetId: string) {
@@ -630,7 +752,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
         currentStepIndex={state.currentStepIndex}
         finalStepIndex={finalStepIndex}
         replayCount={state.replayCount}
-        syncState={state.syncState}
+        syncState={state.syncState === 'event_sync_failed' ? 'failed' : state.syncState}
         syncError={state.syncError}
         cpuRuns={cpuRuns}
         pageRuns={pageRuns}
@@ -638,21 +760,104 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
         onSpeedChange={(speed) => dispatch({ type: 'set_speed', speed })}
       />
       {availableCpuCheckpoints.map((checkpoint) => (
-        <AlgorithmLabCheckpoint
-          key={checkpoint.id}
-          checkpoint={checkpoint}
-          submittedAnswer={state.checkpointAnswers[checkpoint.id]}
-          onSubmit={(answer) => submitCpuCheckpoint(checkpoint, answer)}
-        />
+        <div key={checkpoint.id} className="space-y-2">
+          <AlgorithmLabCheckpoint
+            checkpoint={checkpoint}
+            submittedAnswer={state.checkpointAnswers[checkpoint.id]}
+            onSubmit={(answer) => submitCpuCheckpoint(checkpoint, answer)}
+          />
+          {state.checkpointSyncStates[checkpoint.id] === 'pending' ? (
+            <p className="text-xs text-[var(--a3-text-muted)]" role="status">正在同步检查点记录…</p>
+          ) : null}
+          {state.checkpointSyncStates[checkpoint.id] === 'event_sync_failed' ? (
+            <button
+              type="button"
+              onClick={() => void syncCheckpointEvent(
+                checkpoint,
+                state.checkpointAnswers[checkpoint.id],
+                cpuRuns[0]?.algorithm ?? '',
+              )}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-500 px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-950/30"
+            >
+              <RefreshCw className="size-3.5" />重新同步检查点记录
+            </button>
+          ) : null}
+        </div>
       ))}
       {availablePageCheckpoints.map((checkpoint) => (
-        <AlgorithmLabCheckpoint
-          key={checkpoint.id}
-          checkpoint={checkpoint as unknown as CpuCheckpointDefinition}
-          submittedAnswer={state.checkpointAnswers[checkpoint.id]}
-          onSubmit={(answer) => submitPageCheckpoint(checkpoint, answer)}
-        />
+        <div key={checkpoint.id} className="space-y-2">
+          <AlgorithmLabCheckpoint
+            checkpoint={checkpoint as unknown as CpuCheckpointDefinition}
+            submittedAnswer={state.checkpointAnswers[checkpoint.id]}
+            onSubmit={(answer) => submitPageCheckpoint(checkpoint, answer)}
+          />
+          {state.checkpointSyncStates[checkpoint.id] === 'pending' ? (
+            <p className="text-xs text-[var(--a3-text-muted)]" role="status">正在同步检查点记录…</p>
+          ) : null}
+          {state.checkpointSyncStates[checkpoint.id] === 'event_sync_failed' ? (
+            <button
+              type="button"
+              onClick={() => void syncCheckpointEvent(
+                checkpoint,
+                state.checkpointAnswers[checkpoint.id],
+                pageRuns[0]?.algorithm ?? '',
+              )}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-500 px-3 text-xs font-semibold text-amber-700 hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-950/30"
+            >
+              <RefreshCw className="size-3.5" />重新同步检查点记录
+            </button>
+          ) : null}
+        </div>
       ))}
+      {state.completionResult ? (
+        <section className="border-t border-[var(--a3-border)] pt-4" aria-label="学习证据写回结果">
+          <div className="flex items-start gap-2">
+            {state.completionResult.verified ? (
+              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-emerald-600" />
+            ) : (
+              <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600" />
+            )}
+            <div>
+              <p className="text-sm font-semibold text-[var(--a3-text)]">
+                {state.completionResult.verified ? '已验证学习证据' : '未验证探索记录'}
+              </p>
+              <p className="mt-1 text-xs leading-5 text-[var(--a3-text-muted)]">
+                检查点得分 {state.completionResult.score} 分
+                {state.completionResult.masteryEvidenceAccepted ? '，已计入掌握证据。' : '，未计入掌握证据。'}
+              </p>
+            </div>
+          </div>
+          <Link
+            href={state.completionResult.nextAction.href}
+            className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-md bg-emerald-700 px-3 text-center text-sm font-semibold text-white hover:bg-emerald-600"
+          >
+            {state.completionResult.nextAction.label}
+          </Link>
+        </section>
+      ) : completed ? (
+        <section className="border-t border-[var(--a3-border)] pt-4" aria-label="提交学习记录">
+          <button
+            type="button"
+            onClick={() => void submitCompletion()}
+            disabled={state.syncState === 'pending' || !completionReady || !state.completionEventId}
+            className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-emerald-700 px-3 text-sm font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {state.syncState === 'pending' ? (
+              <><RefreshCw className="size-4 animate-spin" />正在同步学习记录</>
+            ) : state.syncState === 'event_sync_failed' ? (
+              <><RefreshCw className="size-4" />重新同步学习记录</>
+            ) : (
+              <><ShieldCheck className="size-4" />提交学习记录</>
+            )}
+          </button>
+          {!completionReady && state.syncState !== 'pending' ? (
+            <p className="mt-2 text-xs leading-5 text-[var(--a3-text-muted)]">到达最终步骤并完成两个检查点后可提交。</p>
+          ) : null}
+          {state.syncState === 'event_sync_failed' ? (
+            <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300" role="alert">{state.syncError}</p>
+          ) : null}
+        </section>
+      ) : null}
     </div>
   );
   const controls = (
@@ -779,9 +984,12 @@ function configuredState<TLabId extends AlgorithmLabId>(
     runs: [],
     currentStepIndex: 0,
     checkpointAnswers: {},
+    checkpointSyncStates: {},
     reviewedStepIndexes: [],
     syncState: 'idle',
     syncError: '',
+    completionEventId: null,
+    completionResult: null,
     startedAt: null,
     attemptNumber: state.attemptNumber + 1,
     simulationStatus: 'idle',
@@ -830,9 +1038,14 @@ function restoredState<TLabId extends AlgorithmLabId>(
       getAlgorithmLabFinalStepIndex(base.labId, runs),
     ),
     checkpointAnswers: normalizeCheckpointAnswers(session.checkpointAnswers),
+    checkpointSyncStates: Object.fromEntries(
+      Object.keys(session.checkpointAnswers).map((checkpointId) => [checkpointId, 'event_sync_failed']),
+    ),
     replayCount: session.replayCount,
     reviewedStepIndexes: [...session.reviewedStepIndexes],
     startedAt: session.startedAt,
+    completionEventId: null,
+    completionResult: null,
     simulationStatus: 'idle',
     simulationError: '',
   };
@@ -953,6 +1166,7 @@ export interface AttemptEventState {
   attemptNumber: number;
   startedEventGate: StartedEventGate;
   checkpointEventGate: Set<string>;
+  checkpointSyncGates: Map<string, CheckpointEventGate>;
 }
 
 export function createAttemptEventState(attemptNumber: number): AttemptEventState {
@@ -960,6 +1174,7 @@ export function createAttemptEventState(attemptNumber: number): AttemptEventStat
     attemptNumber,
     startedEventGate: createStartedEventGate(),
     checkpointEventGate: new Set<string>(),
+    checkpointSyncGates: new Map<string, CheckpointEventGate>(),
   };
 }
 
@@ -1009,6 +1224,44 @@ export function createAlgorithmLabCheckpointEventId(
   const timestamp = Date.parse(startedAt ?? '');
   const stableTime = Number.isFinite(timestamp) ? timestamp : 0;
   return `a3lab_checkpoint_${labId.replaceAll('-', '_')}_${checkpointId.replaceAll('-', '_')}_${stableTime}`;
+}
+
+export interface CheckpointEventGate {
+  eventId: string;
+  status: 'idle' | 'in_flight' | 'sent';
+}
+
+export function createCheckpointEventGate(eventId: string): CheckpointEventGate {
+  return { eventId, status: 'idle' };
+}
+
+export function getOrCreateCheckpointEventGate(
+  gates: Map<string, CheckpointEventGate>,
+  checkpointId: string,
+  eventId: string,
+): CheckpointEventGate {
+  const existing = gates.get(checkpointId);
+  if (existing?.eventId === eventId) return existing;
+  const gate = createCheckpointEventGate(eventId);
+  gates.set(checkpointId, gate);
+  return gate;
+}
+
+export async function synchronizeAlgorithmLabCheckpointEvent(
+  gate: CheckpointEventGate,
+  send: (eventId: string) => Promise<StartedEventResult>,
+): Promise<boolean> {
+  if (gate.status !== 'idle') return false;
+  gate.status = 'in_flight';
+  try {
+    const result = await send(gate.eventId);
+    const accepted = result.status === 'accepted' || result.status === 'duplicate';
+    gate.status = accepted ? 'sent' : 'idle';
+    return accepted;
+  } catch {
+    gate.status = 'idle';
+    return false;
+  }
 }
 
 export function canStartAlgorithmLabRun(

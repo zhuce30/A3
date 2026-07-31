@@ -302,19 +302,44 @@ class AlgorithmLabApiTests(TestCase):
         self.assertNotIn("correct", custom_event.metadata["prediction"])
         self.assertEqual(build_algorithm_lab_effect(self.user)["prediction"], {"answered": 0, "correct": 0})
 
-    def test_duplicate_is_stable_and_same_event_id_is_independent_between_users(self):
+    def test_duplicate_retry_returns_the_original_event_summary(self):
         self.client.force_login(self.user)
         first = self.post_complete(known_cpu_completion("shared-event"))
-        second = self.post_complete(known_cpu_completion("shared-event", resultFingerprint="forged"))
-        self.client.force_login(self.other)
-        other = self.post_complete(known_cpu_completion("shared-event"))
+        divergent_retry = known_cpu_completion(
+            "shared-event",
+            resultFingerprint="forged",
+            prediction={"answer": "rr", "skipped": False, "correct": False},
+            checkpoints={
+                "answered": 2,
+                "correct": 0,
+                "items": [
+                    {"id": "checkpoint-0", "correct": False},
+                    {"id": "checkpoint-1", "correct": False},
+                ],
+            },
+            metrics={"score": 0, "durationSec": 99, "replayCount": 4, "reviewedStepIndexes": [9]},
+        )
+        second = self.post_complete(divergent_retry)
 
         self.assertEqual(first.status_code, 201)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(second.json()["status"], "duplicate")
         self.assertEqual(second.json()["completion"], first.json()["completion"])
+        self.assertEqual(second.json()["completion"]["score"], 100)
+        self.assertTrue(second.json()["completion"]["verified"])
+        self.assertEqual(LearningEvent.objects.filter(user=self.user, event_id="shared-event").count(), 1)
+
+    def test_same_event_id_is_independent_between_users(self):
+        self.client.force_login(self.user)
+        first = self.post_complete(known_cpu_completion("shared-event"))
+        self.client.force_login(self.other)
+        other = self.post_complete(known_cpu_completion("shared-event"))
+
+        self.assertEqual(first.status_code, 201)
         self.assertEqual(other.status_code, 201)
         self.assertEqual(LearningEvent.objects.filter(event_id="shared-event").count(), 2)
+        self.assertTrue(LearningEvent.objects.filter(user=self.user, event_id="shared-event").exists())
+        self.assertTrue(LearningEvent.objects.filter(user=self.other, event_id="shared-event").exists())
 
     def test_validation_rejects_bounds_unknown_algorithms_oversized_lists_and_steps(self):
         self.client.force_login(self.user)

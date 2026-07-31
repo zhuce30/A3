@@ -1,6 +1,10 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
+import * as algorithmLabWorkbench from '@/components/a3/features/algorithm-lab/algorithm-lab-workbench';
+import * as algorithmLabClient from '@/lib/a3/algorithm-lab/client';
 import {
   fetchAlgorithmLabCatalog,
   submitAlgorithmLabCompletion,
@@ -20,6 +24,43 @@ vi.mock('@/lib/a3/api-client', () => ({
 
 const getJson = vi.mocked(a3GetJson);
 const postJson = vi.mocked(a3PostJson);
+const workbenchSource = readFileSync(
+  join(process.cwd(), 'components/a3/features/algorithm-lab/algorithm-lab-workbench.tsx'),
+  'utf8',
+);
+
+type CompletionGateInput = {
+  phase: string;
+  currentStepIndex: number;
+  finalStepIndex: number;
+  requiredCheckpointIds: string[];
+  checkpointAnswers: Record<string, string>;
+  syncState: string;
+};
+
+type CompletionEvidence = {
+  eventId: string;
+  labId: 'cpu-scheduling';
+  labVersion: string;
+  presetId: string;
+  presetVersion: string;
+  customInput: boolean;
+  selectedAlgorithms: Array<'fcfs' | 'sjf' | 'priority' | 'rr'>;
+  prediction: { answer: string | null; skipped: boolean; correct: boolean | null };
+  checkpointItems: Array<{ id: string; correct: boolean }>;
+  durationSec: number;
+  replayCount: number;
+  reviewedStepIndexes: number[];
+  resultFingerprints: Array<{ algorithm: 'fcfs' | 'sjf' | 'priority' | 'rr'; fingerprint: string }>;
+};
+
+function task10Export<T>(name: string): T {
+  return (algorithmLabClient as unknown as Record<string, unknown>)[name] as T;
+}
+
+function workbenchExport<T>(name: string): T {
+  return (algorithmLabWorkbench as unknown as Record<string, unknown>)[name] as T;
+}
 
 describe('algorithm lab API client', () => {
   beforeEach(() => {
@@ -264,6 +305,186 @@ describe('algorithm lab session recovery', () => {
   });
 });
 
+describe('retry-safe algorithm lab completion', () => {
+  let storage: ReturnType<typeof createMemoryStorage>;
+
+  beforeEach(() => {
+    storage = createMemoryStorage();
+    vi.stubGlobal('sessionStorage', storage);
+  });
+
+  it('blocks completion until the global final step and both checkpoints are answered', () => {
+    const canSubmit = task10Export<(input: CompletionGateInput) => boolean>(
+      'canSubmitAlgorithmLabCompletion',
+    );
+    expect(typeof canSubmit).toBe('function');
+    const ready = {
+      phase: 'completed',
+      currentStepIndex: 12,
+      finalStepIndex: 12,
+      requiredCheckpointIds: ['cpu-ready-queue', 'cpu-completion-order'],
+      checkpointAnswers: {
+        'cpu-ready-queue': 'P2',
+        'cpu-completion-order': 'P1 → P2 → P3',
+      },
+      syncState: 'idle',
+    };
+
+    expect(canSubmit({ ...ready, phase: 'running' })).toBe(false);
+    expect(canSubmit({ ...ready, currentStepIndex: 11 })).toBe(false);
+    expect(canSubmit({ ...ready, checkpointAnswers: { 'cpu-ready-queue': 'P2' } })).toBe(false);
+    expect(canSubmit({ ...ready, syncState: 'pending' })).toBe(false);
+    expect(canSubmit(ready)).toBe(true);
+  });
+
+  it('builds a step-free request with checkpoint score, separate prediction, canonical fingerprint, and normalized reviews', () => {
+    const buildRequest = task10Export<(
+      evidence: CompletionEvidence,
+    ) => AlgorithmLabCompletionRequest<'cpu-scheduling'>>('buildAlgorithmLabCompletionRequest');
+    expect(typeof buildRequest).toBe('function');
+    const request = buildRequest(createCompletionEvidence());
+
+    expect(request.metrics.score).toBe(50);
+    expect(request.prediction).toEqual({ answer: 'sjf', skipped: false, correct: true });
+    expect(request.checkpoints).toMatchObject({ answered: 2, correct: 1 });
+    expect(request.metrics.reviewedStepIndexes).toEqual(Array.from({ length: 50 }, (_, index) => index));
+    expect(request.resultFingerprint).toBe(
+      'a3lab-result.v1|cpu-scheduling|cpu-foundation|1.0.0|'
+      + 'fcfs=cpu:30f71277755e0281d134aa1ca82e049c|'
+      + 'priority=cpu:4aae8cbcb315ec683110dcf7aa793990|'
+      + 'rr=cpu:7a045a7da6352c4488d7a567d0ff26c2|'
+      + 'sjf=cpu:7958460a04842ebeb1e53aebf42d471a',
+    );
+    expect(JSON.stringify(request)).not.toContain('steps');
+  });
+
+  it('persists one completion event ID and reuses it for a retry', () => {
+    const getOrCreateEventId = task10Export<(
+      labId: 'cpu-scheduling',
+      startedAt: string,
+    ) => string>('getOrCreateAlgorithmLabCompletionEventId');
+    expect(typeof getOrCreateEventId).toBe('function');
+
+    const startedAt = '2026-07-31T00:00:00.000Z';
+    const first = getOrCreateEventId('cpu-scheduling', startedAt);
+    const retry = getOrCreateEventId('cpu-scheduling', startedAt);
+    const nextAttempt = getOrCreateEventId('cpu-scheduling', '2026-08-01T00:00:00.000Z');
+
+    expect(first).toMatch(/^a3lab_complete_cpu_scheduling_/);
+    expect(retry).toBe(first);
+    expect(nextAttempt).not.toBe(first);
+    expect(storage.getItem('a3.algorithmLab.cpu-scheduling.completionEventId')).toBe(nextAttempt);
+  });
+
+  it.each(['accepted', 'duplicate'] as const)('clears the compact session after a %s response', async (status) => {
+    const synchronize = task10Export<(
+      request: AlgorithmLabCompletionRequest,
+      options: {
+        submit: () => Promise<unknown>;
+        onSubmitted: () => void;
+      },
+    ) => Promise<{ syncState: string }>>('synchronizeAlgorithmLabCompletion');
+    const clearEventId = task10Export<(labId: 'cpu-scheduling') => void>(
+      'clearAlgorithmLabCompletionEventId',
+    );
+    expect(typeof synchronize).toBe('function');
+    expect(typeof clearEventId).toBe('function');
+    saveLabSession('cpu-scheduling', { ...createSession(), phase: 'completed' });
+    const eventId = task10Export<(labId: 'cpu-scheduling', startedAt: string) => string>(
+      'getOrCreateAlgorithmLabCompletionEventId',
+    )('cpu-scheduling', '2026-07-31T00:00:00.000Z');
+
+    const outcome = await synchronize(
+      { ...createCompletionRequest(), eventId },
+      {
+        submit: async () => ({
+          success: true,
+          status,
+          completion: {
+            labId: 'cpu-scheduling',
+            verified: true,
+            score: 100,
+            masteryEvidenceAccepted: true,
+            nextAction: {
+              type: 'assessment',
+              label: '完成专项练习',
+              href: '/a3/assessment',
+              reason: '继续验证调度算法判断',
+            },
+          },
+        }),
+        onSubmitted: () => {
+          clearLabSession('cpu-scheduling');
+          clearEventId('cpu-scheduling');
+        },
+      },
+    );
+
+    expect(outcome.syncState).toBe('submitted');
+    expect(loadLabSession('cpu-scheduling')).toBeNull();
+    expect(storage.getItem('a3.algorithmLab.cpu-scheduling.completionEventId')).toBeNull();
+  });
+
+  it.each([
+    ['network', async () => { throw new Error('offline'); }],
+    ['5xx', async () => ({ success: false, status: 503, error: '服务暂不可用' })],
+  ] as const)('preserves the completed session and exposes retry after a %s failure', async (_kind, submit) => {
+    const synchronize = task10Export<(
+      request: AlgorithmLabCompletionRequest,
+      options: { submit: () => Promise<unknown> },
+    ) => Promise<{ syncState: string; retryLabel?: string }>>('synchronizeAlgorithmLabCompletion');
+    expect(typeof synchronize).toBe('function');
+    saveLabSession('cpu-scheduling', { ...createSession(), phase: 'completed' });
+
+    const outcome = await synchronize(createCompletionRequest(), { submit });
+
+    expect(outcome).toMatchObject({
+      syncState: 'event_sync_failed',
+      retryLabel: '重新同步学习记录',
+    });
+    expect(loadLabSession('cpu-scheduling')).toMatchObject({ phase: 'completed', currentStepIndex: 3 });
+    expect(workbenchSource).toContain('重新同步学习记录');
+    expect(workbenchSource).toMatch(/disabled=\{[^}]*syncState[^}]*pending/);
+  });
+
+  it('retries a checkpoint event with the same ID and keeps its submitted answer on failure', async () => {
+    type Gate = { eventId: string; status: 'idle' | 'in_flight' | 'sent' };
+    const createGate = workbenchExport<(eventId: string) => Gate>('createCheckpointEventGate');
+    const synchronizeCheckpoint = workbenchExport<(
+      gate: Gate,
+      send: (eventId: string) => Promise<{ success: boolean; status?: string }>,
+    ) => Promise<boolean>>('synchronizeAlgorithmLabCheckpointEvent');
+    const createState = workbenchExport<(labId: 'cpu-scheduling') => { checkpointAnswers: Record<string, string> }>(
+      'createAlgorithmLabState',
+    );
+    const reduce = workbenchExport<(
+      state: ReturnType<typeof createState>,
+      action: { type: 'answer_checkpoint'; checkpointId: string; answer: string },
+    ) => ReturnType<typeof createState>>('algorithmLabReducer');
+    expect(typeof createGate).toBe('function');
+    expect(typeof synchronizeCheckpoint).toBe('function');
+    const eventId = 'a3lab_checkpoint_cpu_scheduling_cpu_ready_queue_1785456000000';
+    const gate = createGate(eventId);
+    const send = vi.fn()
+      .mockResolvedValueOnce({ success: false, status: 503 })
+      .mockResolvedValueOnce({ success: true, status: 'duplicate' });
+    const answered = reduce(createState('cpu-scheduling'), {
+      type: 'answer_checkpoint',
+      checkpointId: 'cpu-ready-queue',
+      answer: 'P2',
+    });
+
+    await expect(synchronizeCheckpoint(gate, send)).resolves.toBe(false);
+    expect(gate).toEqual({ eventId, status: 'idle' });
+    expect(answered.checkpointAnswers['cpu-ready-queue']).toBe('P2');
+    await expect(synchronizeCheckpoint(gate, send)).resolves.toBe(true);
+    expect(gate).toEqual({ eventId, status: 'sent' });
+    await expect(synchronizeCheckpoint(gate, send)).resolves.toBe(false);
+    expect(send.mock.calls.map(([stableEventId]) => stableEventId)).toEqual([eventId, eventId]);
+    expect(workbenchSource).toContain('重新同步检查点记录');
+  });
+});
+
 function createSession(): AlgorithmLabSession<'cpu-scheduling'> {
   return {
     schemaVersion: 'a3.algorithm-lab.session.v1',
@@ -317,6 +538,32 @@ function createCompletionRequest(): AlgorithmLabCompletionRequest<'cpu-schedulin
     checkpoints: { answered: 1, correct: 1, items: [{ id: 'cpu-order', correct: true }] },
     metrics: { score: 100, durationSec: 10, replayCount: 0, reviewedStepIndexes: [1] },
     resultFingerprint: 'cpu:fingerprint',
+  };
+}
+
+function createCompletionEvidence(): CompletionEvidence {
+  return {
+    eventId: 'a3lab-completion-1',
+    labId: 'cpu-scheduling',
+    labVersion: '1.0.0',
+    presetId: 'cpu-foundation',
+    presetVersion: '1.0.0',
+    customInput: false,
+    selectedAlgorithms: ['fcfs', 'sjf', 'priority', 'rr'],
+    prediction: { answer: 'sjf', skipped: false, correct: true },
+    checkpointItems: [
+      { id: 'cpu-ready-queue', correct: true },
+      { id: 'cpu-completion-order', correct: false },
+    ],
+    durationSec: 18,
+    replayCount: 1,
+    reviewedStepIndexes: [55, ...Array.from({ length: 56 }, (_, index) => 55 - index), 7, -1, 2.5],
+    resultFingerprints: [
+      { algorithm: 'rr', fingerprint: 'cpu:7a045a7da6352c4488d7a567d0ff26c2' },
+      { algorithm: 'fcfs', fingerprint: 'cpu:30f71277755e0281d134aa1ca82e049c' },
+      { algorithm: 'sjf', fingerprint: 'cpu:7958460a04842ebeb1e53aebf42d471a' },
+      { algorithm: 'priority', fingerprint: 'cpu:4aae8cbcb315ec683110dcf7aa793990' },
+    ],
   };
 }
 
