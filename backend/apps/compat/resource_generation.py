@@ -1826,7 +1826,7 @@ def _build_resource_item(resource_type: str, goal: str, profile: LearnerProfile 
         [{**citation, "type": citation.get("type") or "RAG", "score": citation.get("score")} for citation in citations],
     )
     grounding = _resource_grounding(verification)
-    return {
+    resource = {
         "type": resource_type,
         "title": _resource_title(resource_type, goal),
         "content": content,
@@ -1839,6 +1839,14 @@ def _build_resource_item(resource_type: str, goal: str, profile: LearnerProfile 
         "synthesis": synthesis,
         "estimatedMinutes": _estimated_minutes(resource_type),
     }
+    if resource_type == "code_lab":
+        from backend.apps.learning.algorithm_labs import recommend_algorithm_lab
+
+        weak_points = list(profile.weak_points or []) if profile is not None else []
+        related_lab = recommend_algorithm_lab(goal, weak_points)
+        if related_lab:
+            resource["relatedLab"] = related_lab
+    return resource
 
 
 def _resource_grounding(verification) -> dict:

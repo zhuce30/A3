@@ -3,6 +3,7 @@ from django.test import TestCase
 from backend.apps.learning import algorithm_labs
 from backend.apps.accounts.models import User
 from backend.apps.compat.recommendations import build_recommendation_payload
+from backend.apps.compat.resource_generation import _build_resource_item
 from backend.apps.learning.models import Chapter, Course, KnowledgePoint, LearningPath, LearningPathItem
 from backend.apps.learning.services import (
     complete_study_plan_task,
@@ -133,3 +134,26 @@ class AlgorithmLabRecommendationTests(TestCase):
         self.assertEqual(completed["status"], "completed")
         self.cpu_item.refresh_from_db()
         self.assertGreaterEqual(self.cpu_item.progress, 60)
+
+    def test_code_lab_resource_gets_a_deterministic_related_lab_action(self):
+        resource = _build_resource_item(
+            "code_lab",
+            "CPU 璋冨害绠楁硶",
+            self.profile,
+            [{"id": "S1", "title": "CPU 璋冨害", "snippet": "CPU 璋冨害绛栫暐瀵规瘮", "type": "RAG"}],
+            allow_llm=False,
+        )
+
+        self.assertEqual(resource["relatedLab"]["labId"], "cpu-scheduling")
+        self.assertEqual(resource["relatedLab"]["kind"], "interactive_lab")
+
+    def test_unrelated_code_lab_resource_does_not_fabricate_a_lab_action(self):
+        resource = _build_resource_item(
+            "code_lab",
+            "杩涚▼鎺у埗鍧?PCB",
+            None,
+            [{"id": "S1", "title": "PCB", "snippet": "PCB 璁板綍杩涚▼鐘舵€?", "type": "RAG"}],
+            allow_llm=False,
+        )
+
+        self.assertNotIn("relatedLab", resource)
