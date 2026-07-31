@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from io import BytesIO
 
 from django.utils import timezone
+from django.db.models import Q
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
@@ -81,7 +82,14 @@ def select_wrong_questions(user, scope: str):
     if normalized_scope == "active":
         queryset = queryset.filter(mastered=False)
     elif normalized_scope == "due":
-        queryset = queryset.filter(mastered=False, review_after__lte=timezone.now())
+        tomorrow = timezone.localdate() + timedelta(days=1)
+        tomorrow_start = timezone.make_aware(
+            datetime.combine(tomorrow, time.min),
+            timezone.get_current_timezone(),
+        )
+        queryset = queryset.filter(mastered=False).filter(
+            Q(review_after__isnull=True) | Q(review_after__lt=tomorrow_start)
+        )
     elif normalized_scope == "mastered":
         queryset = queryset.filter(mastered=True)
     return queryset[:MAX_EXPORT_QUESTIONS]

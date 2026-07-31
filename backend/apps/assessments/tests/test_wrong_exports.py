@@ -39,8 +39,15 @@ class WrongExportDomainTests(TestCase):
             title="进程调度",
         )
         now = timezone.now()
+        later_today = timezone.localtime(now).replace(hour=23, minute=0, second=0, microsecond=0)
         self.future = self._wrong(self.user, "未来复习题", review_after=now + timedelta(days=2))
         self.due = self._wrong(self.user, "今日到期题", review_after=now - timedelta(hours=1), wrong_count=3)
+        self.due_later_today = self._wrong(
+            self.user,
+            "今天稍晚到期题",
+            review_after=later_today,
+        )
+        self.unscheduled = self._wrong(self.user, "未安排复习题", review_after=None)
         self.mastered = self._wrong(self.user, "已掌握题", review_after=now - timedelta(days=2), mastered=True)
         self.other = self._wrong(self.other_user, "其他用户题", review_after=now - timedelta(days=1))
 
@@ -79,11 +86,11 @@ class WrongExportDomainTests(TestCase):
 
         self.assertEqual(
             {item.id for item in select_wrong_questions(self.user, "active")},
-            {self.future.id, self.due.id},
+            {self.future.id, self.due.id, self.due_later_today.id, self.unscheduled.id},
         )
         self.assertEqual(
             {item.id for item in select_wrong_questions(self.user, "due")},
-            {self.due.id},
+            {self.due.id, self.due_later_today.id, self.unscheduled.id},
         )
         self.assertEqual(
             {item.id for item in select_wrong_questions(self.user, "mastered")},
@@ -91,7 +98,7 @@ class WrongExportDomainTests(TestCase):
         )
         self.assertEqual(
             {item.id for item in select_wrong_questions(self.user, "all")},
-            {self.future.id, self.due.id, self.mastered.id},
+            {self.future.id, self.due.id, self.due_later_today.id, self.unscheduled.id, self.mastered.id},
         )
 
     def test_select_wrong_questions_rejects_unknown_scope(self):
@@ -112,8 +119,8 @@ class WrongExportDomainTests(TestCase):
         self.assertEqual(snapshot["schemaVersion"], "1.0")
         self.assertEqual(snapshot["scope"], "active")
         self.assertEqual(snapshot["studentName"], "测试同学")
-        self.assertEqual(snapshot["summary"]["totalCount"], 2)
-        self.assertEqual(snapshot["summary"]["activeCount"], 2)
+        self.assertEqual(snapshot["summary"]["totalCount"], 4)
+        self.assertEqual(snapshot["summary"]["activeCount"], 4)
         self.assertEqual(snapshot["summary"]["masteredCount"], 0)
         self.assertEqual(snapshot["summary"]["knowledgePoints"], ["进程调度"])
         row = next(item for item in snapshot["questions"] if item["stem"] == "今日到期题")
@@ -154,9 +161,15 @@ class WrongExportDomainTests(TestCase):
         self.assertEqual(headers[0:5], ["错题ID", "知识点", "章节", "题干", "选项"])
         self.assertIn("正确答案", headers)
         self.assertIn("下次复习时间", headers)
-        self.assertEqual(sheet.max_row, 3)
+        self.assertEqual(sheet.max_row, 5)
         review_column = headers.index("下次复习时间") + 1
-        self.assertIsNotNone(sheet.cell(row=2, column=review_column).value)
+        stem_column = headers.index("题干") + 1
+        due_row = next(
+            row
+            for row in range(2, sheet.max_row + 1)
+            if sheet.cell(row=row, column=stem_column).value == "今日到期题"
+        )
+        self.assertIsNotNone(sheet.cell(row=due_row, column=review_column).value)
         self.assertEqual(sheet.freeze_panes, "A2")
 
     def test_build_pdf_export_is_parseable_and_has_metadata(self):
