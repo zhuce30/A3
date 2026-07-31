@@ -197,13 +197,13 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
 
   useEffect(() => {
     if (state.phase !== 'running') return;
-    if (state.currentStepIndex >= finalStepIndex) {
+    if (finalStepIndex < 0) {
       dispatch({ type: 'finish' });
       return;
     }
     const timer = window.setInterval(() => dispatch({ type: 'advance' }), Math.round(1000 / state.speed));
     return () => window.clearInterval(timer);
-  }, [finalStepIndex, state.currentStepIndex, state.phase, state.speed]);
+  }, [finalStepIndex, state.phase, state.speed]);
 
   useEffect(() => {
     if (state.phase === 'submitted' || state.syncState === 'submitted') {
@@ -247,6 +247,12 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
     void canvasRef.current?.requestFullscreen?.();
   }
 
+  function resetWorkbench() {
+    clearLabSession(labId);
+    startedEventSent.current = false;
+    dispatch({ type: 'reset' });
+  }
+
   const inputPanel = (
     <AlgorithmLabInputPanel
       definition={definition}
@@ -278,7 +284,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
       onPause={() => dispatch({ type: 'pause' })}
       onRewind={() => dispatch({ type: 'rewind' })}
       onAdvance={() => dispatch({ type: 'advance' })}
-      onReset={() => dispatch({ type: 'reset' })}
+      onReset={resetWorkbench}
       onFullscreen={fullscreen}
     />
   );

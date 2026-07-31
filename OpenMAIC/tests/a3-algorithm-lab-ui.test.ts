@@ -114,12 +114,22 @@ describe('algorithm lab UI', () => {
 
     expect(source.match(/setInterval\(/g)).toHaveLength(1);
     expect(source).toContain('clearInterval');
+    expect(source).toContain('}, [finalStepIndex, state.phase, state.speed]);');
     expect(source).toContain('loadLabSession');
     expect(source).toContain('saveLabSession');
     expect(source).toContain('simulateCpuScheduling');
     expect(source).toContain('simulatePageReplacement');
     expect(source).toContain('trackAlgorithmLabStarted');
     expect(source).not.toContain('steps: state.runs');
+  });
+
+  it('clears persisted recovery and started-event state on reset', () => {
+    const source = readFileSync(workbenchPath, 'utf8');
+
+    expect(source).toContain('function resetWorkbench()');
+    expect(source).toContain('clearLabSession(labId);');
+    expect(source).toContain('startedEventSent.current = false;');
+    expect(source).toContain('onReset={resetWorkbench}');
   });
 
   it('provides the desktop, tablet and mobile workbench layouts', () => {
