@@ -52,12 +52,14 @@ export interface CpuCheckpointDefinition {
 interface CpuSchedulingVisualizerProps {
   runs: CpuRun[];
   currentStepIndex: number;
+  revealReadyQueue?: boolean;
   onSeek: (index: number) => void;
 }
 
 export function CpuSchedulingVisualizer({
   runs,
   currentStepIndex,
+  revealReadyQueue = false,
   onSeek,
 }: CpuSchedulingVisualizerProps) {
   if (runs.length === 0) {
@@ -77,6 +79,7 @@ export function CpuSchedulingVisualizer({
 
   const totalTime = getTotalElapsedTime(runs);
   const focusedRun = runs[0];
+  const timeAxis = buildCpuGlobalTimeAxis(runs);
   const currentTime = deriveCpuGlobalCurrentTime(runs, currentStepIndex);
   const visibleSteps = new Map(runs.map((run) => [run, selectCpuStepAtTime(run, currentTime)]));
   const focusedStep = visibleSteps.get(focusedRun);
@@ -154,18 +157,19 @@ export function CpuSchedulingVisualizer({
                     ))}
                     {visibleSegments.map((segment) => {
                       const visual = getCpuProcessVisual(segment.processId);
-                      const stepIndex = findCpuSegmentStepIndex(run, segment);
+                      const eventTime = findCpuSegmentEventTime(run, segment);
+                      const globalStepIndex = findCpuGlobalTimeIndex(timeAxis, eventTime);
                       return (
                         <button
                           key={`${run.algorithm}-${segment.processId}-${segment.start}-${segment.end}`}
                           type="button"
-                          onClick={() => onSeek(stepIndex)}
+                          onClick={() => onSeek(findCpuGlobalTimeIndex(timeAxis, eventTime))}
                           className={`absolute inset-y-1 flex min-w-7 items-center justify-center overflow-hidden rounded border px-1 text-[11px] font-semibold transition-colors duration-200 focus-visible:z-30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${visual.barClass}`}
                           style={{
                             left: `${timeToPercent(segment.start, totalTime)}%`,
                             width: `${timeToPercent(segment.end - segment.start, totalTime)}%`,
                           }}
-                          aria-label={`${algorithmLabels[run.algorithm as CpuSchedulingAlgorithm]}：${visual.label}，${segment.start} 到 ${segment.end}，跳到步骤 ${stepIndex + 1}`}
+                          aria-label={`${algorithmLabels[run.algorithm as CpuSchedulingAlgorithm]}：${visual.label}，${segment.start} 到 ${segment.end}，跳到全局步骤 ${globalStepIndex + 1}`}
                         >
                           {visual.label}
                         </button>
@@ -186,7 +190,9 @@ export function CpuSchedulingVisualizer({
             就绪队列 · {algorithmLabels[focusedRun.algorithm as CpuSchedulingAlgorithm]}
           </div>
           <div className="mt-2 flex min-h-10 flex-wrap items-center gap-2" aria-label="就绪队列">
-            {focusedStep?.state.readyQueue.length ? focusedStep.state.readyQueue.map((processId, index) => {
+            {!revealReadyQueue ? (
+              <span className="text-xs text-[var(--a3-text-muted)]">提交就绪队列检查点后显示</span>
+            ) : focusedStep?.state.readyQueue.length ? focusedStep.state.readyQueue.map((processId, index) => {
               const visual = getCpuProcessVisual(processId);
               return (
                 <span key={`${processId}-${index}`} className={`inline-flex h-8 items-center gap-2 rounded-md border px-2.5 text-xs font-semibold ${visual.barClass}`}>
@@ -267,6 +273,15 @@ export function findCpuSegmentStepIndex(run: CpuRun, segment: CpuSegment): numbe
   return Math.max(0, index);
 }
 
+export function findCpuSegmentEventTime(run: CpuRun, segment: CpuSegment): number {
+  const step = run.steps.find((candidateStep) => candidateStep.state.timeline.some((candidate) => (
+    candidate.processId === segment.processId
+    && candidate.start === segment.start
+    && candidate.end === segment.end
+  )));
+  return step?.time ?? segment.end;
+}
+
 export function getCpuTimelineLayout(trackWidth: number) {
   const stableTrackWidth = Math.max(1, trackWidth);
   return {
@@ -277,13 +292,30 @@ export function getCpuTimelineLayout(trackWidth: number) {
 }
 
 export function deriveCpuGlobalCurrentTime(runs: CpuRun[], currentStepIndex: number): number {
-  const controllingRun = runs[0];
-  if (!controllingRun || controllingRun.steps.length === 0) return 0;
-  const index = Math.max(0, Math.min(Math.trunc(currentStepIndex), controllingRun.steps.length - 1));
-  return controllingRun.steps[index].time;
+  const timeAxis = buildCpuGlobalTimeAxis(runs);
+  if (timeAxis.length === 0) return 0;
+  const safeIndex = Number.isFinite(currentStepIndex) ? Math.trunc(currentStepIndex) : 0;
+  const index = Math.max(0, Math.min(safeIndex, timeAxis.length - 1));
+  return timeAxis[index];
 }
 
-export function selectCpuStepAtTime(run: CpuRun, currentTime: number) {
+export function buildCpuGlobalTimeAxis(runs: CpuRun[]): number[] {
+  return [...new Set(runs.flatMap((run) => run.steps.map((step) => step.time)))]
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+}
+
+export function findCpuGlobalTimeIndex(timeAxis: number[], eventTime: number): number {
+  const exactIndex = timeAxis.indexOf(eventTime);
+  if (exactIndex >= 0) return exactIndex;
+  for (let index = timeAxis.length - 1; index >= 0; index -= 1) {
+    if (timeAxis[index] <= eventTime) return index;
+  }
+  return 0;
+}
+
+export function selectCpuStepAtTime(run: CpuRun | undefined, currentTime: number) {
+  if (!run) return undefined;
   let visibleStep: CpuRun['steps'][number] | undefined;
   for (const step of run.steps) {
     if (step.time <= currentTime && (!visibleStep || step.time >= visibleStep.time)) {
@@ -310,7 +342,10 @@ export function deriveCpuPredictionResult(
   };
 }
 
-export function buildCpuCheckpoints(run: CpuRun): CpuCheckpointDefinition[] {
+export function buildCpuCheckpoints(
+  run: CpuRun,
+  timeAxis: number[] = buildCpuGlobalTimeAxis([run]),
+): CpuCheckpointDefinition[] {
   const readyStepIndex = Math.max(0, run.steps.findIndex((step) => step.state.readyQueue.length > 0));
   const readyStep = run.steps[readyStepIndex] ?? run.steps[0];
   const readyAnswer = readyStep?.state.readyQueue[0] ?? '队列为空';
@@ -331,7 +366,7 @@ export function buildCpuCheckpoints(run: CpuRun): CpuCheckpointDefinition[] {
       question: `在 ${algorithmLabels[run.algorithm as CpuSchedulingAlgorithm]} 的时间 ${readyStep?.time ?? 0}，就绪队列首项是什么？`,
       options: readyOptions,
       correctAnswer: readyAnswer,
-      stepIndex: readyStepIndex,
+      stepIndex: findCpuGlobalTimeIndex(timeAxis, readyStep?.time ?? 0),
       context: '判断调度器下一次可选的进程。',
     },
     {
@@ -339,10 +374,28 @@ export function buildCpuCheckpoints(run: CpuRun): CpuCheckpointDefinition[] {
       question: `${algorithmLabels[run.algorithm as CpuSchedulingAlgorithm]} 的进程完成顺序是什么？`,
       options: completionOptions,
       correctAnswer: completionAnswer,
-      stepIndex: Math.max(0, run.steps.length - 1),
+      stepIndex: Math.max(0, timeAxis.length - 1),
       context: '按完成时刻从早到晚排列全部进程。',
     },
   ];
+}
+
+export function isCpuCheckpointRevealed(
+  checkpointId: CpuCheckpointDefinition['id'],
+  checkpointAnswers: Record<string, string>,
+): boolean {
+  return typeof checkpointAnswers[checkpointId] === 'string';
+}
+
+export function getAvailableCpuCheckpoints(
+  checkpoints: CpuCheckpointDefinition[],
+  currentStepIndex: number,
+  checkpointAnswers: Record<string, string>,
+): CpuCheckpointDefinition[] {
+  return checkpoints.filter((checkpoint) => (
+    checkpoint.stepIndex <= currentStepIndex
+    || isCpuCheckpointRevealed(checkpoint.id, checkpointAnswers)
+  ));
 }
 
 function getTotalElapsedTime(runs: CpuRun[]) {

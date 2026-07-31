@@ -11,16 +11,22 @@ import {
   createAlgorithmLabState,
   createStartedEventGate,
   emitAlgorithmLabStartedOnce,
+  getAlgorithmLabFinalStepIndex,
   type AlgorithmLabRunRequest,
 } from '@/components/a3/features/algorithm-lab/algorithm-lab-workbench';
 import { getNextMobilePanel } from '@/components/a3/features/algorithm-lab/algorithm-lab-layout';
 import {
   buildCpuCheckpoints,
+  buildCpuGlobalTimeAxis,
   deriveCpuGlobalCurrentTime,
   deriveCpuPredictionResult,
+  findCpuGlobalTimeIndex,
+  findCpuSegmentEventTime,
   findCpuSegmentStepIndex,
+  getAvailableCpuCheckpoints,
   getCpuTimelineLayout,
   getCpuProcessVisual,
+  isCpuCheckpointRevealed,
   selectCpuStepAtTime,
 } from '@/components/a3/features/algorithm-lab/cpu-scheduling-visualizer';
 import {
@@ -354,6 +360,50 @@ describe('algorithm lab UI', () => {
     expect(statusPanel).toContain('selectCpuStepAtTime');
   });
 
+  it('drives playback and cross-row seeking from the sorted global CPU event-time axis', () => {
+    const input = {
+      processes: [
+        { processId: 'P1', arrivalTime: 0, burstTime: 5, priority: 1 },
+        { processId: 'P2', arrivalTime: 0, burstTime: 1, priority: 0 },
+      ],
+      timeQuantum: 2,
+    };
+    const fcfs = simulateCpuScheduling(input, 'fcfs');
+    const sjf = simulateCpuScheduling(input, 'sjf');
+    const rr = simulateCpuScheduling(input, 'rr');
+    const runs = [fcfs, sjf, rr];
+    const timeAxis = buildCpuGlobalTimeAxis(runs);
+
+    expect(timeAxis).toEqual([0, 1, 2, 3, 5, 6]);
+    expect(getAlgorithmLabFinalStepIndex('cpu-scheduling', runs)).toBe(5);
+    expect(deriveCpuGlobalCurrentTime(runs, 2)).toBe(2);
+    expect(selectCpuStepAtTime(undefined, 2)).toBeUndefined();
+    expect(selectCpuStepAtTime(fcfs, 2)).toBe(fcfs.steps[0]);
+    expect(selectCpuStepAtTime(rr, 2)).toBe(rr.steps[1]);
+
+    const fcfsFirstSegment = fcfs.steps.at(-1)!.state.timeline[0];
+    const eventTime = findCpuSegmentEventTime(fcfs, fcfsFirstSegment);
+    expect(findCpuSegmentStepIndex(fcfs, fcfsFirstSegment)).toBe(1);
+    expect(eventTime).toBe(5);
+    expect(findCpuGlobalTimeIndex(timeAxis, eventTime)).toBe(4);
+
+    let state = algorithmLabReducer(createAlgorithmLabState('cpu-scheduling'), {
+      type: 'start',
+      runs,
+      startedAt: '2026-07-31T12:00:00.000Z',
+    });
+    const visitedTimes = [deriveCpuGlobalCurrentTime(runs, state.currentStepIndex)];
+    while (state.phase !== 'completed') {
+      state = algorithmLabReducer(state, { type: 'advance' });
+      visitedTimes.push(deriveCpuGlobalCurrentTime(runs, state.currentStepIndex));
+    }
+    expect(visitedTimes).toEqual(timeAxis);
+
+    const visualizer = readFileSync(cpuVisualizerPath, 'utf8');
+    expect(visualizer).toContain('findCpuGlobalTimeIndex(timeAxis, eventTime)');
+    expect(visualizer).not.toContain('onSeek(stepIndex)');
+  });
+
   it('keeps process visuals and segment seeking deterministic across algorithms', () => {
     expect(getCpuProcessVisual('P2')).toEqual(getCpuProcessVisual('P2'));
     expect(getCpuProcessVisual('idle').label).toBe('空闲');
@@ -449,6 +499,54 @@ describe('algorithm lab UI', () => {
     expect(workbench).toContain('checkpointEventGate');
     expect(workbench).toContain('correct');
     expect(workbench).toContain('stepIndex');
+  });
+
+  it('gates CPU checkpoints and withholds their answer-bearing fields until submission', () => {
+    const input = {
+      processes: [
+        { processId: 'P1', arrivalTime: 0, burstTime: 5, priority: 1 },
+        { processId: 'P2', arrivalTime: 0, burstTime: 1, priority: 0 },
+      ],
+      timeQuantum: 2,
+    };
+    const runs = [
+      simulateCpuScheduling(input, 'fcfs'),
+      simulateCpuScheduling(input, 'sjf'),
+      simulateCpuScheduling(input, 'rr'),
+    ];
+    const timeAxis = buildCpuGlobalTimeAxis(runs);
+    const checkpoints = buildCpuCheckpoints(runs[0], timeAxis);
+
+    expect(checkpoints.map((checkpoint) => [checkpoint.id, checkpoint.stepIndex])).toEqual([
+      ['cpu-ready-queue', 0],
+      ['cpu-completion-order', timeAxis.length - 1],
+    ]);
+    expect(getAvailableCpuCheckpoints(checkpoints, 0, {})).toHaveLength(1);
+    expect(getAvailableCpuCheckpoints(checkpoints, timeAxis.length - 2, {}).map(({ id }) => id)).toEqual([
+      'cpu-ready-queue',
+    ]);
+    expect(getAvailableCpuCheckpoints(checkpoints, timeAxis.length - 1, {}).map(({ id }) => id)).toEqual([
+      'cpu-ready-queue',
+      'cpu-completion-order',
+    ]);
+    expect(isCpuCheckpointRevealed('cpu-ready-queue', {})).toBe(false);
+    expect(isCpuCheckpointRevealed('cpu-ready-queue', { 'cpu-ready-queue': 'P2' })).toBe(true);
+    expect(isCpuCheckpointRevealed('cpu-completion-order', {})).toBe(false);
+    expect(isCpuCheckpointRevealed('cpu-completion-order', {
+      'cpu-completion-order': runs[0].finalMetrics.completionOrder.join(' → '),
+    })).toBe(true);
+
+    const visualizer = readFileSync(cpuVisualizerPath, 'utf8');
+    const statusPanel = readFileSync(statusPanelPath, 'utf8');
+    const workbench = readFileSync(workbenchPath, 'utf8');
+    expect(visualizer).toContain('revealReadyQueue');
+    expect(visualizer.indexOf('!revealReadyQueue')).toBeLessThan(
+      visualizer.indexOf('focusedStep?.state.readyQueue.length'),
+    );
+    expect(statusPanel).toContain('revealCompletionOrder');
+    expect(statusPanel).toContain('提交完成顺序检查点后显示');
+    expect(workbench).toContain('getAvailableCpuCheckpoints');
+    expect(workbench).toContain('isCpuCheckpointRevealed');
   });
 
   it('shows all five CPU metrics in the status panel', () => {

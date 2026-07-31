@@ -24,6 +24,7 @@ interface AlgorithmLabStatusPanelProps {
   syncState: 'idle' | 'pending' | 'failed' | 'submitted';
   syncError: string;
   cpuRuns?: CpuRun[];
+  revealCompletionOrder?: boolean;
   onSpeedChange: (speed: number) => void;
 }
 
@@ -36,6 +37,7 @@ export function AlgorithmLabStatusPanel({
   syncState,
   syncError,
   cpuRuns = [],
+  revealCompletionOrder = false,
   onSpeedChange,
 }: AlgorithmLabStatusPanelProps) {
   return (
@@ -56,7 +58,13 @@ export function AlgorithmLabStatusPanel({
         <StatusMetric icon={CircleCheck} label="重新运行" value={`${replayCount} 次`} />
       </div>
 
-      {cpuRuns.length > 0 ? <CpuMetricsTable runs={cpuRuns} currentStepIndex={currentStepIndex} /> : null}
+      {cpuRuns.length > 0 ? (
+        <CpuMetricsTable
+          runs={cpuRuns}
+          currentStepIndex={currentStepIndex}
+          revealCompletionOrder={revealCompletionOrder}
+        />
+      ) : null}
 
       <label className="block text-xs font-medium text-[var(--a3-text-muted)]">
         播放速度
@@ -79,7 +87,15 @@ export function AlgorithmLabStatusPanel({
   );
 }
 
-function CpuMetricsTable({ runs, currentStepIndex }: { runs: CpuRun[]; currentStepIndex: number }) {
+function CpuMetricsTable({
+  runs,
+  currentStepIndex,
+  revealCompletionOrder,
+}: {
+  runs: CpuRun[];
+  currentStepIndex: number;
+  revealCompletionOrder: boolean;
+}) {
   const currentTime = deriveCpuGlobalCurrentTime(runs, currentStepIndex);
   return (
     <div>
@@ -107,7 +123,11 @@ function CpuMetricsTable({ runs, currentStepIndex }: { runs: CpuRun[]; currentSt
                   <td className="px-2 py-2 tabular-nums">{metrics.averageTurnaroundTime}</td>
                   <td className="px-2 py-2 tabular-nums">{metrics.averageResponseTime}</td>
                   <td className="px-2 py-2 tabular-nums">{metrics.contextSwitches}</td>
-                  <td className="px-2 py-2 whitespace-nowrap">{metrics.completionOrder.join(' → ') || '尚未完成'}</td>
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    {revealCompletionOrder
+                      ? metrics.completionOrder.join(' → ') || '尚未完成'
+                      : '提交完成顺序检查点后显示'}
+                  </td>
                 </tr>
               );
             })}

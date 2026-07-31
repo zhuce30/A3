@@ -36,8 +36,13 @@ import { AlgorithmLabStatusPanel } from './algorithm-lab-status-panel';
 import { AlgorithmLabStepExplanation } from './algorithm-lab-step-explanation';
 import {
   buildCpuCheckpoints,
+  buildCpuGlobalTimeAxis,
   CpuSchedulingVisualizer,
+  deriveCpuGlobalCurrentTime,
   deriveCpuPredictionResult,
+  getAvailableCpuCheckpoints,
+  isCpuCheckpointRevealed,
+  selectCpuStepAtTime,
   type CpuCheckpointDefinition,
 } from './cpu-scheduling-visualizer';
 
@@ -159,7 +164,7 @@ export function algorithmLabReducer(
   state: AlgorithmLabState,
   action: AlgorithmLabAction,
 ): AlgorithmLabState {
-  const finalStepIndex = getFinalStepIndex(state.runs);
+  const finalStepIndex = getAlgorithmLabFinalStepIndex(state.labId, state.runs);
   switch (action.type) {
     case 'restore':
       return restoreState(state, action);
@@ -244,8 +249,10 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const startedEventGate = useRef(createStartedEventGate());
   const checkpointEventGate = useRef(new Set<string>());
-  const finalStepIndex = useMemo(() => getFinalStepIndex(state.runs), [state.runs]);
-  const currentStep = state.runs[0]?.steps[state.currentStepIndex];
+  const finalStepIndex = useMemo(
+    () => getAlgorithmLabFinalStepIndex(state.labId, state.runs),
+    [state.labId, state.runs],
+  );
   const inputValidation = state.labId === 'cpu-scheduling'
     ? validateCpuSchedulingInput(state.input)
     : validatePageReplacementInput(state.input);
@@ -255,14 +262,25 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
     () => state.labId === 'cpu-scheduling' ? state.runs.filter(isCpuSchedulingRun) : [],
     [state.labId, state.runs],
   );
+  const cpuTimeAxis = useMemo(() => buildCpuGlobalTimeAxis(cpuRuns), [cpuRuns]);
+  const currentStep = state.labId === 'cpu-scheduling'
+    ? selectCpuStepAtTime(cpuRuns[0], deriveCpuGlobalCurrentTime(cpuRuns, state.currentStepIndex))
+    : state.runs[0]?.steps[state.currentStepIndex];
   const completed = state.phase === 'completed' || state.phase === 'submitted';
   const predictionResult = state.labId === 'cpu-scheduling'
     ? deriveCpuPredictionResult(state.prediction, cpuRuns, completed)
     : null;
   const cpuCheckpoints = useMemo(
-    () => completed && cpuRuns[0] ? buildCpuCheckpoints(cpuRuns[0]) : [],
-    [completed, cpuRuns],
+    () => cpuRuns[0] ? buildCpuCheckpoints(cpuRuns[0], cpuTimeAxis) : [],
+    [cpuRuns, cpuTimeAxis],
   );
+  const availableCpuCheckpoints = getAvailableCpuCheckpoints(
+    cpuCheckpoints,
+    state.currentStepIndex,
+    state.checkpointAnswers,
+  );
+  const revealReadyQueue = isCpuCheckpointRevealed('cpu-ready-queue', state.checkpointAnswers);
+  const revealCompletionOrder = isCpuCheckpointRevealed('cpu-completion-order', state.checkpointAnswers);
 
   useEffect(() => {
     if (labId === 'cpu-scheduling') {
@@ -458,9 +476,10 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
         syncState={state.syncState}
         syncError={state.syncError}
         cpuRuns={cpuRuns}
+        revealCompletionOrder={revealCompletionOrder}
         onSpeedChange={(speed) => dispatch({ type: 'set_speed', speed })}
       />
-      {cpuCheckpoints.map((checkpoint) => (
+      {availableCpuCheckpoints.map((checkpoint) => (
         <AlgorithmLabCheckpoint
           key={checkpoint.id}
           checkpoint={checkpoint}
@@ -517,6 +536,7 @@ function KnownAlgorithmLabWorkbench({ labId }: { labId: AlgorithmLabId }) {
           <CpuSchedulingVisualizer
             runs={cpuRuns}
             currentStepIndex={state.currentStepIndex}
+            revealReadyQueue={revealReadyQueue}
             onSeek={(index) => dispatch({ type: 'seek', index })}
           />
         ) : (
@@ -606,7 +626,10 @@ function restoredState<TLabId extends AlgorithmLabId>(
     selectedAlgorithms: [...session.selectedAlgorithms],
     prediction: normalizePrediction(session.prediction),
     runs,
-    currentStepIndex: clampStep(session.currentStepIndex, getFinalStepIndex(runs)),
+    currentStepIndex: clampStep(
+      session.currentStepIndex,
+      getAlgorithmLabFinalStepIndex(base.labId, runs),
+    ),
     checkpointAnswers: normalizeCheckpointAnswers(session.checkpointAnswers),
     replayCount: session.replayCount,
     reviewedStepIndexes: [...session.reviewedStepIndexes],
@@ -782,6 +805,16 @@ function isCpuSchedulingRun(
   run: SimulationRun<unknown, unknown>,
 ): run is SimulationRun<CpuSchedulingState, CpuSchedulingMetrics> {
   return isCpuAlgorithm(run.algorithm);
+}
+
+export function getAlgorithmLabFinalStepIndex(
+  labId: AlgorithmLabId,
+  runs: SimulationRun<unknown, unknown>[],
+): number {
+  if (labId === 'cpu-scheduling') {
+    return buildCpuGlobalTimeAxis(runs.filter(isCpuSchedulingRun)).length - 1;
+  }
+  return getFinalStepIndex(runs);
 }
 
 function getFinalStepIndex(runs: SimulationRun<unknown, unknown>[]): number {
