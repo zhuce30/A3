@@ -217,8 +217,11 @@ class A3RequirementsDeepFillTests(CompatApiTestCase):
 
     def test_resource_generation_uses_dedicated_worker_queue(self):
         compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+        production_compose = Path("docker-compose.prod.yml").read_text(encoding="utf-8")
 
         self.assertIn("--queues=resource-generation", compose)
+        self.assertIn("--queues=resource-generation", production_compose)
+        self.assertIn("resource-worker:", production_compose)
 
     def test_resource_generation_has_single_kernel_entrypoint(self):
         source = Path("backend/apps/compat/resource_generation.py").read_text(encoding="utf-8")
