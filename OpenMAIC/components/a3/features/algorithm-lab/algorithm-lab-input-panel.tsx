@@ -428,7 +428,10 @@ function PagePrediction({
 export function parsePageReferenceString(value: string): number[] {
   const normalized = value.trim();
   if (!normalized) return [];
-  return normalized.split(/[\s,]+/).map((token) => Number(token));
+  return normalized
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .map((token) => Number(token));
 }
 
 function pageReferencesEqual(left: number[], right: number[]): boolean {

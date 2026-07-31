@@ -4,7 +4,10 @@ import React, { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { AlgorithmLabInputPanel } from '@/components/a3/features/algorithm-lab/algorithm-lab-input-panel';
+import {
+  AlgorithmLabInputPanel,
+  parsePageReferenceString,
+} from '@/components/a3/features/algorithm-lab/algorithm-lab-input-panel';
 import type { PageReplacementInput } from '@/lib/a3/algorithm-lab/contracts';
 import { getAlgorithmLabDefinition } from '@/lib/a3/algorithm-lab/registry';
 
@@ -60,6 +63,11 @@ function PageInputHarness() {
 }
 
 describe('page replacement input draft lifecycle', () => {
+  it('ignores trailing separators instead of appending a page zero', () => {
+    expect(parsePageReferenceString('1, 2, ')).toEqual([1, 2]);
+    expect(parsePageReferenceString('1 2   ')).toEqual([1, 2]);
+  });
+
   it('keeps the textarea mounted, focused, and at the same caret when editing becomes custom', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
