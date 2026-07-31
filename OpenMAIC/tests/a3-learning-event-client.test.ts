@@ -4,6 +4,8 @@ import { a3PostJson } from '@/lib/a3/api-client';
 import {
   A3_LEARNING_EVENT_SCHEMA_VERSION,
   buildLearningEvent,
+  trackAlgorithmLabCheckpoint,
+  trackAlgorithmLabStarted,
   trackLearningEvent,
   trackPageView,
   trackPracticeSubmit,
@@ -96,6 +98,33 @@ describe('learning event client', () => {
       success: false,
       error: '学习事件写入失败',
     });
+  });
+
+  it('builds all algorithm lab events with the interactive lab target contract', async () => {
+    postJson.mockResolvedValue({ success: true, status: 'accepted' });
+    const common = {
+      sourcePage: '/a3/labs/cpu-scheduling',
+      targetType: 'algorithm_lab',
+      targetId: 'cpu-scheduling',
+      resourceType: 'interactive_lab',
+    } as const;
+
+    await trackAlgorithmLabStarted(common);
+    await trackAlgorithmLabCheckpoint(common);
+    const completed = buildLearningEvent({ ...common, eventType: 'algorithm_lab_completed' });
+
+    const payloads = postJson.mock.calls.map(([, payload]) => payload as Record<string, unknown>);
+    expect(payloads.map(({ eventType }) => eventType)).toEqual([
+      'algorithm_lab_started',
+      'algorithm_lab_checkpoint_submitted',
+    ]);
+    expect([...payloads, completed]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ eventType: 'algorithm_lab_started', targetType: 'algorithm_lab', resourceType: 'interactive_lab' }),
+        expect.objectContaining({ eventType: 'algorithm_lab_checkpoint_submitted', targetType: 'algorithm_lab', resourceType: 'interactive_lab' }),
+        expect.objectContaining({ eventType: 'algorithm_lab_completed', targetType: 'algorithm_lab', resourceType: 'interactive_lab' }),
+      ]),
+    );
   });
 });
 
