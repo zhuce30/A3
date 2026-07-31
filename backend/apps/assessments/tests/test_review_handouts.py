@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from django.test import TestCase, override_settings
+from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 from docx import Document
 from pypdf import PdfReader
@@ -177,3 +178,96 @@ class ReviewHandoutDomainTests(TestCase):
             self.assertFalse(job.pdf_path)
             self.assertEqual(list(Path(artifact_root).rglob("*")), [])
         search.assert_not_called()
+
+
+class ReviewHandoutApiTests(ReviewHandoutDomainTests):
+    def setUp(self):
+        super().setUp()
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    @patch("backend.apps.assessments.views.current_app.send_task")
+    def test_create_list_and_detail_dispatch_to_resource_generation_queue(self, send_task):
+        send_task.return_value.id = "celery-handout-001"
+        created = self.client.post(
+            "/api/assessments/wrong-questions/review-handouts/",
+            data=json.dumps({"scope": "active"}),
+            content_type="application/json",
+        )
+        self.assertEqual(created.status_code, 202)
+        job = created.json()["job"]
+        send_task.assert_called_once_with(
+            "assessments.generate_review_handout",
+            args=[job["jobId"]],
+            queue="resource-generation",
+        )
+        listed = self.client.get("/api/assessments/wrong-questions/review-handouts/")
+        detail = self.client.get(f"/api/assessments/wrong-questions/review-handouts/{job['jobId']}/")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["jobs"][0]["jobId"], job["jobId"])
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["job"]["snapshotId"], job["snapshotId"])
+
+    @patch("backend.apps.assessments.views.current_app.control.revoke")
+    def test_cancel_is_idempotent_and_revokes_worker(self, revoke):
+        from backend.apps.assessments.review_handouts import create_review_handout_job
+
+        job, _ = create_review_handout_job(self.user, "active")
+        job.celery_task_id = "celery-handout-cancel"
+        job.save(update_fields=["celery_task_id", "updated_at"])
+        url = f"/api/assessments/wrong-questions/review-handouts/{job.id}/cancel/"
+        first = self.client.post(url, data="{}", content_type="application/json")
+        second = self.client.post(url, data="{}", content_type="application/json")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["job"]["status"], "cancelled")
+        revoke.assert_called_once_with("celery-handout-cancel", terminate=True)
+
+    @patch("backend.apps.assessments.views.current_app.send_task")
+    def test_retry_creates_new_job_from_failed_snapshot(self, send_task):
+        from backend.apps.assessments.review_handouts import create_review_handout_job
+
+        send_task.return_value.id = "celery-handout-retry"
+        job, _ = create_review_handout_job(self.user, "active")
+        job.status = "failed"
+        job.error_message = "旧任务失败"
+        job.save(update_fields=["status", "error_message", "updated_at"])
+        response = self.client.post(
+            f"/api/assessments/wrong-questions/review-handouts/{job.id}/retry/",
+            data="{}",
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertNotEqual(response.json()["job"]["jobId"], str(job.id))
+
+    def test_other_user_cannot_read_cancel_or_download_job(self):
+        from backend.apps.assessments.review_handouts import create_review_handout_job
+
+        job, _ = create_review_handout_job(self.user, "active")
+        other = User.objects.create_user(phone="13800004444", password="TestPassword123")
+        self.client.force_login(other)
+        base = f"/api/assessments/wrong-questions/review-handouts/{job.id}"
+        self.assertEqual(self.client.get(f"{base}/").status_code, 404)
+        self.assertEqual(self.client.post(f"{base}/cancel/", data="{}", content_type="application/json").status_code, 404)
+        self.assertEqual(self.client.get(f"{base}/download/docx/").status_code, 404)
+
+    def test_download_returns_owned_completed_artifacts(self):
+        from backend.apps.assessments.review_handouts import create_review_handout_job, generate_review_handout
+
+        job, _ = create_review_handout_job(self.user, "active")
+        with TemporaryDirectory() as artifact_root, override_settings(A3_REVIEW_HANDOUT_ROOT=artifact_root):
+            with patch("backend.apps.assessments.review_handouts.search_knowledge_base", return_value=[]):
+                generate_review_handout(str(job.id))
+            job.refresh_from_db()
+            docx = self.client.get(f"/api/assessments/wrong-questions/review-handouts/{job.id}/download/docx/")
+            pdf = self.client.get(f"/api/assessments/wrong-questions/review-handouts/{job.id}/download/pdf/")
+            self.assertEqual(docx.status_code, 200)
+            self.assertEqual(pdf.status_code, 200)
+            self.assertIn("review-handout.docx", docx["Content-Disposition"])
+            self.assertEqual(pdf["Content-Type"], "application/pdf")
+            self.assertGreater(sum(len(chunk) for chunk in docx.streaming_content), 1000)
+            self.assertGreater(sum(len(chunk) for chunk in pdf.streaming_content), 1000)
+            for response in (docx, pdf):
+                for closer in response._resource_closers:
+                    closer()
+                response._resource_closers.clear()

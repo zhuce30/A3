@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+from celery import current_app
 from django.db import models, transaction
-from django.http import HttpResponse, JsonResponse
+from django.http import FileResponse, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
 from backend.apps.assessments.generation import (
@@ -13,7 +15,13 @@ from backend.apps.assessments.generation import (
     create_question_generation_job,
     serialize_question_generation_job,
 )
-from backend.apps.assessments.models import AssessmentSession, Question, QuestionReviewStatus, WrongQuestion
+from backend.apps.assessments.models import AssessmentSession, Question, QuestionReviewStatus, ReviewHandoutJob, WrongQuestion
+from backend.apps.assessments.review_handouts import (
+    create_review_handout_job,
+    resolve_handout_artifact,
+    retry_review_handout_job,
+    serialize_review_handout_job,
+)
 from backend.apps.assessments.services import answer_assessment_question, build_learning_report, create_assessment, practice_suggestions, resolve_practice_knowledge_point, retry_wrong, serialize_question_bank_item, serialize_session, serialize_wrong_question, wrong_retry_feedback, wrong_review_summary
 from backend.apps.assessments.wrong_exports import WrongExportRequestError, build_wrong_export
 from backend.apps.compat.agent_kernel import run_question_generation_workflow
@@ -164,6 +172,107 @@ def wrong_question_export(request):
 
     response = HttpResponse(artifact.content, content_type=artifact.content_type)
     response["Content-Disposition"] = f'attachment; filename="{artifact.filename}"'
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _dispatch_review_handout(job: ReviewHandoutJob) -> ReviewHandoutJob:
+    try:
+        result = current_app.send_task(
+            "assessments.generate_review_handout",
+            args=[str(job.id)],
+            queue="resource-generation",
+        )
+        job.celery_task_id = result.id or ""
+        job.save(update_fields=["celery_task_id", "updated_at"])
+    except Exception:
+        job.status = "failed"
+        job.progress = 100
+        job.stage = "failed"
+        job.message = "复习讲义任务队列暂不可用，请稍后重试。"
+        job.error_message = job.message
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "progress", "stage", "message", "error_message", "finished_at", "updated_at"])
+    return job
+
+
+@require_http_methods(["GET", "POST"])
+def review_handout_jobs(request):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    if request.method == "GET":
+        jobs = ReviewHandoutJob.objects.filter(user=request.user).order_by("-created_at")[:30]
+        return JsonResponse({"success": True, "jobs": [serialize_review_handout_job(job) for job in jobs]})
+    try:
+        payload = _body(request)
+        job, created = create_review_handout_job(request.user, str(payload.get("scope") or "active"))
+        if created:
+            _dispatch_review_handout(job)
+        return JsonResponse({"success": True, "job": serialize_review_handout_job(job), "reused": not created}, status=202)
+    except WrongExportRequestError as exc:
+        message = str(exc)
+        return JsonResponse({"success": False, "error": message}, status=409 if "没有可生成" in message else 400)
+    except ValueError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=400)
+
+
+@require_http_methods(["GET"])
+def review_handout_job_detail(request, job_id):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(ReviewHandoutJob, id=job_id, user=request.user)
+    return JsonResponse({"success": True, "job": serialize_review_handout_job(job)})
+
+
+@require_http_methods(["POST"])
+def cancel_review_handout_job(request, job_id):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    with transaction.atomic():
+        job = get_object_or_404(ReviewHandoutJob.objects.select_for_update(), id=job_id, user=request.user)
+        task_id = job.celery_task_id
+        changed = job.status in {"queued", "running"}
+        if changed:
+            job.status = "cancelled"
+            job.progress = 100
+            job.stage = "cancelled"
+            job.message = "复习讲义任务已取消"
+            job.finished_at = timezone.now()
+            job.save(update_fields=["status", "progress", "stage", "message", "finished_at", "updated_at"])
+    if changed and task_id:
+        current_app.control.revoke(task_id, terminate=True)
+    return JsonResponse({"success": True, "job": serialize_review_handout_job(job)})
+
+
+@require_http_methods(["POST"])
+def retry_review_handout(request, job_id):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(ReviewHandoutJob, id=job_id, user=request.user)
+    try:
+        next_job = retry_review_handout_job(job)
+        _dispatch_review_handout(next_job)
+        return JsonResponse({"success": True, "job": serialize_review_handout_job(next_job)}, status=202)
+    except WrongExportRequestError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=409)
+
+
+@require_http_methods(["GET"])
+def download_review_handout(request, job_id, export_format):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(ReviewHandoutJob, id=job_id, user=request.user)
+    try:
+        path = resolve_handout_artifact(job, export_format)
+    except WrongExportRequestError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=404)
+    content_type = "application/pdf" if export_format == "pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    response = FileResponse(path.open("rb"), content_type=content_type, as_attachment=True, filename=path.name)
     response["X-Content-Type-Options"] = "nosniff"
     return response
 

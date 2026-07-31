@@ -110,6 +110,21 @@ def create_review_handout_job(user, scope: str) -> tuple[ReviewHandoutJob, bool]
     return job, True
 
 
+def retry_review_handout_job(job: ReviewHandoutJob) -> ReviewHandoutJob:
+    if job.status not in {"failed", "cancelled"}:
+        raise WrongExportRequestError("只有失败或已取消的讲义任务可以重试")
+    return ReviewHandoutJob.objects.create(
+        user=job.user,
+        scope=job.scope,
+        snapshot_hash=job.snapshot_hash,
+        snapshot=job.snapshot,
+        ranked_weak_points=job.ranked_weak_points,
+        status="queued",
+        stage="queued",
+        message="复习讲义已重新进入生成队列",
+    )
+
+
 def serialize_review_handout_job(job: ReviewHandoutJob) -> dict:
     base = f"/api/assessments/wrong-questions/review-handouts/{job.id}"
     payload = {
@@ -331,6 +346,24 @@ def _save_job(job: ReviewHandoutJob, **changes) -> None:
 def _artifact_directory(job: ReviewHandoutJob) -> Path:
     root = Path(getattr(settings, "A3_REVIEW_HANDOUT_ROOT", settings.BASE_DIR / "tmp" / "review-handouts"))
     return root / str(job.user_id) / str(job.id)
+
+
+def resolve_handout_artifact(job: ReviewHandoutJob, export_format: str) -> Path:
+    normalized = str(export_format or "").lower()
+    if normalized not in {"docx", "pdf"}:
+        raise WrongExportRequestError("讲义下载格式必须是 docx 或 pdf")
+    stored = job.docx_path if normalized == "docx" else job.pdf_path
+    if job.status != "succeeded" or not stored:
+        raise WrongExportRequestError("讲义文件尚未生成")
+    root = Path(getattr(settings, "A3_REVIEW_HANDOUT_ROOT", settings.BASE_DIR / "tmp" / "review-handouts")).resolve()
+    path = Path(stored).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise WrongExportRequestError("讲义文件路径无效") from exc
+    if not path.is_file() or path.suffix.lower() != f".{normalized}":
+        raise WrongExportRequestError("讲义文件不存在，请重新生成")
+    return path
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
