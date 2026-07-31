@@ -39,9 +39,15 @@ export class CpuSimulationWorkerRunner {
   ): Promise<CpuSimulationRun[]> {
     this.cancel();
     const requestId = `cpu-simulation-${++this.requestSequence}`;
-    const worker = this.createWorker();
 
     return new Promise((resolve, reject) => {
+      let worker: CpuSimulationWorkerLike;
+      try {
+        worker = this.createWorker();
+      } catch {
+        reject(new Error('CPU 调度计算无法启动，请重试'));
+        return;
+      }
       const activeRequest: ActiveRequest = { requestId, worker, reject };
       this.activeRequest = activeRequest;
 

@@ -48,7 +48,6 @@ export function AlgorithmLabInputPanel({
   onPredict,
   onSkipPrediction,
 }: AlgorithmLabInputPanelProps) {
-  const [pageEditorRevision, setPageEditorRevision] = useState(0);
   const cpuValidation = cpuInput ? validateCpuSchedulingInput(cpuInput) : null;
   const pageValidation = pageInput ? validatePageReplacementInput(pageInput) : null;
   const isCustom = presetId === 'custom';
@@ -73,10 +72,7 @@ export function AlgorithmLabInputPanel({
         <select
           id="algorithm-lab-preset"
           value={presetId}
-          onChange={(event) => {
-            onSelectPreset(event.target.value);
-            setPageEditorRevision((revision) => revision + 1);
-          }}
+          onChange={(event) => onSelectPreset(event.target.value)}
           className="mt-2 h-10 w-full rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-3 text-sm text-[var(--a3-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
         >
           {presetId === 'custom' ? <option value="custom">自定义配置</option> : null}
@@ -114,7 +110,7 @@ export function AlgorithmLabInputPanel({
       ) : null}
 
       {definition.id === 'page-replacement' && pageInput && onPageInputChange ? (
-        <PageReplacementEditor key={`${pageEditorRevision}:${presetId}`} input={pageInput} onChange={onPageInputChange} />
+        <PageReplacementEditor input={pageInput} onChange={onPageInputChange} />
       ) : null}
 
       {cpuValidation && !cpuValidation.valid ? (
@@ -162,7 +158,18 @@ function PageReplacementEditor({
   input: PageReplacementInput;
   onChange: (input: PageReplacementInput) => void;
 }) {
-  const [draft, setDraft] = useState(input.referenceString.join(', '));
+  const [draftState, setDraftState] = useState(() => ({
+    value: input.referenceString.join(', '),
+    referenceString: [...input.referenceString],
+  }));
+  const externalDraft = input.referenceString.join(', ');
+
+  if (!pageReferencesEqual(draftState.referenceString, input.referenceString)) {
+    setDraftState({
+      value: externalDraft,
+      referenceString: [...input.referenceString],
+    });
+  }
 
   return (
     <fieldset className="space-y-3 border-t border-[var(--a3-border)] pt-4">
@@ -170,13 +177,14 @@ function PageReplacementEditor({
       <label className="block text-xs font-medium text-[var(--a3-text-muted)]">
         页面引用序列
         <textarea
-          value={draft}
+          value={draftState.value}
           rows={3}
           spellCheck={false}
           placeholder="例如：7, 0, 1, 2, 0, 3"
           onChange={(event) => {
-            setDraft(event.target.value);
-            onChange({ ...input, referenceString: parsePageReferenceString(event.target.value) });
+            const referenceString = parsePageReferenceString(event.target.value);
+            setDraftState({ value: event.target.value, referenceString: [...referenceString] });
+            onChange({ ...input, referenceString });
           }}
           className="mt-2 w-full resize-y rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-3 py-2 text-sm leading-6 tabular-nums text-[var(--a3-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
         />
@@ -421,6 +429,11 @@ export function parsePageReferenceString(value: string): number[] {
   const normalized = value.trim();
   if (!normalized) return [];
   return normalized.split(/[\s,]+/).map((token) => Number(token));
+}
+
+function pageReferencesEqual(left: number[], right: number[]): boolean {
+  return left.length === right.length
+    && left.every((page, index) => Object.is(page, right[index]));
 }
 
 export function addCpuProcess(input: CpuSchedulingInput): CpuSchedulingInput {

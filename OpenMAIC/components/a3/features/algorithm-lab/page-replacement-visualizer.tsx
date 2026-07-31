@@ -1,3 +1,5 @@
+'use client';
+
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -5,8 +7,10 @@ import {
   CircleAlert,
   Eye,
   Layers3,
+  LocateFixed,
   Minus,
 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   PageReplacementAlgorithm,
   SimulationRun,
@@ -71,6 +75,23 @@ export function PageReplacementVisualizer({
   const visibleIndexAxis = indexAxis.filter((referenceIndex) => (
     referenceIndex <= currentReferenceIndex
   ));
+  const [mobileAlgorithm, setMobileAlgorithm] = useState<PageReplacementAlgorithm | null>(
+    () => runs[0]?.algorithm as PageReplacementAlgorithm | undefined ?? null,
+  );
+  const activeMobileRun = runs.find((run) => run.algorithm === mobileAlgorithm) ?? runs[0];
+  const currentColumnRef = useRef<HTMLButtonElement>(null);
+  const scrollToCurrentColumn = useCallback(() => {
+    if (typeof currentColumnRef.current?.scrollIntoView !== 'function') return;
+    currentColumnRef.current.scrollIntoView({
+      behavior: 'auto',
+      block: 'nearest',
+      inline: 'center',
+    });
+  }, []);
+
+  useEffect(() => {
+    scrollToCurrentColumn();
+  }, [currentReferenceIndex, scrollToCurrentColumn]);
 
   if (runs.length === 0) {
     return (
@@ -100,9 +121,44 @@ export function PageReplacementVisualizer({
             选择任一历史列可定位到共享引用索引，不会重新运行算法。
           </p>
         </div>
-        <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-900 dark:border-amber-800 dark:bg-amber-950/35 dark:text-amber-100">
-          当前列 {currentReferenceIndex + 1} / {indexAxis.length}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-900 dark:border-amber-800 dark:bg-amber-950/35 dark:text-amber-100">
+            当前列 {currentReferenceIndex + 1} / {indexAxis.length} · {completed ? '已完成' : '进行中'}
+          </div>
+          <button
+            type="button"
+            onClick={scrollToCurrentColumn}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-[var(--a3-text-muted)] hover:bg-[var(--a3-surface-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+            aria-label="回到当前步骤"
+            title="回到当前步骤"
+          >
+            <LocateFixed className="size-3.5" />
+            回到当前步骤
+          </button>
         </div>
+      </div>
+
+      <div
+        className="mt-4 flex gap-1 rounded-md bg-[var(--a3-surface-muted)] p-1 lg:hidden"
+        role="group"
+        aria-label="选择移动端当前算法"
+      >
+        {runs.map((run) => {
+          const algorithm = run.algorithm as PageReplacementAlgorithm;
+          const active = activeMobileRun?.algorithm === algorithm;
+          return (
+            <button
+              key={algorithm}
+              type="button"
+              onClick={() => setMobileAlgorithm(algorithm)}
+              className={`h-8 flex-1 rounded text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${active ? 'bg-[var(--a3-surface-solid)] text-[var(--a3-text)] shadow-sm' : 'text-[var(--a3-text-muted)]'}`}
+              aria-label={`移动端查看 ${algorithmLabels[algorithm]}`}
+              aria-pressed={active}
+            >
+              {algorithmLabels[algorithm]}
+            </button>
+          );
+        })}
       </div>
 
       <div className="mt-4 overflow-x-auto pb-2" data-testid="page-reference-sequence">
@@ -118,6 +174,7 @@ export function PageReplacementVisualizer({
                     type="button"
                     data-testid="page-reference-column"
                     data-reference-index={referenceIndex}
+                    ref={current ? currentColumnRef : undefined}
                     onClick={() => onSeek(findPageGlobalIndexPosition(indexAxis, referenceIndex))}
                     className={`flex h-12 w-[76px] shrink-0 flex-col items-center justify-center rounded-md border text-sm font-semibold tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${current ? 'border-amber-500 bg-amber-100 text-amber-950 ring-2 ring-amber-300 dark:bg-amber-950/45 dark:text-amber-100' : 'border-[var(--a3-border)] bg-[var(--a3-surface-solid)] text-[var(--a3-text)] hover:bg-[var(--a3-surface-muted)]'}`}
                     aria-label={`定位到引用索引 ${referenceIndex}，页面 ${referenceString[referenceIndex]}`}
@@ -131,18 +188,26 @@ export function PageReplacementVisualizer({
             </div>
           </div>
 
-          <div className="mt-4 space-y-4">
-            {runs.map((run) => (
-              <PageAlgorithmRow
-                key={run.algorithm}
-                run={run}
-                indexAxis={visibleIndexAxis}
-                frameCount={frameCount}
-                currentReferenceIndex={currentReferenceIndex}
-                revealVictim={revealVictim}
-                onSeek={(referenceIndex) => onSeek(findPageGlobalIndexPosition(indexAxis, referenceIndex))}
-              />
-            ))}
+          <div className="mt-4 space-y-4" data-testid="page-algorithm-views">
+            {runs.map((run) => {
+              const mobileActive = activeMobileRun?.algorithm === run.algorithm;
+              return (
+                <div
+                  key={run.algorithm}
+                  className={mobileActive ? 'block' : 'hidden lg:block'}
+                  data-mobile-active={mobileActive ? 'true' : undefined}
+                >
+                  <PageAlgorithmRow
+                    run={run}
+                    indexAxis={visibleIndexAxis}
+                    frameCount={frameCount}
+                    currentReferenceIndex={currentReferenceIndex}
+                    revealVictim={revealVictim}
+                    onSeek={(referenceIndex) => onSeek(findPageGlobalIndexPosition(indexAxis, referenceIndex))}
+                  />
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -157,22 +222,41 @@ export function PageReplacementVisualizer({
 
       <div className="mt-4 grid gap-3 lg:grid-cols-3" aria-label="当前策略依据">
         {runs.map((run) => {
-          const step = selectPageStepAtIndex(run, currentReferenceIndex);
+          const mobileActive = activeMobileRun?.algorithm === run.algorithm;
           return (
-            <div key={run.algorithm} className="border-l-2 border-amber-400 pl-3">
-              <div className="text-xs font-semibold text-[var(--a3-text)]">{algorithmLabels[run.algorithm as PageReplacementAlgorithm]} 策略依据</div>
-              <div className="mt-1 text-xs leading-5 text-[var(--a3-text-muted)]">
-                {revealPolicyReason
-                  ? describePolicyEvidence(run.algorithm as PageReplacementAlgorithm, step?.state, currentReferenceIndex)
-                  : '提交策略原因检查点后显示当前证据。'}
-              </div>
+            <div key={run.algorithm} className={mobileActive ? 'block' : 'hidden lg:block'}>
+              <PolicyEvidence
+                run={run}
+                currentReferenceIndex={currentReferenceIndex}
+                revealPolicyReason={revealPolicyReason}
+              />
             </div>
           );
         })}
       </div>
-
-      {completed ? <PageComparisonResult runs={runs} /> : null}
     </section>
+  );
+}
+
+function PolicyEvidence({
+  run,
+  currentReferenceIndex,
+  revealPolicyReason,
+}: {
+  run: PageRun;
+  currentReferenceIndex: number;
+  revealPolicyReason: boolean;
+}) {
+  const step = selectPageStepAtIndex(run, currentReferenceIndex);
+  return (
+    <div className="border-l-2 border-amber-400 pl-3">
+      <div className="text-xs font-semibold text-[var(--a3-text)]">{algorithmLabels[run.algorithm as PageReplacementAlgorithm]} 策略依据</div>
+      <div className="mt-1 text-xs leading-5 text-[var(--a3-text-muted)]">
+        {revealPolicyReason
+          ? describePolicyEvidence(run.algorithm as PageReplacementAlgorithm, step?.state, currentReferenceIndex)
+          : '提交策略原因检查点后显示当前证据。'}
+      </div>
+    </div>
   );
 }
 
@@ -202,6 +286,12 @@ function PageAlgorithmRow({
           const step = selectPageStepAtIndex(run, referenceIndex);
           const previousStep = selectPageStepAtIndex(run, referenceIndex - 1);
           const current = referenceIndex === currentReferenceIndex;
+          const accessibleDescription = describePageStateColumn(
+            run,
+            referenceIndex,
+            frameCount,
+            revealVictim,
+          );
           return (
             <button
               key={referenceIndex}
@@ -210,25 +300,27 @@ function PageAlgorithmRow({
               data-reference-index={referenceIndex}
               onClick={() => onSeek(referenceIndex)}
               className={`w-[76px] shrink-0 rounded-md border p-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${current ? 'border-amber-500 bg-amber-50 ring-2 ring-amber-200 dark:bg-amber-950/30' : 'border-[var(--a3-border)] bg-[var(--a3-surface-solid)] hover:bg-[var(--a3-surface-muted)]'}`}
-              aria-label={`${algorithmLabels[run.algorithm as PageReplacementAlgorithm]} 引用索引 ${referenceIndex}，${step?.state.hit ? '命中' : '缺页'}`}
             >
-              <div className={`mb-1.5 flex items-center gap-1 text-[9px] font-semibold ${step?.state.hit ? 'text-emerald-700 dark:text-emerald-300' : 'text-amber-700 dark:text-amber-300'}`}>
-                {step?.state.hit ? <CheckCircle2 className="size-3" /> : <CircleAlert className="size-3" />}
-                {step?.state.hit ? '命中' : '缺页'}
-              </div>
-              <div className="space-y-1">
-                {Array.from({ length: frameCount }, (_, frameIndex) => (
-                  <FrameSlot
-                    key={frameIndex}
-                    page={step?.state.frames[frameIndex] ?? null}
-                    cue={getFrameCue(previousStep?.state, step?.state, frameIndex)}
-                  />
-                ))}
-              </div>
-              <div className="mt-1.5 min-h-4 truncate text-[9px] font-medium text-rose-700 dark:text-rose-300">
-                {step?.state.evictedPage !== null && step?.state.evictedPage !== undefined
-                  ? revealVictim ? `淘汰 ${step.state.evictedPage}` : '淘汰待判断'
-                  : '保持不变'}
+              <span className="sr-only">{accessibleDescription}</span>
+              <div aria-hidden="true">
+                <div className={`mb-1.5 flex items-center gap-1 text-[9px] font-semibold ${step?.state.hit ? 'text-emerald-700 dark:text-emerald-300' : 'text-amber-700 dark:text-amber-300'}`}>
+                  {step?.state.hit ? <CheckCircle2 className="size-3" /> : <CircleAlert className="size-3" />}
+                  {step?.state.hit ? '命中' : '缺页'}
+                </div>
+                <div className="space-y-1">
+                  {Array.from({ length: frameCount }, (_, frameIndex) => (
+                    <FrameSlot
+                      key={frameIndex}
+                      page={step?.state.frames[frameIndex] ?? null}
+                      cue={getFrameCue(previousStep?.state, step?.state, frameIndex)}
+                    />
+                  ))}
+                </div>
+                <div className="mt-1.5 min-h-4 truncate text-[9px] font-medium text-rose-700 dark:text-rose-300">
+                  {step?.state.evictedPage !== null && step?.state.evictedPage !== undefined
+                    ? revealVictim ? `淘汰 ${step.state.evictedPage}` : '淘汰待判断'
+                    : '保持不变'}
+                </div>
               </div>
             </button>
           );
@@ -258,22 +350,6 @@ function Cue({ icon: Icon, label, className }: { icon: typeof Eye; label: string
   return <span className="inline-flex items-center gap-1"><Icon className={`size-3.5 ${className}`} />{label}</span>;
 }
 
-function PageComparisonResult({ runs }: { runs: PageRun[] }) {
-  const fewestFaults = Math.min(...runs.map((run) => run.finalMetrics.pageFaults));
-  const winners = runs.filter((run) => run.finalMetrics.pageFaults === fewestFaults);
-  return (
-    <div className="mt-5 border-t border-[var(--a3-border)] pt-4" aria-live="polite">
-      <div className="text-xs font-semibold text-[var(--a3-text)]">当前序列比较结论</div>
-      <p className="mt-1 text-xs leading-5 text-[var(--a3-text-muted)]">
-        {winners.length === 1
-          ? `${algorithmLabels[winners[0].algorithm as PageReplacementAlgorithm]} 在本次引用序列中缺页最少，共 ${fewestFaults} 次。`
-          : `${winners.map((run) => algorithmLabels[run.algorithm as PageReplacementAlgorithm]).join('、')} 并列最少，均为 ${fewestFaults} 次缺页。`}
-        此结论仅代表当前引用序列，不表示某种策略在所有负载下都最优。
-      </p>
-    </div>
-  );
-}
-
 function getFrameCue(
   previous: PageReplacementState | undefined,
   current: PageReplacementState | undefined,
@@ -284,6 +360,39 @@ function getFrameCue(
   if (current?.hit && page === current.currentPage) return 'hit';
   if (page !== (previous?.frames[frameIndex] ?? null)) return 'inserted';
   return 'unchanged';
+}
+
+export function describePageStateColumn(
+  run: PageRun,
+  referenceIndex: number,
+  frameCount: number,
+  revealVictim: boolean,
+): string {
+  const step = selectPageStepAtIndex(run, referenceIndex);
+  if (!step) return `${algorithmLabels[run.algorithm as PageReplacementAlgorithm]} 引用索引 ${referenceIndex}，无状态`;
+  const previousStep = selectPageStepAtIndex(run, referenceIndex - 1);
+  const frames = Array.from({ length: frameCount }, (_, frameIndex) => {
+    const page = step.state.frames[frameIndex] ?? null;
+    const cue = getFrameCue(previousStep?.state, step.state, frameIndex);
+    const cueLabel = cue === 'inserted'
+      ? '调入'
+      : cue === 'hit'
+        ? '命中'
+        : cue === 'empty'
+          ? '空闲'
+          : '保持不变';
+    return `页框 ${frameIndex + 1}：${page === null ? '空' : `页面 ${page}`}，${cueLabel}`;
+  });
+  const eviction = step.state.evictedPage === null
+    ? '未淘汰页面'
+    : revealVictim
+      ? `淘汰页面 ${step.state.evictedPage}`
+      : '发生淘汰，淘汰页待判断';
+  return [
+    `${algorithmLabels[run.algorithm as PageReplacementAlgorithm]} 引用索引 ${referenceIndex}，请求页面 ${step.state.currentPage}，${step.state.hit ? '命中' : '缺页'}`,
+    ...frames,
+    eviction,
+  ].join('；');
 }
 
 function describePolicyEvidence(
