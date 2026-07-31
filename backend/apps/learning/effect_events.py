@@ -31,6 +31,9 @@ ALLOWED_CLIENT_EVENT_TYPES = {
     "classroom_opened",
     "video_opened",
     "video_completed",
+    "algorithm_lab_started",
+    "algorithm_lab_checkpoint_submitted",
+    "algorithm_lab_completed",
 }
 
 RESOURCE_EVENT_ACTIONS = {
