@@ -1,5 +1,21 @@
 import type { ClassroomSource } from './classroom-types';
 
+export type AlgorithmLabId = 'cpu-scheduling' | 'page-replacement';
+
+export type InteractiveLabAction = {
+  kind: 'interactive_lab';
+  label: string;
+  href: `/a3/labs/${AlgorithmLabId}`;
+  labId: 'cpu-scheduling' | 'page-replacement';
+  presetId?: string;
+  reason: string;
+};
+
+export function buildInteractiveLabHref(action: InteractiveLabAction): string {
+  if (!action.presetId) return action.href;
+  return `${action.href}?preset=${encodeURIComponent(action.presetId)}`;
+}
+
 export type RecommendationProfileSignal = {
   label: string;
   value: string;
@@ -14,6 +30,7 @@ export type A3Recommendation = {
   score: number;
   reason: string;
   href: string;
+  action?: InteractiveLabAction;
   citation: ClassroomSource | null;
   evidence: {
     profileMatch: {
@@ -149,6 +166,7 @@ export type A3ResourcePackV2Resource = {
   verified: boolean;
   personalizationReason: string;
   estimatedMinutes: number;
+  relatedLab?: InteractiveLabAction;
 };
 
 export type A3OpenMAICClassroomArtifact = {

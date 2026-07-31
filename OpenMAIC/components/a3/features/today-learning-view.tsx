@@ -2,13 +2,14 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Bell, BookOpenCheck, CheckCircle2, ChevronDown, Clock3, Loader2, MessageCircle, RotateCcw, Sparkles } from 'lucide-react';
+import { ArrowRight, Bell, BookOpenCheck, CheckCircle2, ChevronDown, Clock3, FlaskConical, Loader2, MessageCircle, RotateCcw, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import { buildProfileChangeInsight, buildTaskProfileRationale, buildTodayFlowInsights, type LearningFlowInsight } from '@/lib/a3/learning-flow-insights';
 import { trackLearningEvent, trackPageView } from '@/lib/a3/learning-event-client';
 import type { LearningReport } from '@/lib/a3/assessment-types';
 import type { A3ApiResponse, DailyReflection, StudyPlan, StudyPlanDay, StudyPlanTask, StudyPlanTaskFeedback } from '@/lib/a3/learning-types';
+import { buildInteractiveLabHref } from '@/lib/a3/recommendation-types';
 import type { DynamicProfileFeedResponse } from '@/lib/a3/profile-timeline';
 import { formatReportMetricDelta } from '@/lib/a3/report-delta';
 import { cn } from '@/lib/utils';
@@ -25,6 +26,7 @@ const taskCopy: Record<StudyPlanTask['type'], { label: string; action: string; t
   review: { label: '复习', action: '看错题', tone: 'orange' },
   summary: { label: '复盘', action: '写总结', tone: 'violet' },
   resource_pack: { label: '资源包', action: '去专项练习', tone: 'violet' },
+  interactive_lab: { label: '交互实验', action: '进入实验', tone: 'green' },
 };
 
 const policyLabel: Record<NonNullable<StudyPlan['adaptivePolicy']>['mode'], string> = {
@@ -123,6 +125,9 @@ export function TodayLearningView() {
   const tasks = today?.tasks ?? [];
   const completedCount = tasks.filter((task) => task.status === 'completed').length;
   const activeTask = tasks.find((task) => task.status !== 'completed') ?? tasks[tasks.length - 1] ?? null;
+  const activeTaskHref = activeTask?.type === 'interactive_lab' && activeTask.relatedLab
+    ? buildInteractiveLabHref(activeTask.relatedLab)
+    : activeTask?.href ?? '/a3/study-plan';
   const progress = tasks.length ? Math.round((completedCount * 100) / tasks.length) : 0;
   const finished = tasks.length > 0 && completedCount === tasks.length;
   const rolloverCount = tasks.filter((task) => task.rolledOverFrom).length;
@@ -174,7 +179,7 @@ export function TodayLearningView() {
             </div>
             <div className="mt-6 flex flex-wrap gap-3">
               <Button asChild className="bg-emerald-500 text-slate-950 hover:bg-emerald-400">
-                <Link data-tour-id="today-next-action" href={activeTask?.href ?? '/a3/study-plan'}>
+                <Link data-tour-id="today-next-action" href={activeTaskHref}>
                   {finished ? '查看学习计划' : taskCopy[activeTask?.type ?? 'learn'].action}
                   <ArrowRight className="size-4" />
                 </Link>
@@ -699,6 +704,9 @@ function SessionTask({
 }) {
   const completed = task.status === 'completed';
   const copy = taskCopy[task.type];
+  const labHref = task.type === 'interactive_lab' && task.relatedLab
+    ? buildInteractiveLabHref(task.relatedLab)
+    : task.href;
   const profileRationale = buildTaskProfileRationale(task, profileFeed);
   return (
     <div
@@ -736,8 +744,16 @@ function SessionTask({
         </div>
       </div>
       <div className="flex items-center justify-end gap-2">
-        <Button asChild size="sm" variant="outline">
-          <Link href={task.href}>{copy.action}</Link>
+        <Button
+          asChild
+          size="sm"
+          variant={task.type === 'interactive_lab' ? 'default' : 'outline'}
+          className={task.type === 'interactive_lab' ? 'bg-emerald-800 text-white hover:bg-emerald-700' : undefined}
+        >
+          <Link href={labHref}>
+            {task.type === 'interactive_lab' ? <FlaskConical className="size-4" /> : null}
+            {copy.action}
+          </Link>
         </Button>
         <Button
           size="sm"

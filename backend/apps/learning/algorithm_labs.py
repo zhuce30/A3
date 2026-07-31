@@ -139,6 +139,31 @@ _LABS = (
 )
 
 
+def recommend_algorithm_lab(knowledge_point: str, weak_points: list[str] | None = None) -> dict | None:
+    normalized = " ".join(
+        [str(knowledge_point or ""), *[str(item) for item in (weak_points or [])]]
+    ).lower()
+    if any(token in normalized for token in ("调度", "cpu", "进程调度", "processor scheduling")):
+        return {
+            "kind": "interactive_lab",
+            "label": "进入 CPU 调度实验",
+            "href": "/a3/labs/cpu-scheduling",
+            "labId": "cpu-scheduling",
+            "presetId": "cpu-misconception",
+            "reason": "对比调度策略，定位等待与周转差异。",
+        }
+    if any(token in normalized for token in ("页面置换", "虚拟内存", "缺页", "page replacement")):
+        return {
+            "kind": "interactive_lab",
+            "label": "进入页面置换实验",
+            "href": "/a3/labs/page-replacement",
+            "labId": "page-replacement",
+            "presetId": "page-misconception",
+            "reason": "跟踪页框变化，比较缺页与淘汰差异。",
+        }
+    return None
+
+
 def list_algorithm_labs(user) -> dict:
     events = list(
         LearningEvent.objects.filter(user=user, event_type="algorithm_lab_completed")

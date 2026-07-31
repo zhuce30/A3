@@ -2,11 +2,12 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { ArrowRight, CheckCircle2, CircleDot, ClipboardCheck, Loader2, Lock, RefreshCw } from 'lucide-react';
+import { ArrowRight, CheckCircle2, CircleDot, ClipboardCheck, FlaskConical, Loader2, Lock, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { AgentDecisionEvidence } from '@/components/a3/ui/agent-decision-evidence';
 import { a3GetJson, a3PatchJson, a3PostJson } from '@/lib/a3/api-client';
 import type { A3ApiResponse, LearningPath, PathItem, StudyPlan } from '@/lib/a3/learning-types';
+import { buildInteractiveLabHref } from '@/lib/a3/recommendation-types';
 import { A3Card, A3Pill } from '../ui/a3-card';
 
 export function LearningPathView() {
@@ -259,6 +260,14 @@ function PathNode({
               <Link href="/a3/study-plan">
                 完成前置节点
                 <ArrowRight className="ml-2 size-4" />
+              </Link>
+            </Button>
+          )}
+          {item.relatedLab && (
+            <Button asChild size="sm" className="bg-emerald-800 text-white hover:bg-emerald-700">
+              <Link href={buildInteractiveLabHref(item.relatedLab)}>
+                <FlaskConical className="size-4" />
+                {item.relatedLab.label}
               </Link>
             </Button>
           )}
