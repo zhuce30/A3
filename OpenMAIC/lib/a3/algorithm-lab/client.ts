@@ -25,6 +25,7 @@ export interface AlgorithmLabCatalogItem {
     lastCompletedAt: string | null;
     verifiedRuns: number;
   };
+  recentSession: AlgorithmLabRecentSession | null;
 }
 
 export interface AlgorithmLabCatalogResponse {
@@ -32,7 +33,37 @@ export interface AlgorithmLabCatalogResponse {
   error?: string;
   schemaVersion?: 'a3.algorithm-labs.catalog.v1';
   labs: AlgorithmLabCatalogItem[];
-  recentSession: AlgorithmLabCompletionResponse['completion'] | null;
+}
+
+export interface AlgorithmLabNextAction {
+  type: 'assessment' | 'replay_lab';
+  label: string;
+  href: string;
+  reason: string;
+}
+
+export interface AlgorithmLabCompletionResult {
+  labId: AlgorithmLabId;
+  verified: boolean;
+  score: number;
+  masteryEvidenceAccepted: boolean;
+  nextAction: AlgorithmLabNextAction;
+}
+
+export interface AlgorithmLabRecentSession extends AlgorithmLabCompletionResult {
+  schemaVersion?: 'a3.algorithm-lab.completion.v1';
+  eventId?: string;
+  labVersion?: string;
+  presetId?: string;
+  presetVersion?: string;
+  customInput?: boolean;
+  selectedAlgorithms?: AlgorithmLabAlgorithm[];
+  prediction?: AlgorithmLabCompletionRequest['prediction'];
+  checkpoints?: Omit<AlgorithmLabCompletionRequest['checkpoints'], 'items'> & {
+    items?: AlgorithmLabCompletionRequest['checkpoints']['items'];
+  };
+  metrics?: AlgorithmLabCompletionRequest['metrics'] & { reviewedCount?: number };
+  completedAt?: string;
 }
 
 export interface AlgorithmLabCompletionRequest {
@@ -63,23 +94,19 @@ export interface AlgorithmLabCompletionRequest {
   resultFingerprint: string;
 }
 
-export interface AlgorithmLabCompletionResponse {
-  success: boolean;
-  error?: string;
-  status?: 'accepted' | 'duplicate';
-  completion?: {
-    labId: AlgorithmLabId;
-    verified: boolean;
-    score: number;
-    masteryEvidenceAccepted: boolean;
-    nextAction: {
-      type?: string;
-      label: string;
-      href: string;
-      reason: string;
+export type AlgorithmLabCompletionResponse =
+  | {
+      success: true;
+      status: 'accepted' | 'duplicate';
+      completion: AlgorithmLabCompletionResult;
+      error?: never;
+    }
+  | {
+      success: false;
+      error: string;
+      status?: number;
+      completion?: never;
     };
-  };
-}
 
 export function fetchAlgorithmLabCatalog(): Promise<AlgorithmLabCatalogResponse> {
   return a3GetJson<AlgorithmLabCatalogResponse>('/api/learning/algorithm-labs/');

@@ -3,7 +3,10 @@ import type {
   AlgorithmLabId,
   AlgorithmLabInputById,
   AlgorithmLabPhase,
+  CpuSchedulingInput,
+  PageReplacementInput,
 } from './contracts';
+import { validateCpuSchedulingInput, validatePageReplacementInput } from './validators';
 
 export const ALGORITHM_LAB_SESSION_SCHEMA_VERSION = 'a3.algorithm-lab.session.v1';
 
@@ -57,6 +60,7 @@ export function saveLabSession<TLabId extends AlgorithmLabId>(
     storage.setItem(storageKey(labId), serialized);
     return true;
   } catch {
+    removeKey(storage, labId);
     return false;
   }
 }
@@ -142,28 +146,19 @@ function normalizeInput<TLabId extends AlgorithmLabId>(
   labId: TLabId,
   value: unknown,
 ): AlgorithmLabInputById[TLabId] | null {
-  if (!isRecord(value)) return null;
   if (labId === 'cpu-scheduling') {
-    if (!Array.isArray(value.processes) || !isPositiveInteger(value.timeQuantum)) return null;
-    const processes = value.processes.map((process) => {
-      if (!isRecord(process)) return null;
-      if (!isNonEmptyString(process.processId)) return null;
-      if (![process.arrivalTime, process.burstTime, process.priority].every(isNonNegativeInteger)) return null;
-      return {
-        processId: process.processId,
-        arrivalTime: process.arrivalTime,
-        burstTime: process.burstTime,
-        priority: process.priority,
-      };
-    });
-    if (processes.some((process) => process === null)) return null;
-    return { processes, timeQuantum: value.timeQuantum } as AlgorithmLabInputById[TLabId];
+    if (!validateCpuSchedulingInput(value).valid) return null;
+    const input = value as CpuSchedulingInput;
+    return {
+      processes: input.processes.map((process) => ({ ...process })),
+      timeQuantum: input.timeQuantum,
+    } as AlgorithmLabInputById[TLabId];
   }
-  if (!Array.isArray(value.referenceString) || !value.referenceString.every(isNonNegativeInteger)) return null;
-  if (!isPositiveInteger(value.frameCount)) return null;
+  if (!validatePageReplacementInput(value).valid) return null;
+  const input = value as PageReplacementInput;
   return {
-    referenceString: [...value.referenceString],
-    frameCount: value.frameCount,
+    referenceString: [...input.referenceString],
+    frameCount: input.frameCount,
   } as AlgorithmLabInputById[TLabId];
 }
 
@@ -221,10 +216,6 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0;
-}
-
-function isPositiveInteger(value: unknown): value is number {
-  return isNonNegativeInteger(value) && value > 0;
 }
 
 function isIndexList(value: unknown): value is number[] {
