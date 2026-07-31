@@ -127,6 +127,35 @@ export type WrongReviewSummary = {
   nextAction: { label: string; href: string; reason: string };
 };
 
+export type WrongExportScope = 'active' | 'due' | 'mastered' | 'all';
+export type WrongExportFormat = 'docx' | 'xlsx' | 'pdf';
+
+export type ReviewHandoutJob = {
+  jobId: string;
+  scope: WrongExportScope;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  progress: number;
+  stage: string;
+  message: string;
+  snapshotId: string;
+  traceId: string;
+  citations: Array<{
+    knowledgePoint: string;
+    title: string;
+    location: string;
+    snippet: string;
+    score: number;
+    verified: boolean;
+  }>;
+  verified: boolean;
+  degraded: boolean;
+  error: string;
+  createdAt: string;
+  updatedAt: string;
+  docxDownloadUrl?: string;
+  pdfDownloadUrl?: string;
+};
+
 export type WrongRetryFeedback = {
   studyPlan?: import('./learning-types').StudyPlan;
   report?: LearningReport;

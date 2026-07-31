@@ -6,6 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import { BookMarked, CheckCircle2, ChevronDown, ChevronUp, Loader2, RefreshCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ProfileUpdateCandidatePanel } from '@/components/a3/profile/profile-update-candidate-panel';
+import { WrongNotebookActions } from '@/components/a3/features/wrong-notebook-actions';
 import { a3GetJson, a3PostJson } from '@/lib/a3/api-client';
 import type { WrongQuestion, WrongReviewSummary, WrongRetryFeedback } from '@/lib/a3/assessment-types';
 import { getReviewStatusMeta } from '@/lib/a3/review-status';
@@ -150,6 +151,8 @@ export function WrongNotebookView() {
         <Summary value={masteredCount} label="已掌握" tone="green" />
         <Summary value={reviewSummary?.overdueCount ?? 0} label="逾期复习" tone="slate" />
       </div>
+
+      <WrongNotebookActions reviewSummary={reviewSummary} />
 
       {reviewSummary && (
         <A3Card title="复习节奏" subtitle={reviewSummary.nextAction.reason} action={<A3Pill tone={reviewSummary.todayCount ? 'orange' : 'green'}>{reviewSummary.todayCount ? '需要处理' : '节奏正常'}</A3Pill>}>

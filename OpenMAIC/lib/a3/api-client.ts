@@ -67,6 +67,50 @@ export async function a3DownloadFile(url: string, fileName: string) {
   URL.revokeObjectURL(blobUrl);
 }
 
+export async function a3PostDownload(
+  url: string,
+  body: unknown,
+  fallbackFileName: string,
+): Promise<{ fileName: string }> {
+  const response = await a3CsrfFetch(url, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const contentType = response.headers.get('content-type') ?? '';
+    if (contentType.includes('application/json')) {
+      const payload = await response.json() as { error?: string };
+      throw new Error(payload.error || '文件生成失败');
+    }
+    throw new Error('文件生成失败（' + response.status + '）');
+  }
+  const fileName = responseFileName(response.headers.get('Content-Disposition')) || fallbackFileName;
+  const blobUrl = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement('a');
+  anchor.href = blobUrl;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(blobUrl);
+  return { fileName };
+}
+
+function responseFileName(contentDisposition: string | null) {
+  if (!contentDisposition) return '';
+  const encoded = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded;
+    }
+  }
+  return contentDisposition.match(/filename="?([^";]+)"?/i)?.[1] ?? '';
+}
+
 async function a3JsonRequest<T>(method: 'POST' | 'PATCH', url: string, body: unknown): Promise<T> {
   try {
     const response = await a3CsrfFetch(url, {
