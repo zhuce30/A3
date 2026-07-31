@@ -147,5 +147,7 @@ describe('A3 student navigation consolidation', () => {
     const emptyStateSource = assessmentView.slice(emptyStateStart, emptyStateEnd);
 
     expect(emptyStateSource).toContain('href="/a3/labs"');
+    expect(emptyStateSource).toContain('flex-col items-stretch');
+    expect(emptyStateSource).toContain('sm:flex-row sm:flex-wrap');
   });
 });

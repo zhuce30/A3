@@ -665,7 +665,7 @@ function EmptyAssessmentState({ error, submitting, onRestart }: { error: string;
       <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">
         {error || '完成入学诊断或学习路径后，系统会根据当前节点生成诊断题目。'}
       </p>
-      <div className="mt-5 flex justify-center gap-3">
+      <div className="mt-5 flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-center">
         <Button onClick={onRestart} disabled={submitting} className="bg-blue-600 hover:bg-blue-700">
           {submitting ? <Loader2 className="size-4 animate-spin" /> : null}
           {error ? '重新尝试' : '开始测评'}
