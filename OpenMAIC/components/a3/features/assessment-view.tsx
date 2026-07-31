@@ -673,6 +673,12 @@ function EmptyAssessmentState({ error, submitting, onRestart }: { error: string;
         <Button asChild variant="outline">
           <Link href="/a3/admission-diagnostic">入学诊断</Link>
         </Button>
+        <Button asChild variant="outline" className="border-amber-200 bg-amber-50 text-amber-900 hover:bg-amber-100 hover:text-amber-950">
+          <Link href="/a3/labs">
+            <FlaskConical className="size-4" />
+            交互实验
+          </Link>
+        </Button>
       </div>
     </section>
   );

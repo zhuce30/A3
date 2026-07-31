@@ -140,4 +140,12 @@ describe('A3 student navigation consolidation', () => {
 
     expect(knowledgeBaseView).toContain('href="/a3/knowledge-graph"');
   });
+
+  it('keeps the algorithm lab entry visible when no assessment session is available', () => {
+    const emptyStateStart = assessmentView.indexOf('function EmptyAssessmentState');
+    const emptyStateEnd = assessmentView.indexOf('function QuestionEvidenceStrip');
+    const emptyStateSource = assessmentView.slice(emptyStateStart, emptyStateEnd);
+
+    expect(emptyStateSource).toContain('href="/a3/labs"');
+  });
 });

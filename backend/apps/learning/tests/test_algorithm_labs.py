@@ -114,7 +114,7 @@ class AlgorithmLabApiTests(TestCase):
         self.assertEqual(payload["labs"][1]["algorithms"], ["fifo", "lru", "opt"])
         self.assertEqual(payload["labs"][0]["progress"], {
             "completed": False,
-            "bestScore": 0,
+            "bestScore": None,
             "lastCompletedAt": None,
             "verifiedRuns": 0,
         })

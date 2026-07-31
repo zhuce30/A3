@@ -153,7 +153,7 @@ def list_algorithm_labs(user) -> dict:
                 **_public_lab(lab),
                 "progress": {
                     "completed": bool(lab_events),
-                    "bestScore": round(max(scores), 1) if scores else 0,
+                    "bestScore": round(max(scores), 1) if scores else None,
                     "lastCompletedAt": latest.created_at.isoformat() if latest else None,
                     "verifiedRuns": sum(_event_verified(event) for event in lab_events),
                 },
