@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { selectLatestResumeLabId } from '@/components/a3/features/algorithm-lab/algorithm-lab-catalog-view';
 
 const root = process.cwd();
 const catalogPath = join(root, 'components/a3/features/algorithm-lab/algorithm-lab-catalog-view.tsx');
@@ -23,6 +24,16 @@ describe('algorithm lab UI', () => {
     expect(source).toContain('clearLabSession');
     expect(source).toContain('清除记录');
     expect(source).not.toContain('session.steps');
+  });
+
+  it('selects the most recently started unfinished session', () => {
+    expect(selectLatestResumeLabId(
+      [{ id: 'cpu-scheduling' }, { id: 'page-replacement' }],
+      {
+        'cpu-scheduling': { startedAt: '2026-07-31T08:00:00.000Z' },
+        'page-replacement': { startedAt: '2026-07-31T09:00:00.000Z' },
+      },
+    )).toBe('page-replacement');
   });
 
   it('orders recommended labs first and renders repeated lab items with one clear action', () => {

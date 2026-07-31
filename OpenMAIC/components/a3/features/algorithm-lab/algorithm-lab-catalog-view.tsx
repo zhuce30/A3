@@ -28,6 +28,7 @@ import { useA3Locale, type A3Locale } from '@/lib/a3/i18n';
 
 type CatalogLab = AlgorithmLabCatalogItem & { recommended?: boolean };
 type SessionMap = Partial<Record<AlgorithmLabId, AlgorithmLabSession>>;
+type ResumeSessionMap = Partial<Record<AlgorithmLabId, Pick<AlgorithmLabSession, 'startedAt'>>>;
 
 const catalogMessages = {
   'zh-CN': {
@@ -99,6 +100,19 @@ const algorithmLabels: Record<string, string> = {
   opt: 'OPT',
 };
 
+export function selectLatestResumeLabId(
+  labs: ReadonlyArray<{ id: AlgorithmLabId }>,
+  sessions: ResumeSessionMap,
+): AlgorithmLabId | undefined {
+  return labs.reduce<AlgorithmLabId | undefined>((latestId, lab) => {
+    const candidate = sessions[lab.id];
+    if (!candidate) return latestId;
+    if (!latestId) return lab.id;
+    const latest = sessions[latestId];
+    return !latest || Date.parse(candidate.startedAt) > Date.parse(latest.startedAt) ? lab.id : latestId;
+  }, undefined);
+}
+
 export function AlgorithmLabCatalogView() {
   const { locale } = useA3Locale();
   const copy = catalogMessages[locale];
@@ -148,7 +162,8 @@ export function AlgorithmLabCatalogView() {
       .map(({ lab }) => lab),
     [labs],
   );
-  const resumeLab = sortedLabs.find((lab) => sessions[lab.id]);
+  const resumeLabId = selectLatestResumeLabId(sortedLabs, sessions);
+  const resumeLab = sortedLabs.find((lab) => lab.id === resumeLabId);
 
   function clearResume(labId: AlgorithmLabId) {
     clearLabSession(labId);
