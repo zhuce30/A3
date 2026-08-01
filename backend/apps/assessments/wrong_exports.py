@@ -52,21 +52,39 @@ def build_wrong_export(user, scope: str, export_format: str) -> ExportArtifact:
     if not items:
         raise WrongExportRequestError("当前范围没有可导出的错题")
     snapshot = build_wrong_question_snapshot(user, scope, items)
+    return render_wrong_export(snapshot, normalized_format)
+
+
+def render_wrong_export(
+    snapshot: dict,
+    export_format: str,
+    *,
+    enhancement: dict | None = None,
+    citations: list[dict] | None = None,
+    degraded_reasons: list[str] | None = None,
+) -> ExportArtifact:
+    normalized_format = str(export_format or "").strip().lower()
+    if normalized_format not in WRONG_EXPORT_FORMATS:
+        raise WrongExportRequestError("导出格式必须是 docx、xlsx 或 pdf")
     date_label = timezone.localdate().strftime("%Y%m%d")
     filename = f"wrong-questions-{snapshot['scope']}-{date_label}.{normalized_format}"
     if normalized_format == "docx":
         return ExportArtifact(
-            _build_docx(snapshot),
+            _build_docx(snapshot, enhancement, citations, degraded_reasons),
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             filename,
         )
     if normalized_format == "xlsx":
         return ExportArtifact(
-            _build_xlsx(snapshot),
+            _build_xlsx(snapshot, enhancement, citations, degraded_reasons),
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename,
         )
-    return ExportArtifact(_build_pdf(snapshot), "application/pdf", filename)
+    return ExportArtifact(
+        _build_pdf(snapshot, enhancement, citations, degraded_reasons),
+        "application/pdf",
+        filename,
+    )
 
 
 def select_wrong_questions(user, scope: str):
@@ -163,7 +181,12 @@ def _bounded_text(value, limit: int = MAX_TEXT_LENGTH) -> str:
     return str(value or "").strip()[:limit]
 
 
-def _build_docx(snapshot: dict) -> bytes:
+def _build_docx(
+    snapshot: dict,
+    enhancement: dict | None = None,
+    citations: list[dict] | None = None,
+    degraded_reasons: list[str] | None = None,
+) -> bytes:
     document = Document()
     section = document.sections[0]
     section.top_margin = Inches(0.65)
@@ -229,6 +252,39 @@ def _build_docx(snapshot: dict) -> bytes:
         document.add_paragraph(f"解析：{row['explanation']}")
         document.add_paragraph(f"来源：{row['source']} · {row['course']} / {row['chapter']}")
 
+    if degraded_reasons:
+        notice = document.add_paragraph("基础版：AI 增强暂未完整完成，原题、原答案和原始解析仍可正常复习。")
+        notice.runs[0].bold = True
+    sections = _enhancement_sections(enhancement)
+    if sections:
+        document.add_heading("AI 深度诊断", level=1)
+    for section_data in sections:
+        document.add_heading(_bounded_text(section_data.get("knowledgePoint") or "未分类", 128), level=2)
+        document.add_paragraph(f"共性诊断：{_bounded_text(section_data.get('groupDiagnosis'))}")
+        gaps = section_data.get("prerequisiteGaps") if isinstance(section_data.get("prerequisiteGaps"), list) else []
+        document.add_paragraph(f"前置知识缺口：{'、'.join(_bounded_text(item, 500) for item in gaps) or '未发现明确缺口'}")
+        for analysis in section_data.get("questionAnalyses") or []:
+            document.add_paragraph(f"题目 {analysis.get('questionId') or '-'}：{_bounded_text(analysis.get('deepErrorDiagnosis'))}")
+            for step in analysis.get("solutionSteps") or []:
+                document.add_paragraph(_bounded_text(step), style="List Bullet")
+            document.add_paragraph(f"自检：{_bounded_text(analysis.get('selfCheck'))}")
+            document.add_paragraph(f"复习建议：{_bounded_text(analysis.get('reviewAdvice'))}")
+        practices = section_data.get("transferPractice") if isinstance(section_data.get("transferPractice"), list) else []
+        if practices:
+            document.add_heading("迁移练习", level=2)
+        for index, practice in enumerate(practices, start=1):
+            document.add_paragraph(f"{index}. {_bounded_text(practice.get('prompt'))}")
+            document.add_paragraph(f"答案：{_bounded_text(practice.get('answer'))}")
+            document.add_paragraph(f"解析：{_bounded_text(practice.get('explanation'))}")
+    if citations:
+        document.add_heading("资料引用", level=1)
+        for citation in citations:
+            document.add_paragraph(
+                f"[{_bounded_text(citation.get('sourceId'), 32)}] "
+                f"{_bounded_text(citation.get('title'), 255)} · {_bounded_text(citation.get('location'), 500)}\n"
+                f"{_bounded_text(citation.get('snippet'), 600)}"
+            )
+
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
     footer.add_run("由智学引擎生成 · 仅用于个人复习")
@@ -244,7 +300,12 @@ XLSX_HEADERS = [
 ]
 
 
-def _build_xlsx(snapshot: dict) -> bytes:
+def _build_xlsx(
+    snapshot: dict,
+    enhancement: dict | None = None,
+    citations: list[dict] | None = None,
+    degraded_reasons: list[str] | None = None,
+) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "错题明细"
@@ -283,12 +344,67 @@ def _build_xlsx(snapshot: dict) -> bytes:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
         for date_index in (13, 14):
             row[date_index - 1].number_format = "yyyy-mm-dd hh:mm"
+    analysis_sheet = workbook.create_sheet("AI分析")
+    analysis_sheet.append([
+        "题目ID", "知识点", "共性诊断", "前置知识缺口", "深层错因",
+        "解题步骤", "自检", "复习建议", "证据状态", "引用编号",
+    ])
+    practice_sheet = workbook.create_sheet("迁移练习与引用")
+    practice_sheet.append(["记录类型", "知识点", "内容", "答案", "解析/片段", "难度/位置", "引用编号"])
+    sections = _enhancement_sections(enhancement)
+    for section_data in sections:
+        point = _bounded_text(section_data.get("knowledgePoint"), 128)
+        gaps = "\n".join(_bounded_text(item, 500) for item in section_data.get("prerequisiteGaps") or [])
+        for analysis in section_data.get("questionAnalyses") or []:
+            analysis_sheet.append([
+                _bounded_text(analysis.get("questionId"), 64), point,
+                _bounded_text(section_data.get("groupDiagnosis")), gaps,
+                _bounded_text(analysis.get("deepErrorDiagnosis")),
+                "\n".join(_bounded_text(item, 500) for item in analysis.get("solutionSteps") or []),
+                _bounded_text(analysis.get("selfCheck")), _bounded_text(analysis.get("reviewAdvice")),
+                _bounded_text(section_data.get("evidenceStatus"), 32),
+                ", ".join(_bounded_text(item, 32) for item in analysis.get("citationIds") or []),
+            ])
+        for practice in section_data.get("transferPractice") or []:
+            practice_sheet.append([
+                "迁移练习", point, _bounded_text(practice.get("prompt")),
+                _bounded_text(practice.get("answer")), _bounded_text(practice.get("explanation")),
+                _bounded_text(practice.get("difficulty"), 32),
+                ", ".join(_bounded_text(item, 32) for item in practice.get("citationIds") or []),
+            ])
+    for citation in citations or []:
+        practice_sheet.append([
+            "资料引用", _bounded_text(citation.get("knowledgePoint"), 128),
+            _bounded_text(citation.get("title"), 255), "",
+            _bounded_text(citation.get("snippet"), 600), _bounded_text(citation.get("location"), 500),
+            _bounded_text(citation.get("sourceId"), 32),
+        ])
+    if degraded_reasons and analysis_sheet.max_row == 1:
+        analysis_sheet.append(["", "", "基础版", "", "AI 增强暂未完整完成", "", "", "", "unverified", ""])
+    for extra_sheet in (analysis_sheet, practice_sheet):
+        extra_sheet.freeze_panes = "A2"
+        extra_sheet.auto_filter.ref = extra_sheet.dimensions
+        for cell in extra_sheet[1]:
+            cell.font = Font(name="Microsoft YaHei", color="FFFFFF", bold=True)
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for column in range(1, extra_sheet.max_column + 1):
+            extra_sheet.column_dimensions[get_column_letter(column)].width = 24
+        for row in extra_sheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.font = Font(name="Microsoft YaHei", size=10)
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
 
 
-def _build_pdf(snapshot: dict) -> bytes:
+def _build_pdf(
+    snapshot: dict,
+    enhancement: dict | None = None,
+    citations: list[dict] | None = None,
+    degraded_reasons: list[str] | None = None,
+) -> bytes:
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
     output = BytesIO()
     document = SimpleDocTemplate(
@@ -366,6 +482,35 @@ def _build_pdf(snapshot: dict) -> bytes:
         if number < len(snapshot["questions"]):
             story.append(Spacer(1, 2 * mm))
 
+    if degraded_reasons:
+        story.append(Paragraph(_escape_pdf_text("基础版：AI 增强暂未完整完成，原始错题内容保持不变。"), heading_style))
+    sections = _enhancement_sections(enhancement)
+    if sections:
+        story.append(Paragraph("AI 深度诊断", title_style))
+    for section_data in sections:
+        story.append(Paragraph(_escape_pdf_text(section_data.get("knowledgePoint") or "未分类"), heading_style))
+        story.append(Paragraph(_escape_pdf_text(f"共性诊断：{section_data.get('groupDiagnosis') or ''}"), body_style))
+        for analysis in section_data.get("questionAnalyses") or []:
+            story.append(Paragraph(_escape_pdf_text(
+                f"题目 {analysis.get('questionId') or '-'}：{analysis.get('deepErrorDiagnosis') or ''}"
+            ), body_style))
+            for step in analysis.get("solutionSteps") or []:
+                story.append(Paragraph(_escape_pdf_text(f"• {step}"), body_style))
+        practices = section_data.get("transferPractice") if isinstance(section_data.get("transferPractice"), list) else []
+        if practices:
+            story.append(Paragraph("迁移练习", heading_style))
+        for practice in practices:
+            story.append(Paragraph(_escape_pdf_text(f"题目：{practice.get('prompt') or ''}"), body_style))
+            story.append(Paragraph(_escape_pdf_text(f"答案：{practice.get('answer') or ''}"), body_style))
+            story.append(Paragraph(_escape_pdf_text(f"解析：{practice.get('explanation') or ''}"), body_style))
+    if citations:
+        story.append(Paragraph("资料引用", title_style))
+        for citation in citations:
+            story.append(Paragraph(_escape_pdf_text(
+                f"[{citation.get('sourceId') or ''}] {citation.get('title') or ''} · "
+                f"{citation.get('location') or ''}：{citation.get('snippet') or ''}"
+            ), body_style))
+
     def footer(canvas, doc):
         canvas.saveState()
         canvas.setFont("STSong-Light", 8)
@@ -375,6 +520,13 @@ def _build_pdf(snapshot: dict) -> bytes:
 
     document.build(story, onFirstPage=footer, onLaterPages=footer)
     return output.getvalue()
+
+
+def _enhancement_sections(enhancement: dict | None) -> list[dict]:
+    if not isinstance(enhancement, dict):
+        return []
+    sections = enhancement.get("sections")
+    return [item for item in sections if isinstance(item, dict)] if isinstance(sections, list) else []
 
 
 def scope_label(scope: str) -> str:

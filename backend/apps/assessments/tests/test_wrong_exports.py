@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from io import BytesIO
+import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -281,6 +282,82 @@ class WrongExportDomainTests(TestCase):
         self.assertIn("今日到期题", text)
         self.assertIn("正确答案：B", text)
         self.assertIn("时间片轮转", text)
+
+    def test_render_ai_enhanced_exports_preserves_originals_and_adds_stable_sections(self):
+        from backend.apps.assessments.wrong_exports import (
+            build_wrong_question_snapshot,
+            render_wrong_export,
+            select_wrong_questions,
+        )
+
+        snapshot = build_wrong_question_snapshot(self.user, "active", select_wrong_questions(self.user, "active"))
+        enhancement = {
+            "sections": [{
+                "knowledgePoint": "进程调度",
+                "groupDiagnosis": "调度规则辨析不清。",
+                "prerequisiteGaps": ["就绪队列"],
+                "confusions": [],
+                "questionAnalyses": [{
+                    "questionId": snapshot["questions"][0]["questionId"],
+                    "deepErrorDiagnosis": "把轮转误认为固定优先级。",
+                    "solutionSteps": ["识别算法", "模拟队列"],
+                    "selfCheck": "检查每个进程是否轮流执行。",
+                    "reviewAdvice": "隔天重新练习。",
+                    "citationIds": ["S1"],
+                }],
+                "transferPractice": [{
+                    "prompt": "模拟三个进程的首轮顺序。",
+                    "answer": "P1、P2、P3",
+                    "explanation": "按就绪队列轮转。",
+                    "difficulty": "基础",
+                    "citationIds": ["S1"],
+                }],
+                "evidenceStatus": "verified",
+            }]
+        }
+        citations = [{"sourceId": "S1", "title": "操作系统资料", "location": "第 3 页", "snippet": "时间片轮转说明。"}]
+        original_snapshot = copy.deepcopy(snapshot)
+        original_enhancement = copy.deepcopy(enhancement)
+
+        docx = render_wrong_export(snapshot, "docx", enhancement=enhancement, citations=citations)
+        document = Document(BytesIO(docx.content))
+        docx_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        self.assertIn("正确答案：B", docx_text)
+        self.assertIn("AI 深度诊断", docx_text)
+        self.assertIn("迁移练习", docx_text)
+        self.assertIn("资料引用", docx_text)
+
+        xlsx = render_wrong_export(snapshot, "xlsx", enhancement=enhancement, citations=citations)
+        workbook = load_workbook(BytesIO(xlsx.content))
+        self.assertEqual(workbook.sheetnames, ["错题明细", "AI分析", "迁移练习与引用"])
+        self.assertIn("正确答案", [cell.value for cell in workbook["错题明细"][1]])
+        self.assertIn("深层错因", [cell.value for cell in workbook["AI分析"][1]])
+
+        pdf = render_wrong_export(snapshot, "pdf", enhancement=enhancement, citations=citations)
+        pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf.content)).pages)
+        self.assertIn("正确答案", pdf_text)
+        self.assertIn("AI 深度诊断", pdf_text)
+        self.assertIn("资料引用", pdf_text)
+        self.assertEqual(snapshot, original_snapshot)
+        self.assertEqual(enhancement, original_enhancement)
+
+    def test_render_degraded_export_has_visible_notice(self):
+        from backend.apps.assessments.wrong_exports import (
+            build_wrong_question_snapshot,
+            render_wrong_export,
+            select_wrong_questions,
+        )
+
+        snapshot = build_wrong_question_snapshot(self.user, "active", select_wrong_questions(self.user, "active"))
+        artifact = render_wrong_export(
+            snapshot,
+            "docx",
+            enhancement={"sections": []},
+            degraded_reasons=["timeout"],
+        )
+        document = Document(BytesIO(artifact.content))
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        self.assertIn("基础版", text)
 
     def test_build_xlsx_export_has_exact_headers_and_typed_dates(self):
         from backend.apps.assessments.wrong_exports import build_wrong_export
