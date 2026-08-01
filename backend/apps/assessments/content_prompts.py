@@ -16,6 +16,7 @@ _PROFILE_FIELDS = (
 )
 _QUESTION_FIELDS = (
     "questionId",
+    "knowledgePoint",
     "stem",
     "options",
     "correctAnswer",

@@ -134,6 +134,17 @@ def _enhance_section(
     response_meta: dict[str, Any] = {}
     max_attempts = _max_attempts()
     request_messages = list(messages)
+    if not _llm_enabled():
+        return {
+            "content": fallback(),
+            "citations": [],
+            "degraded": True,
+            "reason": "disabled",
+            "attempts": 0,
+            "latencyMs": int((time.monotonic() - started) * 1000),
+            "meta": {},
+            "errorCategories": ["disabled"],
+        }
     for attempt in range(max_attempts):
         _raise_if_cancelled(cancel_check)
         attempts += 1
@@ -161,6 +172,7 @@ def _enhance_section(
         except EnhancementCancelled:
             raise
         except Exception as exc:
+            _raise_if_cancelled(cancel_check)
             category, retryable = _classify_error(exc)
             categories.append(category)
             if not retryable or attempt + 1 >= max_attempts:
@@ -281,7 +293,14 @@ def _used_sources(content: dict[str, Any], sources: list[dict[str, Any]]) -> lis
     visit(content)
     point = str(content.get("knowledgePoint") or "")
     return [
-        {**source, "knowledgePoint": point}
+        {
+            "sourceId": str(source.get("sourceId") or ""),
+            "knowledgePoint": point,
+            "title": str(source.get("title") or "")[:255],
+            "location": str(source.get("location") or "")[:500],
+            "snippet": str(source.get("snippet") or "")[:600],
+            "score": source.get("score") if isinstance(source.get("score"), (int, float)) else None,
+        }
         for source in sources
         if source.get("sourceId") in used_ids
     ]
@@ -362,6 +381,11 @@ def _raise_if_cancelled(cancel_check: Callable[[], bool] | None) -> None:
 
 def _max_attempts() -> int:
     return _env_int("A3_ASSESSMENT_EXPORT_LLM_MAX_ATTEMPTS", 3, minimum=1, maximum=3)
+
+
+def _llm_enabled() -> bool:
+    value = os.getenv("A3_ASSESSMENT_EXPORT_LLM_ENABLED", "auto").strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:

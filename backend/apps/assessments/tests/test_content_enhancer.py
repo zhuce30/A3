@@ -19,6 +19,7 @@ from backend.apps.assessments.content_schemas import (
     validate_wrong_export_payload,
 )
 from backend.apps.assessments.content_enhancer import (
+    EnhancementCancelled,
     enhance_review_handout,
     enhance_wrong_export,
 )
@@ -37,6 +38,7 @@ PROFILE = {
 }
 QUESTION = {
     "questionId": "q-1",
+    "knowledgePoint": "进程调度",
     "stem": "时间片轮转调度的核心机制是什么？",
     "options": ["按优先级", "按固定时间片轮转", "只运行最短作业"],
     "correctAnswer": "B",
@@ -129,6 +131,7 @@ class ContentPromptTests(SimpleTestCase):
         self.assertIn("只能使用提供的 sourceId", system)
         self.assertIn("只输出一个 JSON 对象", system)
         self.assertIn('"questionId": "q-1"', user)
+        self.assertIn('"knowledgePoint": "进程调度"', user)
         self.assertIn('"sourceId": "S1"', user)
         self.assertNotIn("13800001111", user)
         self.assertNotIn("session-secret", user)
@@ -387,7 +390,8 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
     @patch("backend.apps.assessments.content_enhancer.chat_completion")
     def test_wrong_export_success_returns_verified_content_and_audit(self, completion):
         completion.return_value = self._response(valid_wrong_export_payload())
-        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        source = dict(SOURCE, sourcePath="D:/private/material.pdf")
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [source]}, sleep=lambda _: None)
         self.assertTrue(result.verified)
         self.assertFalse(result.degraded)
         self.assertEqual(result.content["sections"][0]["knowledgePoint"], "进程调度")
@@ -398,6 +402,7 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
         self.assertEqual(result.audit["finishReason"], "stop")
         self.assertEqual(result.audit["usage"]["completion_tokens"], 30)
         self.assertGreaterEqual(result.audit["latencyMs"], 0)
+        self.assertNotIn("sourcePath", result.citations[0])
         completion.assert_called_once()
         self.assertEqual(completion.call_args.kwargs["temperature"], 0.15)
 
@@ -479,3 +484,24 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
         self.assertTrue(result.verified)
         self.assertEqual(result.audit["promptVersion"], "review-handout-v1")
         self.assertEqual(result.content["sections"][0]["tieredPractice"][2]["level"], "迁移")
+
+    @patch.dict("os.environ", {"A3_ASSESSMENT_EXPORT_LLM_ENABLED": "false"})
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_explicitly_disabled_llm_uses_fallback_without_call(self, completion):
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.audit["attempts"], 0)
+        self.assertEqual(result.audit["errorCategories"], ["disabled"])
+        completion.assert_not_called()
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_cancellation_after_failed_call_stops_before_fallback(self, completion):
+        completion.side_effect = requests.Timeout("private timeout")
+        checks = iter((False, True))
+        with self.assertRaises(EnhancementCancelled):
+            enhance_wrong_export(
+                self._snapshot(),
+                {"进程调度": [SOURCE]},
+                cancel_check=lambda: next(checks),
+                sleep=lambda _: None,
+            )
