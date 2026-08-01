@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   Code2,
   FileText,
+  FlaskConical,
   GitBranch,
   Layers3,
   Loader2,
@@ -44,6 +45,7 @@ import type {
   A3ResourcePackV2ResourceType,
   RecommendationResponse,
 } from '@/lib/a3/recommendation-types';
+import { buildInteractiveLabHref } from '@/lib/a3/recommendation-types';
 import { cn } from '@/lib/utils';
 import { A3Card, A3Pill } from '../ui/a3-card';
 
@@ -1006,8 +1008,16 @@ function RecommendationEvidenceItem({ item, profileFeed }: { item: A3Recommendat
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-[var(--a3-surface-muted)] px-3 py-2 text-xs text-[var(--a3-text-muted)]">
         <span>{action.reason}</span>
         {action.href ? (
-          <Link href={action.href} className="inline-flex items-center gap-1 font-semibold text-blue-700 hover:text-blue-800" data-testid="a3-recommendation-next-action">
-            {action.label} <ArrowRight className="size-3.5" />
+          <Link
+            href={action.href}
+            className={cn(
+              'inline-flex items-center gap-1 font-semibold',
+              item.action ? 'rounded-md bg-emerald-800 px-3 py-2 text-white hover:bg-emerald-700' : 'text-blue-700 hover:text-blue-800',
+            )}
+            data-testid="a3-recommendation-next-action"
+          >
+            {item.action ? <FlaskConical className="size-3.5" /> : null}
+            {action.label} {!item.action ? <ArrowRight className="size-3.5" /> : null}
           </Link>
         ) : null}
       </div>
@@ -1016,6 +1026,13 @@ function RecommendationEvidenceItem({ item, profileFeed }: { item: A3Recommendat
 }
 
 function buildRecommendationAction(item: A3Recommendation) {
+  if (item.action?.kind === 'interactive_lab') {
+    return {
+      label: item.action.label,
+      href: buildInteractiveLabHref(item.action),
+      reason: item.action.reason,
+    };
+  }
   const hasSource = Boolean(item.evidence.sourceEvidence?.title || item.citation?.title);
   if (item.type.includes('practice')) {
     return { label: '去做专项练习', href: item.href || '/a3/assessment', reason: '今日优先学习动作：先练薄弱点，完成后更新掌握度。' };

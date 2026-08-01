@@ -23,6 +23,7 @@ from backend.apps.assessments.models import (
 )
 from backend.apps.assessments.personal_question_llm import generate_grounded_personal_candidates
 from backend.apps.knowledge_base.models import KnowledgeBlock, ResourceScope, ResourceStatus
+from backend.apps.learning.algorithm_labs import build_algorithm_lab_report_effect
 from backend.apps.learning.effect_events import record_learning_event
 from backend.apps.learning.models import KnowledgePoint, LearningPath, LearningPathStatus, PathItemStatus, ResourcePackLog
 from backend.apps.system.admin_tutor_cache import (
@@ -1656,6 +1657,11 @@ def build_learning_report(user, period: str = "term") -> dict:
         answer_stats=answer_stats,
     )
     knowledge_point_insights = _knowledge_point_insights(user, start=period_start_at, end=report_end_at)
+    algorithm_lab_effect = build_algorithm_lab_report_effect(
+        user,
+        start_at=period_start_at,
+        end_at=report_end_at,
+    )
     updated_at = now.isoformat()
     return {
         "period": period_payload,
@@ -1668,6 +1674,7 @@ def build_learning_report(user, period: str = "term") -> dict:
         "actionLoop": action_loop,
         "wrongReviewInsight": wrong_review_insight,
         "resourcePackEffect": _resource_pack_effect(user),
+        "algorithmLabEffect": algorithm_lab_effect,
         "updatedAt": updated_at,
         "studentSummary": _student_report_summary(
             user=user,

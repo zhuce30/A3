@@ -1,0 +1,225 @@
+import { Activity, CircleCheck, Clock3 } from 'lucide-react';
+import type { AlgorithmLabPhase, SimulationRun } from '@/lib/a3/algorithm-lab/contracts';
+import type { CpuSchedulingMetrics, CpuSchedulingState } from '@/lib/a3/algorithm-lab/cpu-scheduling';
+import type { PageReplacementMetrics, PageReplacementState } from '@/lib/a3/algorithm-lab/page-replacement';
+import { deriveCpuGlobalCurrentTime, selectCpuStepAtTime } from './cpu-scheduling-visualizer';
+import { derivePageGlobalCurrentIndex, selectPageStepAtIndex } from './page-replacement-visualizer';
+
+type CpuRun = SimulationRun<CpuSchedulingState, CpuSchedulingMetrics>;
+type PageRun = SimulationRun<PageReplacementState, PageReplacementMetrics>;
+
+const phaseLabels: Record<AlgorithmLabPhase, string> = {
+  idle: '等待配置',
+  configured: '配置已更新',
+  predicted: '预测已记录',
+  running: '正在运行',
+  paused: '已暂停',
+  completed: '运行完成',
+  submitted: '结果已提交',
+};
+
+interface AlgorithmLabStatusPanelProps {
+  phase: AlgorithmLabPhase;
+  speed: number;
+  currentStepIndex: number;
+  finalStepIndex: number;
+  replayCount: number;
+  syncState: 'idle' | 'pending' | 'failed' | 'submitted';
+  syncError: string;
+  cpuRuns?: CpuRun[];
+  pageRuns?: PageRun[];
+  revealCompletionOrder?: boolean;
+  onSpeedChange: (speed: number) => void;
+}
+
+export function AlgorithmLabStatusPanel({
+  phase,
+  speed,
+  currentStepIndex,
+  finalStepIndex,
+  replayCount,
+  syncState,
+  syncError,
+  cpuRuns = [],
+  pageRuns = [],
+  revealCompletionOrder = false,
+  onSpeedChange,
+}: AlgorithmLabStatusPanelProps) {
+  return (
+    <section className="space-y-5" aria-label="实验结果状态">
+      <div>
+        <div className="flex items-center gap-2 text-sm font-semibold text-[var(--a3-text)]">
+          <Activity className="size-4 text-amber-600" />
+          运行状态
+        </div>
+        <div className="mt-3 flex items-center gap-2 text-sm text-[var(--a3-text)]" role="status">
+          <span className={`size-2 rounded-full ${phase === 'running' ? 'animate-pulse bg-emerald-500' : 'bg-amber-500'}`} />
+          {phaseLabels[phase]}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 border-y border-[var(--a3-border)] py-4 text-sm">
+        <StatusMetric icon={Clock3} label="当前步骤" value={`${finalStepIndex >= 0 ? currentStepIndex + 1 : 0}/${finalStepIndex + 1}`} />
+        <StatusMetric icon={CircleCheck} label="重新运行" value={`${replayCount} 次`} />
+      </div>
+
+      {cpuRuns.length > 0 ? (
+        <CpuMetricsTable
+          runs={cpuRuns}
+          currentStepIndex={currentStepIndex}
+          revealCompletionOrder={revealCompletionOrder}
+        />
+      ) : null}
+
+      {pageRuns.length > 0 ? (
+        <PageMetricsTable
+          runs={pageRuns}
+          currentStepIndex={currentStepIndex}
+          completed={phase === 'completed' || phase === 'submitted'}
+        />
+      ) : null}
+
+      <label className="block text-xs font-medium text-[var(--a3-text-muted)]">
+        播放速度
+        <span className="mt-2 flex items-center justify-between text-[11px] text-[var(--a3-text-muted)]" aria-hidden="true">
+          <span>0.5x</span>
+          <span className="font-semibold text-[var(--a3-text)]">当前 {speed}x</span>
+          <span>2x</span>
+        </span>
+        <input
+          type="range"
+          min={0.5}
+          max={2}
+          step={0.5}
+          value={speed}
+          onChange={(event) => onSpeedChange(Number(event.target.value))}
+          aria-valuetext={`${speed}x`}
+          className="mt-1 h-8 w-full cursor-pointer accent-amber-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+        />
+      </label>
+
+      <div className="text-xs leading-5 text-[var(--a3-text-muted)]" aria-live="polite">
+        {syncState === 'failed' ? syncError : syncState === 'submitted' ? '学习证据已写回' : '完成实验后将验证并写回学习报告'}
+      </div>
+    </section>
+  );
+}
+
+function PageMetricsTable({
+  runs,
+  currentStepIndex,
+  completed,
+}: {
+  runs: PageRun[];
+  currentStepIndex: number;
+  completed: boolean;
+}) {
+  const currentReferenceIndex = derivePageGlobalCurrentIndex(runs, currentStepIndex);
+  const fewestFaults = Math.min(...runs.map((run) => run.finalMetrics.pageFaults));
+  const winners = runs.filter((run) => run.finalMetrics.pageFaults === fewestFaults);
+  return (
+    <div>
+      <div className="text-xs font-semibold text-[var(--a3-text)]">页面置换指标</div>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full min-w-[360px] border-collapse text-left text-[11px]">
+          <thead className="text-[var(--a3-text-muted)]">
+            <tr className="border-b border-[var(--a3-border)]">
+              <th className="px-2 py-2 font-medium">算法</th>
+              <th className="px-2 py-2 font-medium">缺页次数</th>
+              <th className="px-2 py-2 font-medium">命中次数</th>
+              <th className="px-2 py-2 font-medium">缺页率</th>
+              <th className="px-2 py-2 font-medium">淘汰次数</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map((run) => {
+              const metrics = selectPageStepAtIndex(run, currentReferenceIndex)?.metrics ?? run.finalMetrics;
+              return (
+                <tr key={run.algorithm} className="border-b border-[var(--a3-border)]/70 text-[var(--a3-text)] last:border-0">
+                  <th className="px-2 py-2 font-semibold uppercase">{run.algorithm}</th>
+                  <td className="px-2 py-2 tabular-nums">{metrics.pageFaults}</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.hits}</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.faultRate}%</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.evictions}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {completed ? (
+        <p className="mt-2 text-[11px] leading-5 text-[var(--a3-text-muted)]">
+          {winners.map((run) => run.algorithm.toUpperCase()).join('、')} 在本次比较中缺页最少；该结论仅代表当前引用序列。
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function CpuMetricsTable({
+  runs,
+  currentStepIndex,
+  revealCompletionOrder,
+}: {
+  runs: CpuRun[];
+  currentStepIndex: number;
+  revealCompletionOrder: boolean;
+}) {
+  const currentTime = deriveCpuGlobalCurrentTime(runs, currentStepIndex);
+  return (
+    <div>
+      <div className="text-xs font-semibold text-[var(--a3-text)]">调度指标</div>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full min-w-[520px] border-collapse text-left text-[11px]">
+          <thead className="text-[var(--a3-text-muted)]">
+            <tr className="border-b border-[var(--a3-border)]">
+              <th className="px-2 py-2 font-medium">算法</th>
+              <th className="px-2 py-2 font-medium">平均等待</th>
+              <th className="px-2 py-2 font-medium">平均周转</th>
+              <th className="px-2 py-2 font-medium">平均响应</th>
+              <th className="px-2 py-2 font-medium">上下文切换</th>
+              <th className="px-2 py-2 font-medium">完成顺序</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map((run) => {
+              const step = selectCpuStepAtTime(run, currentTime);
+              const metrics = step?.metrics ?? run.finalMetrics;
+              return (
+                <tr key={run.algorithm} className="border-b border-[var(--a3-border)]/70 text-[var(--a3-text)] last:border-0">
+                  <th className="px-2 py-2 font-semibold uppercase">{run.algorithm}</th>
+                  <td className="px-2 py-2 tabular-nums">{metrics.averageWaitingTime}</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.averageTurnaroundTime}</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.averageResponseTime}</td>
+                  <td className="px-2 py-2 tabular-nums">{metrics.contextSwitches}</td>
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    {revealCompletionOrder
+                      ? metrics.completionOrder.join(' → ') || '尚未完成'
+                      : '提交完成顺序检查点后显示'}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function StatusMetric({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: typeof Clock3;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 text-xs text-[var(--a3-text-muted)]"><Icon className="size-3.5" />{label}</div>
+      <div className="mt-1 font-semibold text-[var(--a3-text)]">{value}</div>
+    </div>
+  );
+}

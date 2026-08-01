@@ -22,6 +22,7 @@ const taskTone: Record<StudyPlanTask['type'], 'blue' | 'green' | 'orange' | 'vio
   review: 'orange',
   summary: 'violet',
   resource_pack: 'violet',
+  interactive_lab: 'green',
 };
 
 const taskLabel: Record<StudyPlanTask['type'], string> = {
@@ -30,6 +31,7 @@ const taskLabel: Record<StudyPlanTask['type'], string> = {
   review: '复习',
   summary: '复盘',
   resource_pack: '资源包',
+  interactive_lab: '交互实验',
 };
 
 const dayStatusLabel: Record<StudyPlanDay['status'], string> = {

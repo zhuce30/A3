@@ -2,11 +2,11 @@ import path from 'node:path';
 
 type PlaywrightEnvironment = Record<string, string | undefined>;
 
-function resolvePort(value?: string) {
+function resolvePort(value?: string, name = 'A3_PLAYWRIGHT_PORT') {
   if (!value) return 3002;
   const port = Number(value);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error(`Invalid A3_PLAYWRIGHT_PORT: ${value}`);
+    throw new Error(`Invalid ${name}: ${value}`);
   }
   return port;
 }
@@ -43,6 +43,10 @@ export function resolveA3PlaywrightRuntime(
     );
   }
   const port = explicitPort ?? baseURLPort ?? 3002;
+  const backendPort = environment.A3_PLAYWRIGHT_BACKEND_PORT
+    ? resolvePort(environment.A3_PLAYWRIGHT_BACKEND_PORT, 'A3_PLAYWRIGHT_BACKEND_PORT')
+    : 8000;
+  const backendURL = `http://localhost:${backendPort}`;
   parsedBaseURL.port = String(port);
   const baseURL = serializeBaseURL(parsedBaseURL);
   const useExistingServers = environment.A3_PLAYWRIGHT_USE_EXISTING === '1';
@@ -56,16 +60,21 @@ export function resolveA3PlaywrightRuntime(
   const backendManagePy = path.join(backendProjectRoot, 'backend', 'manage.py');
   const frontendCommand = environment.CI
     ? `pnpm build && pnpm start -- -p ${port}`
-    : `cmd /c node_modules\\.bin\\next.CMD dev -p ${port}`;
+    : `cmd /c "node_modules\\.bin\\next.CMD dev --webpack -p ${port}"`;
   const backendCommand = [
-    'cmd /c set A3_KB_SYNC_INDEX_ON_UPLOAD=1&&',
+    `cmd /c "set DJANGO_DEBUG=1&& set DJANGO_SETTINGS_MODULE=backend.config.test_sqlite_settings&& set CORS_ALLOWED_ORIGINS=http://localhost:${port},http://127.0.0.1:${port}&& set A3_KB_SYNC_INDEX_ON_UPLOAD=1&&`,
     quoteCommandPath(backendPython),
     quoteCommandPath(backendManagePy),
-    'runserver 127.0.0.1:8000 --noreload',
+    'migrate --noinput&&',
+    quoteCommandPath(backendPython),
+    quoteCommandPath(backendManagePy),
+    `runserver localhost:${backendPort} --noreload"`,
   ].join(' ');
 
   return {
     backendCommand,
+    backendPort,
+    backendURL,
     backendManagePy,
     backendProjectRoot,
     backendPython,

@@ -31,7 +31,12 @@ ALLOWED_CLIENT_EVENT_TYPES = {
     "classroom_opened",
     "video_opened",
     "video_completed",
+    "algorithm_lab_started",
+    "algorithm_lab_checkpoint_submitted",
+    "algorithm_lab_completed",
 }
+
+SERVER_VERIFIED_EVENT_TYPES = {"algorithm_lab_completed"}
 
 RESOURCE_EVENT_ACTIONS = {
     "resource_opened": "opened",
@@ -75,10 +80,10 @@ def record_learning_event(
     )
 
 
-def ingest_learning_event_v2(user, payload: dict) -> dict:
+def ingest_learning_event_v2(user, payload: dict, *, trusted: bool = False) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("事件数据必须是对象")
-    normalized = _normalize_client_event_payload(payload)
+    normalized = _normalize_client_event_payload(payload, trusted=trusted)
     event_id = normalized["event_id"]
     existing = LearningEvent.objects.filter(user=user, event_id=event_id).first()
     if existing:
@@ -174,7 +179,7 @@ def serialize_learning_event(event: LearningEvent) -> dict:
     }
 
 
-def _normalize_client_event_payload(payload: dict) -> dict:
+def _normalize_client_event_payload(payload: dict, *, trusted: bool = False) -> dict:
     schema_version = str(payload.get("schemaVersion") or LEARNING_EVENT_SCHEMA_V2).strip()
     if schema_version != LEARNING_EVENT_SCHEMA_V2:
         raise ValueError("事件 schemaVersion 必须是 a3.learning-event.v2")
@@ -184,6 +189,8 @@ def _normalize_client_event_payload(payload: dict) -> dict:
     event_type = str(payload.get("eventType") or "").strip()
     if not event_type or len(event_type) > 64 or event_type not in ALLOWED_CLIENT_EVENT_TYPES:
         raise ValueError("事件类型无效")
+    if event_type in SERVER_VERIFIED_EVENT_TYPES and not trusted:
+        raise ValueError("该完成事件只能由实验完成接口写入")
     source_page = str(payload.get("sourcePage") or "").strip()
     if len(source_page) > 255:
         raise ValueError("来源页面不能超过 255 个字符")

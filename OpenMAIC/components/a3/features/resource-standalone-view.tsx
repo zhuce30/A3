@@ -10,6 +10,7 @@ import {
   Code2,
   ExternalLink,
   FileText,
+  FlaskConical,
   GitBranch,
   Layers3,
   Loader2,
@@ -28,6 +29,7 @@ import type {
   A3ResourcePackV2Resource,
   A3ResourcePackV2ResourceType,
 } from '@/lib/a3/recommendation-types';
+import { buildInteractiveLabHref } from '@/lib/a3/recommendation-types';
 import { A3Markdown } from '../ui/a3-markdown';
 import { A3Card, A3Pill } from '../ui/a3-card';
 import { CaseStudyWorkbench } from './resource-workbench/case-study-workbench';
@@ -280,7 +282,25 @@ function ResourceBody({
     return <CaseStudyWorkbench resource={resource} feedbackMessage={feedbackMessage} feedbackSaving={feedbackSaving} onFeedback={onFeedback} />;
   }
   if (resource.type === 'code_lab') {
-    return <CodeLabWorkbench key={`${pack.resourcePackId}:${resource.title}`} resource={resource} packId={pack.resourcePackId} feedbackMessage={feedbackMessage} feedbackSaving={feedbackSaving} onFeedback={onFeedback} />;
+    return (
+      <div className="space-y-4">
+        {resource.type === 'code_lab' && resource.relatedLab ? (
+          <div className="flex flex-col justify-between gap-3 border-y border-emerald-200 bg-emerald-50 px-4 py-3 sm:flex-row sm:items-center">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-emerald-950">相关交互实验</div>
+              <p className="mt-1 text-xs leading-5 text-emerald-800">{resource.relatedLab.reason}</p>
+            </div>
+            <Button asChild size="sm" className="shrink-0 bg-emerald-800 text-white hover:bg-emerald-700">
+              <Link href={buildInteractiveLabHref(resource.relatedLab)}>
+                <FlaskConical className="size-4" />
+                {resource.relatedLab.label}
+              </Link>
+            </Button>
+          </div>
+        ) : null}
+        <CodeLabWorkbench key={`${pack.resourcePackId}:${resource.title}`} resource={resource} packId={pack.resourcePackId} feedbackMessage={feedbackMessage} feedbackSaving={feedbackSaving} onFeedback={onFeedback} />
+      </div>
+    );
   }
   return (
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">

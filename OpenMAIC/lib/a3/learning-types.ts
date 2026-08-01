@@ -1,3 +1,5 @@
+import type { InteractiveLabAction } from './recommendation-types';
+
 export type KnowledgePoint = {
   id: string;
   code: string;
@@ -64,6 +66,7 @@ export type PathItem = {
   estimatedMinutes: number;
   completedAt: string | null;
   knowledgePoint: KnowledgePoint & { chapter: { order: number; title: string } };
+  relatedLab?: InteractiveLabAction;
 };
 
 export type LearningPath = {
@@ -182,7 +185,7 @@ export type KnowledgeGraph = {
 
 export type StudyPlanTask = {
   id: string;
-  type: 'learn' | 'practice' | 'review' | 'summary' | 'resource_pack';
+  type: 'learn' | 'practice' | 'review' | 'summary' | 'resource_pack' | 'interactive_lab';
   title: string;
   subtitle: string;
   href: string;
@@ -196,6 +199,7 @@ export type StudyPlanTask = {
   sourceResourceName?: string;
   sourceScope?: string;
   reason?: string;
+  relatedLab?: InteractiveLabAction;
 };
 
 export type StudyPlanDay = {

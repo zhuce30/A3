@@ -23,6 +23,7 @@ from backend.core.settings import FAISS_INDEX_DIR
 from backend.domains.knowledge_base.lexical_retriever import search_lexical_knowledge_base
 from backend.domains.knowledge_base.retriever import search_knowledge_base
 from backend.apps.learning.effect_events import record_learning_event
+from backend.apps.learning.algorithm_labs import recommend_algorithm_lab
 from backend.apps.learning.models import CoachingMessage, CoachingMessageRole, CoachingSession, CoachingSessionStatus, Course, CourseEnrollment, CourseTeachingAssignment, Chapter, KnowledgePoint, KnowledgePrerequisite, LearningPath, LearningPathItem, LearningPathStatus, PathItemStatus, ResourcePackLog
 from backend.apps.learning.tutor_personas import (
     public_tutor_persona,
@@ -279,7 +280,7 @@ def _material_chapter_order(resource: KnowledgeResource, metadata: dict) -> int 
 
 def serialize_path_item(item: LearningPathItem) -> dict:
     point = item.knowledge_point
-    return {
+    payload = {
         "id": str(item.id), "order": item.order, "status": item.status, "progress": item.progress,
         "reason": item.reason, "estimatedMinutes": item.estimated_minutes,
         "completedAt": item.completed_at.isoformat() if item.completed_at else None,
@@ -289,6 +290,10 @@ def serialize_path_item(item: LearningPathItem) -> dict:
             "chapter": {"order": point.chapter.order, "title": point.chapter.title},
         },
     }
+    related_lab = recommend_algorithm_lab(point.title)
+    if related_lab:
+        payload["relatedLab"] = related_lab
+    return payload
 
 
 def serialize_path(path: LearningPath) -> dict:
@@ -1306,7 +1311,7 @@ def _apply_plan_task_side_effects(user, task: dict) -> None:
         .first()
     )
     if path_item and path_item.status != PathItemStatus.LOCKED:
-        if task_type == "learn":
+        if task_type in {"learn", "interactive_lab"}:
             update_path_item_progress(user, path_item, max(path_item.progress, 60))
         elif task_type == "practice":
             update_path_item_progress(user, path_item, 100)
@@ -1334,7 +1339,7 @@ def _task_completion_feedback(user, task: dict, day: dict, plan: dict) -> dict:
         )
     point_title = path_item.knowledge_point.title if path_item else _clean_task_title(str(task.get("title") or ""))
     mastery_after = path_item.progress if path_item else _mastery_score_from_plan(plan, point_id)
-    if task_type == "learn":
+    if task_type in {"learn", "interactive_lab"}:
         headline = "讲解已完成，当前知识点进入可练习状态。"
         next_action = {"label": "去做对应练习", "href": "/a3/assessment"}
         next_step_reason = "刚完成概念讲解，马上做 1 组练习最容易把理解转成可测掌握度。"
@@ -1757,7 +1762,15 @@ def _build_plan_days(items: list[LearningPathItem], wrong_items: list[WrongQuest
         tasks = []
         if point_item:
             point = point_item.knowledge_point
-            tasks.append(_plan_task(f"d{offset + 1}-learn", "learn", f"学习：{point.title}", point.description or point_item.reason, "/a3/classroom", min(30, daily_minutes), point.id))
+            learn_task = _plan_task(f"d{offset + 1}-learn", "learn", f"学习：{point.title}", point.description or point_item.reason, "/a3/classroom", min(30, daily_minutes), point.id)
+            related_lab = recommend_algorithm_lab(point.title)
+            if related_lab:
+                learn_task.update({
+                    "type": "interactive_lab",
+                    "href": related_lab["href"],
+                    "relatedLab": related_lab,
+                })
+            tasks.append(learn_task)
             tasks.append(_plan_task(f"d{offset + 1}-practice", "practice", f"练习：{point.title}", "完成 3-5 道对应题目，提交后自动更新掌握度。", "/a3/assessment", min(20, max(10, daily_minutes // 3)), point.id))
         if wrong:
             point = wrong.question.knowledge_point

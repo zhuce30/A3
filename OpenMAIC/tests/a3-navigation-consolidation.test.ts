@@ -46,6 +46,7 @@ describe('A3 student navigation consolidation', () => {
     expect(studentGroups['/a3/assessment']).toEqual([
       ['/a3/assessment', '练习中心'],
       ['/a3/wrong-notebook', '错题本'],
+      ['/a3/labs', '交互实验'],
     ]);
     expect(studentGroups['/a3/classroom']).toEqual([
       ['/a3/classroom', 'AI 课堂'],
@@ -66,11 +67,13 @@ describe('A3 student navigation consolidation', () => {
     expect(a3Messages['zh-CN'].navTodayTasks).toBe('今日任务');
     expect(a3Messages['zh-CN'].navPlanOverview).toBe('计划总览');
     expect(a3Messages['zh-CN'].navPracticeCenter).toBe('练习中心');
+    expect(a3Messages['zh-CN'].navAlgorithmLabs).toBe('交互实验');
     expect(a3Messages['zh-CN'].navAiClassroom).toBe('AI 课堂');
     expect(a3Messages['zh-CN'].navKnowledgeBaseHome).toBe('知识库首页');
     expect(a3Messages['en-US'].navTodayTasks).toBe('Today Tasks');
     expect(a3Messages['en-US'].navPlanOverview).toBe('Plan Overview');
     expect(a3Messages['en-US'].navPracticeCenter).toBe('Practice Center');
+    expect(a3Messages['en-US'].navAlgorithmLabs).toBe('Interactive Labs');
     expect(a3Messages['en-US'].navAiClassroom).toBe('AI Classroom');
     expect(a3Messages['en-US'].navKnowledgeBaseHome).toBe('Knowledge Base Home');
   });
@@ -110,6 +113,7 @@ describe('A3 student navigation consolidation', () => {
     expect(a3GetActiveNavHref('/a3/learning-path')).toBe('/a3/study-plan');
     expect(a3GetActiveNavHref('/a3/courses')).toBe('/a3/study-plan');
     expect(a3GetActiveNavHref('/a3/wrong-notebook')).toBe('/a3/assessment');
+    expect(a3GetActiveNavHref('/a3/labs/cpu-scheduling')).toBe('/a3/assessment');
     expect(a3GetActiveNavHref('/a3/coaching')).toBe('/a3/classroom');
     expect(a3GetActiveNavHref('/a3/recommendations')).toBe('/a3/classroom');
     expect(a3GetActiveNavHref('/a3/library/OS-DOC-001')).toBe('/a3/classroom');
@@ -128,11 +132,22 @@ describe('A3 student navigation consolidation', () => {
     expect(studyPlanView).toContain('href="/a3/courses"');
 
     expect(assessmentView).toContain('href="/a3/wrong-notebook"');
+    expect(assessmentView).toContain('href="/a3/labs"');
 
     expect(classroomView).toContain('href="/a3/coaching"');
     expect(classroomView).toContain('href="/a3/recommendations"');
     expect(classroomView).toContain('href="/a3/favorites"');
 
     expect(knowledgeBaseView).toContain('href="/a3/knowledge-graph"');
+  });
+
+  it('keeps the algorithm lab entry visible when no assessment session is available', () => {
+    const emptyStateStart = assessmentView.indexOf('function EmptyAssessmentState');
+    const emptyStateEnd = assessmentView.indexOf('function QuestionEvidenceStrip');
+    const emptyStateSource = assessmentView.slice(emptyStateStart, emptyStateEnd);
+
+    expect(emptyStateSource).toContain('href="/a3/labs"');
+    expect(emptyStateSource).toContain('flex-col items-stretch');
+    expect(emptyStateSource).toContain('sm:flex-row sm:flex-wrap');
   });
 });

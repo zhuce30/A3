@@ -6,6 +6,7 @@ from urllib.parse import quote
 from backend.apps.assessments.models import WrongQuestion
 from backend.apps.knowledge_base.display import format_source_display_location, format_source_type_label, safe_source_filename, source_origin_label
 from backend.apps.knowledge_base.curated_recommendations import CuratedResourceMatcher
+from backend.apps.learning.algorithm_labs import recommend_algorithm_lab
 from backend.apps.learning.models import LearningPath, LearningPathStatus
 from backend.apps.learning.resource_attribution import attribution_by_resource_type, build_resource_effect_attribution
 from backend.apps.learning.services import classroom_context
@@ -24,6 +25,7 @@ class RecommendationSeed:
     reason: str
     source: dict | None = None
     evidence: dict | None = None
+    action: dict | None = None
 
 
 def build_recommendation_payload(user, *, goal: str = "", top_k: int = 6, retrieval_mode: str = "fast") -> dict:
@@ -385,6 +387,7 @@ def _path_recommendations(user, profile: LearnerProfile | None, target: dict) ->
         ]
         if low_load_match:
             ranking_basis.extend(_low_load_ranking_basis(foundation_level, daily_minutes))
+        lab_action = recommend_algorithm_lab(point.title) if weak_match else None
         seeds.append(
             RecommendationSeed(
                 title=f"{point.title} 专项学习包",
@@ -398,6 +401,7 @@ def _path_recommendations(user, profile: LearnerProfile | None, target: dict) ->
                     "sourceEvidence": None,
                     "fallback": True,
                 },
+                action=lab_action,
             )
         )
         if len(seeds) >= 4:
@@ -645,7 +649,7 @@ def _serialize_recommendation(seed: RecommendationSeed, rank: int) -> dict:
     if "weakPoint" in (profile_match.get("signals") or []) and "错题薄弱点匹配" not in ranking_labels:
         ranking_basis = [*ranking_basis, {"label": "错题薄弱点匹配", "value": True}]
         evidence = {**evidence, "rankingBasis": ranking_basis}
-    return {
+    serialized = {
         "id": f"rec-{rank}",
         "rank": rank,
         "title": seed.title,
@@ -656,6 +660,9 @@ def _serialize_recommendation(seed: RecommendationSeed, rank: int) -> dict:
         "citation": seed.source,
         "evidence": evidence,
     }
+    if seed.action:
+        serialized["action"] = seed.action
+    return serialized
 
 
 def _profile_match_evidence(profile: LearnerProfile | None, resource_type: str, title: str, *, weak_match: bool = False, low_load_match: bool = False) -> dict:

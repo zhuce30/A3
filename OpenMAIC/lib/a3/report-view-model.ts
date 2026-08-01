@@ -46,6 +46,15 @@ export type LearningMethodEffect = {
   action?: ReportAction;
 };
 
+export type AlgorithmLabReportSection = {
+  title: '算法实验学习证据';
+  conclusion: string;
+  evidenceLabel: string;
+  metrics: Array<{ label: string; value: string }>;
+  reviewSignal: string | null;
+  action: { label: string; href: string };
+};
+
 export type LearningEffectReport = {
   assessment?: {
     attemptCount?: number;
@@ -101,6 +110,7 @@ export type StudentReportViewModel = {
   weakKnowledgePoints: WeakKnowledgePointInsight[];
   sevenDayPlan: SevenDayReportPlan;
   effectiveMethods: LearningMethodEffect[];
+  algorithmLabEffect: AlgorithmLabReportSection | null;
   evidenceState: 'ready' | 'partial' | 'insufficient';
 };
 
@@ -148,7 +158,48 @@ export function buildStudentReportViewModel(input: {
     weakKnowledgePoints: (report.knowledgePointInsights ?? []).slice(0, 3).map(mapKnowledgePointInsight),
     sevenDayPlan: buildSevenDayPlan(report, studyPlan),
     effectiveMethods: buildEffectiveMethods(report, effectReport),
+    algorithmLabEffect: buildAlgorithmLabEffect(report),
     evidenceState,
+  };
+}
+
+function buildAlgorithmLabEffect(report: LearningReport): AlgorithmLabReportSection | null {
+  const effect = report.algorithmLabEffect;
+  const completedRuns = Math.floor(nonNegative(effect?.completedRuns));
+  if (!effect || completedRuns === 0) return null;
+
+  const verifiedRuns = Math.min(completedRuns, Math.floor(nonNegative(effect.verifiedRuns)));
+  const explorationRuns = completedRuns - verifiedRuns;
+  const evidenceLabel = verifiedRuns > 0
+    ? `${verifiedRuns} 次已验证掌握证据${explorationRuns > 0 ? `，${explorationRuns} 次探索活动` : ''}`
+    : `${completedRuns} 次探索活动，尚无已验证掌握证据`;
+  const labNames: Record<string, string> = {
+    'cpu-scheduling': 'CPU 调度算法实验',
+    'page-replacement': '页面置换算法实验',
+  };
+  const weakLab = effect.byLab
+    .filter((item) => labNames[item.labId] && nonNegative(item.completedRuns) > 0 && nonNegative(item.bestScore) < 80)
+    .sort((left, right) => nonNegative(left.bestScore) - nonNegative(right.bestScore))[0];
+  const commonSignal = effect.commonReviewSignals
+    .filter((item) => Number.isInteger(item.stepIndex) && item.stepIndex >= 0 && nonNegative(item.count) > 0)
+    .sort((left, right) => nonNegative(right.count) - nonNegative(left.count) || left.stepIndex - right.stepIndex)[0];
+
+  return {
+    title: '算法实验学习证据',
+    conclusion: `你完成了 ${completedRuns} 次算法实验，其中 ${verifiedRuns} 次使用标准案例，可作为掌握证据。`,
+    evidenceLabel,
+    metrics: [
+      { label: '完成实验', value: `${completedRuns} 次` },
+      { label: '预测准确率', value: `${boundedPercentage(effect.predictionAccuracy).toFixed(1)}%` },
+      { label: '检查题正确率', value: `${boundedPercentage(effect.checkpointAccuracy).toFixed(1)}%` },
+      { label: '复查步骤', value: `${Math.floor(nonNegative(effect.reviewedStepCount))} 个` },
+    ],
+    reviewSignal: commonSignal
+      ? `第 ${commonSignal.stepIndex} 步复查 ${Math.floor(nonNegative(commonSignal.count))} 次`
+      : null,
+    action: weakLab
+      ? { label: `复练 ${labNames[weakLab.labId]}`, href: `/a3/labs/${weakLab.labId}` }
+      : { label: effect.nextAction.label.trim() || '继续交互实验', href: '/a3/labs' },
   };
 }
 
@@ -170,6 +221,10 @@ function safeStudentText(value: string | undefined, fallback: string): string {
 
 function nonNegative(value: number | null | undefined): number {
   return Number.isFinite(value) ? Math.max(0, Number(value)) : 0;
+}
+
+function boundedPercentage(value: number | null | undefined): number {
+  return Math.min(100, nonNegative(value));
 }
 
 function normalizeAction(

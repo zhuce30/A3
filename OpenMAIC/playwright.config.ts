@@ -27,12 +27,17 @@ export default defineConfig({
         {
           command: runtime.frontendCommand,
           url: runtime.baseURL,
+          env: {
+            ...process.env,
+            A3_API_BASE_URL: runtime.backendURL,
+            NEXT_PUBLIC_A3_API_BASE_URL: runtime.backendURL,
+          },
           reuseExistingServer: false,
           timeout: 120_000,
         },
         {
           command: runtime.backendCommand,
-          url: 'http://localhost:8000/api/auth/csrf/',
+          url: `${runtime.backendURL}/api/auth/csrf/`,
           reuseExistingServer: false,
           timeout: 120_000,
         },

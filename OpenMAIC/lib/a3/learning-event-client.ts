@@ -18,7 +18,10 @@ export type A3LearningEventType =
   | 'coach_message_sent'
   | 'classroom_opened'
   | 'video_opened'
-  | 'video_completed';
+  | 'video_completed'
+  | 'algorithm_lab_started'
+  | 'algorithm_lab_checkpoint_submitted'
+  | 'algorithm_lab_completed';
 
 export type A3LearningEventPayload = {
   eventId: string;
@@ -108,6 +111,20 @@ export function trackPracticeSubmit(input: Omit<A3LearningEventInput, 'eventType
   return trackLearningEvent({
     ...input,
     eventType: 'practice_submitted',
+  });
+}
+
+export function trackAlgorithmLabStarted(input: Omit<A3LearningEventInput, 'eventType'>) {
+  return trackLearningEvent({
+    ...input,
+    eventType: 'algorithm_lab_started',
+  });
+}
+
+export function trackAlgorithmLabCheckpoint(input: Omit<A3LearningEventInput, 'eventType'>) {
+  return trackLearningEvent({
+    ...input,
+    eventType: 'algorithm_lab_checkpoint_submitted',
   });
 }
 
