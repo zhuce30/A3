@@ -298,7 +298,7 @@ function Start-CeleryWorker {
   $windowStyle = if ($Visible) { "Normal" } else { "Hidden" }
   $process = Start-Process `
     -FilePath $CeleryExe `
-    -ArgumentList @("-A", "backend.config", "worker", "--loglevel=INFO", "--pool=solo", "--hostname=$CeleryWorkerName") `
+    -ArgumentList @("-A", "backend.config", "worker", "--loglevel=INFO", "--pool=solo", "--queues=celery,resource-generation", "--hostname=$CeleryWorkerName") `
     -WorkingDirectory $Root `
     -WindowStyle $windowStyle `
     -RedirectStandardOutput $CeleryLog `

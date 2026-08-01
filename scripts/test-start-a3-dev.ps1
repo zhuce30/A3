@@ -30,6 +30,7 @@ $requiredSnippets = @(
   "assessments.refill_personal_question_pool",
   "inspect registered",
   "--pool=solo",
+  "--queues=celery,resource-generation",
   "Get-CeleryWorkerProcesses",
   "Wait-CeleryWorker",
   "http://127.0.0.1:3002",
