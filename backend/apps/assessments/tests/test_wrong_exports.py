@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import json
 
-from django.test import Client, TestCase, override_settings
+from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from docx import Document
 from openpyxl import load_workbook
@@ -21,6 +21,28 @@ from backend.apps.assessments.content_enhancer import EnhancementResult
 from backend.apps.assessments.wrong_exports import ExportArtifact, WrongExportRequestError
 from backend.apps.learning.models import Chapter, Course, KnowledgePoint
 from backend.apps.profiles.models import LearnerProfile
+
+
+class AssessmentExportRuntimeConfigTests(SimpleTestCase):
+    def test_production_template_and_services_define_assessment_llm_limits(self):
+        root = Path(__file__).resolve().parents[4]
+        template = (root / ".env.production.template").read_text(encoding="utf-8")
+        compose = (root / "docker-compose.prod.yml").read_text(encoding="utf-8")
+        names = [
+            "A3_ASSESSMENT_EXPORT_LLM_ENABLED",
+            "A3_ASSESSMENT_EXPORT_LLM_TIMEOUT_SECONDS",
+            "A3_ASSESSMENT_EXPORT_LLM_MAX_TOKENS",
+            "A3_ASSESSMENT_EXPORT_LLM_MAX_ATTEMPTS",
+        ]
+        backend = compose.split("  backend:\n", 1)[1].split("\n  celery:\n", 1)[0]
+        resource_worker = compose.split("  resource-worker:\n", 1)[1].split("\n  video-worker:\n", 1)[0]
+
+        for name in names:
+            self.assertIn(f"{name}=", template)
+            self.assertIn(f"{name}:", backend)
+            self.assertIn(f"{name}:", resource_worker)
+
+        self.assertNotRegex(template, r"A3_LLM_API_KEY=\S+")
 
 
 class WrongExportDomainTests(TestCase):
