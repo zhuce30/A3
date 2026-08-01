@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase.ttfonts import TTFError, TTFont
 
 
 PDF_CJK_FONT_NAME = "A3NotoSansCJK"
@@ -16,6 +16,8 @@ def register_pdf_cjk_font() -> str:
     configured = (os.getenv("A3_PDF_CJK_FONT_PATH") or "").strip()
     candidates = [
         configured,
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "C:/Windows/Fonts/NotoSansSC-VF.ttf",
@@ -27,6 +29,10 @@ def register_pdf_cjk_font() -> str:
         path = Path(candidate)
         if not path.is_file():
             continue
-        pdfmetrics.registerFont(TTFont(PDF_CJK_FONT_NAME, str(path), subfontIndex=0))
+        try:
+            font = TTFont(PDF_CJK_FONT_NAME, str(path), subfontIndex=0)
+        except TTFError:
+            continue
+        pdfmetrics.registerFont(font)
         return PDF_CJK_FONT_NAME
     raise RuntimeError("未找到可嵌入的中文 PDF 字体，请配置 A3_PDF_CJK_FONT_PATH。")
