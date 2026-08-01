@@ -2,10 +2,20 @@ import os
 from django.test import SimpleTestCase
 from unittest.mock import patch
 
-from backend.apps.compat.llm import chat_completion, generate_tutoring_answer
+from backend.apps.compat.llm import LLMInvalidResponse, chat_completion, generate_tutoring_answer
 
 
 class TutoringLLMPromptTests(SimpleTestCase):
+    @patch("backend.apps.compat.llm.requests.post")
+    def test_chat_completion_rejects_malformed_provider_envelopes(self, post):
+        post.return_value.raise_for_status.return_value = None
+        with patch.dict(os.environ, {"A3_LLM_API_KEY": "test-key"}, clear=False):
+            for payload in ({"choices": []}, [], {"choices": [{}]}, {"choices": [{"message": []}]}):
+                post.return_value.json.return_value = payload
+                with self.subTest(payload=payload):
+                    with self.assertRaises(LLMInvalidResponse):
+                        chat_completion([{"role": "user", "content": "hello"}])
+
     @patch("backend.apps.compat.llm.requests.post")
     def test_chat_completion_accepts_coaching_model_environment_aliases(self, post):
         post.return_value.raise_for_status.return_value = None

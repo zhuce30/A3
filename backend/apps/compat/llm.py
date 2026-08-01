@@ -19,6 +19,10 @@ class LLMEmptyResponse(LLMUnavailable):
     pass
 
 
+class LLMInvalidResponse(LLMUnavailable):
+    pass
+
+
 def chat_completion(
     messages: list[dict],
     *,
@@ -61,8 +65,16 @@ def chat_completion(
     )
     response.raise_for_status()
     data = response.json()
-    choice = data.get("choices", [{}])[0] if isinstance(data.get("choices"), list) else {}
-    content = str(choice.get("message", {}).get("content") or "").strip()
+    if not isinstance(data, dict):
+        raise LLMInvalidResponse("LLM response must be an object")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise LLMInvalidResponse("LLM response is missing choices")
+    choice = choices[0]
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise LLMInvalidResponse("LLM response is missing message")
+    content = str(message.get("content") or "").strip()
     if not content:
         raise LLMEmptyResponse("LLM returned empty content")
     return {

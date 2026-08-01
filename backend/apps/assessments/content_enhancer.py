@@ -20,7 +20,13 @@ from backend.apps.assessments.content_schemas import (
     validate_review_handout_payload,
     validate_wrong_export_payload,
 )
-from backend.apps.compat.llm import LLMEmptyResponse, LLMUnavailable, chat_completion
+from backend.apps.compat.llm import (
+    LLMEmptyResponse,
+    LLMInvalidResponse,
+    LLMUnavailable,
+    chat_completion,
+)
+from backend.apps.compat.verification import verify_answer
 
 
 RETRY_DELAYS = (1, 3)
@@ -160,12 +166,15 @@ def _enhance_section(
             )
             response_meta = response if isinstance(response, dict) else {}
             content = validator(extract_json_object(str(response_meta.get("content") or "")))
+            used_sources = _used_sources(content, sources)
+            evidence_status, evidence_reason = _verify_section_evidence(content, used_sources)
+            content["evidenceStatus"] = evidence_status
             _raise_if_cancelled(cancel_check)
             return {
                 "content": content,
-                "citations": _used_sources(content, sources),
-                "degraded": False,
-                "reason": "",
+                "citations": used_sources,
+                "degraded": evidence_status != "verified",
+                "reason": evidence_reason,
                 "attempts": attempts,
                 "latencyMs": int((time.monotonic() - started) * 1000),
                 "meta": response_meta,
@@ -238,11 +247,11 @@ def _aggregate(
         degraded_reasons=reasons or (["empty_content"] if not sections else []),
         audit={
             "promptVersion": prompt_version,
-            "provider": str(last_meta.get("provider") or ""),
-            "model": str(last_meta.get("model") or ""),
+            "provider": _safe_audit_text(last_meta.get("provider")),
+            "model": _safe_audit_text(last_meta.get("model")),
             "attempts": sum(outcome["attempts"] for outcome in outcomes),
             "latencyMs": sum(outcome["latencyMs"] for outcome in outcomes),
-            "finishReason": str(last_meta.get("finishReason") or ""),
+            "finishReason": _safe_audit_text(last_meta.get("finishReason")),
             "usage": usage,
             "errorCategories": error_categories,
         },
@@ -309,6 +318,43 @@ def _used_sources(content: dict[str, Any], sources: list[dict[str, Any]]) -> lis
     ]
 
 
+def _verify_section_evidence(
+    content: dict[str, Any],
+    citations: list[dict[str, Any]],
+) -> tuple[str, str]:
+    if not citations:
+        return "unverified", "missing_evidence"
+    verification_sources = [dict(citation, type="RAG") for citation in citations]
+    verification = verify_answer(
+        str(content.get("knowledgePoint") or ""),
+        _verification_text(content),
+        verification_sources,
+    )
+    if verification.verified:
+        return "verified", ""
+    return "partial", "claim_not_supported"
+
+
+def _verification_text(value: Any, *, field: str = "") -> str:
+    if isinstance(value, dict):
+        return "\n".join(
+            part
+            for key, item in value.items()
+            if key not in {"citationIds", "evidenceStatus", "questionId"}
+            for part in [_verification_text(item, field=key)]
+            if part
+        )
+    if isinstance(value, list):
+        return "\n".join(part for item in value for part in [_verification_text(item, field=field)] if part)
+    if isinstance(value, str) and field not in {"difficulty", "level"}:
+        return value.strip()
+    return ""
+
+
+def _safe_audit_text(value: Any) -> str:
+    return str(sanitize_prompt_value(str(value or "")))[:128]
+
+
 def _wrong_export_fallback(point: str, questions: list[dict[str, Any]]) -> dict[str, Any]:
     analyses = []
     for question in questions:
@@ -360,7 +406,7 @@ def _review_handout_fallback(point: str, questions: list[dict[str, Any]]) -> dic
 def _classify_error(exc: Exception) -> tuple[str, bool]:
     if isinstance(exc, ContentValidationError):
         return "invalid_response", True
-    if isinstance(exc, LLMEmptyResponse) or (
+    if isinstance(exc, (LLMEmptyResponse, LLMInvalidResponse)) or (
         isinstance(exc, LLMUnavailable) and str(exc) == "LLM returned empty content"
     ):
         return "invalid_response", True

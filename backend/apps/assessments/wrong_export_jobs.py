@@ -161,7 +161,7 @@ def generate_wrong_export_job(job_id: str) -> dict[str, Any]:
             status="succeeded",
             progress=100,
             stage="completed",
-            message="错题导出已生成（基础版）" if result.degraded else "错题导出已完成 AI 增强与引用核验",
+            message="错题导出已生成（引用未完全核验）" if result.degraded else "错题导出已完成 AI 增强并通过引用核验",
             artifact_path=str(path),
             content_type=artifact.content_type,
             filename=artifact.filename,

@@ -208,11 +208,11 @@ def validate_wrong_export_payload(
             "citationIds": _citation_ids(item["citationIds"], f"transferPractice[{index}].citationIds", source_ids),
         })
     normalized["transferPractice"] = practices
-    requested_evidence_status = _evidence_status(result["evidenceStatus"])
+    _evidence_status(result["evidenceStatus"])
     has_citations = any(item["citationIds"] for item in analyses) or any(
         item["citationIds"] for item in practices
     )
-    normalized["evidenceStatus"] = requested_evidence_status if has_citations else "unverified"
+    normalized["evidenceStatus"] = "partial" if has_citations else "unverified"
     global_texts = [
         normalized["knowledgePoint"],
         normalized["groupDiagnosis"],
@@ -230,6 +230,9 @@ def validate_wrong_export_payload(
         ),
     ]
     _reject_answer_conflict(global_texts, answers)
+    missing_questions = sorted(question_ids - seen_questions)
+    if missing_questions:
+        raise ContentValidationError(f"缺少题目 {missing_questions[0]}")
     return normalized
 
 
@@ -285,8 +288,8 @@ def validate_review_handout_payload(
     normalized["tieredPractice"] = practices
     normalized["reviewActions"] = _prose_list(result["reviewActions"], "reviewActions")
     normalized["citationIds"] = _citation_ids(result["citationIds"], "citationIds", source_ids)
-    requested_evidence_status = _evidence_status(result["evidenceStatus"])
-    normalized["evidenceStatus"] = requested_evidence_status if normalized["citationIds"] else "unverified"
+    _evidence_status(result["evidenceStatus"])
+    normalized["evidenceStatus"] = "partial" if normalized["citationIds"] else "unverified"
     immutable_answers = answers or {}
     if question_ids is not None:
         unknown_answers = sorted(set(immutable_answers) - question_ids)

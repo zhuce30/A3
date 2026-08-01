@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import requests
@@ -23,7 +24,7 @@ from backend.apps.assessments.content_enhancer import (
     enhance_review_handout,
     enhance_wrong_export,
 )
-from backend.apps.compat.llm import LLMUnavailable
+from backend.apps.compat.llm import LLMInvalidResponse, LLMUnavailable
 
 
 PROFILE = {
@@ -249,6 +250,17 @@ class ContentPromptTests(SimpleTestCase):
         self.assertNotIn("13900001111", serialized)
         self.assertNotIn("private-session-id", serialized)
 
+    def test_prompt_sanitizer_redacts_phone_and_email_inside_allowed_text(self):
+        profile = dict(
+            PROFILE,
+            learningGoal="Contact 13800001111 or student@example.edu before reviewing",
+        )
+        question = dict(QUESTION, stem="Owner phone: +86 13900001111")
+        user = build_wrong_export_messages(profile, [question], [SOURCE])[1]["content"]
+        self.assertNotIn("13800001111", user)
+        self.assertNotIn("13900001111", user)
+        self.assertNotIn("student@example.edu", user)
+
 
 class ContentSchemaTests(SimpleTestCase):
     def test_extract_json_object_accepts_only_one_plain_object(self):
@@ -266,7 +278,7 @@ class ContentSchemaTests(SimpleTestCase):
             answers={"q-1": "B"},
         )
         self.assertEqual(payload["questionAnalyses"][0]["questionId"], "q-1")
-        self.assertEqual(payload["evidenceStatus"], "verified")
+        self.assertEqual(payload["evidenceStatus"], "partial")
         self.assertIsNot(payload, valid_wrong_export_payload())
 
     def test_wrong_export_validator_rejects_unknown_and_duplicate_question_ids(self):
@@ -278,6 +290,24 @@ class ContentSchemaTests(SimpleTestCase):
         duplicate["questionAnalyses"].append(dict(duplicate["questionAnalyses"][0]))
         with self.assertRaisesMessage(ContentValidationError, "重复题目 q-1"):
             validate_wrong_export_payload(duplicate, question_ids={"q-1"}, source_ids={"S1"}, answers={"q-1": "B"})
+
+    def test_wrong_export_validator_requires_every_input_question(self):
+        payload = valid_wrong_export_payload()
+        with self.assertRaises(ContentValidationError):
+            validate_wrong_export_payload(
+                payload,
+                question_ids={"q-1", "q-2"},
+                source_ids={"S1"},
+                answers={"q-1": "B", "q-2": "A"},
+            )
+        payload["questionAnalyses"] = []
+        with self.assertRaises(ContentValidationError):
+            validate_wrong_export_payload(
+                payload,
+                question_ids={"q-1"},
+                source_ids={"S1"},
+                answers={"q-1": "B"},
+            )
 
     def test_wrong_export_validator_rejects_unknown_citation_and_answer_conflict(self):
         with self.assertRaisesMessage(ContentValidationError, "未知引用 S9"):
@@ -359,6 +389,8 @@ class ContentSchemaTests(SimpleTestCase):
         ):
             payload = valid_wrong_export_payload()
             payload["groupDiagnosis"] = diagnosis
+            second_analysis = dict(payload["questionAnalyses"][0], questionId="q-2")
+            payload["questionAnalyses"].append(second_analysis)
             validate_wrong_export_payload(
                 payload,
                 question_ids={"q-1", "q-2"},
@@ -490,6 +522,12 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
         environment = patch.dict("os.environ", {"A3_ASSESSMENT_EXPORT_LLM_ENABLED": "true"})
         environment.start()
         self.addCleanup(environment.stop)
+        verifier = patch(
+            "backend.apps.assessments.content_enhancer.verify_answer",
+            return_value=SimpleNamespace(verified=True),
+        )
+        self.verifier = verifier.start()
+        self.addCleanup(verifier.stop)
 
     def _snapshot(self, *, two_points=False):
         questions = [dict(QUESTION)]
@@ -513,9 +551,11 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
             "usage": {"prompt_tokens": 20, "completion_tokens": 30},
         }
 
+    @patch("backend.apps.assessments.content_enhancer.verify_answer")
     @patch("backend.apps.assessments.content_enhancer.chat_completion")
-    def test_wrong_export_success_returns_verified_content_and_audit(self, completion):
+    def test_wrong_export_success_requires_server_verifier(self, completion, verifier):
         completion.return_value = self._response(valid_wrong_export_payload())
+        verifier.return_value = SimpleNamespace(verified=True)
         source = dict(SOURCE, sourcePath="D:/private/material.pdf")
         result = enhance_wrong_export(self._snapshot(), {"进程调度": [source]}, sleep=lambda _: None)
         self.assertTrue(result.verified)
@@ -531,14 +571,40 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
         self.assertNotIn("sourcePath", result.citations[0])
         completion.assert_called_once()
         self.assertEqual(completion.call_args.kwargs["temperature"], 0.15)
+        verifier.assert_called_once()
+
+    @patch("backend.apps.assessments.content_enhancer.verify_answer")
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_model_cannot_self_assert_verified_with_whitelisted_citation(self, completion, verifier):
+        completion.return_value = self._response(valid_wrong_export_payload())
+        verifier.return_value = SimpleNamespace(verified=False)
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertFalse(result.verified)
+        self.assertTrue(result.degraded)
+        self.assertIn("claim_not_supported", result.degraded_reasons)
+        self.assertEqual(result.content["sections"][0]["evidenceStatus"], "partial")
 
     @patch("backend.apps.assessments.content_enhancer.chat_completion")
     def test_model_cannot_mark_content_verified_without_used_citations(self, completion):
         completion.return_value = self._response(valid_wrong_export_payload(citation_ids=[]))
         result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
         self.assertFalse(result.verified)
+        self.assertTrue(result.degraded)
+        self.assertIn("missing_evidence", result.degraded_reasons)
         self.assertEqual(result.citations, [])
         self.assertEqual(result.content["sections"][0]["evidenceStatus"], "unverified")
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_audit_redacts_model_and_finish_reason_paths(self, completion):
+        completion.return_value = self._response(
+            valid_wrong_export_payload(citation_ids=[]),
+            model="D:/private/models/qwen.gguf",
+        )
+        completion.return_value["finishReason"] = "/opt/A3/private/stop.txt"
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        serialized = json.dumps(result.audit, ensure_ascii=False)
+        self.assertNotIn("D:/private", serialized)
+        self.assertNotIn("/opt/A3", serialized)
 
     @patch("backend.apps.assessments.content_enhancer.chat_completion")
     def test_persisted_citations_are_sanitized_again(self, completion):
@@ -584,6 +650,14 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
         self.assertEqual(completion.call_count, 2)
 
     @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_malformed_provider_envelope_is_invalid_response(self, completion):
+        completion.side_effect = LLMInvalidResponse("missing choices")
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.audit["attempts"], 3)
+        self.assertEqual(result.audit["errorCategories"], ["invalid_response"])
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
     def test_http_401_short_circuits_to_safe_fallback(self, completion):
         response = Mock(status_code=401)
         completion.side_effect = requests.HTTPError("Bearer sk-secret", response=response)
@@ -616,7 +690,7 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
         self.assertEqual(len(result.content["sections"]), 2)
         self.assertEqual(result.content["sections"][0]["evidenceStatus"], "unverified")
         self.assertEqual(result.content["sections"][1]["knowledgePoint"], "死锁")
-        self.assertEqual(result.content["sections"][1]["evidenceStatus"], "verified")
+        self.assertIn(result.content["sections"][1]["evidenceStatus"], {"partial", "verified"})
         self.assertEqual(result.content["sections"][1]["questionAnalyses"][0]["questionId"], "q-2")
 
     @patch("backend.apps.assessments.content_enhancer.chat_completion")

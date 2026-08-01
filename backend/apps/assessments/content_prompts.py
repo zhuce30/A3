@@ -72,6 +72,8 @@ _FILE_URI = re.compile(r"(?i)file:(?:/{1,3})?[^\s\"'，。；;]+")
 _KEY_LIKE_VALUE = re.compile(
     r"(?i)(?:sk|rk|pk|api[_-]?key|dashscope|qwen)[_-][A-Za-z0-9_-]{12,}"
 )
+_EMAIL = re.compile(r"(?i)(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])")
+_MOBILE_PHONE = re.compile(r"(?<!\d)(?:\+?86[\s-]?)?1[3-9]\d{9}(?!\d)")
 _REDACTED = "[已移除敏感信息]"
 _PUBLIC_URL = re.compile(r"(?i)https?://[^\s\"'，。；;]+")
 
@@ -167,7 +169,15 @@ def sanitize_prompt_value(value: Any) -> Any:
         return f"A3PUBLICURLPLACEHOLDER{len(public_urls) - 1}"
 
     sanitized = _PUBLIC_URL.sub(protect_public_url, value)
-    for pattern in (_FILE_URI, _WINDOWS_PATH, _UNC_PATH, _UNIX_PATH, _KEY_LIKE_VALUE):
+    for pattern in (
+        _FILE_URI,
+        _WINDOWS_PATH,
+        _UNC_PATH,
+        _UNIX_PATH,
+        _KEY_LIKE_VALUE,
+        _EMAIL,
+        _MOBILE_PHONE,
+    ):
         sanitized = pattern.sub(_REDACTED, sanitized)
     for index, public_url in enumerate(public_urls):
         sanitized = sanitized.replace(f"A3PUBLICURLPLACEHOLDER{index}", public_url)

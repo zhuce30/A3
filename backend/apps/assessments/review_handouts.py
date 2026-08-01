@@ -46,6 +46,7 @@ SAFE_DEGRADED_REASONS = {
     "disabled",
     "empty_content",
     "invalid_response",
+    "claim_not_supported",
     "missing_evidence",
     "provider_error",
     "rate_limit",
@@ -208,7 +209,7 @@ def generate_review_handout(job_id: str) -> dict:
                 if "retrieval_error" in reasons
                 else "部分内容已降级，讲义仍已根据可信错题记录生成"
                 if degraded
-                else "复习讲义已生成并完成引用核验"
+                else "复习讲义已生成并通过引用核验"
             ),
             enhancement=enhancement,
             citations=result.citations,
