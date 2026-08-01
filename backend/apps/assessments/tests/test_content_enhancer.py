@@ -167,6 +167,16 @@ class ContentPromptTests(SimpleTestCase):
         self.assertNotIn("api_key-secret", serialized)
         self.assertEqual(sanitized["location"], "操作系统课程 > 进程管理 > 第 3 节")
 
+    def test_prompt_sanitizer_preserves_urls_and_redacts_sensitive_keys(self):
+        sanitized = sanitize_prompt_value({
+            "location": "https://example.edu/course/chapter-3",
+            "nested": {"apiKey": "abcdefghijklmnop", "session": "session-secret"},
+        })
+        serialized = json.dumps(sanitized, ensure_ascii=False)
+        self.assertEqual(sanitized["location"], "https://example.edu/course/chapter-3")
+        self.assertNotIn("abcdefghijklmnop", serialized)
+        self.assertNotIn("session-secret", serialized)
+
 
 class ContentSchemaTests(SimpleTestCase):
     def test_extract_json_object_accepts_only_one_plain_object(self):
@@ -211,7 +221,6 @@ class ContentSchemaTests(SimpleTestCase):
             lambda value: value.__setitem__("prerequisiteGaps", ["正确选项为 A。"]),
             lambda value: value["confusions"][0].__setitem__("difference", "答案为 A。"),
             lambda value: value["questionAnalyses"][0].__setitem__("selfCheck", "答案是 A。"),
-            lambda value: value["transferPractice"][0].__setitem__("explanation", "原题正确答案应为 A。"),
         ]
         for mutate in mutations:
             payload = valid_wrong_export_payload()
@@ -223,8 +232,20 @@ class ContentSchemaTests(SimpleTestCase):
     def test_wrong_export_validator_does_not_treat_practice_answer_as_original_claim(self):
         payload = valid_wrong_export_payload()
         payload["transferPractice"][0]["answer"] = "A"
+        payload["transferPractice"][0]["explanation"] = "这道迁移练习的正确答案是 A。"
         validated = validate_wrong_export_payload(payload, question_ids={"q-1"}, source_ids={"S1"}, answers={"q-1": "B"})
         self.assertEqual(validated["transferPractice"][0]["answer"], "A")
+
+    def test_wrong_export_validator_keeps_question_answer_mapping(self):
+        payload = valid_wrong_export_payload()
+        payload["groupDiagnosis"] = "q-1 的正确答案是 A。"
+        with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
+            validate_wrong_export_payload(
+                payload,
+                question_ids={"q-1", "q-2"},
+                source_ids={"S1"},
+                answers={"q-1": "B", "q-2": "A"},
+            )
 
     def test_wrong_export_validator_rejects_missing_invalid_and_oversized_fields(self):
         missing = valid_wrong_export_payload()
@@ -279,8 +300,6 @@ class ContentSchemaTests(SimpleTestCase):
         mutations = (
             lambda value: value.__setitem__("learningDiagnosis", "本题正确选项为 A。"),
             lambda value: value.__setitem__("coreConcept", "答案是 A。"),
-            lambda value: value["workedExample"].__setitem__("answer", "原题答案为 A。"),
-            lambda value: value["tieredPractice"][0].__setitem__("explanation", "正确答案应为 A。"),
         )
         for mutate in mutations:
             payload = valid_handout_payload()
@@ -288,6 +307,26 @@ class ContentSchemaTests(SimpleTestCase):
             with self.subTest(payload=payload):
                 with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
                     validate_review_handout_payload(payload, source_ids={"S1"}, answers={"q-1": "B"})
+
+    def test_handout_validator_allows_new_example_answer_explanations(self):
+        payload = valid_handout_payload()
+        payload["workedExample"]["answer"] = "A"
+        payload["workedExample"]["steps"] = ["本例正确答案是 A。"]
+        payload["tieredPractice"][0]["answer"] = "A"
+        payload["tieredPractice"][0]["explanation"] = "这道练习的正确答案是 A。"
+        validated = validate_review_handout_payload(payload, source_ids={"S1"}, answers={"q-1": "B"})
+        self.assertEqual(validated["workedExample"]["answer"], "A")
+
+    def test_handout_validator_keeps_question_answer_mapping(self):
+        payload = valid_handout_payload()
+        payload["learningDiagnosis"] = "q-1 的正确答案是 A。"
+        with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
+            validate_review_handout_payload(
+                payload,
+                source_ids={"S1"},
+                question_ids={"q-1", "q-2"},
+                answers={"q-1": "B", "q-2": "A"},
+            )
 
     def test_validators_reject_extra_fields_duplicate_citations_and_bad_enums(self):
         cases = []

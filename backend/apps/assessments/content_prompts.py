@@ -58,13 +58,19 @@ _FILE_URI = re.compile(r"(?i)file:(?:/{1,3})?[^\s\"'，。；;]+")
 _KEY_LIKE_VALUE = re.compile(
     r"(?i)(?:sk|rk|pk|api[_-]?key|dashscope|qwen)[_-][A-Za-z0-9_-]{12,}"
 )
+_SENSITIVE_KEY = re.compile(
+    r"(?i)(?:api[_-]?key|authorization|cookie|pass(?:word|wd)?|secret|session|token)"
+)
 _REDACTED = "[已移除敏感信息]"
 
 
 def sanitize_prompt_value(value: Any) -> Any:
     """Recursively redact local paths and credential-like values from prompt data."""
     if isinstance(value, dict):
-        return {key: sanitize_prompt_value(item) for key, item in value.items()}
+        return {
+            key: _REDACTED if _SENSITIVE_KEY.search(str(key)) else sanitize_prompt_value(item)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [sanitize_prompt_value(item) for item in value]
     if isinstance(value, tuple):
@@ -73,6 +79,8 @@ def sanitize_prompt_value(value: Any) -> Any:
         return value
     sanitized = value
     for pattern in (_FILE_URI, _WINDOWS_PATH, _UNC_PATH, _UNIX_PATH, _KEY_LIKE_VALUE):
+        if pattern is _UNIX_PATH and re.search(r"https?://", sanitized, re.IGNORECASE):
+            continue
         sanitized = pattern.sub(_REDACTED, sanitized)
     return sanitized
 

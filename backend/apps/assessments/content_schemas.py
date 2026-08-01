@@ -93,13 +93,28 @@ def _answer_token(value: Any) -> str:
     return re.sub(r"[\s。．.，,；;：:]", "", str(value)).casefold()
 
 
-def _reject_answer_conflict(texts: Iterable[str], correct_answers: Iterable[Any]) -> None:
-    expected = {_answer_token(answer) for answer in correct_answers if _answer_token(answer)}
-    if not expected:
+def _reject_answer_conflict(
+    texts: Iterable[str],
+    answers: dict[str, Any],
+    *,
+    default_question_id: str | None = None,
+) -> None:
+    expected_by_question = {
+        str(question_id): _answer_token(answer)
+        for question_id, answer in answers.items()
+        if _answer_token(answer)
+    }
+    if not expected_by_question:
         return
     for text in texts:
         for match in _ANSWER_ASSERTION.finditer(text):
-            if _answer_token(match.group(1)) not in expected:
+            mentioned = [question_id for question_id in expected_by_question if question_id in text]
+            question_id = mentioned[0] if len(mentioned) == 1 else default_question_id
+            if question_id is None and len(expected_by_question) == 1:
+                question_id = next(iter(expected_by_question))
+            if question_id is None:
+                continue
+            if _answer_token(match.group(1)) != expected_by_question.get(question_id):
                 raise ContentValidationError("正确答案冲突")
 
 
@@ -145,7 +160,11 @@ def validate_wrong_export_payload(
         steps = _prose_list(item["solutionSteps"], f"questionAnalyses[{index}].solutionSteps")
         self_check = _prose(item["selfCheck"], f"questionAnalyses[{index}].selfCheck")
         review_advice = _prose(item["reviewAdvice"], f"questionAnalyses[{index}].reviewAdvice")
-        _reject_answer_conflict([diagnosis, *steps, self_check, review_advice], [answers.get(question_id)])
+        _reject_answer_conflict(
+            [diagnosis, *steps, self_check, review_advice],
+            answers,
+            default_question_id=question_id,
+        )
         analyses.append({
             "questionId": question_id,
             "deepErrorDiagnosis": diagnosis,
@@ -173,7 +192,6 @@ def validate_wrong_export_payload(
         })
     normalized["transferPractice"] = practices
     normalized["evidenceStatus"] = _evidence_status(result["evidenceStatus"])
-    all_answers = answers.values()
     global_texts = [
         normalized["knowledgePoint"],
         normalized["groupDiagnosis"],
@@ -189,13 +207,8 @@ def validate_wrong_export_payload(
                 item["reviewAdvice"],
             )
         ),
-        *(
-            text
-            for item in normalized["transferPractice"]
-            for text in (item["prompt"], item["explanation"])
-        ),
     ]
-    _reject_answer_conflict(global_texts, all_answers)
+    _reject_answer_conflict(global_texts, answers)
     return normalized
 
 
@@ -264,15 +277,7 @@ def validate_review_handout_payload(
         *normalized["prerequisites"],
         *normalized["commonErrorPatterns"],
         *normalized["method"],
-        normalized["workedExample"]["prompt"],
-        *normalized["workedExample"]["steps"],
-        normalized["workedExample"]["answer"],
-        *(
-            text
-            for item in normalized["tieredPractice"]
-            for text in (item["prompt"], item["answer"], item["explanation"])
-        ),
         *normalized["reviewActions"],
     ]
-    _reject_answer_conflict(generated_texts, immutable_answers.values())
+    _reject_answer_conflict(generated_texts, immutable_answers)
     return normalized
