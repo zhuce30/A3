@@ -26,6 +26,10 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
+from backend.apps.assessments.content_enhancer import (
+    EnhancementCancelled,
+    enhance_review_handout,
+)
 from backend.apps.assessments.models import ReviewHandoutJob
 from backend.apps.assessments.wrong_exports import (
     WrongExportRequestError,
@@ -37,6 +41,18 @@ from backend.domains.knowledge_base.retriever import search_knowledge_base
 
 ACTIVE_JOB_STATUSES = {"queued", "running"}
 TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
+SAFE_DEGRADED_REASONS = {
+    "authentication",
+    "configuration",
+    "disabled",
+    "empty_content",
+    "invalid_response",
+    "missing_evidence",
+    "provider_error",
+    "rate_limit",
+    "retrieval_error",
+    "timeout",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -139,6 +155,9 @@ def serialize_review_handout_job(job: ReviewHandoutJob) -> dict:
         "citations": job.citations if isinstance(job.citations, list) else [],
         "verified": job.verified,
         "degraded": job.degraded,
+        "degradedReasons": job.degraded_reasons if isinstance(job.degraded_reasons, list) else [],
+        "promptVersion": job.prompt_version,
+        "llmAudit": job.llm_audit if isinstance(job.llm_audit, dict) else {},
         "error": job.error_message if job.status == "failed" else "",
         "createdAt": job.created_at.isoformat(),
         "updatedAt": job.updated_at.isoformat(),
@@ -159,21 +178,45 @@ def generate_review_handout(job_id: str) -> dict:
     artifact_dir = _artifact_directory(job)
     try:
         _save_job(job, status="running", progress=10, stage="retrieval", message="正在检索本地课程资料", started_at=job.started_at or timezone.now())
-        chapters, citations, degraded = _build_handout_chapters(job)
-        _save_job(job, progress=55, stage="document", message="正在整理讲义章节与练习")
+        evidence_by_point, retrieval_reasons = _collect_handout_evidence(job)
+        _save_job(job, progress=35, stage="enhancing", message="正在生成个性化讲解与分层练习")
+        result = enhance_review_handout(
+            job.snapshot,
+            job.ranked_weak_points[:8],
+            evidence_by_point,
+            cancel_check=lambda: _job_cancelled(job.id),
+        )
+        reasons = _safe_degraded_reasons([*result.degraded_reasons, *retrieval_reasons])
+        degraded = result.degraded or bool(reasons)
+        verified = result.verified and not degraded
+        sections = result.content.get("sections") if isinstance(result.content, dict) else []
+        sections = sections if isinstance(sections, list) else []
+        plan = build_seven_day_plan(job.ranked_weak_points)
+        enhancement = {"sections": sections, "sevenDayPlan": plan}
+        _save_job(job, progress=65, stage="rendering", message="正在排版讲义与 7 天复习计划")
         artifact_dir.mkdir(parents=True, exist_ok=True)
         docx_path = artifact_dir / "review-handout.docx"
         pdf_path = artifact_dir / "review-handout.pdf"
-        _atomic_write(docx_path, _build_handout_docx(job.snapshot, chapters, citations, degraded))
-        _atomic_write(pdf_path, _build_handout_pdf(job.snapshot, chapters, citations, degraded))
+        _atomic_write(docx_path, _build_handout_docx(job.snapshot, sections, result.citations, plan, reasons))
+        _atomic_write(pdf_path, _build_handout_pdf(job.snapshot, sections, result.citations, plan, reasons))
         _save_job(
             job,
             status="succeeded",
             progress=100,
             stage="completed",
-            message="资料检索暂不可用，已根据可信题目解析生成复习提纲" if degraded else "复习讲义已生成并完成引用核验",
-            citations=citations,
-            verified=bool(citations) and not degraded,
+            message=(
+                "资料检索暂不可用，已根据可信题目解析生成复习提纲"
+                if "retrieval_error" in reasons
+                else "部分内容已降级，讲义仍已根据可信错题记录生成"
+                if degraded
+                else "复习讲义已生成并完成引用核验"
+            ),
+            enhancement=enhancement,
+            citations=result.citations,
+            llm_audit=result.audit,
+            degraded_reasons=reasons,
+            prompt_version=str(result.audit.get("promptVersion") or ""),
+            verified=verified,
             degraded=degraded,
             docx_path=str(docx_path),
             pdf_path=str(pdf_path),
@@ -182,7 +225,7 @@ def generate_review_handout(job_id: str) -> dict:
             finished_at=timezone.now(),
         )
         return {"success": True, "jobId": str(job.id)}
-    except ReviewHandoutCancelled:
+    except (ReviewHandoutCancelled, EnhancementCancelled):
         shutil.rmtree(artifact_dir, ignore_errors=True)
         return {"success": False, "cancelled": True}
     except Exception as exc:
@@ -196,13 +239,10 @@ def generate_review_handout(job_id: str) -> dict:
         return {"success": False, "error": message}
 
 
-def _build_handout_chapters(job: ReviewHandoutJob) -> tuple[list[dict], list[dict], bool]:
-    rows_by_point = defaultdict(list)
-    for row in job.snapshot.get("questions") or []:
-        rows_by_point[str(row.get("knowledgePoint") or "未分类")].append(row)
-    citations = []
-    chapters = []
-    retrieval_failed = False
+def _collect_handout_evidence(job: ReviewHandoutJob) -> tuple[dict[str, list[dict]], list[str]]:
+    evidence_by_point: dict[str, list[dict]] = {}
+    reasons = []
+    source_index = 1
     for weakness in job.ranked_weak_points[:8]:
         point = weakness["knowledgePoint"]
         evidence = []
@@ -211,45 +251,57 @@ def _build_handout_chapters(job: ReviewHandoutJob) -> tuple[list[dict], list[dic
             for result in results[:3]:
                 metadata = result.metadata if isinstance(result.metadata, dict) else {}
                 citation = {
-                    "knowledgePoint": point,
+                    "sourceId": f"S{source_index}",
                     "title": str(metadata.get("title") or metadata.get("source_name") or "课程资料")[:255],
                     "location": _citation_location(metadata),
                     "snippet": str(result.text or "").strip()[:600],
                     "score": round(float(result.score or 0), 4),
-                    "verified": bool(str(result.text or "").strip()),
                 }
                 if citation["snippet"]:
                     evidence.append(citation)
-                    citations.append(citation)
+                    source_index += 1
         except Exception:
-            retrieval_failed = True
-        questions = rows_by_point[point]
-        core = evidence[0]["snippet"] if evidence else "；".join(row["explanation"] for row in questions[:3])
-        chapters.append({
+            reasons.append("retrieval_error")
+        if not evidence:
+            reasons.append("missing_evidence")
+        evidence_by_point[point] = evidence
+    return evidence_by_point, _safe_degraded_reasons(reasons)
+
+
+def build_seven_day_plan(ranked_weak_points: list[dict]) -> list[dict]:
+    ranked = sorted(
+        [dict(item) for item in ranked_weak_points if isinstance(item, dict)],
+        key=lambda item: (-float(item.get("score") or 0), str(item.get("knowledgePoint") or "")),
+    )[:8]
+    days = [{"day": day, "tasks": []} for day in range(1, 8)]
+    if not ranked:
+        return days
+
+    for item in ranked:
+        point = str(item.get("knowledgePoint") or "未分类")
+        first_day = 1 if int(item.get("dueCount") or 0) > 0 else 2 if int(item.get("activeCount") or 0) > 0 else 3
+        days[first_day - 1]["tasks"].append({
             "knowledgePoint": point,
-            "score": weakness["score"],
-            "coreConcept": core or f"围绕{point}复习定义、适用条件与判断步骤。",
-            "prerequisites": f"先确认{point}涉及的基本定义、条件与符号含义。",
-            "errorPatterns": [row["errorCause"] for row in questions[:5]],
-            "questions": questions[:8],
-            "checklist": ["先识别题目考查的核心概念", "逐项核对适用条件", "作答后反向检查结论"],
-            "variants": [_variant_for(row, index) for index, row in enumerate(questions[:3], start=1)],
-            "advice": f"优先重练{len(questions)}道关联错题；完成后在错题本连续答对两次。",
-            "citations": evidence,
+            "type": "focused_practice",
+            "action": "复习核心概念并完成基础、巩固、迁移练习",
         })
-    degraded = retrieval_failed or not citations
-    return chapters, citations[:24], degraded
+        for review_day in (first_day + 2, first_day + 4):
+            if review_day <= 7:
+                days[review_day - 1]["tasks"].append({
+                    "knowledgePoint": point,
+                    "type": "spaced_review",
+                    "action": "遮住答案重做并核对错因是否消除",
+                })
+    return days
 
 
-def _variant_for(row: dict, index: int) -> dict:
-    return {
-        "prompt": f"变式 {index}：改变题目情境后，重新判断下列问题：{row['stem']}",
-        "answer": row["correctAnswer"],
-        "explanation": row["explanation"],
-    }
-
-
-def _build_handout_docx(snapshot: dict, chapters: list[dict], citations: list[dict], degraded: bool) -> bytes:
+def _build_handout_docx(
+    snapshot: dict,
+    sections: list[dict],
+    citations: list[dict],
+    plan: list[dict],
+    degraded_reasons: list[str],
+) -> bytes:
     document = Document()
     section = document.sections[0]
     section.top_margin = Inches(0.65)
@@ -264,44 +316,71 @@ def _build_handout_docx(snapshot: dict, chapters: list[dict], citations: list[di
     title_run = title.add_run("个性化复习讲义")
     title_run.bold = True
     title_run.font.size = Pt(22)
-    document.add_paragraph(f"学生：{snapshot['studentName']}　范围：{snapshot['scope']}　薄弱点：{'、'.join(item['knowledgePoint'] for item in chapters)}")
-    if degraded:
-        document.add_paragraph("说明：本地资料检索暂不可用，本讲义根据可信错题记录和题目解析生成，资料引用不足。")
-    for chapter in chapters:
-        document.add_heading(chapter["knowledgePoint"], level=1)
-        _docx_section(document, "核心概念", chapter["coreConcept"])
-        _docx_section(document, "先修知识", chapter["prerequisites"])
-        _docx_section(document, "错因归纳", "；".join(chapter["errorPatterns"]))
-        _docx_section(document, "解题检查清单", "\n".join(f"- {item}" for item in chapter["checklist"]))
+    document.add_paragraph(f"学生：{snapshot['studentName']}　范围：{snapshot['scope']}　薄弱点：{'、'.join(str(item.get('knowledgePoint') or '') for item in sections)}")
+    if degraded_reasons:
+        document.add_paragraph("说明：部分 AI 增强或资料引用不可用，未核验内容已明确标注；原题事实与原始解析保持不变。")
+    questions_by_point = _snapshot_questions_by_point(snapshot)
+    citations_by_point = _citations_by_point(citations)
+    for section_data in sections:
+        point = str(section_data.get("knowledgePoint") or "未分类")
+        document.add_heading(point, level=1)
+        document.add_paragraph(f"证据状态：{_evidence_label(section_data.get('evidenceStatus'))}")
+        _docx_section(document, "学习诊断", section_data.get("learningDiagnosis"))
+        _docx_section(document, "核心概念", section_data.get("coreConcept"))
+        _docx_section(document, "先修知识", _joined(section_data.get("prerequisites")))
+        _docx_section(document, "常见错误", _joined(section_data.get("commonErrorPatterns")))
+        _docx_section(document, "解题方法", _numbered(section_data.get("method")))
+        _docx_worked_example(document, section_data.get("workedExample"))
         document.add_heading("关联错题", level=2)
-        for row in chapter["questions"]:
-            document.add_paragraph(row["stem"])
-        document.add_heading("变式练习", level=2)
-        for variant in chapter["variants"]:
-            document.add_paragraph(variant["prompt"])
-        _docx_section(document, "复习建议", chapter["advice"])
+        for row in questions_by_point.get(point, []):
+            document.add_paragraph(str(row.get("stem") or ""))
+        document.add_heading("分层练习", level=2)
+        practices = section_data.get("tieredPractice") if isinstance(section_data.get("tieredPractice"), list) else []
+        if practices:
+            for practice in practices:
+                document.add_paragraph(f"{practice.get('level', '')}练习：{practice.get('prompt', '')}")
+        else:
+            document.add_paragraph("AI 分层练习暂不可用，请先重练关联错题。")
+        _docx_section(document, "复习行动", _joined(section_data.get("reviewActions")))
         document.add_heading("资料引用", level=2)
-        if chapter["citations"]:
-            for item in chapter["citations"]:
+        point_citations = citations_by_point.get(point, [])
+        if point_citations:
+            for item in point_citations:
                 document.add_paragraph(f"{item['title']} · {item['location']} · {item['snippet']}")
         else:
             document.add_paragraph("未检索到可核验的本地资料引用。")
+    document.add_heading("7 天复习计划", level=1)
+    for day in plan:
+        tasks = day.get("tasks") if isinstance(day.get("tasks"), list) else []
+        content = "；".join(f"{item.get('knowledgePoint')}：{item.get('action')}" for item in tasks) or "完成当日常规学习并整理疑问。"
+        document.add_paragraph(f"第 {day.get('day')} 天：{content}")
     document.add_heading("答案与解析", level=1)
-    for chapter in chapters:
-        document.add_heading(chapter["knowledgePoint"], level=2)
-        for variant in chapter["variants"]:
-            document.add_paragraph(f"{variant['prompt']}\n答案：{variant['answer']}\n解析：{variant['explanation']}")
+    for section_data in sections:
+        point = str(section_data.get("knowledgePoint") or "未分类")
+        document.add_heading(point, level=2)
+        for row in questions_by_point.get(point, []):
+            document.add_paragraph(f"原题：{row.get('stem', '')}\n正确答案：{row.get('correctAnswer', '')}\n原始解析：{row.get('explanation', '')}")
+        example = section_data.get("workedExample") if isinstance(section_data.get("workedExample"), dict) else {}
+        document.add_paragraph(f"例题：{example.get('prompt', '')}\n答案：{example.get('answer', '')}\n步骤：{_joined(example.get('steps'))}")
+        for practice in section_data.get("tieredPractice") or []:
+            document.add_paragraph(f"{practice.get('level', '')}练习：{practice.get('prompt', '')}\n答案：{practice.get('answer', '')}\n解析：{practice.get('explanation', '')}")
     output = BytesIO()
     document.save(output)
     return output.getvalue()
 
 
-def _docx_section(document, title: str, content: str) -> None:
+def _docx_section(document, title: str, content) -> None:
     document.add_heading(title, level=2)
     document.add_paragraph(content or "暂无")
 
 
-def _build_handout_pdf(snapshot: dict, chapters: list[dict], citations: list[dict], degraded: bool) -> bytes:
+def _build_handout_pdf(
+    snapshot: dict,
+    sections: list[dict],
+    citations: list[dict],
+    plan: list[dict],
+    degraded_reasons: list[str],
+) -> bytes:
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
     output = BytesIO()
     doc = SimpleDocTemplate(output, pagesize=A4, rightMargin=18 * mm, leftMargin=18 * mm, topMargin=16 * mm, bottomMargin=18 * mm, title="智学引擎个性化复习讲义", author="智学引擎")
@@ -310,24 +389,58 @@ def _build_handout_pdf(snapshot: dict, chapters: list[dict], citations: list[dic
     h1 = ParagraphStyle("HH1", parent=styles["Heading1"], fontName="STSong-Light", fontSize=15, leading=21, textColor=colors.HexColor("#1F4E78"), spaceBefore=10)
     h2 = ParagraphStyle("HH2", parent=styles["Heading2"], fontName="STSong-Light", fontSize=11, leading=16, textColor=colors.HexColor("#334155"), spaceBefore=6)
     body = ParagraphStyle("HBody", parent=styles["BodyText"], fontName="STSong-Light", fontSize=9.5, leading=15, spaceAfter=4)
-    story = [Paragraph("个性化复习讲义", title), Paragraph(_xml(f"学生：{snapshot['studentName']}　薄弱点：{'、'.join(item['knowledgePoint'] for item in chapters)}"), body)]
-    if degraded:
-        story.append(Paragraph("本地资料检索暂不可用，本讲义根据可信错题记录和题目解析生成。", body))
-    for chapter in chapters:
-        story.append(Paragraph(_xml(chapter["knowledgePoint"]), h1))
-        for label, content in (("核心概念", chapter["coreConcept"]), ("先修知识", chapter["prerequisites"]), ("错因归纳", "；".join(chapter["errorPatterns"])), ("解题检查清单", "；".join(chapter["checklist"])), ("复习建议", chapter["advice"])):
+    story = [Paragraph("个性化复习讲义", title), Paragraph(_xml(f"学生：{snapshot['studentName']}　薄弱点：{'、'.join(str(item.get('knowledgePoint') or '') for item in sections)}"), body)]
+    if degraded_reasons:
+        story.append(Paragraph("部分 AI 增强或资料引用不可用，未核验内容已明确标注；原题事实与原始解析保持不变。", body))
+    questions_by_point = _snapshot_questions_by_point(snapshot)
+    citations_by_point = _citations_by_point(citations)
+    for section_data in sections:
+        point = str(section_data.get("knowledgePoint") or "未分类")
+        story.append(Paragraph(_xml(point), h1))
+        story.append(Paragraph(_xml(f"证据状态：{_evidence_label(section_data.get('evidenceStatus'))}"), body))
+        for label, content in (
+            ("学习诊断", section_data.get("learningDiagnosis")),
+            ("核心概念", section_data.get("coreConcept")),
+            ("先修知识", _joined(section_data.get("prerequisites"))),
+            ("常见错误", _joined(section_data.get("commonErrorPatterns"))),
+            ("解题方法", _numbered(section_data.get("method"))),
+        ):
             story.extend([Paragraph(label, h2), Paragraph(_xml(content), body)])
-        story.append(Paragraph("变式练习", h2))
-        for variant in chapter["variants"]:
-            story.append(Paragraph(_xml(variant["prompt"]), body))
+        example = section_data.get("workedExample") if isinstance(section_data.get("workedExample"), dict) else {}
+        story.extend([Paragraph("例题精讲", h2), Paragraph(_xml(f"{example.get('prompt', '')}；步骤：{_joined(example.get('steps'))}"), body)])
+        story.append(Paragraph("关联错题", h2))
+        for row in questions_by_point.get(point, []):
+            story.append(Paragraph(_xml(row.get("stem")), body))
+        story.append(Paragraph("分层练习", h2))
+        practices = section_data.get("tieredPractice") if isinstance(section_data.get("tieredPractice"), list) else []
+        if practices:
+            for practice in practices:
+                story.append(Paragraph(_xml(f"{practice.get('level', '')}练习：{practice.get('prompt', '')}"), body))
+        else:
+            story.append(Paragraph("AI 分层练习暂不可用，请先重练关联错题。", body))
+        story.extend([Paragraph("复习行动", h2), Paragraph(_xml(_joined(section_data.get("reviewActions"))), body)])
         story.append(Paragraph("资料引用", h2))
-        for item in chapter["citations"]:
-            story.append(Paragraph(_xml(f"{item['title']} · {item['location']} · {item['snippet']}"), body))
+        point_citations = citations_by_point.get(point, [])
+        if point_citations:
+            for item in point_citations:
+                story.append(Paragraph(_xml(f"{item['title']} · {item['location']} · {item['snippet']}"), body))
+        else:
+            story.append(Paragraph("未检索到可核验的本地资料引用。", body))
+    story.append(Paragraph("7 天复习计划", h1))
+    for day in plan:
+        tasks = day.get("tasks") if isinstance(day.get("tasks"), list) else []
+        content = "；".join(f"{item.get('knowledgePoint')}：{item.get('action')}" for item in tasks) or "完成当日常规学习并整理疑问。"
+        story.append(Paragraph(_xml(f"第 {day.get('day')} 天：{content}"), body))
     story.append(Paragraph("答案与解析", h1))
-    for chapter in chapters:
-        story.append(Paragraph(_xml(chapter["knowledgePoint"]), h2))
-        for variant in chapter["variants"]:
-            story.append(Paragraph(_xml(f"{variant['prompt']}　答案：{variant['answer']}　解析：{variant['explanation']}"), body))
+    for section_data in sections:
+        point = str(section_data.get("knowledgePoint") or "未分类")
+        story.append(Paragraph(_xml(point), h2))
+        for row in questions_by_point.get(point, []):
+            story.append(Paragraph(_xml(f"原题：{row.get('stem', '')}　正确答案：{row.get('correctAnswer', '')}　原始解析：{row.get('explanation', '')}"), body))
+        example = section_data.get("workedExample") if isinstance(section_data.get("workedExample"), dict) else {}
+        story.append(Paragraph(_xml(f"例题：{example.get('prompt', '')}　答案：{example.get('answer', '')}　步骤：{_joined(example.get('steps'))}"), body))
+        for practice in section_data.get("tieredPractice") or []:
+            story.append(Paragraph(_xml(f"{practice.get('level', '')}练习：{practice.get('prompt', '')}　答案：{practice.get('answer', '')}　解析：{practice.get('explanation', '')}"), body))
     doc.build(story)
     return output.getvalue()
 
@@ -341,6 +454,58 @@ def _save_job(job: ReviewHandoutJob, **changes) -> None:
             setattr(current, field, value)
             setattr(job, field, value)
         current.save(update_fields=[*changes.keys(), "updated_at"])
+
+
+def _job_cancelled(job_id) -> bool:
+    return ReviewHandoutJob.objects.filter(pk=job_id, status="cancelled").exists()
+
+
+def _safe_degraded_reasons(reasons) -> list[str]:
+    safe = []
+    for reason in reasons if isinstance(reasons, (list, tuple)) else []:
+        normalized = str(reason or "").strip().lower()
+        if normalized in SAFE_DEGRADED_REASONS and normalized not in safe:
+            safe.append(normalized)
+    return safe
+
+
+def _snapshot_questions_by_point(snapshot: dict) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in snapshot.get("questions") or []:
+        if isinstance(row, dict):
+            grouped[str(row.get("knowledgePoint") or "未分类")].append(row)
+    return grouped
+
+
+def _citations_by_point(citations: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for citation in citations if isinstance(citations, list) else []:
+        if isinstance(citation, dict):
+            grouped[str(citation.get("knowledgePoint") or "未分类")].append(citation)
+    return grouped
+
+
+def _joined(value) -> str:
+    if isinstance(value, list):
+        return "；".join(str(item) for item in value if str(item).strip())
+    return str(value or "")
+
+
+def _numbered(value) -> str:
+    if not isinstance(value, list):
+        return str(value or "")
+    return "\n".join(f"{index}. {item}" for index, item in enumerate(value, start=1))
+
+
+def _evidence_label(value) -> str:
+    return {"verified": "已核验", "partial": "部分核验", "unverified": "未核验"}.get(str(value), "未核验")
+
+
+def _docx_worked_example(document, value) -> None:
+    example = value if isinstance(value, dict) else {}
+    document.add_heading("例题精讲", level=2)
+    document.add_paragraph(str(example.get("prompt") or "暂无"))
+    document.add_paragraph(f"步骤：{_numbered(example.get('steps')) or '暂无'}")
 
 
 def _artifact_directory(job: ReviewHandoutJob) -> Path:
