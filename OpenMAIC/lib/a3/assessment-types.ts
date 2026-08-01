@@ -129,26 +129,65 @@ export type WrongReviewSummary = {
 
 export type WrongExportScope = 'active' | 'due' | 'mastered' | 'all';
 export type WrongExportFormat = 'docx' | 'xlsx' | 'pdf';
+export type AssessmentJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 
-export type ReviewHandoutJob = {
+export type AssessmentContentAudit = {
+  promptVersion?: string;
+  provider?: string;
+  model?: string;
+  attempts?: number;
+  latencyMs?: number;
+  finishReason?: string;
+  usage?: Record<string, number>;
+  errorCategories?: string[];
+};
+
+export type AssessmentCitation = {
+  sourceId?: string;
+  knowledgePoint: string;
+  title: string;
+  location: string;
+  snippet: string;
+  score: number | null;
+};
+
+export type WrongQuestionExportJob = {
   jobId: string;
   scope: WrongExportScope;
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  format: WrongExportFormat;
+  status: AssessmentJobStatus;
   progress: number;
   stage: string;
   message: string;
   snapshotId: string;
   traceId: string;
-  citations: Array<{
-    knowledgePoint: string;
-    title: string;
-    location: string;
-    snippet: string;
-    score: number;
-    verified: boolean;
-  }>;
   verified: boolean;
   degraded: boolean;
+  degradedReasons: string[];
+  promptVersion: string;
+  model: string;
+  attempts: number;
+  error: string;
+  createdAt: string;
+  updatedAt: string;
+  downloadUrl?: string;
+};
+
+export type ReviewHandoutJob = {
+  jobId: string;
+  scope: WrongExportScope;
+  status: AssessmentJobStatus;
+  progress: number;
+  stage: string;
+  message: string;
+  snapshotId: string;
+  traceId: string;
+  citations: AssessmentCitation[];
+  verified: boolean;
+  degraded: boolean;
+  degradedReasons: string[];
+  promptVersion: string;
+  llmAudit: AssessmentContentAudit;
   error: string;
   createdAt: string;
   updatedAt: string;
