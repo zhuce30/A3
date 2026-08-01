@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { DigitalHumanAvatar } from '@/components/a3/features/coaching/digital-human-avatar';
 import { DigitalHumanThreeStage } from '@/components/a3/features/coaching/digital-human-three-stage';
@@ -11,6 +12,31 @@ import {
   A3_DIGITAL_HUMAN_AVATAR_MODES,
   A3_DIGITAL_HUMAN_AVATAR_STATES,
 } from '@/lib/a3/digital-human-types';
+
+const SHIPPED_TEACHER_VRMS = [
+  { fileName: 'teacher.vrm' },
+  {
+    fileName: 'teacher2.vrm',
+    byteLength: 14_574_928,
+    sha256: 'cf0e672ae98ca5cb35de92dd99bf836725d619931c0ef174e5e9e50a1a0001bf',
+  },
+  {
+    fileName: 'teacher3.vrm',
+    byteLength: 15_195_704,
+    sha256: '9ea7e12d57025f16101f867b0e3f88907bbabcf697d9edfa1176fc4bc7b0bc1e',
+  },
+  {
+    fileName: 'teacher4.vrm',
+    byteLength: 15_088_084,
+    sha256: 'ff0b340fb317d70039b15e34e165f46ec1aaead691aa28abca524a1861dcbe61',
+  },
+] as const;
+
+const UNPUBLISHED_TEACHER_SOURCE_PROJECTS = new Set([
+  'teacher2.vroid',
+  'teacher3.vroid',
+  'teacher4.vroid',
+]);
 
 describe('A3 digital human avatar types', () => {
   it('defines stable avatar states and modes', () => {
@@ -196,73 +222,95 @@ describe('DigitalHumanAvatar', () => {
     expect(readme).toContain('generate-a3-idle-vrma.mjs');
   });
 
-  it('publishes a sanitized project-scoped teacher VRM without personal metadata', () => {
+  it('publishes sanitized project-scoped teacher VRMs without personal metadata', () => {
     const avatarDirectory = path.resolve(process.cwd(), 'public/a3/assets/teacher-avatar');
-    const teacherPath = path.join(avatarDirectory, 'teacher.vrm');
-    const teacherBuffer = fs.readFileSync(teacherPath);
-    const teacherJson = readGlbJson(teacherPath);
-    const meta = teacherJson.extensions?.VRMC_vrm?.meta as Record<string, unknown>;
-    const model = teacherJson as typeof teacherJson & {
-      buffers: Array<{ byteLength: number }>;
-      bufferViews: Array<{ byteOffset?: number; byteLength: number }>;
-      images: Array<{ bufferView?: number }>;
-      textures: Array<{ source?: number; sampler?: number }>;
-      samplers: unknown[];
-    };
+    for (const asset of SHIPPED_TEACHER_VRMS) {
+      const teacherPath = path.join(avatarDirectory, asset.fileName);
+      const teacherBuffer = fs.readFileSync(teacherPath);
+      const teacherJson = readGlbJson(teacherPath);
+      const meta = teacherJson.extensions?.VRMC_vrm?.meta as Record<string, unknown>;
+      const model = teacherJson as typeof teacherJson & {
+        buffers: Array<{ byteLength: number }>;
+        bufferViews: Array<{ byteOffset?: number; byteLength: number }>;
+        images: Array<{ bufferView?: number }>;
+        textures: Array<{ source?: number; sampler?: number }>;
+        samplers: unknown[];
+      };
 
-    expect(teacherBuffer.readUInt32LE(8)).toBe(teacherBuffer.length);
-    expect(readGlbChunkLengths(teacherBuffer).every((length) => length % 4 === 0)).toBe(true);
-    expect(meta.authors).toEqual(['A3 project team']);
-    expect(meta).not.toHaveProperty('contactInformation');
-    expect(meta).not.toHaveProperty('thumbnailImage');
-    expect(meta.avatarPermission).toBe('onlySeparatelyLicensedPerson');
-    expect(meta.allowRedistribution).toBe(false);
-    expect(meta.commercialUsage).toBe('personalNonProfit');
-    expect(meta.modification).toBe('prohibited');
-    expect(fs.statSync(teacherPath).size).toBeLessThan(17_000_000);
-    expect(
-      model.images.every(
-        (image) => image.bufferView === undefined || image.bufferView < model.bufferViews.length,
-      ),
-    ).toBe(true);
-    expect(
-      model.textures.every(
-        (texture) =>
-          (texture.source === undefined || texture.source < model.images.length) &&
-          (texture.sampler === undefined || texture.sampler < model.samplers.length),
-      ),
-    ).toBe(true);
-    expect(
-      model.bufferViews.every(
-        (view) => (view.byteOffset || 0) + view.byteLength <= model.buffers[0].byteLength,
-      ),
-    ).toBe(true);
+      expect(teacherBuffer.readUInt32LE(8), asset.fileName).toBe(teacherBuffer.length);
+      expect(
+        readGlbChunkLengths(teacherBuffer).every((length) => length % 4 === 0),
+        asset.fileName,
+      ).toBe(true);
+      expect(meta.authors, asset.fileName).toEqual(['A3 project team']);
+      expect(meta, asset.fileName).not.toHaveProperty('contactInformation');
+      expect(meta, asset.fileName).not.toHaveProperty('thumbnailImage');
+      expect(meta.avatarPermission, asset.fileName).toBe('onlySeparatelyLicensedPerson');
+      expect(meta.allowRedistribution, asset.fileName).toBe(false);
+      expect(meta.commercialUsage, asset.fileName).toBe('personalNonProfit');
+      expect(meta.modification, asset.fileName).toBe('prohibited');
+      expect(teacherBuffer.length, asset.fileName).toBeLessThan(17_000_000);
+      expect(
+        model.images.every(
+          (image) => image.bufferView === undefined || image.bufferView < model.bufferViews.length,
+        ),
+        asset.fileName,
+      ).toBe(true);
+      expect(
+        model.textures.every(
+          (texture) =>
+            (texture.source === undefined || texture.source < model.images.length) &&
+            (texture.sampler === undefined || texture.sampler < model.samplers.length),
+        ),
+        asset.fileName,
+      ).toBe(true);
+      expect(
+        model.bufferViews.every(
+          (view) => (view.byteOffset || 0) + view.byteLength <= model.buffers[0].byteLength,
+        ),
+        asset.fileName,
+      ).toBe(true);
+      expect(JSON.stringify(teacherJson), asset.fileName).not.toMatch(/1[3-9]\d{9}/);
+
+      if ('byteLength' in asset) {
+        expect(teacherBuffer.length, asset.fileName).toBe(asset.byteLength);
+        expect(createHash('sha256').update(teacherBuffer).digest('hex'), asset.fileName).toBe(
+          asset.sha256,
+        );
+      }
+    }
 
     for (const entry of fs.readdirSync(avatarDirectory, { withFileTypes: true })) {
-      if (!entry.isFile()) continue;
+      if (!entry.isFile() || UNPUBLISHED_TEACHER_SOURCE_PROJECTS.has(entry.name)) continue;
       const filePath = path.join(avatarDirectory, entry.name);
       const searchable = /\.vrma?$/.test(entry.name)
         ? JSON.stringify(readGlbJson(filePath))
         : fs.readFileSync(filePath, 'utf8');
-      expect(searchable).not.toMatch(/1[3-9]\d{9}/);
+      expect(searchable, entry.name).not.toMatch(/1[3-9]\d{9}/);
     }
   });
 
-  it('reproduces the sanitized teacher VRM byte for byte', () => {
-    const teacherPath = path.resolve(process.cwd(), 'public/a3/assets/teacher-avatar/teacher.vrm');
+  it('reproduces every sanitized teacher VRM byte for byte', () => {
+    const avatarDirectory = path.resolve(process.cwd(), 'public/a3/assets/teacher-avatar');
     const sanitizerPath = path.resolve(process.cwd(), 'scripts/sanitize-a3-teacher-vrm.mjs');
     const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'a3-teacher-vrm-'));
-    const outputPath = path.join(temporaryDirectory, 'teacher.vrm');
 
     try {
-      execFileSync(process.execPath, [
-        sanitizerPath,
-        '--input',
-        teacherPath,
-        '--output',
-        outputPath,
-      ]);
-      expect(Buffer.compare(fs.readFileSync(outputPath), fs.readFileSync(teacherPath))).toBe(0);
+      for (const asset of SHIPPED_TEACHER_VRMS) {
+        const teacherPath = path.join(avatarDirectory, asset.fileName);
+        const outputPath = path.join(temporaryDirectory, asset.fileName);
+        execFileSync(process.execPath, [
+          sanitizerPath,
+          '--input',
+          teacherPath,
+          '--output',
+          outputPath,
+        ]);
+        expect(
+          Buffer.compare(fs.readFileSync(outputPath), fs.readFileSync(teacherPath)),
+          asset.fileName,
+        ).toBe(0);
+      }
     } finally {
       fs.rmSync(temporaryDirectory, { recursive: true, force: true });
     }
