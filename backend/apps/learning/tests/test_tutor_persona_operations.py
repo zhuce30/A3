@@ -1,11 +1,13 @@
 import importlib
+from types import SimpleNamespace
 
+from django.apps import apps as django_apps
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import migrations
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, migrations, transaction
+from django.db.migrations.executor import MigrationExecutor
 from django.db.models.deletion import ProtectedError
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 
 from backend.apps.accounts.models import User
 from backend.apps.learning import models as learning_models
@@ -47,11 +49,23 @@ class TutorPersonaOperationsModelTests(TestCase):
 
         configurations = TutorPersonaConfiguration.objects.select_related("avatar_asset")
         self.assertEqual(configurations.count(), 4)
+        self.assertEqual(TutorAvatarAsset.objects.count(), 4)
         self.assertEqual(
             set(configurations.values_list("persona_id", flat=True)),
             {"structured-teacher", "socratic-guide", "practice-coach", "foundation-coach"},
         )
-        self.assertEqual({configuration.avatar_asset_id for configuration in configurations}, {asset.id})
+        self.assertEqual(
+            {
+                configuration.persona_id: configuration.avatar_asset.asset_id
+                for configuration in configurations
+            },
+            {
+                "structured-teacher": "teacher-default-v1",
+                "socratic-guide": "teacher-insight-v1",
+                "practice-coach": "teacher-practice-v1",
+                "foundation-coach": "teacher-foundation-v1",
+            },
+        )
 
     def test_feedback_is_unique_per_user_and_session(self):
         TutorPersonaFeedback = self.get_model("TutorPersonaFeedback")
@@ -225,3 +239,396 @@ class TutorPersonaOperationsModelTests(TestCase):
         self.assertEqual(feedback.tags, [])
         with self.assertRaises(ProtectedError):
             asset.delete()
+
+    def get_additional_avatar_migration(self):
+        return importlib.import_module(
+            "backend.apps.learning.migrations.0016_additional_tutor_avatar_assets"
+        )
+
+    def get_migration_schema_editor(self):
+        return SimpleNamespace(connection=connection)
+
+    def reset_additional_avatar_migration_state(self):
+        migration_module = self.get_additional_avatar_migration()
+        TutorAvatarAsset = self.get_model("TutorAvatarAsset")
+        TutorPersonaConfiguration = self.get_model("TutorPersonaConfiguration")
+        default_asset = TutorAvatarAsset.objects.get(asset_id="teacher-default-v1")
+
+        TutorPersonaConfiguration.objects.filter(
+            persona_id__in=migration_module.PERSONA_ASSIGNMENTS,
+        ).update(avatar_asset=default_asset, updated_by=None)
+        TutorAvatarAsset.objects.filter(asset_id__in=migration_module.ASSET_IDS).delete()
+        return migration_module, default_asset
+
+    def test_additional_avatar_migration_seeds_exact_assets_and_assigns_untouched_personas(self):
+        migration_module, default_asset = self.reset_additional_avatar_migration_state()
+        TutorAvatarAsset = self.get_model("TutorAvatarAsset")
+        TutorPersonaConfiguration = self.get_model("TutorPersonaConfiguration")
+
+        migration_module.forwards(django_apps, self.get_migration_schema_editor())
+
+        expected_assets = {
+            "teacher-insight-v1": {
+                "display_name": "启思导师",
+                "public_path": "/a3/assets/teacher-avatar/teacher2.vrm",
+                "sha256": "cf0e672ae98ca5cb35de92dd99bf836725d619931c0ef174e5e9e50a1a0001bf",
+                "file_size_bytes": 14_574_928,
+            },
+            "teacher-practice-v1": {
+                "display_name": "知行导师",
+                "public_path": "/a3/assets/teacher-avatar/teacher3.vrm",
+                "sha256": "9ea7e12d57025f16101f867b0e3f88907bbabcf697d9edfa1176fc4bc7b0bc1e",
+                "file_size_bytes": 15_195_704,
+            },
+            "teacher-foundation-v1": {
+                "display_name": "明理导师",
+                "public_path": "/a3/assets/teacher-avatar/teacher4.vrm",
+                "sha256": "ff0b340fb317d70039b15e34e165f46ec1aaead691aa28abca524a1861dcbe61",
+                "file_size_bytes": 15_088_084,
+            },
+        }
+        common_fields = {
+            "thumbnail_path": "",
+            "author": "A3 project team",
+            "source_name": "VRoid Studio self-created model",
+            "source_url": "https://vroid.com/en/studio",
+            "license_name": "VRM 1.0 project-scoped non-commercial",
+            "license_url": "https://vrm.dev/licenses/1.0/",
+            "usage_scope": ["A3 demo", "competition", "product prototype"],
+            "status": "enabled",
+            "is_default": False,
+            "metadata": {
+                "licenseStatus": "complete",
+                "vrmVersion": "1.0",
+                "humanBoneCount": 54,
+                "expressionPresetCount": 14,
+                "runtimeAnimations": "shared-vrma",
+                "seededByMigration": "learning.0016",
+            },
+        }
+
+        self.assertEqual(tuple(expected_assets), migration_module.ASSET_IDS)
+        for asset_id, expected in expected_assets.items():
+            asset = TutorAvatarAsset.objects.get(asset_id=asset_id)
+            for field, value in {**expected, **common_fields}.items():
+                self.assertEqual(getattr(asset, field), value)
+
+        self.assertEqual(
+            TutorPersonaConfiguration.objects.get(persona_id="structured-teacher").avatar_asset_id,
+            default_asset.id,
+        )
+        for persona_id, asset_id in migration_module.PERSONA_ASSIGNMENTS.items():
+            configuration = TutorPersonaConfiguration.objects.get(persona_id=persona_id)
+            self.assertEqual(configuration.avatar_asset.asset_id, asset_id)
+
+    def test_additional_avatar_migration_is_idempotent_and_preserves_overrides(self):
+        migration_module, default_asset = self.reset_additional_avatar_migration_state()
+        TutorAvatarAsset = self.get_model("TutorAvatarAsset")
+        TutorPersonaConfiguration = self.get_model("TutorPersonaConfiguration")
+        custom_asset = TutorAvatarAsset.objects.create(
+            asset_id="teacher-custom-v1",
+            display_name="自定义导师",
+            public_path="/a3/assets/teacher-avatar/custom.vrm",
+            sha256="4" * 64,
+            file_size_bytes=5,
+        )
+        practice = TutorPersonaConfiguration.objects.get(persona_id="practice-coach")
+        practice.updated_by = self.user
+        practice.save(update_fields=["updated_by"])
+        foundation = TutorPersonaConfiguration.objects.get(persona_id="foundation-coach")
+        foundation.avatar_asset = custom_asset
+        foundation.save(update_fields=["avatar_asset"])
+
+        migration_module.forwards(django_apps, self.get_migration_schema_editor())
+        TutorAvatarAsset.objects.filter(asset_id="teacher-insight-v1").update(display_name="旧名称")
+        migration_module.forwards(django_apps, self.get_migration_schema_editor())
+
+        self.assertEqual(
+            TutorAvatarAsset.objects.filter(asset_id__in=migration_module.ASSET_IDS).count(),
+            3,
+        )
+        self.assertEqual(
+            TutorAvatarAsset.objects.get(asset_id="teacher-insight-v1").display_name,
+            "旧名称",
+        )
+        practice.refresh_from_db()
+        foundation.refresh_from_db()
+        self.assertEqual(practice.avatar_asset_id, default_asset.id)
+        self.assertEqual(practice.updated_by_id, self.user.id)
+        self.assertEqual(foundation.avatar_asset_id, custom_asset.id)
+
+    def test_additional_avatar_reverse_restores_only_untouched_bindings_and_keeps_reused_assets(self):
+        migration_module, default_asset = self.reset_additional_avatar_migration_state()
+        TutorAvatarAsset = self.get_model("TutorAvatarAsset")
+        TutorPersonaConfiguration = self.get_model("TutorPersonaConfiguration")
+        migration_module.forwards(django_apps, self.get_migration_schema_editor())
+
+        insight_asset = TutorAvatarAsset.objects.get(asset_id="teacher-insight-v1")
+        practice = TutorPersonaConfiguration.objects.get(persona_id="practice-coach")
+        practice.updated_by = self.user
+        practice.save(update_fields=["updated_by"])
+        TutorPersonaConfiguration.objects.create(
+            persona_id="administrator-reused-avatar",
+            avatar_asset=insight_asset,
+            updated_by=self.user,
+        )
+
+        migration_module.reverse(django_apps, self.get_migration_schema_editor())
+
+        socratic = TutorPersonaConfiguration.objects.get(persona_id="socratic-guide")
+        foundation = TutorPersonaConfiguration.objects.get(persona_id="foundation-coach")
+        practice.refresh_from_db()
+        self.assertEqual(socratic.avatar_asset_id, default_asset.id)
+        self.assertEqual(foundation.avatar_asset_id, default_asset.id)
+        self.assertEqual(practice.avatar_asset.asset_id, "teacher-practice-v1")
+        self.assertEqual(practice.updated_by_id, self.user.id)
+        self.assertTrue(TutorAvatarAsset.objects.filter(asset_id="teacher-insight-v1").exists())
+        self.assertTrue(TutorAvatarAsset.objects.filter(asset_id="teacher-practice-v1").exists())
+        self.assertFalse(TutorAvatarAsset.objects.filter(asset_id="teacher-foundation-v1").exists())
+
+
+class AdditionalTutorAvatarMigrationTests(TransactionTestCase):
+    serialized_rollback = True
+    migrate_from = ("learning", "0015_tutor_analytics_indexes")
+    migrate_to = ("learning", "0016_additional_tutor_avatar_assets")
+
+    expected_assets = {
+        "teacher-insight-v1": {
+            "display_name": "启思导师",
+            "public_path": "/a3/assets/teacher-avatar/teacher2.vrm",
+            "sha256": "cf0e672ae98ca5cb35de92dd99bf836725d619931c0ef174e5e9e50a1a0001bf",
+            "file_size_bytes": 14_574_928,
+        },
+        "teacher-practice-v1": {
+            "display_name": "知行导师",
+            "public_path": "/a3/assets/teacher-avatar/teacher3.vrm",
+            "sha256": "9ea7e12d57025f16101f867b0e3f88907bbabcf697d9edfa1176fc4bc7b0bc1e",
+            "file_size_bytes": 15_195_704,
+        },
+        "teacher-foundation-v1": {
+            "display_name": "明理导师",
+            "public_path": "/a3/assets/teacher-avatar/teacher4.vrm",
+            "sha256": "ff0b340fb317d70039b15e34e165f46ec1aaead691aa28abca524a1861dcbe61",
+            "file_size_bytes": 15_088_084,
+        },
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.db_alias = connection.alias
+        self.executor = MigrationExecutor(connection)
+        self.executor.migrate([self.migrate_from])
+        self.old_apps = self.executor.loader.project_state([self.migrate_from]).apps
+
+    def tearDown(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+        super().tearDown()
+
+    def migrate(self, target):
+        executor = MigrationExecutor(connection)
+        executor.migrate([target])
+        return executor.loader.project_state([target]).apps
+
+    def asset_snapshot(self, Asset, asset_id):
+        field_names = [field.attname for field in Asset._meta.concrete_fields]
+        return (
+            Asset.objects.using(self.db_alias)
+            .values(*field_names)
+            .get(asset_id=asset_id)
+        )
+
+    def test_real_forward_migration_seeds_canonical_assets_and_assigns_untouched_personas(self):
+        migration_module = importlib.import_module(
+            "backend.apps.learning.migrations.0016_additional_tutor_avatar_assets"
+        )
+
+        apps = self.migrate(self.migrate_to)
+        Asset = apps.get_model("learning", "TutorAvatarAsset")
+        Configuration = apps.get_model("learning", "TutorPersonaConfiguration")
+
+        self.assertEqual(tuple(self.expected_assets), migration_module.ASSET_IDS)
+        self.assertEqual(
+            migration_module.PERSONA_ASSIGNMENTS,
+            {
+                "socratic-guide": "teacher-insight-v1",
+                "practice-coach": "teacher-practice-v1",
+                "foundation-coach": "teacher-foundation-v1",
+            },
+        )
+        for asset_id, expected in self.expected_assets.items():
+            asset = Asset.objects.using(self.db_alias).get(asset_id=asset_id)
+            for field_name, value in expected.items():
+                self.assertEqual(getattr(asset, field_name), value)
+            self.assertEqual(asset.thumbnail_path, "")
+            self.assertEqual(asset.author, "A3 project team")
+            self.assertEqual(asset.source_name, "VRoid Studio self-created model")
+            self.assertEqual(asset.source_url, "https://vroid.com/en/studio")
+            self.assertEqual(asset.license_name, "VRM 1.0 project-scoped non-commercial")
+            self.assertEqual(asset.license_url, "https://vrm.dev/licenses/1.0/")
+            self.assertEqual(asset.usage_scope, ["A3 demo", "competition", "product prototype"])
+            self.assertEqual(asset.status, "enabled")
+            self.assertFalse(asset.is_default)
+            self.assertIsNone(asset.default_slot)
+            self.assertEqual(
+                asset.metadata,
+                {
+                    "licenseStatus": "complete",
+                    "vrmVersion": "1.0",
+                    "humanBoneCount": 54,
+                    "expressionPresetCount": 14,
+                    "runtimeAnimations": "shared-vrma",
+                    "seededByMigration": "learning.0016",
+                },
+            )
+
+        assignments = {
+            configuration.persona_id: configuration.avatar_asset.asset_id
+            for configuration in Configuration.objects.using(self.db_alias)
+            .select_related("avatar_asset")
+            .order_by("persona_id")
+        }
+        self.assertEqual(
+            assignments,
+            {
+                "foundation-coach": "teacher-foundation-v1",
+                "practice-coach": "teacher-practice-v1",
+                "socratic-guide": "teacher-insight-v1",
+                "structured-teacher": "teacher-default-v1",
+            },
+        )
+
+    def test_real_forward_migration_preserves_admin_override_on_default_asset(self):
+        User = self.old_apps.get_model("accounts", "User")
+        Asset = self.old_apps.get_model("learning", "TutorAvatarAsset")
+        Configuration = self.old_apps.get_model("learning", "TutorPersonaConfiguration")
+        user = User.objects.using(self.db_alias).create(
+            phone="13800007211",
+            password="unused",
+        )
+        default_asset = Asset.objects.using(self.db_alias).get(asset_id="teacher-default-v1")
+        Configuration.objects.using(self.db_alias).filter(persona_id="practice-coach").update(
+            avatar_asset=default_asset,
+            updated_by_id=user.id,
+        )
+
+        apps = self.migrate(self.migrate_to)
+        Configuration = apps.get_model("learning", "TutorPersonaConfiguration")
+        configuration = Configuration.objects.using(self.db_alias).select_related(
+            "avatar_asset"
+        ).get(persona_id="practice-coach")
+
+        self.assertEqual(configuration.avatar_asset.asset_id, "teacher-default-v1")
+        self.assertEqual(configuration.updated_by_id, user.id)
+
+    def test_preexisting_asset_is_not_overwritten_or_deleted_and_only_safe_asset_is_bound(self):
+        Asset = self.old_apps.get_model("learning", "TutorAvatarAsset")
+        Configuration = self.old_apps.get_model("learning", "TutorPersonaConfiguration")
+        safe = self.expected_assets["teacher-insight-v1"]
+        Asset.objects.using(self.db_alias).create(
+            asset_id="teacher-insight-v1",
+            display_name="管理员预置启思形象",
+            public_path=safe["public_path"],
+            thumbnail_path="/custom/insight.png",
+            author="administrator",
+            source_name="pre-existing catalog",
+            source_url="https://example.com/source",
+            license_name="custom approved license",
+            license_url="https://example.com/license",
+            usage_scope=["custom scope"],
+            sha256=safe["sha256"],
+            file_size_bytes=safe["file_size_bytes"],
+            status="enabled",
+            is_default=False,
+            metadata={"owner": "administrator"},
+        )
+        unsafe = self.expected_assets["teacher-practice-v1"]
+        Asset.objects.using(self.db_alias).create(
+            asset_id="teacher-practice-v1",
+            display_name="不安全的预置形象",
+            public_path=unsafe["public_path"],
+            sha256="0" * 64,
+            file_size_bytes=unsafe["file_size_bytes"],
+            status="enabled",
+            is_default=False,
+            metadata={"owner": "administrator"},
+        )
+        safe_before = self.asset_snapshot(Asset, "teacher-insight-v1")
+        unsafe_before = self.asset_snapshot(Asset, "teacher-practice-v1")
+
+        apps = self.migrate(self.migrate_to)
+        Asset = apps.get_model("learning", "TutorAvatarAsset")
+        Configuration = apps.get_model("learning", "TutorPersonaConfiguration")
+        self.assertEqual(self.asset_snapshot(Asset, "teacher-insight-v1"), safe_before)
+        self.assertEqual(self.asset_snapshot(Asset, "teacher-practice-v1"), unsafe_before)
+        self.assertEqual(
+            Configuration.objects.using(self.db_alias)
+            .select_related("avatar_asset")
+            .get(persona_id="socratic-guide")
+            .avatar_asset.asset_id,
+            "teacher-insight-v1",
+        )
+        self.assertEqual(
+            Configuration.objects.using(self.db_alias)
+            .select_related("avatar_asset")
+            .get(persona_id="practice-coach")
+            .avatar_asset.asset_id,
+            "teacher-default-v1",
+        )
+
+        apps = self.migrate(self.migrate_from)
+        Asset = apps.get_model("learning", "TutorAvatarAsset")
+        self.assertEqual(self.asset_snapshot(Asset, "teacher-insight-v1"), safe_before)
+        self.assertEqual(self.asset_snapshot(Asset, "teacher-practice-v1"), unsafe_before)
+
+    def test_real_reverse_migration_preserves_admin_reuse_and_admin_modified_assignment(self):
+        apps = self.migrate(self.migrate_to)
+        User = apps.get_model("accounts", "User")
+        Asset = apps.get_model("learning", "TutorAvatarAsset")
+        Configuration = apps.get_model("learning", "TutorPersonaConfiguration")
+        user = User.objects.using(self.db_alias).create(
+            phone="13800007212",
+            password="unused",
+        )
+        insight_asset = Asset.objects.using(self.db_alias).get(asset_id="teacher-insight-v1")
+        Configuration.objects.using(self.db_alias).create(
+            persona_id="administrator-reused-avatar",
+            avatar_asset=insight_asset,
+            updated_by_id=user.id,
+        )
+        Configuration.objects.using(self.db_alias).filter(persona_id="practice-coach").update(
+            updated_by_id=user.id,
+        )
+
+        apps = self.migrate(self.migrate_from)
+        Asset = apps.get_model("learning", "TutorAvatarAsset")
+        Configuration = apps.get_model("learning", "TutorPersonaConfiguration")
+
+        self.assertEqual(
+            Configuration.objects.using(self.db_alias)
+            .select_related("avatar_asset")
+            .get(persona_id="socratic-guide")
+            .avatar_asset.asset_id,
+            "teacher-default-v1",
+        )
+        self.assertEqual(
+            Configuration.objects.using(self.db_alias)
+            .select_related("avatar_asset")
+            .get(persona_id="administrator-reused-avatar")
+            .avatar_asset.asset_id,
+            "teacher-insight-v1",
+        )
+        practice = Configuration.objects.using(self.db_alias).select_related("avatar_asset").get(
+            persona_id="practice-coach"
+        )
+        self.assertEqual(practice.avatar_asset.asset_id, "teacher-practice-v1")
+        self.assertEqual(practice.updated_by_id, user.id)
+        self.assertTrue(
+            Asset.objects.using(self.db_alias).filter(asset_id="teacher-insight-v1").exists()
+        )
+        self.assertTrue(
+            Asset.objects.using(self.db_alias).filter(asset_id="teacher-practice-v1").exists()
+        )
+        self.assertFalse(
+            Asset.objects.using(self.db_alias).filter(asset_id="teacher-foundation-v1").exists()
+        )
