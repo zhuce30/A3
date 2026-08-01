@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import timedelta
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import json
 
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 from docx import Document
 from openpyxl import load_workbook
@@ -13,6 +16,8 @@ from pypdf import PdfReader
 
 from backend.apps.accounts.models import User
 from backend.apps.assessments.models import Question, WrongQuestion, WrongQuestionExportJob
+from backend.apps.assessments.content_enhancer import EnhancementResult
+from backend.apps.assessments.wrong_exports import ExportArtifact, WrongExportRequestError
 from backend.apps.learning.models import Chapter, Course, KnowledgePoint
 from backend.apps.profiles.models import LearnerProfile
 
@@ -106,6 +111,108 @@ class WrongExportDomainTests(TestCase):
         self.assertEqual(job.degraded_reasons, ["timeout"])
         self.assertTrue(job.created_at)
         self.assertTrue(job.updated_at)
+
+    def test_create_wrong_export_job_validates_and_reuses_only_matching_active_job(self):
+        from backend.apps.assessments.wrong_export_jobs import create_wrong_export_job
+
+        first, created = create_wrong_export_job(self.user, "active", "docx")
+        reused, reused_created = create_wrong_export_job(self.user, "active", "docx")
+        xlsx, xlsx_created = create_wrong_export_job(self.user, "active", "xlsx")
+        other, other_created = create_wrong_export_job(self.other_user, "active", "docx")
+
+        self.assertTrue(created)
+        self.assertFalse(reused_created)
+        self.assertEqual(first.id, reused.id)
+        self.assertTrue(xlsx_created)
+        self.assertNotEqual(first.id, xlsx.id)
+        self.assertTrue(other_created)
+        self.assertNotEqual(first.id, other.id)
+        self.assertNotIn("generatedAt", first.snapshot_hash)
+        with self.assertRaises(WrongExportRequestError):
+            create_wrong_export_job(self.user, "private", "docx")
+        with self.assertRaises(WrongExportRequestError):
+            create_wrong_export_job(self.user, "active", "zip")
+
+    def test_retry_wrong_export_job_clones_failed_snapshot(self):
+        from backend.apps.assessments.wrong_export_jobs import create_wrong_export_job, retry_wrong_export_job
+
+        original, _ = create_wrong_export_job(self.user, "active", "pdf")
+        original.status = "failed"
+        original.save(update_fields=["status", "updated_at"])
+        retried = retry_wrong_export_job(original)
+        self.assertNotEqual(original.id, retried.id)
+        self.assertEqual(original.snapshot_hash, retried.snapshot_hash)
+        self.assertEqual(original.snapshot, retried.snapshot)
+
+    @patch("backend.apps.assessments.wrong_export_jobs._render_export")
+    @patch("backend.apps.assessments.wrong_export_jobs.enhance_wrong_export")
+    @patch("backend.apps.assessments.wrong_export_jobs.search_knowledge_base")
+    def test_generate_wrong_export_job_persists_enhancement_and_artifact(self, search, enhance, render):
+        from backend.apps.assessments.wrong_export_jobs import (
+            _save_job,
+            create_wrong_export_job,
+            generate_wrong_export_job,
+        )
+
+        search.return_value = []
+        enhance.return_value = EnhancementResult(
+            content={"sections": []},
+            citations=[],
+            verified=False,
+            degraded=True,
+            degraded_reasons=["configuration"],
+            audit={"promptVersion": "wrong-export-v1", "attempts": 1},
+        )
+        render.return_value = ExportArtifact(b"docx-bytes", "application/test", "wrong.docx")
+        with TemporaryDirectory() as directory, override_settings(A3_WRONG_EXPORT_ROOT=directory):
+            job, _ = create_wrong_export_job(self.user, "active", "docx")
+            with patch("backend.apps.assessments.wrong_export_jobs._save_job", wraps=_save_job) as save_job:
+                result = generate_wrong_export_job(str(job.id))
+            job.refresh_from_db()
+            self.assertTrue(result["success"])
+            self.assertEqual(job.status, "succeeded")
+            self.assertEqual(job.stage, "completed")
+            self.assertEqual(job.progress, 100)
+            self.assertTrue(job.degraded)
+            self.assertEqual(job.degraded_reasons, ["configuration"])
+            self.assertEqual(job.llm_audit["promptVersion"], "wrong-export-v1")
+            self.assertEqual(Path(job.artifact_path).read_bytes(), b"docx-bytes")
+            stages = [call.kwargs.get("stage") for call in save_job.call_args_list if call.kwargs.get("stage")]
+            self.assertEqual(stages, ["retrieval", "enhancing", "rendering", "completed"])
+
+    @patch("backend.apps.assessments.wrong_export_jobs._render_export")
+    def test_cancelled_wrong_export_job_is_terminal_and_writes_nothing(self, render):
+        from backend.apps.assessments.wrong_export_jobs import create_wrong_export_job, generate_wrong_export_job
+
+        with TemporaryDirectory() as directory, override_settings(A3_WRONG_EXPORT_ROOT=directory):
+            job, _ = create_wrong_export_job(self.user, "active", "docx")
+            job.status = "cancelled"
+            job.save(update_fields=["status", "updated_at"])
+            result = generate_wrong_export_job(str(job.id))
+            self.assertTrue(result["cancelled"])
+            render.assert_not_called()
+            self.assertFalse(any(Path(directory).rglob("*.docx")))
+
+    def test_wrong_export_serialization_and_resolution_hide_server_path(self):
+        from backend.apps.assessments.wrong_export_jobs import (
+            create_wrong_export_job,
+            resolve_wrong_export_artifact,
+            serialize_wrong_export_job,
+        )
+
+        with TemporaryDirectory() as directory, override_settings(A3_WRONG_EXPORT_ROOT=directory):
+            job, _ = create_wrong_export_job(self.user, "active", "docx")
+            path = Path(directory) / str(self.user.id) / str(job.id) / "wrong.docx"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"ok")
+            job.status = "succeeded"
+            job.artifact_path = str(path)
+            job.filename = "wrong.docx"
+            job.save(update_fields=["status", "artifact_path", "filename", "updated_at"])
+            payload = serialize_wrong_export_job(job)
+            self.assertNotIn(directory, str(payload))
+            self.assertIn("downloadUrl", payload)
+            self.assertEqual(resolve_wrong_export_artifact(job), path.resolve())
 
     def test_select_wrong_questions_supports_all_scopes_and_owner_isolation(self):
         from backend.apps.assessments.wrong_exports import select_wrong_questions

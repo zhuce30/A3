@@ -37,3 +37,25 @@ def generate_review_handout_task(self, job_id: str) -> dict:
         return generate_review_handout(job_id)
     finally:
         close_old_connections()
+
+
+@shared_task(
+    bind=True,
+    name="assessments.generate_wrong_question_export",
+    acks_late=True,
+    reject_on_worker_lost=False,
+    soft_time_limit=1200,
+    time_limit=1320,
+)
+def generate_wrong_question_export_task(self, job_id: str) -> dict:
+    from backend.apps.assessments.models import WrongQuestionExportJob
+    from backend.apps.assessments.wrong_export_jobs import generate_wrong_export_job
+
+    close_old_connections()
+    try:
+        WrongQuestionExportJob.objects.filter(id=job_id, status="queued").update(
+            celery_task_id=self.request.id or ""
+        )
+        return generate_wrong_export_job(job_id)
+    finally:
+        close_old_connections()
