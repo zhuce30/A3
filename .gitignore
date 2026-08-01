@@ -30,6 +30,9 @@ server_err.log
 .nested-git-backups/
 .worktrees/
 
+# Editable VRoid source projects are local authoring assets, not runtime files
+*.vroid
+
 # Environment and secrets
 .env
 .env.*
