@@ -71,7 +71,7 @@ function ControlButton({
   return (
     <button
       type="button"
-      className="inline-flex size-9 items-center justify-center rounded-md text-[var(--a3-text)] transition-colors hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-35 dark:hover:bg-amber-950/50"
+      className="a3-reduced-motion-control inline-flex size-9 items-center justify-center rounded-md text-[var(--a3-text)] transition-colors hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-35 dark:hover:bg-amber-950/50"
       {...props}
     >
       {children}

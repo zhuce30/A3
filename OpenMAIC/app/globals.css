@@ -170,6 +170,10 @@
   .a3-theme-transitioning [data-a3-shell] * {
     transition-duration: 0ms;
   }
+
+  .a3-reduced-motion-control {
+    transition-duration: 0ms;
+  }
 }
 
 @layer base {

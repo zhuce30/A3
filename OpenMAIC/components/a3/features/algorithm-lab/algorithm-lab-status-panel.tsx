@@ -81,16 +81,21 @@ export function AlgorithmLabStatusPanel({
 
       <label className="block text-xs font-medium text-[var(--a3-text-muted)]">
         播放速度
-        <select
+        <span className="mt-2 flex items-center justify-between text-[11px] text-[var(--a3-text-muted)]" aria-hidden="true">
+          <span>0.5x</span>
+          <span className="font-semibold text-[var(--a3-text)]">当前 {speed}x</span>
+          <span>2x</span>
+        </span>
+        <input
+          type="range"
+          min={0.5}
+          max={2}
+          step={0.5}
           value={speed}
           onChange={(event) => onSpeedChange(Number(event.target.value))}
-          className="mt-2 h-10 w-full rounded-md border border-[var(--a3-border)] bg-[var(--a3-surface-solid)] px-3 text-sm text-[var(--a3-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
-        >
-          <option value={0.5}>0.5x</option>
-          <option value={1}>1x</option>
-          <option value={1.5}>1.5x</option>
-          <option value={2}>2x</option>
-        </select>
+          aria-valuetext={`${speed}x`}
+          className="mt-1 h-8 w-full cursor-pointer accent-amber-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+        />
       </label>
 
       <div className="text-xs leading-5 text-[var(--a3-text-muted)]" aria-live="polite">

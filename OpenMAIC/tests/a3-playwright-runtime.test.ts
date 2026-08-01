@@ -91,5 +91,23 @@ describe('A3 Playwright runtime', () => {
     expect(runtime.backendManagePy).toBe(path.join(backendRoot, 'backend', 'manage.py'));
     expect(runtime.backendCommand).toContain(python);
     expect(runtime.backendCommand).toContain(runtime.backendManagePy);
+    expect(runtime.backendCommand).toContain('set DJANGO_DEBUG=1');
+    expect(runtime.backendCommand).toContain('backend.config.test_sqlite_settings');
+    expect(runtime.backendCommand).toContain('migrate --noinput');
+  });
+
+  it('isolates a managed backend on an explicit port and uses webpack in local worktrees', () => {
+    const runtime = resolveA3PlaywrightRuntime(
+      {
+        A3_PLAYWRIGHT_PORT: '3017',
+        A3_PLAYWRIGHT_BACKEND_PORT: '8017',
+      },
+      path.resolve('OpenMAIC'),
+    );
+
+    expect(runtime.backendPort).toBe(8017);
+    expect(runtime.backendURL).toBe('http://localhost:8017');
+    expect(runtime.backendCommand).toContain('localhost:8017');
+    expect(runtime.frontendCommand).toContain('next.CMD dev --webpack');
   });
 });

@@ -379,7 +379,7 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
         )}
       </div>
 
-      <div className="relative">
+      <div className={cn('relative', compact && 'max-[479px]:hidden')}>
         <button type="button" onClick={() => togglePanel('help')} className="flex items-center gap-2 rounded-xl px-1.5 py-2 hover:bg-[var(--a3-surface-muted)] sm:px-2">
           <CircleHelp className="size-5" />
           {!compact && <span className="text-sm font-medium">{messages.helpCenter}</span>}
@@ -448,7 +448,7 @@ export function A3TopActions({ compact = false, showThemeToggle = true }: { comp
 
       <span className="hidden h-6 w-px bg-[var(--a3-border)] md:block" />
 
-      <div className="relative">
+      <div className={cn('relative', compact && 'max-[479px]:hidden')}>
         <button
           type="button"
           onClick={() => togglePanel('language')}
