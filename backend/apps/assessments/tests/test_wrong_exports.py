@@ -437,22 +437,70 @@ class WrongExportApiTests(WrongExportDomainTests):
         self.assertEqual(empty.status_code, 409)
         self.assertIn("没有可导出的错题", empty.json()["error"])
 
-    def test_export_returns_real_binary_files_with_safe_headers(self):
-        expected = {
-            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "pdf": "application/pdf",
-        }
-        for export_format, content_type in expected.items():
-            with self.subTest(export_format=export_format):
-                response = self.client.post(
-                    "/api/assessments/wrong-questions/export/",
-                    data=json.dumps({"scope": "active", "format": export_format}),
-                    content_type="application/json",
-                )
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response["Content-Type"], content_type)
-                self.assertIn(f".{export_format}", response["Content-Disposition"])
-                self.assertNotIn("D:\\", response["Content-Disposition"])
-                self.assertEqual(response["X-Content-Type-Options"], "nosniff")
-                self.assertGreater(len(response.content), 1000)
+    @patch("backend.apps.assessments.views.current_app.send_task")
+    def test_legacy_export_creates_background_job_with_202_json(self, send_task):
+        send_task.return_value.id = "celery-export-1"
+        response = self.client.post(
+            "/api/assessments/wrong-questions/export/",
+            data=json.dumps({"scope": "active", "format": "docx"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(response.json()["job"]["status"], "queued")
+        send_task.assert_called_once_with(
+            "assessments.generate_wrong_question_export",
+            args=[response.json()["job"]["jobId"]],
+            queue="resource-generation",
+        )
+
+    @patch("backend.apps.assessments.views.current_app.send_task")
+    def test_export_job_api_lists_details_cancels_and_retries_with_owner_isolation(self, send_task):
+        send_task.return_value.id = "celery-export-2"
+        created = self.client.post(
+            "/api/assessments/wrong-questions/exports/",
+            data=json.dumps({"scope": "active", "format": "pdf"}),
+            content_type="application/json",
+        )
+        self.assertEqual(created.status_code, 202)
+        job_id = created.json()["job"]["jobId"]
+        listed = self.client.get("/api/assessments/wrong-questions/exports/")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["jobs"][0]["jobId"], job_id)
+        detail = self.client.get(f"/api/assessments/wrong-questions/exports/{job_id}/")
+        self.assertEqual(detail.status_code, 200)
+
+        other_client = Client()
+        other_client.force_login(self.other_user)
+        self.assertEqual(other_client.get(f"/api/assessments/wrong-questions/exports/{job_id}/").status_code, 404)
+
+        with patch("backend.apps.assessments.views.current_app.control.revoke") as revoke:
+            cancelled = self.client.post(f"/api/assessments/wrong-questions/exports/{job_id}/cancel/")
+            repeated = self.client.post(f"/api/assessments/wrong-questions/exports/{job_id}/cancel/")
+            self.assertEqual(cancelled.json()["job"]["status"], "cancelled")
+            self.assertEqual(repeated.json()["job"]["status"], "cancelled")
+            revoke.assert_called_once_with("celery-export-2", terminate=True)
+
+        retried = self.client.post(f"/api/assessments/wrong-questions/exports/{job_id}/retry/")
+        self.assertEqual(retried.status_code, 202)
+        self.assertNotEqual(retried.json()["job"]["jobId"], job_id)
+
+    def test_export_download_requires_owner_and_succeeded_artifact(self):
+        from backend.apps.assessments.wrong_export_jobs import create_wrong_export_job
+
+        with TemporaryDirectory() as directory, override_settings(A3_WRONG_EXPORT_ROOT=directory):
+            job, _ = create_wrong_export_job(self.user, "active", "docx")
+            pending = self.client.get(f"/api/assessments/wrong-questions/exports/{job.id}/download/")
+            self.assertEqual(pending.status_code, 404)
+            path = Path(directory) / str(self.user.id) / str(job.id) / "wrong.docx"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"document")
+            job.status = "succeeded"
+            job.artifact_path = str(path)
+            job.content_type = "application/test"
+            job.filename = "wrong.docx"
+            job.save(update_fields=["status", "artifact_path", "content_type", "filename", "updated_at"])
+            response = self.client.get(f"/api/assessments/wrong-questions/exports/{job.id}/download/")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+            response.close()

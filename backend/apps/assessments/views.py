@@ -5,7 +5,7 @@ from uuid import UUID
 
 from celery import current_app
 from django.db import models, transaction
-from django.http import FileResponse, HttpResponse, JsonResponse
+from django.http import FileResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
@@ -15,7 +15,7 @@ from backend.apps.assessments.generation import (
     create_question_generation_job,
     serialize_question_generation_job,
 )
-from backend.apps.assessments.models import AssessmentSession, Question, QuestionReviewStatus, ReviewHandoutJob, WrongQuestion
+from backend.apps.assessments.models import AssessmentSession, Question, QuestionReviewStatus, ReviewHandoutJob, WrongQuestion, WrongQuestionExportJob
 from backend.apps.assessments.review_handouts import (
     create_review_handout_job,
     resolve_handout_artifact,
@@ -23,7 +23,13 @@ from backend.apps.assessments.review_handouts import (
     serialize_review_handout_job,
 )
 from backend.apps.assessments.services import answer_assessment_question, build_learning_report, create_assessment, practice_suggestions, resolve_practice_knowledge_point, retry_wrong, serialize_question_bank_item, serialize_session, serialize_wrong_question, wrong_retry_feedback, wrong_review_summary
-from backend.apps.assessments.wrong_exports import WrongExportRequestError, build_wrong_export
+from backend.apps.assessments.wrong_export_jobs import (
+    create_wrong_export_job,
+    resolve_wrong_export_artifact,
+    retry_wrong_export_job,
+    serialize_wrong_export_job,
+)
+from backend.apps.assessments.wrong_exports import WrongExportRequestError
 from backend.apps.compat.agent_kernel import run_question_generation_workflow
 
 
@@ -153,15 +159,49 @@ def wrong_questions(request):
 
 @require_http_methods(["POST"])
 def wrong_question_export(request):
+    return wrong_question_export_jobs(request)
+
+
+def _dispatch_wrong_export(job: WrongQuestionExportJob) -> WrongQuestionExportJob:
+    try:
+        result = current_app.send_task(
+            "assessments.generate_wrong_question_export",
+            args=[str(job.id)],
+            queue="resource-generation",
+        )
+        job.celery_task_id = result.id or ""
+        job.save(update_fields=["celery_task_id", "updated_at"])
+    except Exception:
+        job.status = "failed"
+        job.progress = 100
+        job.stage = "failed"
+        job.message = "错题导出任务队列暂不可用，请稍后重试。"
+        job.error_message = job.message
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "progress", "stage", "message", "error_message", "finished_at", "updated_at"])
+    return job
+
+
+@require_http_methods(["GET", "POST"])
+def wrong_question_export_jobs(request):
     rejected = _require_login(request)
     if rejected:
         return rejected
+    if request.method == "GET":
+        jobs = WrongQuestionExportJob.objects.filter(user=request.user).order_by("-created_at")[:30]
+        return JsonResponse({"success": True, "jobs": [serialize_wrong_export_job(job) for job in jobs]})
     try:
         payload = _body(request)
-        artifact = build_wrong_export(
+        job, created = create_wrong_export_job(
             request.user,
             str(payload.get("scope") or "active"),
             str(payload.get("format") or ""),
+        )
+        if created:
+            _dispatch_wrong_export(job)
+        return JsonResponse(
+            {"success": True, "job": serialize_wrong_export_job(job), "reused": not created},
+            status=202,
         )
     except WrongExportRequestError as exc:
         message = str(exc)
@@ -170,8 +210,67 @@ def wrong_question_export(request):
     except ValueError as exc:
         return JsonResponse({"success": False, "error": str(exc)}, status=400)
 
-    response = HttpResponse(artifact.content, content_type=artifact.content_type)
-    response["Content-Disposition"] = f'attachment; filename="{artifact.filename}"'
+
+@require_http_methods(["GET"])
+def wrong_question_export_job_detail(request, job_id):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(WrongQuestionExportJob, id=job_id, user=request.user)
+    return JsonResponse({"success": True, "job": serialize_wrong_export_job(job)})
+
+
+@require_http_methods(["POST"])
+def cancel_wrong_question_export_job(request, job_id):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    with transaction.atomic():
+        job = get_object_or_404(WrongQuestionExportJob.objects.select_for_update(), id=job_id, user=request.user)
+        task_id = job.celery_task_id
+        changed = job.status in {"queued", "running"}
+        if changed:
+            job.status = "cancelled"
+            job.progress = 100
+            job.stage = "cancelled"
+            job.message = "错题导出任务已取消"
+            job.finished_at = timezone.now()
+            job.save(update_fields=["status", "progress", "stage", "message", "finished_at", "updated_at"])
+    if changed and task_id:
+        current_app.control.revoke(task_id, terminate=True)
+    return JsonResponse({"success": True, "job": serialize_wrong_export_job(job)})
+
+
+@require_http_methods(["POST"])
+def retry_wrong_question_export(request, job_id):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(WrongQuestionExportJob, id=job_id, user=request.user)
+    try:
+        next_job = retry_wrong_export_job(job)
+        _dispatch_wrong_export(next_job)
+        return JsonResponse({"success": True, "job": serialize_wrong_export_job(next_job)}, status=202)
+    except WrongExportRequestError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=409)
+
+
+@require_http_methods(["GET"])
+def download_wrong_question_export(request, job_id):
+    rejected = _require_login(request)
+    if rejected:
+        return rejected
+    job = get_object_or_404(WrongQuestionExportJob, id=job_id, user=request.user)
+    try:
+        path = resolve_wrong_export_artifact(job)
+    except WrongExportRequestError as exc:
+        return JsonResponse({"success": False, "error": str(exc)}, status=404)
+    response = FileResponse(
+        path.open("rb"),
+        content_type=job.content_type or "application/octet-stream",
+        as_attachment=True,
+        filename=job.filename or path.name,
+    )
     response["X-Content-Type-Options"] = "nosniff"
     return response
 
