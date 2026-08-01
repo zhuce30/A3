@@ -346,22 +346,50 @@ class AdminTutorApiTests(TestCase):
                     "updatedAt",
                 },
             )
-        self.assertEqual(len(payload["assets"]), 1)
+        self.assertEqual(len(payload["assets"]), 4)
         self.assertEqual(
-            set(payload["assets"][0]),
+            {row["assetId"] for row in payload["assets"]},
             {
-                "assetId",
-                "displayName",
-                "publicPath",
-                "fileSizeBytes",
-                "sha256",
-                "status",
-                "isDefault",
-                "licenseComplete",
+                "teacher-default-v1",
+                "teacher-insight-v1",
+                "teacher-practice-v1",
+                "teacher-foundation-v1",
             },
         )
-        self.assertTrue(payload["assets"][0]["publicPath"].startswith("/a3/assets/teacher-avatar/"))
-        self.assertFalse(payload["assets"][0]["licenseComplete"])
+        default_asset_row = next(
+            row for row in payload["assets"] if row["assetId"] == "teacher-default-v1"
+        )
+        asset_projection_fields = {
+            "assetId",
+            "displayName",
+            "publicPath",
+            "fileSizeBytes",
+            "sha256",
+            "status",
+            "isDefault",
+            "licenseComplete",
+        }
+        for row in payload["assets"]:
+            self.assertEqual(set(row), asset_projection_fields)
+        self.assertTrue(default_asset_row["publicPath"].startswith("/a3/assets/teacher-avatar/"))
+        self.assertFalse(default_asset_row["licenseComplete"])
+        canonical_assets = {
+            row["assetId"]: row
+            for row in payload["assets"]
+            if row["assetId"] != "teacher-default-v1"
+        }
+        self.assertEqual(
+            {
+                asset_id: row["publicPath"]
+                for asset_id, row in canonical_assets.items()
+            },
+            {
+                "teacher-insight-v1": "/a3/assets/teacher-avatar/teacher2.vrm",
+                "teacher-practice-v1": "/a3/assets/teacher-avatar/teacher3.vrm",
+                "teacher-foundation-v1": "/a3/assets/teacher-avatar/teacher4.vrm",
+            },
+        )
+        self.assertTrue(all(row["licenseComplete"] for row in canonical_assets.values()))
         self.assertEqual(
             payload["providerStatus"],
             [

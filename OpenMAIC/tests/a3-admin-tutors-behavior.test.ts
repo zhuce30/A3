@@ -44,13 +44,52 @@ function persona(overrides: Partial<A3AdminTutorPersona> = {}): A3AdminTutorPers
     allowedWorkflows: ['coaching'],
     schemaVersion: 'a3.tutor-persona.v1',
     enabled: true,
-    avatarAssetId: 'teacher-default-v1',
+    avatarAssetId: 'api-test-avatar-gamma',
     voicePreviewEnabled: true,
     configurationDataStatus: 'collected',
     updatedAt: '2026-07-27T08:00:00+00:00',
     ...overrides,
   };
 }
+
+const apiProvidedTutorAssets = [
+  {
+    assetId: 'api-test-avatar-gamma',
+    displayName: 'API 测试导师 Gamma',
+    publicPath: '/a3/assets/teacher-avatar/api-test-gamma.vrm',
+    fileSizeBytes: 1024,
+    status: 'enabled',
+    isDefault: true,
+    licenseComplete: null,
+  },
+  {
+    assetId: 'api-test-avatar-alpha',
+    displayName: 'API 测试导师 Alpha',
+    publicPath: '/a3/assets/teacher-avatar/api-test-alpha.vrm',
+    fileSizeBytes: 1024,
+    status: 'enabled',
+    isDefault: false,
+    licenseComplete: true,
+  },
+  {
+    assetId: 'api-test-avatar-delta',
+    displayName: 'API 测试导师 Delta',
+    publicPath: '/a3/assets/teacher-avatar/api-test-delta.vrm',
+    fileSizeBytes: 1024,
+    status: 'enabled',
+    isDefault: false,
+    licenseComplete: true,
+  },
+  {
+    assetId: 'api-test-avatar-beta',
+    displayName: 'API 测试导师 Beta',
+    publicPath: '/a3/assets/teacher-avatar/api-test-beta.vrm',
+    fileSizeBytes: 1024,
+    status: 'enabled',
+    isDefault: false,
+    licenseComplete: true,
+  },
+];
 
 function response(overrides: Partial<A3AdminTutorsResponse> = {}): A3AdminTutorsResponse {
   return {
@@ -69,14 +108,7 @@ function response(overrides: Partial<A3AdminTutorsResponse> = {}): A3AdminTutors
       satisfaction: { value: 4.5, sampleCount: 4, dataStatus: 'collected' },
     },
     personas: [persona()],
-    assets: [{
-      assetId: 'teacher-default-v1',
-      displayName: '默认导师',
-      fileSizeBytes: 1024,
-      status: 'enabled',
-      isDefault: true,
-      licenseComplete: null,
-    }],
+    assets: apiProvidedTutorAssets,
     providerStatus: [{ id: 'tutorVoicePreview', status: 'unknown', dataStatus: 'not_collected' }],
     analytics: {
       adoption: [
@@ -617,6 +649,22 @@ describe('admin tutor mutation behavior', () => {
 });
 
 describe('admin tutor page states', () => {
+  it('renders synthetic API-provided tutor assets in API order', async () => {
+    adminApi.getA3AdminTutors.mockResolvedValue(response());
+    const view = renderView();
+    await settleTimer();
+
+    const selector = view.container.querySelector<HTMLSelectElement>(
+      'select[aria-label="结构化讲师的 VRM 资产"]',
+    );
+    expect(Array.from(selector?.options || [], (option) => option.value)).toEqual([
+      'api-test-avatar-gamma',
+      'api-test-avatar-alpha',
+      'api-test-avatar-delta',
+      'api-test-avatar-beta',
+    ]);
+  });
+
   it('renders loading, retry, and empty states through real interactions', async () => {
     const loading = deferred<A3AdminTutorsResponse>();
     adminApi.getA3AdminTutors

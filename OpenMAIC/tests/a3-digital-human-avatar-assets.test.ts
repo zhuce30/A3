@@ -123,6 +123,18 @@ describe('controlled tutor avatar assets', () => {
   });
 
   it.each([
+    ['teacher-insight-v1', '/a3/assets/teacher-avatar/teacher2.vrm'],
+    ['teacher-practice-v1', '/a3/assets/teacher-avatar/teacher3.vrm'],
+    ['teacher-foundation-v1', '/a3/assets/teacher-avatar/teacher4.vrm'],
+  ])('accepts the canonical tutor asset %s without fallback', (assetId, publicPath) => {
+    const selection = { assetId, publicPath };
+    const resolved = resolveControlledAvatarAssetSelection(selection);
+
+    expect(resolved.fallbackUsed).toBe(false);
+    expect(resolved.selection).toEqual(selection);
+  });
+
+  it.each([
     'https://example.com/teacher.vrm',
     '//example.com/teacher.vrm',
     '/a3/assets/teacher-avatar/../secret.vrm',
