@@ -60,8 +60,11 @@ class TutorPreferenceTests(TestCase):
             },
         )
         self.assertEqual(persona["schemaVersion"], "a3.tutor-persona.v1")
-        self.assertEqual(persona["avatarAssetId"], "teacher-default-v1")
-        self.assertEqual(persona["avatarPublicPath"], "/a3/assets/teacher-avatar/teacher.vrm")
+        configuration = TutorPersonaConfiguration.objects.select_related("avatar_asset").get(
+            persona_id=persona["id"]
+        )
+        self.assertEqual(persona["avatarAssetId"], configuration.avatar_asset.asset_id)
+        self.assertEqual(persona["avatarPublicPath"], configuration.avatar_asset.public_path)
         self.assertTrue(persona["voicePreviewEnabled"])
         self.assertIn("coaching", persona["allowedWorkflows"])
         self.assertIn("classroom", persona["allowedWorkflows"])
@@ -224,9 +227,9 @@ class TutorPreferenceTests(TestCase):
         self.assertEqual(patch_response.json(), response.json())
 
     def test_all_invalid_rows_do_not_reactivate_code_catalog(self):
-        default_asset = TutorAvatarAsset.objects.get(asset_id="teacher-default-v1")
-        default_asset.public_path = "/a3/assets/teacher-avatar/%252e%252e%252fprivate.vrm"
-        default_asset.save(update_fields=["public_path", "updated_at"])
+        TutorAvatarAsset.objects.update(
+            public_path="/a3/assets/teacher-avatar/%252e%252e%252fprivate.vrm"
+        )
 
         response = self.client.get(self.endpoint)
         patch_response = self.patch_preference({"personaId": "structured-teacher"})
