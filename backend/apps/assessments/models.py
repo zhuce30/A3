@@ -297,6 +297,50 @@ class WrongQuestion(models.Model):
         constraints = [models.UniqueConstraint(fields=["user", "question"], name="unique_user_wrong_question")]
 
 
+class WrongQuestionExportJob(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="wrong_question_export_jobs",
+    )
+    scope = models.CharField(max_length=16, default="active")
+    format = models.CharField(max_length=8)
+    snapshot_hash = models.CharField(max_length=64, db_index=True)
+    snapshot = models.JSONField(default=dict)
+    status = models.CharField(max_length=16, default="queued")
+    progress = models.PositiveSmallIntegerField(default=0)
+    stage = models.CharField(max_length=40, default="queued")
+    message = models.CharField(max_length=255, blank=True)
+    trace_id = models.CharField(max_length=64, blank=True, db_index=True)
+    celery_task_id = models.CharField(max_length=64, blank=True)
+    enhancement = models.JSONField(default=dict, blank=True)
+    citations = models.JSONField(default=list, blank=True)
+    llm_audit = models.JSONField(default=dict, blank=True)
+    verified = models.BooleanField(default=False)
+    degraded = models.BooleanField(default=False)
+    degraded_reasons = models.JSONField(default=list, blank=True)
+    artifact_path = models.CharField(max_length=500, blank=True)
+    content_type = models.CharField(max_length=128, blank=True)
+    filename = models.CharField(max_length=255, blank=True)
+    error_message = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_wrong_question_export_jobs"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="a3_wrong_exp_user_created_idx"),
+            models.Index(
+                fields=["user", "snapshot_hash", "format", "status"],
+                name="a3_wrong_exp_hash_fmt_idx",
+            ),
+        ]
+
+
 class ReviewHandoutJob(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -314,9 +358,13 @@ class ReviewHandoutJob(models.Model):
     message = models.CharField(max_length=255, blank=True)
     trace_id = models.CharField(max_length=64, blank=True, db_index=True)
     celery_task_id = models.CharField(max_length=64, blank=True)
+    enhancement = models.JSONField(default=dict, blank=True)
     citations = models.JSONField(default=list, blank=True)
+    llm_audit = models.JSONField(default=dict, blank=True)
     verified = models.BooleanField(default=False)
     degraded = models.BooleanField(default=False)
+    degraded_reasons = models.JSONField(default=list, blank=True)
+    prompt_version = models.CharField(max_length=64, blank=True)
     docx_path = models.CharField(max_length=500, blank=True)
     pdf_path = models.CharField(max_length=500, blank=True)
     error_message = models.TextField(blank=True)

@@ -3,13 +3,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Download, FileText, Loader2, RefreshCcw, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { a3DownloadFile, a3GetJson, a3PostDownload, a3PostJson } from '@/lib/a3/api-client';
-import type { ReviewHandoutJob, WrongExportFormat, WrongExportScope, WrongReviewSummary } from '@/lib/a3/assessment-types';
+import { a3DownloadFile, a3GetJson, a3PostJson } from '@/lib/a3/api-client';
+import type {
+  AssessmentJobStatus,
+  ReviewHandoutJob,
+  WrongExportFormat,
+  WrongExportScope,
+  WrongQuestionExportJob,
+  WrongReviewSummary,
+} from '@/lib/a3/assessment-types';
 import type { A3ApiResponse } from '@/lib/a3/learning-types';
 import { A3Card, A3Pill } from '../ui/a3-card';
 
-type JobsResponse = A3ApiResponse<{ jobs: ReviewHandoutJob[] }>;
-type JobResponse = A3ApiResponse<{ job: ReviewHandoutJob; reused?: boolean }>;
+type ExportJobsResponse = A3ApiResponse<{ jobs: WrongQuestionExportJob[] }>;
+type ExportJobResponse = A3ApiResponse<{ job: WrongQuestionExportJob; reused?: boolean }>;
+type HandoutJobsResponse = A3ApiResponse<{ jobs: ReviewHandoutJob[] }>;
+type HandoutJobResponse = A3ApiResponse<{ job: ReviewHandoutJob; reused?: boolean }>;
 
 const scopes: Array<{ value: WrongExportScope; label: string }> = [
   { value: 'active', label: '待巩固' },
@@ -32,88 +41,130 @@ const jobActionPath = {
 export function WrongNotebookActions({ reviewSummary }: { reviewSummary: WrongReviewSummary | null }) {
   const [scope, setScope] = useState<WrongExportScope>('active');
   const [format, setFormat] = useState<WrongExportFormat>('docx');
-  const [jobs, setJobs] = useState<ReviewHandoutJob[]>([]);
-  const [loadingJobs, setLoadingJobs] = useState(true);
+  const [exportJobs, setExportJobs] = useState<WrongQuestionExportJob[]>([]);
+  const [handoutJobs, setHandoutJobs] = useState<ReviewHandoutJob[]>([]);
+  const [loadingExportJobs, setLoadingExportJobs] = useState(true);
+  const [loadingHandoutJobs, setLoadingHandoutJobs] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [actingJob, setActingJob] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const hasActiveJob = useMemo(
-    () => jobs.some((job) => job.status === 'queued' || job.status === 'running'),
-    [jobs],
+    () => exportJobs.some((job) => job.status === 'queued' || job.status === 'running')
+      || handoutJobs.some((job) => job.status === 'queued' || job.status === 'running'),
+    [exportJobs, handoutJobs],
   );
 
-  const loadJobs = useCallback(async (quiet = false) => {
-    if (!quiet) setLoadingJobs(true);
-    const result = await a3GetJson<JobsResponse>('/api/assessments/wrong-questions/review-handouts/');
+  const loadExportJobs = useCallback(async (quiet = false) => {
+    if (!quiet) setLoadingExportJobs(true);
+    const result = await a3GetJson<ExportJobsResponse>('/api/assessments/wrong-questions/exports/');
     if (result.success) {
-      setJobs(result.jobs);
+      setExportJobs(result.jobs);
+    } else if (!quiet) {
+      setError(result.error || '导出任务加载失败');
+    }
+    if (!quiet) setLoadingExportJobs(false);
+  }, []);
+
+  const loadHandoutJobs = useCallback(async (quiet = false) => {
+    if (!quiet) setLoadingHandoutJobs(true);
+    const result = await a3GetJson<HandoutJobsResponse>('/api/assessments/wrong-questions/review-handouts/');
+    if (result.success) {
+      setHandoutJobs(result.jobs);
     } else if (!quiet) {
       setError(result.error || '讲义任务加载失败');
     }
-    if (!quiet) setLoadingJobs(false);
+    if (!quiet) setLoadingHandoutJobs(false);
   }, []);
 
   useEffect(() => {
-    void loadJobs();
-  }, [loadJobs]);
+    const timer = window.setTimeout(() => {
+      void loadExportJobs();
+      void loadHandoutJobs();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadExportJobs, loadHandoutJobs]);
 
   useEffect(() => {
     if (!hasActiveJob) return;
-    const timer = window.setInterval(() => void loadJobs(true), 2000);
+    const timer = window.setInterval(() => {
+      void loadExportJobs(true);
+      void loadHandoutJobs(true);
+    }, 2000);
     return () => window.clearInterval(timer);
-  }, [hasActiveJob, loadJobs]);
+  }, [hasActiveJob, loadExportJobs, loadHandoutJobs]);
 
   async function exportWrongQuestions() {
     setExporting(true);
     setError('');
     setNotice('');
-    try {
-      const date = new Date().toISOString().slice(0, 10);
-      const fallback = 'wrong-questions-' + scope + '-' + date + '.' + format;
-      const result = await a3PostDownload(
-        '/api/assessments/wrong-questions/export/',
-        { scope, format },
-        fallback,
-      );
-      setNotice(result.fileName + ' 已开始下载');
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : '错题导出失败');
-    } finally {
-      setExporting(false);
+    const result = await a3PostJson<ExportJobResponse>(
+      '/api/assessments/wrong-questions/exports/',
+      { scope, format },
+    );
+    if (result.success) {
+      setNotice(result.reused ? '相同导出任务已在队列中' : '错题导出已进入生成队列');
+      await loadExportJobs(true);
+    } else {
+      setError(result.error || '错题导出任务创建失败');
     }
+    setExporting(false);
   }
 
   async function generateHandout() {
     setGenerating(true);
     setError('');
     setNotice('');
-    const result = await a3PostJson<JobResponse>(
+    const result = await a3PostJson<HandoutJobResponse>(
       '/api/assessments/wrong-questions/review-handouts/',
       { scope },
     );
     if (result.success) {
       setNotice(result.reused ? '相同讲义任务已在队列中' : '复习讲义已进入生成队列');
-      await loadJobs(true);
+      await loadHandoutJobs(true);
     } else {
       setError(result.error || '复习讲义创建失败');
     }
     setGenerating(false);
   }
 
-  async function runJobAction(job: ReviewHandoutJob, action: 'cancel' | 'retry') {
-    setActingJob(job.jobId);
+  async function runExportJobAction(job: WrongQuestionExportJob, action: 'cancel' | 'retry') {
+    setActingJob('export-' + job.jobId);
     setError('');
-    const url = '/api/assessments/wrong-questions/review-handouts/' + job.jobId + jobActionPath[action];
-    const result = await a3PostJson<JobResponse>(url, {});
+    const url = '/api/assessments/wrong-questions/exports/' + job.jobId + jobActionPath[action];
+    const result = await a3PostJson<ExportJobResponse>(url, {});
     if (result.success) {
-      setNotice(action === 'cancel' ? '讲义任务已取消' : '讲义已重新进入生成队列');
-      await loadJobs(true);
+      setNotice(action === 'cancel' ? '导出任务已取消' : '导出任务已重新进入生成队列');
+      await loadExportJobs(true);
     } else {
       setError(result.error || (action === 'cancel' ? '取消失败' : '重试失败'));
     }
     setActingJob('');
+  }
+
+  async function runHandoutJobAction(job: ReviewHandoutJob, action: 'cancel' | 'retry') {
+    setActingJob('handout-' + job.jobId);
+    setError('');
+    const url = '/api/assessments/wrong-questions/review-handouts/' + job.jobId + jobActionPath[action];
+    const result = await a3PostJson<HandoutJobResponse>(url, {});
+    if (result.success) {
+      setNotice(action === 'cancel' ? '讲义任务已取消' : '讲义已重新进入生成队列');
+      await loadHandoutJobs(true);
+    } else {
+      setError(result.error || (action === 'cancel' ? '取消失败' : '重试失败'));
+    }
+    setActingJob('');
+  }
+
+  async function downloadExport(job: WrongQuestionExportJob) {
+    if (!job.downloadUrl) return;
+    setError('');
+    try {
+      await a3DownloadFile(job.downloadUrl, `wrong-questions-${job.scope}.${job.format}`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '错题导出下载失败');
+    }
   }
 
   async function downloadHandout(url: string, extension: 'docx' | 'pdf') {
@@ -186,26 +237,49 @@ export function WrongNotebookActions({ reviewSummary }: { reviewSummary: WrongRe
 
         <div className="mt-5 border-t border-slate-200 pt-4">
           <div className="mb-3 flex items-center justify-between gap-3">
-            <h3 className="text-sm font-semibold text-slate-950">讲义历史</h3>
-            <Button size="icon" variant="ghost" onClick={() => void loadJobs()} title="刷新讲义任务" aria-label="刷新讲义任务">
+            <h3 className="text-sm font-semibold text-slate-950">导出历史</h3>
+            <Button size="icon" variant="ghost" onClick={() => void loadExportJobs()} title="刷新导出任务" aria-label="刷新导出任务">
               <RefreshCcw className="size-4" />
             </Button>
           </div>
-          {loadingJobs ? (
-            <div className="flex h-20 items-center justify-center text-sm text-slate-500">
-              <Loader2 className="mr-2 size-4 animate-spin" />
-              正在加载讲义任务
-            </div>
-          ) : jobs.length === 0 ? (
-            <div className="rounded-lg bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">还没有生成过复习讲义。</div>
+          {loadingExportJobs ? (
+            <JobListLoading label="正在加载导出任务" />
+          ) : exportJobs.length === 0 ? (
+            <JobListEmpty label="还没有导出过错题。" />
           ) : (
             <div className="space-y-2">
-              {jobs.slice(0, 6).map((job) => (
-                <JobRow
+              {exportJobs.slice(0, 6).map((job) => (
+                <ExportJobRow
                   key={job.jobId}
                   job={job}
-                  acting={actingJob === job.jobId}
-                  onAction={runJobAction}
+                  acting={actingJob === 'export-' + job.jobId}
+                  onAction={runExportJobAction}
+                  onDownload={downloadExport}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 border-t border-slate-200 pt-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold text-slate-950">讲义历史</h3>
+            <Button size="icon" variant="ghost" onClick={() => void loadHandoutJobs()} title="刷新讲义任务" aria-label="刷新讲义任务">
+              <RefreshCcw className="size-4" />
+            </Button>
+          </div>
+          {loadingHandoutJobs ? (
+            <JobListLoading label="正在加载讲义任务" />
+          ) : handoutJobs.length === 0 ? (
+            <JobListEmpty label="还没有生成过复习讲义。" />
+          ) : (
+            <div className="space-y-2">
+              {handoutJobs.slice(0, 6).map((job) => (
+                <HandoutJobRow
+                  key={job.jobId}
+                  job={job}
+                  acting={actingJob === 'handout-' + job.jobId}
+                  onAction={runHandoutJobAction}
                   onDownload={downloadHandout}
                 />
               ))}
@@ -232,7 +306,32 @@ function ScopeSelect({ value, onChange }: { value: WrongExportScope; onChange: (
   );
 }
 
-function JobRow({
+function ExportJobRow({
+  job,
+  acting,
+  onAction,
+  onDownload,
+}: {
+  job: WrongQuestionExportJob;
+  acting: boolean;
+  onAction: (job: WrongQuestionExportJob, action: 'cancel' | 'retry') => void;
+  onDownload: (job: WrongQuestionExportJob) => void;
+}) {
+  return (
+    <TaskRow
+      title={`${scopeLabel(job.scope)}错题 · ${formatLabel(job.format)}`}
+      job={job}
+      acting={acting}
+      auditModel={job.model}
+      auditAttempts={job.attempts}
+      onCancel={() => onAction(job, 'cancel')}
+      onRetry={() => onAction(job, 'retry')}
+      download={job.downloadUrl ? { label: `下载${formatLabel(job.format)}`, onClick: () => onDownload(job) } : undefined}
+    />
+  );
+}
+
+function HandoutJobRow({
   job,
   acting,
   onAction,
@@ -242,6 +341,46 @@ function JobRow({
   acting: boolean;
   onAction: (job: ReviewHandoutJob, action: 'cancel' | 'retry') => void;
   onDownload: (url: string, extension: 'docx' | 'pdf') => void;
+}) {
+  return (
+    <TaskRow
+      title={`${scopeLabel(job.scope)}复习讲义`}
+      job={job}
+      acting={acting}
+      auditModel={job.llmAudit.model}
+      auditAttempts={job.llmAudit.attempts}
+      onCancel={() => onAction(job, 'cancel')}
+      onRetry={() => onAction(job, 'retry')}
+      downloads={[
+        ...(job.docxDownloadUrl ? [{ label: '下载 Word 讲义', onClick: () => onDownload(job.docxDownloadUrl!, 'docx') }] : []),
+        ...(job.pdfDownloadUrl ? [{ label: '下载 PDF 讲义', onClick: () => onDownload(job.pdfDownloadUrl!, 'pdf') }] : []),
+      ]}
+    />
+  );
+}
+
+type TaskJob = Pick<ReviewHandoutJob, 'status' | 'progress' | 'stage' | 'message' | 'verified' | 'degraded' | 'degradedReasons' | 'promptVersion' | 'updatedAt'>;
+
+function TaskRow({
+  title,
+  job,
+  acting,
+  auditModel,
+  auditAttempts,
+  onCancel,
+  onRetry,
+  download,
+  downloads = [],
+}: {
+  title: string;
+  job: TaskJob;
+  acting: boolean;
+  auditModel?: string;
+  auditAttempts?: number;
+  onCancel: () => void;
+  onRetry: () => void;
+  download?: { label: string; onClick: () => void };
+  downloads?: Array<{ label: string; onClick: () => void }>;
 }) {
   const running = job.status === 'queued' || job.status === 'running';
   const icon = running
@@ -256,11 +395,25 @@ function JobRow({
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-slate-900">
           {icon}
-          {scopeLabel(job.scope)}复习讲义
-          {job.degraded && <A3Pill tone="orange">资料不足降级</A3Pill>}
-          {job.verified && <A3Pill tone="green">引用已核验</A3Pill>}
+          {title}
+          {job.degraded && <A3Pill tone="orange">基础版</A3Pill>}
+          {!job.degraded && job.verified && <A3Pill tone="green">已核验</A3Pill>}
+          {!job.degraded && !job.verified && job.status === 'succeeded' && <A3Pill tone="slate">部分核验</A3Pill>}
         </div>
-        <p className="mt-1 truncate text-xs text-slate-500">{job.message || statusLabel(job.status)}</p>
+        <p className="mt-1 break-words text-xs text-slate-500">{job.message || statusLabel(job.status)}</p>
+        <p className="mt-1 text-xs text-slate-400">{stageLabel(job.stage)} · {formatJobTime(job.updatedAt)}</p>
+        {job.status === 'succeeded' && job.promptVersion && (
+          <p className="mt-1 text-xs text-slate-400">
+            增强协议 {job.promptVersion}
+            {auditModel ? ` · ${auditModel}` : ''}
+            {auditAttempts ? ` · ${auditAttempts} 次调用` : ''}
+          </p>
+        )}
+        {job.degradedReasons.length > 0 && (
+          <p className="mt-1 break-words text-xs text-amber-700">
+            降级原因：{job.degradedReasons.map(degradedReasonLabel).join('、')}
+          </p>
+        )}
         {running && (
           <div className="mt-2 h-1.5 w-full max-w-sm overflow-hidden rounded-full bg-slate-100">
             <div className="h-full bg-orange-500 transition-[width]" style={{ width: Math.max(4, job.progress) + '%' }} />
@@ -268,29 +421,37 @@ function JobRow({
         )}
       </div>
       <div className="flex flex-wrap gap-2">
-        {job.docxDownloadUrl && (
-          <Button size="sm" variant="outline" onClick={() => onDownload(job.docxDownloadUrl!, 'docx')}>
-            <FileText className="mr-2 size-4" />Word
+        {[...(download ? [download] : []), ...downloads].map((item) => (
+          <Button key={item.label} size="icon" variant="outline" onClick={item.onClick} title={item.label} aria-label={item.label}>
+            {item.label.includes('Word') ? <FileText className="size-4" /> : <Download className="size-4" />}
           </Button>
-        )}
-        {job.pdfDownloadUrl && (
-          <Button size="sm" variant="outline" onClick={() => onDownload(job.pdfDownloadUrl!, 'pdf')}>
-            <Download className="mr-2 size-4" />PDF
-          </Button>
-        )}
+        ))}
         {running && (
-          <Button size="sm" variant="outline" disabled={acting} onClick={() => onAction(job, 'cancel')}>
-            <XCircle className="mr-2 size-4" />取消
+          <Button size="icon" variant="outline" disabled={acting} onClick={onCancel} title="取消任务" aria-label="取消任务">
+            <XCircle className="size-4" />
           </Button>
         )}
         {(job.status === 'failed' || job.status === 'cancelled') && (
-          <Button size="sm" variant="outline" disabled={acting} onClick={() => onAction(job, 'retry')}>
-            <RefreshCcw className="mr-2 size-4" />重试
+          <Button size="icon" variant="outline" disabled={acting} onClick={onRetry} title="重试任务" aria-label="重试任务">
+            <RefreshCcw className="size-4" />
           </Button>
         )}
       </div>
     </div>
   );
+}
+
+function JobListLoading({ label }: { label: string }) {
+  return (
+    <div className="flex h-20 items-center justify-center text-sm text-slate-500">
+      <Loader2 className="mr-2 size-4 animate-spin" />
+      {label}
+    </div>
+  );
+}
+
+function JobListEmpty({ label }: { label: string }) {
+  return <div className="rounded-lg bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">{label}</div>;
 }
 
 function Metric({ label, value }: { label: string; value: number }) {
@@ -306,6 +467,45 @@ function scopeLabel(scope: WrongExportScope) {
   return scopes.find((item) => item.value === scope)?.label ?? scope;
 }
 
-function statusLabel(status: ReviewHandoutJob['status']) {
+function formatLabel(format: WrongExportFormat) {
+  return formats.find((item) => item.value === format)?.label ?? format.toUpperCase();
+}
+
+function statusLabel(status: AssessmentJobStatus) {
   return { queued: '排队中', running: '生成中', succeeded: '已完成', failed: '生成失败', cancelled: '已取消' }[status];
+}
+
+function stageLabel(stage: string) {
+  const labels: Record<string, string> = {
+    queued: '等待处理',
+    retrieval: '检索资料',
+    enhancing: 'AI 增强',
+    rendering: '生成文件',
+    document: '整理讲义',
+    completed: '处理完成',
+    failed: '处理失败',
+    cancelled: '已取消',
+  };
+  return labels[stage] || stage || '等待处理';
+}
+
+function formatJobTime(value: string) {
+  const time = new Date(value);
+  return Number.isNaN(time.getTime()) ? '' : time.toLocaleString('zh-CN', { hour12: false });
+}
+
+function degradedReasonLabel(reason: string) {
+  const labels: Record<string, string> = {
+    authentication: '模型服务认证不可用',
+    configuration: '模型服务未配置',
+    disabled: 'AI 增强已关闭',
+    empty_content: '未生成增强内容',
+    invalid_response: '模型响应未通过校验',
+    missing_evidence: '本地资料证据不足',
+    provider_error: '模型服务暂不可用',
+    rate_limit: '模型服务繁忙',
+    retrieval_error: '本地资料检索失败',
+    timeout: '模型服务超时',
+  };
+  return labels[reason] ?? '增强内容暂不可用';
 }

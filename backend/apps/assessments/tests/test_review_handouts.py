@@ -12,10 +12,28 @@ from docx import Document
 from pypdf import PdfReader
 
 from backend.apps.accounts.models import User
-from backend.apps.assessments.models import Question, WrongQuestion
+from backend.apps.assessments.content_enhancer import EnhancementResult
+from backend.apps.assessments.content_prompts import REVIEW_HANDOUT_PROMPT_VERSION
+from backend.apps.assessments.models import Question, ReviewHandoutJob, WrongQuestion
 from backend.apps.learning.models import Chapter, Course, KnowledgePoint
 from backend.apps.profiles.models import LearnerProfile
 from backend.domains.knowledge_base.schemas import KnowledgeBaseSearchResult
+
+
+def _pdf_has_embedded_font(reader: PdfReader) -> bool:
+    for page in reader.pages:
+        fonts = page.get("/Resources", {}).get("/Font", {})
+        for raw_font in fonts.values():
+            font = raw_font.get_object()
+            descendants = font.get("/DescendantFonts") or [font]
+            for raw_descendant in descendants:
+                descendant = raw_descendant.get_object()
+                descriptor = descendant.get("/FontDescriptor")
+                if descriptor:
+                    descriptor = descriptor.get_object()
+                    if any(descriptor.get(key) for key in ("/FontFile", "/FontFile2", "/FontFile3")):
+                        return True
+    return False
 
 
 class ReviewHandoutDomainTests(TestCase):
@@ -67,6 +85,91 @@ class ReviewHandoutDomainTests(TestCase):
             review_after=review_after,
         )
 
+    def _enhancement(self, *, degraded_second=False, total_degraded=False):
+        sections = []
+        citations = []
+        for index, point in enumerate(("死锁", "进程调度"), start=1):
+            degraded = total_degraded or (degraded_second and index == 2)
+            if degraded:
+                sections.append({
+                    "knowledgePoint": point,
+                    "learningDiagnosis": "模型增强暂不可用，本节根据可信原题解析生成基础内容。",
+                    "coreConcept": f"{point}的可信题目解析。",
+                    "prerequisites": [],
+                    "commonErrorPatterns": [f"{point}概念混淆"],
+                    "method": ["阅读原题解析", "遮住答案重新作答"],
+                    "workedExample": {
+                        "prompt": f"{point}原题",
+                        "steps": [f"{point}的可信题目解析。"],
+                        "answer": "B",
+                    },
+                    "tieredPractice": [],
+                    "reviewActions": ["完成一次重练"],
+                    "citationIds": [],
+                    "evidenceStatus": "unverified",
+                })
+                continue
+            source_id = f"S{index}"
+            sections.append({
+                "knowledgePoint": point,
+                "learningDiagnosis": f"{point}条件识别不完整。",
+                "coreConcept": f"{point}核心概念。",
+                "prerequisites": ["基本定义"],
+                "commonErrorPatterns": ["忽略必要条件"],
+                "method": ["识别条件", "逐项核对", "验证结论"],
+                "workedExample": {
+                    "prompt": f"{point}例题",
+                    "steps": ["先列条件", "再判断"],
+                    "answer": "示例答案",
+                },
+                "tieredPractice": [
+                    {"level": "基础", "prompt": "基础练习", "answer": "基础答案", "explanation": "基础解析"},
+                    {"level": "巩固", "prompt": "巩固练习", "answer": "巩固答案", "explanation": "巩固解析"},
+                    {"level": "迁移", "prompt": "迁移练习", "answer": "迁移答案", "explanation": "迁移解析"},
+                ],
+                "reviewActions": ["当天重练", "两天后复查"],
+                "citationIds": [source_id],
+                "evidenceStatus": "verified",
+            })
+            citations.append({
+                "sourceId": source_id,
+                "knowledgePoint": point,
+                "title": "操作系统课程讲义",
+                "location": f"第 {17 + index} 页",
+                "snippet": f"{point}课程资料证据。",
+                "score": 0.91,
+            })
+        degraded = total_degraded or degraded_second
+        return EnhancementResult(
+            content={"sections": sections},
+            citations=citations,
+            verified=not degraded,
+            degraded=degraded,
+            degraded_reasons=["authentication"] if degraded else [],
+            audit={
+                "promptVersion": REVIEW_HANDOUT_PROMPT_VERSION,
+                "provider": "openai-compatible",
+                "model": "assessment-model",
+                "attempts": 2,
+                "latencyMs": 42,
+                "finishReason": "stop",
+                "usage": {"totalTokens": 321},
+                "errorCategories": ["authentication"] if degraded else [],
+            },
+        )
+
+    def test_review_handout_job_ai_audit_fields_have_backward_compatible_defaults(self):
+        job = ReviewHandoutJob.objects.create(
+            user=self.user,
+            snapshot_hash="b" * 64,
+            snapshot={},
+            ranked_weak_points=[],
+        )
+        self.assertEqual(job.enhancement, {})
+        self.assertEqual(job.llm_audit, {})
+        self.assertEqual(job.degraded_reasons, [])
+        self.assertEqual(job.prompt_version, "")
+
     def test_rank_weak_points_uses_wrong_history_due_state_and_profile(self):
         from backend.apps.assessments.review_handouts import create_snapshot, rank_weak_points
 
@@ -112,8 +215,9 @@ class ReviewHandoutDomainTests(TestCase):
         self.assertTrue(payload["docxDownloadUrl"].endswith("/download/docx/"))
         self.assertTrue(payload["pdfDownloadUrl"].endswith("/download/pdf/"))
 
+    @patch("backend.apps.assessments.review_handouts.enhance_review_handout")
     @patch("backend.apps.assessments.review_handouts.search_knowledge_base")
-    def test_generate_review_handout_creates_verified_docx_and_pdf(self, search):
+    def test_generate_review_handout_creates_verified_docx_and_pdf(self, search, enhance):
         from backend.apps.assessments.review_handouts import create_review_handout_job, generate_review_handout
 
         search.return_value = [
@@ -123,6 +227,7 @@ class ReviewHandoutDomainTests(TestCase):
                 metadata={"title": "操作系统课程讲义", "page_number": 18, "source_path": "course/os.pdf"},
             )
         ]
+        enhance.return_value = self._enhancement()
         job, _ = create_review_handout_job(self.user, "active")
         with TemporaryDirectory() as artifact_root, override_settings(A3_REVIEW_HANDOUT_ROOT=artifact_root):
             result = generate_review_handout(str(job.id))
@@ -133,15 +238,90 @@ class ReviewHandoutDomainTests(TestCase):
             self.assertEqual(job.progress, 100)
             self.assertTrue(job.verified)
             self.assertFalse(job.degraded)
+            self.assertEqual(job.enhancement["sections"][0]["learningDiagnosis"], "死锁条件识别不完整。")
+            self.assertEqual(job.llm_audit["model"], "assessment-model")
+            self.assertEqual(job.prompt_version, REVIEW_HANDOUT_PROMPT_VERSION)
+            self.assertEqual(job.degraded_reasons, [])
             self.assertEqual(len(job.citations), 2)
             self.assertTrue(Path(job.docx_path).is_file())
             self.assertTrue(Path(job.pdf_path).is_file())
             text = "\n".join(paragraph.text for paragraph in Document(job.docx_path).paragraphs)
             self.assertIn("个性化复习讲义", text)
             self.assertIn("核心概念", text)
+            self.assertIn("学习诊断", text)
+            self.assertIn("解题方法", text)
+            self.assertIn("基础练习", text)
+            self.assertIn("巩固练习", text)
+            self.assertIn("迁移练习", text)
+            self.assertIn("7 天复习计划", text)
+            self.assertIn("资料引用", text)
             self.assertIn("答案与解析", text)
-            self.assertGreaterEqual(len(PdfReader(job.pdf_path).pages), 1)
+            pdf_reader = PdfReader(job.pdf_path)
+            self.assertGreaterEqual(len(pdf_reader.pages), 1)
+            self.assertTrue(_pdf_has_embedded_font(pdf_reader))
         search.assert_called()
+        enhance.assert_called_once()
+
+    @patch("backend.apps.assessments.review_handouts.enhance_review_handout")
+    @patch("backend.apps.assessments.review_handouts.search_knowledge_base", return_value=[])
+    def test_partial_model_failure_keeps_verified_and_degraded_sections(self, _search, enhance):
+        from backend.apps.assessments.review_handouts import create_review_handout_job, generate_review_handout
+
+        enhance.return_value = self._enhancement(degraded_second=True)
+        job, _ = create_review_handout_job(self.user, "active")
+        with TemporaryDirectory() as artifact_root, override_settings(A3_REVIEW_HANDOUT_ROOT=artifact_root):
+            result = generate_review_handout(str(job.id))
+            job.refresh_from_db()
+
+            self.assertTrue(result["success"])
+            self.assertEqual(job.status, "succeeded")
+            self.assertTrue(job.degraded)
+            self.assertFalse(job.verified)
+            self.assertIn("authentication", job.degraded_reasons)
+            self.assertTrue(set(job.degraded_reasons).issubset({
+                "authentication", "configuration", "disabled", "empty_content", "invalid_response",
+                "missing_evidence", "provider_error", "rate_limit", "retrieval_error", "timeout",
+            }))
+            self.assertNotIn("secret", str(job.degraded_reasons).lower())
+            text = "\n".join(paragraph.text for paragraph in Document(job.docx_path).paragraphs)
+            self.assertIn("已核验", text)
+            self.assertIn("未核验", text)
+            self.assertIn("进程调度的可信题目解析", text)
+
+    @patch("backend.apps.assessments.review_handouts.enhance_review_handout")
+    @patch("backend.apps.assessments.review_handouts.search_knowledge_base", return_value=[])
+    def test_total_model_failure_still_generates_docx_and_pdf(self, _search, enhance):
+        from backend.apps.assessments.review_handouts import create_review_handout_job, generate_review_handout
+
+        enhance.return_value = self._enhancement(total_degraded=True)
+        job, _ = create_review_handout_job(self.user, "active")
+        with TemporaryDirectory() as artifact_root, override_settings(A3_REVIEW_HANDOUT_ROOT=artifact_root):
+            result = generate_review_handout(str(job.id))
+            job.refresh_from_db()
+
+            self.assertTrue(result["success"])
+            self.assertTrue(Path(job.docx_path).is_file())
+            self.assertTrue(Path(job.pdf_path).is_file())
+            self.assertTrue(job.degraded)
+            text = "\n".join(paragraph.text for paragraph in Document(job.docx_path).paragraphs)
+            self.assertIn("死锁的可信题目解析", text)
+            self.assertIn("进程调度的可信题目解析", text)
+
+    def test_seven_day_plan_prioritizes_active_due_weaknesses(self):
+        from backend.apps.assessments.review_handouts import build_seven_day_plan
+
+        ranked = [
+            {"knowledgePoint": "死锁", "score": 90, "activeCount": 1, "dueCount": 1},
+            {"knowledgePoint": "进程调度", "score": 70, "activeCount": 1, "dueCount": 0},
+            {"knowledgePoint": "内存管理", "score": 30, "activeCount": 0, "dueCount": 0},
+        ]
+        plan = build_seven_day_plan(ranked)
+
+        self.assertEqual([item["day"] for item in plan], list(range(1, 8)))
+        early_points = {task["knowledgePoint"] for day in plan[:2] for task in day["tasks"]}
+        self.assertIn("死锁", early_points)
+        self.assertIn("进程调度", early_points)
+        self.assertTrue(any(task["type"] == "spaced_review" for day in plan[2:] for task in day["tasks"]))
 
     @patch("backend.apps.assessments.review_handouts.search_knowledge_base", side_effect=RuntimeError("retriever offline"))
     def test_generate_review_handout_degrades_to_trusted_question_explanations(self, _search):

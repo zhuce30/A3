@@ -24,7 +24,11 @@ $RealtimeLog = Join-Path $TmpDir "a3-realtime-proxy.log"
 $CeleryLog = Join-Path $TmpDir "a3-celery-worker.log"
 $CeleryErrorLog = Join-Path $TmpDir "a3-celery-worker-error.log"
 $CeleryWorkerName = "a3-worker@$([Environment]::MachineName)"
-$RequiredCeleryTask = "assessments.refill_personal_question_pool"
+$RequiredCeleryTasks = @(
+  "assessments.refill_personal_question_pool",
+  "assessments.generate_wrong_question_export",
+  "assessments.generate_review_handout"
+)
 
 function Show-Help {
   Write-Output @"
@@ -160,7 +164,8 @@ function Test-CeleryWorker {
   if (-not (Get-CeleryWorkerProcesses).Count) { return $false }
   try {
     $output = & $CeleryExe -A backend.config inspect registered --destination $CeleryWorkerName --timeout 3 2>&1 | Out-String
-    return $LASTEXITCODE -eq 0 -and $output.Contains($RequiredCeleryTask)
+    $missingTasks = @($RequiredCeleryTasks | Where-Object { -not $output.Contains($_) })
+    return $LASTEXITCODE -eq 0 -and $missingTasks.Count -eq 0
   } catch {
     return $false
   }
@@ -175,14 +180,14 @@ function Wait-CeleryWorker {
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   while ((Get-Date) -lt $deadline) {
     if (Test-CeleryWorker -CeleryExe $CeleryExe) {
-      Write-Host "Celery worker ready: $CeleryWorkerName registered $RequiredCeleryTask"
+      Write-Host "Celery worker ready: $CeleryWorkerName registered $($RequiredCeleryTasks -join ', ')"
       return $true
     }
     if (-not (Get-CeleryWorkerProcesses).Count) { break }
     Start-Sleep -Seconds 2
   }
 
-  Write-Warning "Celery worker did not become ready or did not register $RequiredCeleryTask"
+  Write-Warning "Celery worker did not become ready or did not register $($RequiredCeleryTasks -join ', ')"
   foreach ($logPath in @($CeleryLog, $CeleryErrorLog)) {
     if (Test-Path -LiteralPath $logPath) {
       Write-Warning "Last log lines from $logPath"
