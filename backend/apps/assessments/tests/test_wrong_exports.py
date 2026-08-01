@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from io import BytesIO
+from io import BytesIO, StringIO
 import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,6 +10,7 @@ from unittest.mock import patch
 import json
 
 from django.test import Client, SimpleTestCase, TestCase, override_settings
+from django.core.management import call_command
 from django.utils import timezone
 from docx import Document
 from openpyxl import load_workbook
@@ -21,6 +22,22 @@ from backend.apps.assessments.content_enhancer import EnhancementResult
 from backend.apps.assessments.wrong_exports import ExportArtifact, WrongExportRequestError
 from backend.apps.learning.models import Chapter, Course, KnowledgePoint
 from backend.apps.profiles.models import LearnerProfile
+
+
+def _pdf_has_embedded_font(reader: PdfReader) -> bool:
+    for page in reader.pages:
+        fonts = page.get("/Resources", {}).get("/Font", {})
+        for raw_font in fonts.values():
+            font = raw_font.get_object()
+            descendants = font.get("/DescendantFonts") or [font]
+            for raw_descendant in descendants:
+                descendant = raw_descendant.get_object()
+                descriptor = descendant.get("/FontDescriptor")
+                if descriptor:
+                    descriptor = descriptor.get_object()
+                    if any(descriptor.get(key) for key in ("/FontFile", "/FontFile2", "/FontFile3")):
+                        return True
+    return False
 
 
 class AssessmentExportRuntimeConfigTests(SimpleTestCase):
@@ -415,6 +432,7 @@ class WrongExportDomainTests(TestCase):
         self.assertGreaterEqual(len(reader.pages), 1)
         self.assertEqual(reader.metadata.title, "智学引擎错题复习清单")
         self.assertGreater(len(artifact.content), 1000)
+        self.assertTrue(_pdf_has_embedded_font(reader))
 
     def test_build_wrong_export_rejects_invalid_format_and_empty_scope(self):
         from backend.apps.assessments.wrong_exports import WrongExportRequestError, build_wrong_export
@@ -424,6 +442,28 @@ class WrongExportDomainTests(TestCase):
         WrongQuestion.objects.filter(user=self.user).update(mastered=False)
         with self.assertRaisesMessage(WrongExportRequestError, "没有可导出的错题"):
             build_wrong_export(self.user, "mastered", "docx")
+
+    @patch("backend.apps.assessments.review_handouts.search_knowledge_base", return_value=[])
+    @patch("backend.apps.assessments.wrong_export_jobs.search_knowledge_base", return_value=[])
+    def test_smoke_command_generates_five_parseable_files_with_safe_output(self, _export_search, _handout_search):
+        output = StringIO()
+        with TemporaryDirectory() as directory, override_settings(
+            A3_WRONG_EXPORT_ROOT=Path(directory) / "exports",
+            A3_REVIEW_HANDOUT_ROOT=Path(directory) / "handouts",
+        ):
+            call_command("smoke_ai_assessment_exports", "--user-id", str(self.user.id), stdout=output)
+
+        lines = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 5)
+        expected_fields = {"jobId", "status", "model", "verified", "degraded", "citationCount", "fileSize"}
+        for line in lines:
+            self.assertEqual(set(line), expected_fields)
+            self.assertEqual(line["status"], "succeeded")
+            self.assertGreater(line["fileSize"], 1000)
+        rendered = output.getvalue()
+        self.assertNotIn(self.user.display_name, rendered)
+        self.assertNotIn(str(Path(directory).resolve()), rendered)
+        self.assertNotIn("可信题目解析", rendered)
 
 
 class WrongExportApiTests(WrongExportDomainTests):

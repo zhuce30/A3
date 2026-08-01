@@ -23,6 +23,7 @@ from backend.apps.assessments.content_enhancer import (
     enhance_review_handout,
     enhance_wrong_export,
 )
+from backend.apps.compat.llm import LLMUnavailable
 
 
 PROFILE = {
@@ -134,6 +135,10 @@ class ContentPromptTests(SimpleTestCase):
         self.assertIn('"knowledgePoint": "进程调度"', user)
         self.assertIn('"sourceId": "S1"', user)
         self.assertNotIn("13800001111", user)
+        self.assertIn("confusions 中每项包含 conceptA、conceptB、difference", system)
+        self.assertIn("selfCheck、reviewAdvice 是文本", system)
+        self.assertIn("solutionSteps、citationIds 是文本数组", system)
+        self.assertIn('"selfCheck":"检查文本"', system)
         self.assertNotIn("session-secret", user)
         self.assertNotIn("key-secret", user)
         self.assertNotIn("D:/private", user)
@@ -144,6 +149,9 @@ class ContentPromptTests(SimpleTestCase):
         self.assertIn("不得伪造教材名称、页码", system)
         self.assertIn("基础、巩固、迁移", system)
         self.assertIn("evidenceStatus", system)
+        self.assertIn("prerequisites、commonErrorPatterns、method、reviewActions、citationIds 都是文本数组", system)
+        self.assertIn("workedExample.steps 是文本数组", system)
+        self.assertIn('"steps":["步骤文本"]', system)
         self.assertNotIn("13800001111", user)
 
     def test_prompt_drops_absolute_path_misfiled_as_source_location(self):
@@ -186,6 +194,60 @@ class ContentPromptTests(SimpleTestCase):
         self.assertEqual(sanitized["location"], "https://example.edu/course/chapter-3")
         self.assertNotIn("abcdefghijklmnop", serialized)
         self.assertNotIn("session-secret", serialized)
+
+    def test_prompt_sanitizer_redacts_local_path_beside_public_url(self):
+        value = "https://example.edu/course and /srv/private/a.pdf"
+        sanitized = sanitize_prompt_value(value)
+        self.assertIn("https://example.edu/course", sanitized)
+        self.assertNotIn("/srv/private/a.pdf", sanitized)
+
+    def test_prompt_sanitizer_redacts_private_key_plain_key_and_phone(self):
+        sanitized = sanitize_prompt_value({
+            "nested": {
+                "privateKey": "private-secret-value",
+                "key": "plain-secret-value",
+                "phone": "13800001111",
+            }
+        })
+        serialized = json.dumps(sanitized, ensure_ascii=False)
+        self.assertNotIn("private-secret-value", serialized)
+        self.assertNotIn("plain-secret-value", serialized)
+        self.assertNotIn("13800001111", serialized)
+
+    def test_prompt_sanitizer_does_not_preserve_secret_or_local_urls(self):
+        sanitized = sanitize_prompt_value({
+            "signed": "https://example.edu/course?api_key=sk-secretvalue123456",
+            "local": "http://localhost:8000/private/material",
+        })
+        serialized = json.dumps(sanitized, ensure_ascii=False)
+        self.assertNotIn("sk-secretvalue123456", serialized)
+        self.assertNotIn("localhost:8000/private/material", serialized)
+
+    def test_prompt_sanitizer_closes_signed_url_userinfo_path_and_loopback_bypasses(self):
+        values = [
+            "https://example.edu/course?sig=super-secret-signature",
+            "https://student:secret-password@example.edu/course",
+            "https://example.edu/download/sk-secretvalue123456/file",
+            "http://127.1/private/material",
+        ]
+        serialized = json.dumps(sanitize_prompt_value(values), ensure_ascii=False)
+        for secret in ("super-secret-signature", "secret-password", "sk-secretvalue123456", "127.1/private"):
+            self.assertNotIn(secret, serialized)
+
+    def test_prompt_sanitizer_preserves_safe_public_url_fragment(self):
+        value = "https://example.edu/course#section-3"
+        self.assertEqual(sanitize_prompt_value(value), value)
+
+    def test_prompt_sanitizer_redacts_common_identity_aliases(self):
+        sanitized = sanitize_prompt_value({
+            "phoneNumber": "13800001111",
+            "mobile": "13900001111",
+            "sessionId": "private-session-id",
+        })
+        serialized = json.dumps(sanitized, ensure_ascii=False)
+        self.assertNotIn("13800001111", serialized)
+        self.assertNotIn("13900001111", serialized)
+        self.assertNotIn("private-session-id", serialized)
 
 
 class ContentSchemaTests(SimpleTestCase):
@@ -249,6 +311,64 @@ class ContentSchemaTests(SimpleTestCase):
     def test_wrong_export_validator_keeps_question_answer_mapping(self):
         payload = valid_wrong_export_payload()
         payload["groupDiagnosis"] = "q-1 的正确答案是 A。"
+        with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
+            validate_wrong_export_payload(
+                payload,
+                question_ids={"q-1", "q-2"},
+                source_ids={"S1"},
+                answers={"q-1": "B", "q-2": "A"},
+            )
+
+    def test_wrong_export_validator_matches_question_ids_exactly(self):
+        payload = valid_wrong_export_payload()
+        payload["groupDiagnosis"] = "q-10 的正确答案是 A。"
+        with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
+            validate_wrong_export_payload(
+                payload,
+                question_ids={"q-1", "q-10"},
+                source_ids={"S1"},
+                answers={"q-1": "A", "q-10": "B"},
+            )
+
+    def test_wrong_export_validator_checks_each_answer_claim_in_multi_question_text(self):
+        payload = valid_wrong_export_payload()
+        payload["groupDiagnosis"] = "q-1 的正确答案是 A；q-2 的正确答案是 B。"
+        with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
+            validate_wrong_export_payload(
+                payload,
+                question_ids={"q-1", "q-2"},
+                source_ids={"S1"},
+                answers={"q-1": "B", "q-2": "A"},
+            )
+
+    def test_wrong_export_validator_checks_slash_separated_answer_claims(self):
+        payload = valid_wrong_export_payload()
+        payload["groupDiagnosis"] = "q-1 的正确答案是 B / q-2 的正确答案是 B。"
+        with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
+            validate_wrong_export_payload(
+                payload,
+                question_ids={"q-1", "q-2"},
+                source_ids={"S1"},
+                answers={"q-1": "B", "q-2": "A"},
+            )
+
+    def test_wrong_export_validator_accepts_repeated_or_shared_correct_question_ids(self):
+        for diagnosis in (
+            "针对 q-1，q-1 的正确答案是 B。",
+            "q-1 和 q-2 的正确答案是 B。",
+        ):
+            payload = valid_wrong_export_payload()
+            payload["groupDiagnosis"] = diagnosis
+            validate_wrong_export_payload(
+                payload,
+                question_ids={"q-1", "q-2"},
+                source_ids={"S1"},
+                answers={"q-1": "B", "q-2": "B"},
+            )
+
+    def test_wrong_export_validator_rejects_impossible_unscoped_answer(self):
+        payload = valid_wrong_export_payload()
+        payload["groupDiagnosis"] = "正确答案是 C。"
         with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
             validate_wrong_export_payload(
                 payload,
@@ -365,6 +485,12 @@ class ContentSchemaTests(SimpleTestCase):
 
 
 class AssessmentContentEnhancerTests(SimpleTestCase):
+    def setUp(self):
+        super().setUp()
+        environment = patch.dict("os.environ", {"A3_ASSESSMENT_EXPORT_LLM_ENABLED": "true"})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def _snapshot(self, *, two_points=False):
         questions = [dict(QUESTION)]
         if two_points:
@@ -407,6 +533,27 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
         self.assertEqual(completion.call_args.kwargs["temperature"], 0.15)
 
     @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_model_cannot_mark_content_verified_without_used_citations(self, completion):
+        completion.return_value = self._response(valid_wrong_export_payload(citation_ids=[]))
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertFalse(result.verified)
+        self.assertEqual(result.citations, [])
+        self.assertEqual(result.content["sections"][0]["evidenceStatus"], "unverified")
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_persisted_citations_are_sanitized_again(self, completion):
+        completion.return_value = self._response(valid_wrong_export_payload())
+        source = dict(
+            SOURCE,
+            location="C:/private/material.pdf",
+            snippet="token sk-secretvalue123456",
+        )
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [source]}, sleep=lambda _: None)
+        serialized = json.dumps(result.citations, ensure_ascii=False)
+        self.assertNotIn("C:/private", serialized)
+        self.assertNotIn("sk-secretvalue", serialized)
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
     def test_timeout_retries_then_succeeds(self, completion):
         completion.side_effect = [requests.Timeout("secret timeout detail"), self._response(valid_wrong_export_payload())]
         result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
@@ -424,6 +571,17 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
         result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
         self.assertFalse(result.degraded)
         self.assertEqual(result.audit["attempts"], 3)
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_empty_model_response_retries_then_succeeds(self, completion):
+        completion.side_effect = [
+            LLMUnavailable("LLM returned empty content"),
+            self._response(valid_wrong_export_payload()),
+        ]
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertFalse(result.degraded)
+        self.assertEqual(result.audit["attempts"], 2)
+        self.assertEqual(completion.call_count, 2)
 
     @patch("backend.apps.assessments.content_enhancer.chat_completion")
     def test_http_401_short_circuits_to_safe_fallback(self, completion):
@@ -492,6 +650,25 @@ class AssessmentContentEnhancerTests(SimpleTestCase):
         self.assertTrue(result.degraded)
         self.assertEqual(result.audit["attempts"], 0)
         self.assertEqual(result.audit["errorCategories"], ["disabled"])
+        completion.assert_not_called()
+
+    @patch.dict(
+        "os.environ",
+        {
+            "A3_ASSESSMENT_EXPORT_LLM_ENABLED": "auto",
+            "A3_LLM_API_KEY": "",
+            "A3_COACHING_API_KEY": "",
+            "DASHSCOPE_API_KEY": "",
+            "QWEN_API_KEY": "",
+            "OPENAI_API_KEY": "",
+        },
+    )
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_auto_without_key_degrades_without_provider_call(self, completion):
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.audit["attempts"], 0)
+        self.assertEqual(result.audit["errorCategories"], ["configuration"])
         completion.assert_not_called()
 
     @patch("backend.apps.assessments.content_enhancer.chat_completion")

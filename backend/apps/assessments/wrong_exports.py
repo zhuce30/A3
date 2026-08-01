@@ -20,11 +20,10 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from backend.apps.assessments.models import WrongQuestion
+from backend.apps.assessments.pdf_fonts import register_pdf_cjk_font
 
 
 WRONG_EXPORT_SCOPES = {"active", "due", "mastered", "all"}
@@ -405,7 +404,7 @@ def _build_pdf(
     citations: list[dict] | None = None,
     degraded_reasons: list[str] | None = None,
 ) -> bytes:
-    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    pdf_font = register_pdf_cjk_font()
     output = BytesIO()
     document = SimpleDocTemplate(
         output,
@@ -419,15 +418,15 @@ def _build_pdf(
     )
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
-        "ChineseTitle", parent=styles["Title"], fontName="STSong-Light", fontSize=20,
+        "ChineseTitle", parent=styles["Title"], fontName=pdf_font, fontSize=20,
         leading=26, alignment=TA_CENTER, textColor=colors.HexColor("#0F172A"), spaceAfter=8,
     )
     heading_style = ParagraphStyle(
-        "ChineseHeading", parent=styles["Heading2"], fontName="STSong-Light", fontSize=13,
+        "ChineseHeading", parent=styles["Heading2"], fontName=pdf_font, fontSize=13,
         leading=18, textColor=colors.HexColor("#1F4E78"), spaceBefore=10, spaceAfter=5,
     )
     body_style = ParagraphStyle(
-        "ChineseBody", parent=styles["BodyText"], fontName="STSong-Light", fontSize=9.5,
+        "ChineseBody", parent=styles["BodyText"], fontName=pdf_font, fontSize=9.5,
         leading=15, textColor=colors.HexColor("#334155"), spaceAfter=4,
     )
     story = [
@@ -447,7 +446,7 @@ def _build_pdf(
         colWidths=[26 * mm, 26 * mm, 26 * mm, 88 * mm],
     )
     summary_table.setStyle(TableStyle([
-        ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
+        ("FONTNAME", (0, 0), (-1, -1), pdf_font),
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E2E8F0")),
         ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#0F172A")),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
@@ -513,7 +512,7 @@ def _build_pdf(
 
     def footer(canvas, doc):
         canvas.saveState()
-        canvas.setFont("STSong-Light", 8)
+        canvas.setFont(pdf_font, 8)
         canvas.setFillColor(colors.HexColor("#64748B"))
         canvas.drawCentredString(A4[0] / 2, 9 * mm, f"由智学引擎生成 · 第 {doc.page} 页")
         canvas.restoreState()

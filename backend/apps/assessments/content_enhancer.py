@@ -12,6 +12,7 @@ from backend.apps.assessments.content_prompts import (
     WRONG_EXPORT_PROMPT_VERSION,
     build_review_handout_messages,
     build_wrong_export_messages,
+    sanitize_prompt_value,
 )
 from backend.apps.assessments.content_schemas import (
     ContentValidationError,
@@ -19,7 +20,7 @@ from backend.apps.assessments.content_schemas import (
     validate_review_handout_payload,
     validate_wrong_export_payload,
 )
-from backend.apps.compat.llm import LLMUnavailable, chat_completion
+from backend.apps.compat.llm import LLMEmptyResponse, LLMUnavailable, chat_completion
 
 
 RETRY_DELAYS = (1, 3)
@@ -134,16 +135,17 @@ def _enhance_section(
     response_meta: dict[str, Any] = {}
     max_attempts = _max_attempts()
     request_messages = list(messages)
-    if not _llm_enabled():
+    unavailable_reason = _llm_unavailable_reason()
+    if unavailable_reason:
         return {
             "content": fallback(),
             "citations": [],
             "degraded": True,
-            "reason": "disabled",
+            "reason": unavailable_reason,
             "attempts": 0,
             "latencyMs": int((time.monotonic() - started) * 1000),
             "meta": {},
-            "errorCategories": ["disabled"],
+            "errorCategories": [unavailable_reason],
         }
     for attempt in range(max_attempts):
         _raise_if_cancelled(cancel_check)
@@ -225,7 +227,8 @@ def _aggregate(
                     usage[key] = usage.get(key, 0) + value
     degraded = any(outcome["degraded"] for outcome in outcomes) or not sections
     verified = bool(sections) and not degraded and all(
-        section.get("evidenceStatus") == "verified" for section in sections
+        section.get("evidenceStatus") == "verified" and bool(outcome["citations"])
+        for section, outcome in zip(sections, outcomes)
     )
     return EnhancementResult(
         content={"sections": sections},
@@ -296,9 +299,9 @@ def _used_sources(content: dict[str, Any], sources: list[dict[str, Any]]) -> lis
         {
             "sourceId": str(source.get("sourceId") or ""),
             "knowledgePoint": point,
-            "title": str(source.get("title") or "")[:255],
-            "location": str(source.get("location") or "")[:500],
-            "snippet": str(source.get("snippet") or "")[:600],
+            "title": str(sanitize_prompt_value(source.get("title") or ""))[:255],
+            "location": str(sanitize_prompt_value(source.get("location") or ""))[:500],
+            "snippet": str(sanitize_prompt_value(source.get("snippet") or ""))[:600],
             "score": source.get("score") if isinstance(source.get("score"), (int, float)) else None,
         }
         for source in sources
@@ -357,6 +360,10 @@ def _review_handout_fallback(point: str, questions: list[dict[str, Any]]) -> dic
 def _classify_error(exc: Exception) -> tuple[str, bool]:
     if isinstance(exc, ContentValidationError):
         return "invalid_response", True
+    if isinstance(exc, LLMEmptyResponse) or (
+        isinstance(exc, LLMUnavailable) and str(exc) == "LLM returned empty content"
+    ):
+        return "invalid_response", True
     if isinstance(exc, LLMUnavailable):
         return "configuration", False
     if isinstance(exc, (requests.Timeout, TimeoutError)):
@@ -383,9 +390,22 @@ def _max_attempts() -> int:
     return _env_int("A3_ASSESSMENT_EXPORT_LLM_MAX_ATTEMPTS", 3, minimum=1, maximum=3)
 
 
-def _llm_enabled() -> bool:
+def _llm_unavailable_reason() -> str:
     value = os.getenv("A3_ASSESSMENT_EXPORT_LLM_ENABLED", "auto").strip().lower()
-    return value not in {"0", "false", "no", "off", "disabled"}
+    if value in {"0", "false", "no", "off", "disabled"}:
+        return "disabled"
+    if value == "auto" and not any(
+        (os.getenv(name) or "").strip()
+        for name in (
+            "A3_LLM_API_KEY",
+            "A3_COACHING_API_KEY",
+            "DASHSCOPE_API_KEY",
+            "QWEN_API_KEY",
+            "OPENAI_API_KEY",
+        )
+    ):
+        return "configuration"
+    return ""
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:

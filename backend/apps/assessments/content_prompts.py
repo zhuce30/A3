@@ -1,6 +1,9 @@
+import ipaddress
 import json
 import re
+import socket
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 WRONG_EXPORT_PROMPT_VERSION = "wrong-export-v1"
@@ -43,13 +46,23 @@ _COMMON_SYSTEM_RULES = """你是“智学引擎 A3”的学习诊断内容生成
 如果输入不足，请明确写“不足以判断”，不得补造事实。"""
 
 _WRONG_EXPORT_CONTRACT = """输出对象必须包含 knowledgePoint、groupDiagnosis、prerequisiteGaps、confusions、questionAnalyses、transferPractice、evidenceStatus。
+confusions 中每项包含 conceptA、conceptB、difference；没有明确易混概念时输出空数组，不得输出字符串数组。
 questionAnalyses 中每项必须使用输入中的 questionId，并包含 deepErrorDiagnosis、solutionSteps、selfCheck、reviewAdvice、citationIds。
+questionAnalyses 的 deepErrorDiagnosis、selfCheck、reviewAdvice 是文本，solutionSteps、citationIds 是文本数组。
 transferPractice 中每项包含 prompt、answer、explanation、difficulty、citationIds；difficulty 只能是“基础”或“进阶”。
-evidenceStatus 只能是 verified、partial 或 unverified。"""
+transferPractice 的 prompt、answer、explanation、difficulty 是文本，citationIds 是文本数组。
+evidenceStatus 只能是 verified、partial 或 unverified。
+严格使用以下 JSON 类型骨架，示例文字需替换为基于输入的内容：
+{"knowledgePoint":"知识点","groupDiagnosis":"诊断文本","prerequisiteGaps":["缺口文本"],"confusions":[{"conceptA":"概念甲","conceptB":"概念乙","difference":"差异文本"}],"questionAnalyses":[{"questionId":"输入中的题目ID","deepErrorDiagnosis":"诊断文本","solutionSteps":["步骤文本"],"selfCheck":"检查文本","reviewAdvice":"建议文本","citationIds":[]}],"transferPractice":[{"prompt":"练习题干","answer":"练习答案","explanation":"练习解析","difficulty":"基础","citationIds":[]}],"evidenceStatus":"unverified"}"""
 
 _HANDOUT_CONTRACT = """输出对象必须包含 knowledgePoint、learningDiagnosis、coreConcept、prerequisites、commonErrorPatterns、method、workedExample、tieredPractice、reviewActions、citationIds、evidenceStatus。
+knowledgePoint、learningDiagnosis、coreConcept 是文本；prerequisites、commonErrorPatterns、method、reviewActions、citationIds 都是文本数组。
 tieredPractice 必须提供基础、巩固、迁移三种分层练习，每项包含 level、prompt、answer、explanation。
-workedExample 必须包含 prompt、steps、answer。evidenceStatus 只能是 verified、partial 或 unverified。"""
+tieredPractice 每项的 level、prompt、answer、explanation 都是文本。
+workedExample 必须包含 prompt、steps、answer，其中 prompt、answer 是文本，workedExample.steps 是文本数组。
+evidenceStatus 只能是 verified、partial 或 unverified。
+严格使用以下 JSON 类型骨架，示例文字需替换为基于输入的内容：
+{"knowledgePoint":"知识点","learningDiagnosis":"诊断文本","coreConcept":"概念文本","prerequisites":["先修文本"],"commonErrorPatterns":["错误文本"],"method":["方法步骤"],"workedExample":{"prompt":"例题题干","steps":["步骤文本"],"answer":"例题答案"},"tieredPractice":[{"level":"基础","prompt":"练习题干","answer":"练习答案","explanation":"练习解析"},{"level":"巩固","prompt":"练习题干","answer":"练习答案","explanation":"练习解析"},{"level":"迁移","prompt":"练习题干","answer":"练习答案","explanation":"练习解析"}],"reviewActions":["复习行动"],"citationIds":[],"evidenceStatus":"unverified"}"""
 
 
 _WINDOWS_PATH = re.compile(r"(?i)(?<![\w])(?:[a-z]:[\\/])[^\s\"'，。；;]+")
@@ -59,17 +72,83 @@ _FILE_URI = re.compile(r"(?i)file:(?:/{1,3})?[^\s\"'，。；;]+")
 _KEY_LIKE_VALUE = re.compile(
     r"(?i)(?:sk|rk|pk|api[_-]?key|dashscope|qwen)[_-][A-Za-z0-9_-]{12,}"
 )
-_SENSITIVE_KEY = re.compile(
-    r"(?i)(?:api[_-]?key|authorization|cookie|pass(?:word|wd)?|secret|session|token)"
-)
 _REDACTED = "[已移除敏感信息]"
+_PUBLIC_URL = re.compile(r"(?i)https?://[^\s\"'，。；;]+")
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+    return normalized in {
+        "key",
+        "apikey",
+        "accesskey",
+        "secretkey",
+        "privatekey",
+        "authorization",
+        "cookie",
+        "password",
+        "passwd",
+        "secret",
+        "session",
+        "sessionid",
+        "token",
+        "phone",
+        "phonenumber",
+        "mobile",
+        "mobilenumber",
+        "mobilephone",
+        "signature",
+        "sig",
+        "sas",
+        "credential",
+        "xamzsignature",
+        "xamzcredential",
+        "xgoogsignature",
+    } or normalized.endswith(("apikey", "privatekey", "password", "passwd", "secret", "token"))
+
+
+def _sanitize_public_url(raw_url: str) -> str:
+    parsed = urlsplit(raw_url)
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    if (
+        not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or hostname == "localhost"
+        or hostname.endswith((".localhost", ".local"))
+    ):
+        return _REDACTED
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        if re.fullmatch(r"[0-9.]+", hostname):
+            try:
+                address = ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(hostname)))
+            except (OSError, ValueError):
+                return _REDACTED
+        elif "." not in hostname:
+            return _REDACTED
+        else:
+            address = None
+    if address is not None and not address.is_global:
+        return _REDACTED
+    if _KEY_LIKE_VALUE.search(parsed.path) or _KEY_LIKE_VALUE.search(parsed.fragment):
+        return _REDACTED
+    sanitized_query = urlencode(
+        [
+            (key, _REDACTED if _is_sensitive_key(key) else sanitize_prompt_value(item))
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        ],
+        doseq=True,
+    )
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, sanitized_query, parsed.fragment))
 
 
 def sanitize_prompt_value(value: Any) -> Any:
     """Recursively redact local paths and credential-like values from prompt data."""
     if isinstance(value, dict):
         return {
-            key: _REDACTED if _SENSITIVE_KEY.search(str(key)) else sanitize_prompt_value(item)
+            key: _REDACTED if _is_sensitive_key(key) else sanitize_prompt_value(item)
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -78,11 +157,20 @@ def sanitize_prompt_value(value: Any) -> Any:
         return [sanitize_prompt_value(item) for item in value]
     if not isinstance(value, str):
         return value
-    sanitized = value
+    public_urls: list[str] = []
+
+    def protect_public_url(match: re.Match[str]) -> str:
+        sanitized_url = _sanitize_public_url(match.group(0))
+        if sanitized_url == _REDACTED:
+            return _REDACTED
+        public_urls.append(sanitized_url)
+        return f"A3PUBLICURLPLACEHOLDER{len(public_urls) - 1}"
+
+    sanitized = _PUBLIC_URL.sub(protect_public_url, value)
     for pattern in (_FILE_URI, _WINDOWS_PATH, _UNC_PATH, _UNIX_PATH, _KEY_LIKE_VALUE):
-        if pattern is _UNIX_PATH and re.search(r"https?://", sanitized, re.IGNORECASE):
-            continue
         sanitized = pattern.sub(_REDACTED, sanitized)
+    for index, public_url in enumerate(public_urls):
+        sanitized = sanitized.replace(f"A3PUBLICURLPLACEHOLDER{index}", public_url)
     return sanitized
 
 

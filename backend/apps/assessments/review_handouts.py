@@ -22,8 +22,6 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 from backend.apps.assessments.content_enhancer import (
@@ -31,6 +29,7 @@ from backend.apps.assessments.content_enhancer import (
     enhance_review_handout,
 )
 from backend.apps.assessments.models import ReviewHandoutJob
+from backend.apps.assessments.pdf_fonts import register_pdf_cjk_font
 from backend.apps.assessments.wrong_exports import (
     WrongExportRequestError,
     build_wrong_question_snapshot,
@@ -381,14 +380,14 @@ def _build_handout_pdf(
     plan: list[dict],
     degraded_reasons: list[str],
 ) -> bytes:
-    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    pdf_font = register_pdf_cjk_font()
     output = BytesIO()
     doc = SimpleDocTemplate(output, pagesize=A4, rightMargin=18 * mm, leftMargin=18 * mm, topMargin=16 * mm, bottomMargin=18 * mm, title="智学引擎个性化复习讲义", author="智学引擎")
     styles = getSampleStyleSheet()
-    title = ParagraphStyle("HTitle", parent=styles["Title"], fontName="STSong-Light", fontSize=20, leading=26, alignment=TA_CENTER, textColor=colors.HexColor("#0F172A"))
-    h1 = ParagraphStyle("HH1", parent=styles["Heading1"], fontName="STSong-Light", fontSize=15, leading=21, textColor=colors.HexColor("#1F4E78"), spaceBefore=10)
-    h2 = ParagraphStyle("HH2", parent=styles["Heading2"], fontName="STSong-Light", fontSize=11, leading=16, textColor=colors.HexColor("#334155"), spaceBefore=6)
-    body = ParagraphStyle("HBody", parent=styles["BodyText"], fontName="STSong-Light", fontSize=9.5, leading=15, spaceAfter=4)
+    title = ParagraphStyle("HTitle", parent=styles["Title"], fontName=pdf_font, fontSize=20, leading=26, alignment=TA_CENTER, textColor=colors.HexColor("#0F172A"))
+    h1 = ParagraphStyle("HH1", parent=styles["Heading1"], fontName=pdf_font, fontSize=15, leading=21, textColor=colors.HexColor("#1F4E78"), spaceBefore=10)
+    h2 = ParagraphStyle("HH2", parent=styles["Heading2"], fontName=pdf_font, fontSize=11, leading=16, textColor=colors.HexColor("#334155"), spaceBefore=6)
+    body = ParagraphStyle("HBody", parent=styles["BodyText"], fontName=pdf_font, fontSize=9.5, leading=15, spaceAfter=4)
     story = [Paragraph("个性化复习讲义", title), Paragraph(_xml(f"学生：{snapshot['studentName']}　薄弱点：{'、'.join(str(item.get('knowledgePoint') or '') for item in sections)}"), body)]
     if degraded_reasons:
         story.append(Paragraph("部分 AI 增强或资料引用不可用，未核验内容已明确标注；原题事实与原始解析保持不变。", body))

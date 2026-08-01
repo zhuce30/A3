@@ -15,6 +15,10 @@ class LLMUnavailable(RuntimeError):
     pass
 
 
+class LLMEmptyResponse(LLMUnavailable):
+    pass
+
+
 def chat_completion(
     messages: list[dict],
     *,
@@ -60,7 +64,7 @@ def chat_completion(
     choice = data.get("choices", [{}])[0] if isinstance(data.get("choices"), list) else {}
     content = str(choice.get("message", {}).get("content") or "").strip()
     if not content:
-        raise LLMUnavailable("LLM returned empty content")
+        raise LLMEmptyResponse("LLM returned empty content")
     return {
         "content": content,
         "provider": "dashscope",

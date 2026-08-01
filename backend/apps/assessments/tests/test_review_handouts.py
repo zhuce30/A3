@@ -20,6 +20,22 @@ from backend.apps.profiles.models import LearnerProfile
 from backend.domains.knowledge_base.schemas import KnowledgeBaseSearchResult
 
 
+def _pdf_has_embedded_font(reader: PdfReader) -> bool:
+    for page in reader.pages:
+        fonts = page.get("/Resources", {}).get("/Font", {})
+        for raw_font in fonts.values():
+            font = raw_font.get_object()
+            descendants = font.get("/DescendantFonts") or [font]
+            for raw_descendant in descendants:
+                descendant = raw_descendant.get_object()
+                descriptor = descendant.get("/FontDescriptor")
+                if descriptor:
+                    descriptor = descriptor.get_object()
+                    if any(descriptor.get(key) for key in ("/FontFile", "/FontFile2", "/FontFile3")):
+                        return True
+    return False
+
+
 class ReviewHandoutDomainTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
@@ -240,7 +256,9 @@ class ReviewHandoutDomainTests(TestCase):
             self.assertIn("7 天复习计划", text)
             self.assertIn("资料引用", text)
             self.assertIn("答案与解析", text)
-            self.assertGreaterEqual(len(PdfReader(job.pdf_path).pages), 1)
+            pdf_reader = PdfReader(job.pdf_path)
+            self.assertGreaterEqual(len(pdf_reader.pages), 1)
+            self.assertTrue(_pdf_has_embedded_font(pdf_reader))
         search.assert_called()
         enhance.assert_called_once()
 

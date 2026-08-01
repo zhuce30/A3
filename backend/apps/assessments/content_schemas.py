@@ -106,16 +106,33 @@ def _reject_answer_conflict(
     }
     if not expected_by_question:
         return
+    question_pattern = re.compile(
+        r"(?<![0-9A-Za-z_-])(?:"
+        + "|".join(re.escape(question_id) for question_id in sorted(expected_by_question, key=len, reverse=True))
+        + r")(?![0-9A-Za-z_-])"
+    )
     for text in texts:
+        previous_assertion_end = 0
         for match in _ANSWER_ASSERTION.finditer(text):
-            mentioned = [question_id for question_id in expected_by_question if question_id in text]
-            question_id = mentioned[0] if len(mentioned) == 1 else default_question_id
-            if question_id is None and len(expected_by_question) == 1:
-                question_id = next(iter(expected_by_question))
-            if question_id is None:
-                continue
-            if _answer_token(match.group(1)) != expected_by_question.get(question_id):
+            assertion_prefix = text[previous_assertion_end:match.start()]
+            mentioned = list(dict.fromkeys(
+                item.group(0) for item in question_pattern.finditer(assertion_prefix)
+            ))
+            claimed_answer = _answer_token(match.group(1))
+            if mentioned:
+                conflicts = any(
+                    claimed_answer != expected_by_question.get(question_id)
+                    for question_id in mentioned
+                )
+            elif default_question_id is not None:
+                conflicts = claimed_answer != expected_by_question.get(default_question_id)
+            elif len(expected_by_question) == 1:
+                conflicts = claimed_answer != next(iter(expected_by_question.values()))
+            else:
+                conflicts = claimed_answer not in set(expected_by_question.values())
+            if conflicts:
                 raise ContentValidationError("正确答案冲突")
+            previous_assertion_end = match.end()
 
 
 def validate_wrong_export_payload(
@@ -191,7 +208,11 @@ def validate_wrong_export_payload(
             "citationIds": _citation_ids(item["citationIds"], f"transferPractice[{index}].citationIds", source_ids),
         })
     normalized["transferPractice"] = practices
-    normalized["evidenceStatus"] = _evidence_status(result["evidenceStatus"])
+    requested_evidence_status = _evidence_status(result["evidenceStatus"])
+    has_citations = any(item["citationIds"] for item in analyses) or any(
+        item["citationIds"] for item in practices
+    )
+    normalized["evidenceStatus"] = requested_evidence_status if has_citations else "unverified"
     global_texts = [
         normalized["knowledgePoint"],
         normalized["groupDiagnosis"],
@@ -264,7 +285,8 @@ def validate_review_handout_payload(
     normalized["tieredPractice"] = practices
     normalized["reviewActions"] = _prose_list(result["reviewActions"], "reviewActions")
     normalized["citationIds"] = _citation_ids(result["citationIds"], "citationIds", source_ids)
-    normalized["evidenceStatus"] = _evidence_status(result["evidenceStatus"])
+    requested_evidence_status = _evidence_status(result["evidenceStatus"])
+    normalized["evidenceStatus"] = requested_evidence_status if normalized["citationIds"] else "unverified"
     immutable_answers = answers or {}
     if question_ids is not None:
         unknown_answers = sorted(set(immutable_answers) - question_ids)
