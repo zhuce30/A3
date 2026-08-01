@@ -22,7 +22,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from backend.apps.assessments.models import WrongQuestion
 
@@ -326,9 +326,9 @@ def _build_pdf(snapshot: dict) -> bytes:
     summary_table = Table(
         [["错题总数", "待巩固", "已掌握", "重点知识点"], [
             summary["totalCount"], summary["activeCount"], summary["masteredCount"],
-            "、".join(summary["knowledgePoints"][:5]) or "暂无",
+            Paragraph(_escape_pdf_text("、".join(summary["knowledgePoints"][:5]) or "暂无"), body_style),
         ]],
-        colWidths=[28 * mm, 28 * mm, 28 * mm, 82 * mm],
+        colWidths=[26 * mm, 26 * mm, 26 * mm, 88 * mm],
     )
     summary_table.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
@@ -348,16 +348,21 @@ def _build_pdf(snapshot: dict) -> bytes:
         if row["knowledgePoint"] != current_point:
             current_point = row["knowledgePoint"]
             story.append(Paragraph(_escape_pdf_text(current_point), heading_style))
-        story.append(Paragraph(_escape_pdf_text(f"{number}. {row['stem']}"), heading_style))
-        for option in row["options"]:
-            story.append(Paragraph(_escape_pdf_text(f"{option['key']}. {option['text']}"), body_style))
-        story.append(Paragraph(_escape_pdf_text(
-            f"上次错误答案：{row['lastWrongAnswer'] or '未记录'}　正确答案：{row['correctAnswer']}　"
-            f"错误次数：{row['wrongCount']}　下次复习：{_display_datetime(row['reviewAfter'])}"
-        ), body_style))
-        story.append(Paragraph(_escape_pdf_text(f"错因：{row['errorCause']}"), body_style))
-        story.append(Paragraph(_escape_pdf_text(f"解析：{row['explanation']}"), body_style))
-        story.append(Paragraph(_escape_pdf_text(f"来源：{row['source']} · {row['course']} / {row['chapter']}"), body_style))
+        question_parts = [Paragraph(_escape_pdf_text(f"{number}. {row['stem']}"), heading_style)]
+        question_parts.extend(
+            Paragraph(_escape_pdf_text(f"{option['key']}. {option['text']}"), body_style)
+            for option in row["options"]
+        )
+        question_parts.extend([
+            Paragraph(_escape_pdf_text(
+                f"上次错误答案：{row['lastWrongAnswer'] or '未记录'}　正确答案：{row['correctAnswer']}　"
+                f"错误次数：{row['wrongCount']}　下次复习：{_display_datetime(row['reviewAfter'])}"
+            ), body_style),
+            Paragraph(_escape_pdf_text(f"错因：{row['errorCause']}"), body_style),
+            Paragraph(_escape_pdf_text(f"解析：{row['explanation']}"), body_style),
+            Paragraph(_escape_pdf_text(f"来源：{row['source']} · {row['course']} / {row['chapter']}"), body_style),
+        ])
+        story.append(KeepTogether(question_parts))
         if number < len(snapshot["questions"]):
             story.append(Spacer(1, 2 * mm))
 
