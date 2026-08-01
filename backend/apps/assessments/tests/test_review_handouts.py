@@ -12,7 +12,7 @@ from docx import Document
 from pypdf import PdfReader
 
 from backend.apps.accounts.models import User
-from backend.apps.assessments.models import Question, WrongQuestion
+from backend.apps.assessments.models import Question, ReviewHandoutJob, WrongQuestion
 from backend.apps.learning.models import Chapter, Course, KnowledgePoint
 from backend.apps.profiles.models import LearnerProfile
 from backend.domains.knowledge_base.schemas import KnowledgeBaseSearchResult
@@ -66,6 +66,18 @@ class ReviewHandoutDomainTests(TestCase):
             last_wrong_answer="A",
             review_after=review_after,
         )
+
+    def test_review_handout_job_ai_audit_fields_have_backward_compatible_defaults(self):
+        job = ReviewHandoutJob.objects.create(
+            user=self.user,
+            snapshot_hash="b" * 64,
+            snapshot={},
+            ranked_weak_points=[],
+        )
+        self.assertEqual(job.enhancement, {})
+        self.assertEqual(job.llm_audit, {})
+        self.assertEqual(job.degraded_reasons, [])
+        self.assertEqual(job.prompt_version, "")
 
     def test_rank_weak_points_uses_wrong_history_due_state_and_profile(self):
         from backend.apps.assessments.review_handouts import create_snapshot, rank_weak_points

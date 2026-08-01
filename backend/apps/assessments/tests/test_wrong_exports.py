@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 from pypdf import PdfReader
 
 from backend.apps.accounts.models import User
-from backend.apps.assessments.models import Question, WrongQuestion
+from backend.apps.assessments.models import Question, WrongQuestion, WrongQuestionExportJob
 from backend.apps.learning.models import Chapter, Course, KnowledgePoint
 from backend.apps.profiles.models import LearnerProfile
 
@@ -80,6 +80,32 @@ class WrongExportDomainTests(TestCase):
             review_after=review_after,
         )
         return wrong
+
+    def test_wrong_export_job_persists_snapshot_audit_and_artifact_metadata(self):
+        job = WrongQuestionExportJob.objects.create(
+            user=self.user,
+            scope="active",
+            format="docx",
+            snapshot_hash="a" * 64,
+            snapshot={"questions": [{"questionId": "q-1"}]},
+            enhancement={"sections": []},
+            citations=[{"sourceId": "S1"}],
+            llm_audit={"promptVersion": "wrong-export-v1"},
+            degraded=True,
+            degraded_reasons=["timeout"],
+            artifact_path="exports/private.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename="wrong-questions-active.docx",
+        )
+        job.refresh_from_db()
+        self.assertEqual(job.user, self.user)
+        self.assertEqual(job.status, "queued")
+        self.assertEqual(job.progress, 0)
+        self.assertEqual(job.enhancement, {"sections": []})
+        self.assertEqual(job.llm_audit["promptVersion"], "wrong-export-v1")
+        self.assertEqual(job.degraded_reasons, ["timeout"])
+        self.assertTrue(job.created_at)
+        self.assertTrue(job.updated_at)
 
     def test_select_wrong_questions_supports_all_scopes_and_owner_isolation(self):
         from backend.apps.assessments.wrong_exports import select_wrong_questions
