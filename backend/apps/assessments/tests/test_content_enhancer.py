@@ -1,4 +1,7 @@
 import json
+from unittest.mock import Mock, patch
+
+import requests
 
 from django.test import SimpleTestCase
 
@@ -14,6 +17,10 @@ from backend.apps.assessments.content_schemas import (
     extract_json_object,
     validate_review_handout_payload,
     validate_wrong_export_payload,
+)
+from backend.apps.assessments.content_enhancer import (
+    enhance_review_handout,
+    enhance_wrong_export,
 )
 
 
@@ -352,3 +359,123 @@ class ContentSchemaTests(SimpleTestCase):
     def test_valid_payload_remains_json_serializable(self):
         normalized = validate_wrong_export_payload(valid_wrong_export_payload(), question_ids={"q-1"}, source_ids={"S1"}, answers={"q-1": "B"})
         json.dumps(normalized, ensure_ascii=False)
+
+
+class AssessmentContentEnhancerTests(SimpleTestCase):
+    def _snapshot(self, *, two_points=False):
+        questions = [dict(QUESTION)]
+        if two_points:
+            questions.append(dict(
+                QUESTION,
+                questionId="q-2",
+                knowledgePoint="死锁",
+                correctAnswer="A",
+                errorCause="忽略互斥条件",
+            ))
+        questions[0]["knowledgePoint"] = "进程调度"
+        return {"profile": PROFILE, "questions": questions}
+
+    def _response(self, payload, *, model="qwen-plus"):
+        return {
+            "content": json.dumps(payload, ensure_ascii=False),
+            "provider": "dashscope",
+            "model": model,
+            "finishReason": "stop",
+            "usage": {"prompt_tokens": 20, "completion_tokens": 30},
+        }
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_wrong_export_success_returns_verified_content_and_audit(self, completion):
+        completion.return_value = self._response(valid_wrong_export_payload())
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertTrue(result.verified)
+        self.assertFalse(result.degraded)
+        self.assertEqual(result.content["sections"][0]["knowledgePoint"], "进程调度")
+        self.assertEqual(result.audit["promptVersion"], "wrong-export-v1")
+        self.assertEqual(result.audit["provider"], "dashscope")
+        self.assertEqual(result.audit["model"], "qwen-plus")
+        self.assertEqual(result.audit["attempts"], 1)
+        self.assertEqual(result.audit["finishReason"], "stop")
+        self.assertEqual(result.audit["usage"]["completion_tokens"], 30)
+        self.assertGreaterEqual(result.audit["latencyMs"], 0)
+        completion.assert_called_once()
+        self.assertEqual(completion.call_args.kwargs["temperature"], 0.15)
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_timeout_retries_then_succeeds(self, completion):
+        completion.side_effect = [requests.Timeout("secret timeout detail"), self._response(valid_wrong_export_payload())]
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertFalse(result.degraded)
+        self.assertEqual(result.audit["attempts"], 2)
+        self.assertEqual(completion.call_count, 2)
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_invalid_json_retries_twice_then_succeeds(self, completion):
+        completion.side_effect = [
+            {"content": "not json", "provider": "dashscope", "model": "qwen-plus"},
+            {"content": "```json\n{}\n```", "provider": "dashscope", "model": "qwen-plus"},
+            self._response(valid_wrong_export_payload()),
+        ]
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertFalse(result.degraded)
+        self.assertEqual(result.audit["attempts"], 3)
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_http_401_short_circuits_to_safe_fallback(self, completion):
+        response = Mock(status_code=401)
+        completion.side_effect = requests.HTTPError("Bearer sk-secret", response=response)
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertTrue(result.degraded)
+        self.assertFalse(result.verified)
+        self.assertEqual(result.audit["attempts"], 1)
+        self.assertEqual(result.audit["errorCategories"], ["authentication"])
+        self.assertNotIn("sk-secret", json.dumps(result.audit))
+        self.assertEqual(result.content["sections"][0]["questionAnalyses"][0]["questionId"], "q-1")
+        self.assertEqual(result.content["sections"][0]["transferPractice"], [])
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_one_point_failure_does_not_block_other_points(self, completion):
+        successful_section = dict(valid_wrong_export_payload(citation_ids=["S2"]), knowledgePoint="死锁")
+        successful_section["questionAnalyses"][0]["questionId"] = "q-2"
+        completion.side_effect = [
+            requests.Timeout("private"),
+            requests.Timeout("private"),
+            requests.Timeout("private"),
+            self._response(successful_section),
+        ]
+        result = enhance_wrong_export(
+            self._snapshot(two_points=True),
+            {"进程调度": [SOURCE], "死锁": [dict(SOURCE, sourceId="S2")]},
+            sleep=lambda _: None,
+        )
+        self.assertTrue(result.degraded)
+        self.assertFalse(result.verified)
+        self.assertEqual(len(result.content["sections"]), 2)
+        self.assertEqual(result.content["sections"][0]["evidenceStatus"], "unverified")
+        self.assertEqual(result.content["sections"][1]["knowledgePoint"], "死锁")
+        self.assertEqual(result.content["sections"][1]["evidenceStatus"], "verified")
+        self.assertEqual(result.content["sections"][1]["questionAnalyses"][0]["questionId"], "q-2")
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_all_points_failure_still_returns_downloadable_base_content(self, completion):
+        completion.side_effect = requests.Timeout("private timeout")
+        result = enhance_wrong_export(self._snapshot(), {"进程调度": [SOURCE]}, sleep=lambda _: None)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.audit["attempts"], 3)
+        self.assertIn("timeout", result.degraded_reasons)
+        analysis = result.content["sections"][0]["questionAnalyses"][0]
+        self.assertIn(QUESTION["errorCause"], analysis["deepErrorDiagnosis"])
+        self.assertIn(QUESTION["explanation"], analysis["solutionSteps"])
+
+    @patch("backend.apps.assessments.content_enhancer.chat_completion")
+    def test_review_handout_uses_shared_retry_and_validation(self, completion):
+        completion.return_value = self._response(valid_handout_payload())
+        result = enhance_review_handout(
+            self._snapshot(),
+            [dict(WEAKNESS)],
+            {"进程调度": [SOURCE]},
+            sleep=lambda _: None,
+        )
+        self.assertTrue(result.verified)
+        self.assertEqual(result.audit["promptVersion"], "review-handout-v1")
+        self.assertEqual(result.content["sections"][0]["tieredPractice"][2]["level"], "迁移")
