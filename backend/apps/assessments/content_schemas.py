@@ -84,7 +84,7 @@ def _evidence_status(value: Any) -> str:
 
 
 _ANSWER_ASSERTION = re.compile(
-    r"(?:本题|原题)?\s*正确答案\s*(?:应当|应该|应|是|为)\s*[：:]?\s*([^，。；;、\s]+)",
+    r"(?:本题|原题)?\s*(?:正确答案|正确选项|答案)\s*(?:应当|应该|应|是|为)\s*[：:]?\s*([^，。；;、\s]+)",
     re.IGNORECASE,
 )
 
@@ -93,13 +93,13 @@ def _answer_token(value: Any) -> str:
     return re.sub(r"[\s。．.，,；;：:]", "", str(value)).casefold()
 
 
-def _reject_answer_conflict(texts: Iterable[str], correct_answer: Any) -> None:
-    expected = _answer_token(correct_answer)
+def _reject_answer_conflict(texts: Iterable[str], correct_answers: Iterable[Any]) -> None:
+    expected = {_answer_token(answer) for answer in correct_answers if _answer_token(answer)}
     if not expected:
         return
     for text in texts:
         for match in _ANSWER_ASSERTION.finditer(text):
-            if _answer_token(match.group(1)) != expected:
+            if _answer_token(match.group(1)) not in expected:
                 raise ContentValidationError("正确答案冲突")
 
 
@@ -145,7 +145,7 @@ def validate_wrong_export_payload(
         steps = _prose_list(item["solutionSteps"], f"questionAnalyses[{index}].solutionSteps")
         self_check = _prose(item["selfCheck"], f"questionAnalyses[{index}].selfCheck")
         review_advice = _prose(item["reviewAdvice"], f"questionAnalyses[{index}].reviewAdvice")
-        _reject_answer_conflict([diagnosis, *steps, self_check, review_advice], answers.get(question_id))
+        _reject_answer_conflict([diagnosis, *steps, self_check, review_advice], [answers.get(question_id)])
         analyses.append({
             "questionId": question_id,
             "deepErrorDiagnosis": diagnosis,
@@ -173,10 +173,39 @@ def validate_wrong_export_payload(
         })
     normalized["transferPractice"] = practices
     normalized["evidenceStatus"] = _evidence_status(result["evidenceStatus"])
+    all_answers = answers.values()
+    global_texts = [
+        normalized["knowledgePoint"],
+        normalized["groupDiagnosis"],
+        *normalized["prerequisiteGaps"],
+        *(text for item in normalized["confusions"] for text in item.values()),
+        *(
+            text
+            for item in normalized["questionAnalyses"]
+            for text in (
+                item["deepErrorDiagnosis"],
+                *item["solutionSteps"],
+                item["selfCheck"],
+                item["reviewAdvice"],
+            )
+        ),
+        *(
+            text
+            for item in normalized["transferPractice"]
+            for text in (item["prompt"], item["explanation"])
+        ),
+    ]
+    _reject_answer_conflict(global_texts, all_answers)
     return normalized
 
 
-def validate_review_handout_payload(payload: Any, *, source_ids: set[str]) -> dict[str, Any]:
+def validate_review_handout_payload(
+    payload: Any,
+    *,
+    source_ids: set[str],
+    answers: dict[str, Any] | None = None,
+    question_ids: set[str] | None = None,
+) -> dict[str, Any]:
     result = copy.deepcopy(_require_object(payload, "payload"))
     required = {
         "knowledgePoint", "learningDiagnosis", "coreConcept", "prerequisites",
@@ -223,4 +252,27 @@ def validate_review_handout_payload(payload: Any, *, source_ids: set[str]) -> di
     normalized["reviewActions"] = _prose_list(result["reviewActions"], "reviewActions")
     normalized["citationIds"] = _citation_ids(result["citationIds"], "citationIds", source_ids)
     normalized["evidenceStatus"] = _evidence_status(result["evidenceStatus"])
+    immutable_answers = answers or {}
+    if question_ids is not None:
+        unknown_answers = sorted(set(immutable_answers) - question_ids)
+        if unknown_answers:
+            raise ContentValidationError(f"未知题目 {unknown_answers[0]}")
+    generated_texts = [
+        normalized["knowledgePoint"],
+        normalized["learningDiagnosis"],
+        normalized["coreConcept"],
+        *normalized["prerequisites"],
+        *normalized["commonErrorPatterns"],
+        *normalized["method"],
+        normalized["workedExample"]["prompt"],
+        *normalized["workedExample"]["steps"],
+        normalized["workedExample"]["answer"],
+        *(
+            text
+            for item in normalized["tieredPractice"]
+            for text in (item["prompt"], item["answer"], item["explanation"])
+        ),
+        *normalized["reviewActions"],
+    ]
+    _reject_answer_conflict(generated_texts, immutable_answers.values())
     return normalized

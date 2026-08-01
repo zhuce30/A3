@@ -51,24 +51,36 @@ tieredPractice 必须提供基础、巩固、迁移三种分层练习，每项�
 workedExample 必须包含 prompt、steps、answer。evidenceStatus 只能是 verified、partial 或 unverified。"""
 
 
+_WINDOWS_PATH = re.compile(r"(?i)(?<![\w])(?:[a-z]:[\\/])[^\s\"'，。；;]+")
+_UNC_PATH = re.compile(r"(?<![\w])\\\\[^\s\"'，。；;]+")
+_UNIX_PATH = re.compile(r"(?<![\w:])/(?:[^\s/\"'，。；;]+/)*[^\s\"'，。；;]+")
+_FILE_URI = re.compile(r"(?i)file:(?:/{1,3})?[^\s\"'，。；;]+")
+_KEY_LIKE_VALUE = re.compile(
+    r"(?i)(?:sk|rk|pk|api[_-]?key|dashscope|qwen)[_-][A-Za-z0-9_-]{12,}"
+)
+_REDACTED = "[已移除敏感信息]"
+
+
+def sanitize_prompt_value(value: Any) -> Any:
+    """Recursively redact local paths and credential-like values from prompt data."""
+    if isinstance(value, dict):
+        return {key: sanitize_prompt_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_prompt_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_prompt_value(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    sanitized = value
+    for pattern in (_FILE_URI, _WINDOWS_PATH, _UNC_PATH, _UNIX_PATH, _KEY_LIKE_VALUE):
+        sanitized = pattern.sub(_REDACTED, sanitized)
+    return sanitized
+
+
 def _pick_fields(value: Any, allowed_fields: tuple[str, ...]) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    selected = {field: value[field] for field in allowed_fields if field in value}
-    if "location" in selected and _looks_like_internal_path(selected["location"]):
-        selected["location"] = ""
-    return selected
-
-
-def _looks_like_internal_path(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    stripped = value.strip()
-    return bool(
-        re.match(r"^[A-Za-z]:[\\/]", stripped)
-        or stripped.startswith(("/", "\\\\"))
-        or stripped.lower().startswith("file:")
-    )
+    return sanitize_prompt_value({field: value[field] for field in allowed_fields if field in value})
 
 
 def _serialize_user_payload(payload: dict[str, Any]) -> str:

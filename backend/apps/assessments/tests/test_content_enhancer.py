@@ -7,6 +7,7 @@ from backend.apps.assessments.content_prompts import (
     WRONG_EXPORT_PROMPT_VERSION,
     build_review_handout_messages,
     build_wrong_export_messages,
+    sanitize_prompt_value,
 )
 from backend.apps.assessments.content_schemas import (
     ContentValidationError,
@@ -140,6 +141,32 @@ class ContentPromptTests(SimpleTestCase):
         user = build_wrong_export_messages(PROFILE, [QUESTION], [source])[1]["content"]
         self.assertNotIn("D:/private", user)
 
+    def test_prompt_recursively_redacts_paths_and_key_like_values(self):
+        profile = dict(
+            PROFILE,
+            learningGoal="参考 C:\\private\\plan.txt 并使用 sk-secretvalue123456",
+            preferences=["图解", "/opt/a3/private/notes.txt"],
+        )
+        question = dict(QUESTION, stem="题目存于 \\\\server\\private\\question.txt")
+        source = dict(SOURCE, title="D:/private/x.pdf", location="公开课程第 3 章")
+        user = build_wrong_export_messages(profile, [question], [source])[1]["content"]
+        self.assertNotIn("C:\\private", user)
+        self.assertNotIn("/opt/a3", user)
+        self.assertNotIn("\\\\server", user)
+        self.assertNotIn("D:/private", user)
+        self.assertNotIn("sk-secretvalue", user)
+        self.assertIn("公开课程第 3 章", user)
+
+    def test_prompt_sanitizer_is_recursive_and_preserves_public_locations(self):
+        sanitized = sanitize_prompt_value({
+            "nested": ["D:\\private\\one.txt", {"token": "api_key-secretvalue123456"}],
+            "location": "操作系统课程 > 进程管理 > 第 3 节",
+        })
+        serialized = json.dumps(sanitized, ensure_ascii=False)
+        self.assertNotIn("D:\\private", serialized)
+        self.assertNotIn("api_key-secret", serialized)
+        self.assertEqual(sanitized["location"], "操作系统课程 > 进程管理 > 第 3 节")
+
 
 class ContentSchemaTests(SimpleTestCase):
     def test_extract_json_object_accepts_only_one_plain_object(self):
@@ -178,6 +205,27 @@ class ContentSchemaTests(SimpleTestCase):
         with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
             validate_wrong_export_payload(conflict, question_ids={"q-1"}, source_ids={"S1"}, answers={"q-1": "B"})
 
+    def test_wrong_export_validator_checks_answer_claims_in_all_generated_sections(self):
+        mutations = [
+            lambda value: value.__setitem__("groupDiagnosis", "正确答案是 A。"),
+            lambda value: value.__setitem__("prerequisiteGaps", ["正确选项为 A。"]),
+            lambda value: value["confusions"][0].__setitem__("difference", "答案为 A。"),
+            lambda value: value["questionAnalyses"][0].__setitem__("selfCheck", "答案是 A。"),
+            lambda value: value["transferPractice"][0].__setitem__("explanation", "原题正确答案应为 A。"),
+        ]
+        for mutate in mutations:
+            payload = valid_wrong_export_payload()
+            mutate(payload)
+            with self.subTest(payload=payload):
+                with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
+                    validate_wrong_export_payload(payload, question_ids={"q-1"}, source_ids={"S1"}, answers={"q-1": "B"})
+
+    def test_wrong_export_validator_does_not_treat_practice_answer_as_original_claim(self):
+        payload = valid_wrong_export_payload()
+        payload["transferPractice"][0]["answer"] = "A"
+        validated = validate_wrong_export_payload(payload, question_ids={"q-1"}, source_ids={"S1"}, answers={"q-1": "B"})
+        self.assertEqual(validated["transferPractice"][0]["answer"], "A")
+
     def test_wrong_export_validator_rejects_missing_invalid_and_oversized_fields(self):
         missing = valid_wrong_export_payload()
         del missing["groupDiagnosis"]
@@ -201,7 +249,7 @@ class ContentSchemaTests(SimpleTestCase):
             validate_wrong_export_payload(too_many_exercises, question_ids={"q-1"}, source_ids={"S1"}, answers={"q-1": "B"})
 
     def test_handout_validator_normalizes_and_rejects_bad_contracts(self):
-        payload = validate_review_handout_payload(valid_handout_payload(), source_ids={"S1"})
+        payload = validate_review_handout_payload(valid_handout_payload(), source_ids={"S1"}, answers={"q-1": "B"})
         self.assertEqual([item["level"] for item in payload["tieredPractice"]], ["基础", "巩固", "迁移"])
         for mutation in ("missing", "citation", "status", "exercise_count"):
             candidate = valid_handout_payload()
@@ -215,17 +263,52 @@ class ContentSchemaTests(SimpleTestCase):
                 candidate["tieredPractice"] *= 3
             with self.subTest(mutation=mutation):
                 with self.assertRaises(ContentValidationError):
-                    validate_review_handout_payload(candidate, source_ids={"S1"})
+                    validate_review_handout_payload(candidate, source_ids={"S1"}, answers={"q-1": "B"})
 
     def test_handout_validator_rejects_missing_tier_and_long_prose(self):
         missing_tier = valid_handout_payload()
         missing_tier["tieredPractice"] = missing_tier["tieredPractice"][:2]
         with self.assertRaises(ContentValidationError):
-            validate_review_handout_payload(missing_tier, source_ids={"S1"})
+            validate_review_handout_payload(missing_tier, source_ids={"S1"}, answers={"q-1": "B"})
         oversized = valid_handout_payload()
         oversized["coreConcept"] = "长" * 2001
         with self.assertRaises(ContentValidationError):
-            validate_review_handout_payload(oversized, source_ids={"S1"})
+            validate_review_handout_payload(oversized, source_ids={"S1"}, answers={"q-1": "B"})
+
+    def test_handout_validator_rejects_original_answer_conflict_anywhere(self):
+        mutations = (
+            lambda value: value.__setitem__("learningDiagnosis", "本题正确选项为 A。"),
+            lambda value: value.__setitem__("coreConcept", "答案是 A。"),
+            lambda value: value["workedExample"].__setitem__("answer", "原题答案为 A。"),
+            lambda value: value["tieredPractice"][0].__setitem__("explanation", "正确答案应为 A。"),
+        )
+        for mutate in mutations:
+            payload = valid_handout_payload()
+            mutate(payload)
+            with self.subTest(payload=payload):
+                with self.assertRaisesMessage(ContentValidationError, "正确答案冲突"):
+                    validate_review_handout_payload(payload, source_ids={"S1"}, answers={"q-1": "B"})
+
+    def test_validators_reject_extra_fields_duplicate_citations_and_bad_enums(self):
+        cases = []
+        extra = valid_wrong_export_payload()
+        extra["unexpected"] = "no"
+        cases.append((validate_wrong_export_payload, extra, {"question_ids": {"q-1"}, "source_ids": {"S1"}, "answers": {"q-1": "B"}}))
+        duplicate_citation = valid_wrong_export_payload(citation_ids=["S1", "S1"])
+        cases.append((validate_wrong_export_payload, duplicate_citation, {"question_ids": {"q-1"}, "source_ids": {"S1"}, "answers": {"q-1": "B"}}))
+        bad_difficulty = valid_wrong_export_payload()
+        bad_difficulty["transferPractice"][0]["difficulty"] = "困难"
+        cases.append((validate_wrong_export_payload, bad_difficulty, {"question_ids": {"q-1"}, "source_ids": {"S1"}, "answers": {"q-1": "B"}}))
+        bad_level = valid_handout_payload()
+        bad_level["tieredPractice"][0]["level"] = "入门"
+        cases.append((validate_review_handout_payload, bad_level, {"source_ids": {"S1"}, "answers": {"q-1": "B"}}))
+        wrong_type = valid_handout_payload()
+        wrong_type["method"] = "识别"
+        cases.append((validate_review_handout_payload, wrong_type, {"source_ids": {"S1"}, "answers": {"q-1": "B"}}))
+        for validator, payload, kwargs in cases:
+            with self.subTest(validator=validator.__name__, payload=payload):
+                with self.assertRaises(ContentValidationError):
+                    validator(payload, **kwargs)
 
     def test_valid_payload_remains_json_serializable(self):
         normalized = validate_wrong_export_payload(valid_wrong_export_payload(), question_ids={"q-1"}, source_ids={"S1"}, answers={"q-1": "B"})
