@@ -20,6 +20,20 @@ def _payload_error(exc: Exception) -> tuple[dict, int]:
     raise exc
 
 
+@authenticated
+@require_http_methods(["GET"])
+def attachment_list(request, note_id):
+    try:
+        attachments = attachment_service.list_attachments(request.user, note_id)
+        return JsonResponse({
+            "success": True,
+            "attachments": [attachment_service.serialize_attachment(item) for item in attachments],
+        })
+    except attachment_service.AttachmentServiceError as exc:
+        payload, status = _payload_error(exc)
+        return JsonResponse(payload, status=status)
+
+
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
 def attachment_upload(request, note_id):

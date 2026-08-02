@@ -72,6 +72,13 @@ async function installNotesContracts(page: Page, initialNotes = [note('note-1', 
       Object.assign(current, { content: payload.content, version: current.version + 1 });
       return json(route, { success: true, note: current, resultingVersion: current.version, idempotent: false });
     }
+    const attachmentList = path.match(/^notes\/([^/]+)\/attachments\/$/);
+    if (attachmentList && request.method() === 'GET') {
+      return json(route, {
+        success: true,
+        attachments: state.attachments.filter((item) => item.noteId === attachmentList[1]),
+      });
+    }
     const restore = path.match(/^notes\/([^/]+)\/restore\/$/);
     if (restore) {
       const current = state.notes.find((item) => item.id === restore[1])!;

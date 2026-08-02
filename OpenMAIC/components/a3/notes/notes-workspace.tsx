@@ -20,6 +20,7 @@ interface NotesWorkspaceProps {
 }
 
 type WorkspaceLoadState = 'loading' | 'ready' | 'error';
+type PersistenceState = 'loading' | 'ready' | 'error';
 
 export function NotesWorkspace({ client: providedClient, userId: providedUserId, draftStore: providedDraftStore, autosave: providedAutosave }: NotesWorkspaceProps = {}) {
   const user = useA3CurrentUser();
@@ -28,7 +29,9 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const [draftStore] = useState(() => providedDraftStore ?? new NotesDraftStore());
   const [autosave] = useState(() => providedAutosave ?? new NotesAutosaveController({ store: draftStore, client, userId }));
   const ownsAutosave = !providedAutosave;
-  const [initialized, setInitialized] = useState(Boolean(providedAutosave));
+  const [initialized, setInitialized] = useState(false);
+  const [persistenceState, setPersistenceState] = useState<PersistenceState>('loading');
+  const [persistenceError, setPersistenceError] = useState('');
   const [accountSwitchRequired, setAccountSwitchRequired] = useState(false);
   const [notebooks, setNotebooks] = useState<NoteNotebook[]>([]);
   const [tags, setTags] = useState<NoteTag[]>([]);
@@ -43,6 +46,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const [editorState, setEditorState] = useState<WorkspaceLoadState>('ready');
   const [error, setError] = useState('');
   const [editorError, setEditorError] = useState('');
+  const [failedNoteId, setFailedNoteId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState('');
   const [busyNoteId, setBusyNoteId] = useState<string | null>(null);
   const [isMobile, setIsMobile] = useState(false);
@@ -50,29 +54,51 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const [focusNoteId, setFocusNoteId] = useState<string | null>(null);
   const noteButtons = useRef(new Map<string, HTMLButtonElement>());
   const selectedNoteIdRef = useRef<string | null>(null);
+  const noteLoadGeneration = useRef(0);
+  const listLoadGeneration = useRef(0);
+  const noteAbortController = useRef<AbortController | null>(null);
+  const listAbortController = useRef<AbortController | null>(null);
 
   useEffect(() => {
     selectedNoteIdRef.current = selectedNote?.id ?? null;
   }, [selectedNote?.id]);
 
+  const initializePersistence = useCallback(async () => {
+    setPersistenceState('loading');
+    setPersistenceError('');
+    setInitialized(false);
+    try {
+      const { account } = await autosave.initialize();
+      if (account.warningRequired) {
+        setAccountSwitchRequired(true);
+        setPersistenceState('ready');
+        return;
+      }
+      setAccountSwitchRequired(false);
+      setPersistenceState('ready');
+      setInitialized(true);
+    } catch {
+      setPersistenceState('error');
+      setPersistenceError('本地草稿存储初始化失败，请重试');
+    }
+  }, [autosave]);
+
   useEffect(() => {
-    if (providedAutosave) return;
-    let alive = true;
-    void autosave.initialize().then(({ account }) => {
-      if (!alive) return;
-      if (account.warningRequired) setAccountSwitchRequired(true);
-      else setInitialized(true);
-    });
-    return () => { alive = false; };
-  }, [autosave, providedAutosave]);
+    const handle = window.setTimeout(() => void initializePersistence(), 0);
+    return () => window.clearTimeout(handle);
+  }, [initializePersistence]);
 
   useEffect(() => () => {
+    noteLoadGeneration.current += 1;
+    listLoadGeneration.current += 1;
+    noteAbortController.current?.abort();
+    listAbortController.current?.abort();
     if (ownsAutosave) autosave.dispose();
   }, [autosave, ownsAutosave]);
 
   useEffect(() => {
     const resize = () => {
-      const mobile = window.innerWidth < 768;
+      const mobile = window.innerWidth < 1028;
       setIsMobile(mobile);
       if (mobile) {
         setMobileView(new URL(window.location.href).searchParams.has('note') ? 'editor' : 'list');
@@ -101,25 +127,66 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   }, [client, initialized]);
 
   const loadNote = useCallback(async (noteId: string) => {
+    const generation = noteLoadGeneration.current + 1;
+    noteLoadGeneration.current = generation;
+    noteAbortController.current?.abort();
+    const controller = new AbortController();
+    noteAbortController.current = controller;
     setEditorState('loading');
     setEditorError('');
-    const result = await client.getNote(noteId);
-    if (!result.success) {
+    setFailedNoteId(null);
+    try {
+      const [result, attachmentResult] = await Promise.all([
+        client.getNote(noteId, { signal: controller.signal }),
+        client.listAttachments(noteId, { signal: controller.signal }),
+      ]);
+      if (generation !== noteLoadGeneration.current || controller.signal.aborted) return;
+      if (!result.success) {
+        setEditorState('error');
+        setEditorError(result.error);
+        setFailedNoteId(noteId);
+        return;
+      }
+      if (!attachmentResult.success) {
+        setEditorState('error');
+        setEditorError(attachmentResult.error);
+        setFailedNoteId(noteId);
+        return;
+      }
+      let draft: PersistableNoteDraft | undefined;
+      try {
+        draft = await draftStore.getDraft(noteId);
+      } catch {
+        if (generation !== noteLoadGeneration.current || controller.signal.aborted) return;
+        setEditorState('error');
+        setEditorError('本地草稿读取失败，请重试');
+        setFailedNoteId(noteId);
+        return;
+      }
+      if (generation !== noteLoadGeneration.current || controller.signal.aborted) return;
+      setSelectedNote(result.note);
+      setAttachments(attachmentResult.attachments);
+      setRecoverableDraft(draft);
+      setEditorState('ready');
+    } catch (loadError) {
+      if (generation !== noteLoadGeneration.current || isAbortError(loadError)) return;
       setEditorState('error');
-      setEditorError(result.error);
-      return;
+      setEditorError('笔记加载失败，请重试');
+      setFailedNoteId(noteId);
     }
-    setSelectedNote(result.note);
-    setAttachments([]);
-    setRecoverableDraft(await draftStore.getDraft(noteId));
-    setEditorState('ready');
   }, [client, draftStore]);
 
   const loadNotes = useCallback(async () => {
     if (!initialized) return;
+    const generation = listLoadGeneration.current + 1;
+    listLoadGeneration.current = generation;
+    listAbortController.current?.abort();
+    const controller = new AbortController();
+    listAbortController.current = controller;
     setListState('loading');
     setError('');
     if (view === 'daily-summaries') {
+      if (generation !== listLoadGeneration.current) return;
       setNotes([]);
       setSelectedNote(null);
       setListState('ready');
@@ -129,22 +196,33 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     if (selectedNotebookId) query.set('notebookId', selectedNotebookId);
     else if (selectedTagId) query.set('tag', selectedTagId);
     else query.set('view', view);
-    const result = await client.searchNotes(query);
-    if (!result.success) {
+    try {
+      const result = await client.searchNotes(query, { signal: controller.signal });
+      if (generation !== listLoadGeneration.current || controller.signal.aborted) return;
+      if (!result.success) {
+        setNotes([]);
+        setListState('error');
+        setError(result.error);
+        return;
+      }
+      setNotes(result.notes);
+      setListState('ready');
+      const urlNoteId = typeof window === 'undefined' ? null : new URL(window.location.href).searchParams.get('note');
+      const preferredId = urlNoteId ?? (!isMobile ? selectedNoteIdRef.current ?? result.notes[0]?.id : null);
+      if (preferredId && result.notes.some((item) => item.id === preferredId) && view !== 'trash') {
+        await loadNote(preferredId);
+      } else if (!preferredId || !result.notes.some((item) => item.id === preferredId)) {
+        noteLoadGeneration.current += 1;
+        noteAbortController.current?.abort();
+        setSelectedNote(null);
+        setAttachments([]);
+        setRecoverableDraft(undefined);
+      }
+    } catch (loadError) {
+      if (generation !== listLoadGeneration.current || isAbortError(loadError)) return;
       setNotes([]);
       setListState('error');
-      setError(result.error);
-      return;
-    }
-    setNotes(result.notes);
-    setListState('ready');
-    const urlNoteId = typeof window === 'undefined' ? null : new URL(window.location.href).searchParams.get('note');
-    const preferredId = urlNoteId ?? (!isMobile ? selectedNoteIdRef.current ?? result.notes[0]?.id : null);
-    if (preferredId && result.notes.some((item) => item.id === preferredId) && view !== 'trash') {
-      await loadNote(preferredId);
-    } else if (!preferredId || !result.notes.some((item) => item.id === preferredId)) {
-      setSelectedNote(null);
-      setRecoverableDraft(undefined);
+      setError('笔记列表加载失败，请重试');
     }
   }, [client, initialized, isMobile, loadNote, selectedNotebookId, selectedTagId, view]);
 
@@ -176,6 +254,10 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   }, [focusNoteId, mobileView, notes]);
 
   const selectScope = (next: { view?: NotesSmartView; notebookId?: string; tagId?: string }) => {
+    listLoadGeneration.current += 1;
+    listAbortController.current?.abort();
+    noteLoadGeneration.current += 1;
+    noteAbortController.current?.abort();
     setView(next.view ?? 'recent');
     setSelectedNotebookId(next.notebookId ?? null);
     setSelectedTagId(next.tagId ?? null);
@@ -309,7 +391,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
           recoverableDraft={recoverableDraft}
           loadState={editorState}
           loadError={editorError}
-          onRetryLoad={() => selectedNote && void loadNote(selectedNote.id)}
+          onRetryLoad={() => failedNoteId && void loadNote(failedNoteId)}
           onNoteChange={updateSelectedNote}
           onAttachmentsChange={setAttachments}
         />
@@ -323,6 +405,26 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     </section>
   );
 
+  if (persistenceState === 'error') {
+    return (
+      <section className="flex h-full items-center justify-center bg-background px-6 text-center" role="alert">
+        <div className="max-w-md">
+          <h1 className="font-semibold">本地草稿存储初始化失败</h1>
+          <p className="mt-2 text-sm text-muted-foreground">{persistenceError || '无法打开本地草稿存储，请重试'}</p>
+          <Button className="mt-4 rounded-md" onClick={() => void initializePersistence()}>重试本地存储</Button>
+        </div>
+      </section>
+    );
+  }
+
+  if (persistenceState === 'loading') {
+    return (
+      <section className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground" aria-label="正在初始化本地草稿存储">
+        正在准备笔记工作区...
+      </section>
+    );
+  }
+
   if (accountSwitchRequired) {
     return (
       <section className="flex h-full items-center justify-center bg-background px-6 text-center" role="alert">
@@ -330,10 +432,15 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
           <h1 className="font-semibold">发现其他账号的离线草稿</h1>
           <p className="mt-2 text-sm text-muted-foreground">为避免账号间草稿混用，需要确认清理其他账号的本地笔记后继续。</p>
           <Button className="mt-4 rounded-md" onClick={() => {
-            void autosave.confirmAccountSwitch().then(() => {
-              setAccountSwitchRequired(false);
-              setInitialized(true);
-            });
+            void autosave.confirmAccountSwitch()
+              .then(() => {
+                setAccountSwitchRequired(false);
+                setInitialized(true);
+              })
+              .catch(() => {
+                setPersistenceState('error');
+                setPersistenceError('本地草稿账号切换失败，请重试');
+              });
           }}>清理并继续</Button>
         </div>
       </section>
@@ -343,13 +450,17 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   return (
     <div
       data-testid="notes-workspace"
-      className="grid h-full min-h-0 min-w-0 bg-background md:grid-cols-[220px_minmax(560px,1fr)]"
+      className="grid h-full min-h-0 min-w-0 bg-background min-[1028px]:grid-cols-[220px_minmax(560px,1fr)]"
     >
-      <div className="hidden min-h-0 border-r border-border/70 md:block">{navigation}</div>
-      <div className="hidden min-h-0 md:block">{editor}</div>
-      {isMobile && mobileView === 'list' && <div data-notes-mobile-view="list" className="min-h-0 md:hidden">{navigation}</div>}
-      {isMobile && mobileView === 'editor' && <div data-notes-mobile-view="editor" className="min-h-0 md:hidden">{editor}</div>}
+      <div className="hidden min-h-0 border-r border-border/70 min-[1028px]:block">{navigation}</div>
+      <div className="hidden min-h-0 min-[1028px]:block">{editor}</div>
+      {isMobile && mobileView === 'list' && <div data-notes-mobile-view="list" className="min-h-0 min-[1028px]:hidden">{navigation}</div>}
+      {isMobile && mobileView === 'editor' && <div data-notes-mobile-view="editor" className="min-h-0 min-[1028px]:hidden">{editor}</div>}
       <p className="sr-only" aria-live="polite">{feedback}</p>
     </div>
   );
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError';
 }

@@ -199,6 +199,39 @@ class UploadSecurityTests(AttachmentTestCase):
 
 
 class AttachmentRouteTests(AttachmentTestCase):
+    def test_list_returns_only_active_owned_attachments_for_owned_note(self) -> None:
+        active = self.create_attachment(display_name="active.txt")
+        link = NoteAttachment.objects.create(
+            user=self.user,
+            note=self.note,
+            kind=NoteAttachment.Kind.LINK,
+            display_name="reference",
+            source_url="https://example.com/reference",
+            parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+        )
+        self.create_attachment(display_name="deleted.txt", deleted_at="2026-08-02T00:00:00Z")
+        foreign_note = Note.objects.create(user=self.other_user, title="foreign", content_json=EMPTY_DOC)
+        NoteAttachment.objects.create(
+            user=self.other_user,
+            note=foreign_note,
+            kind=NoteAttachment.Kind.LINK,
+            display_name="foreign",
+            source_url="https://example.com",
+            parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+        )
+
+        response = self.client.get(reverse("notes:attachment-list", args=[self.note.id]))
+
+        self.assertEqual(response.status_code, 200)
+        attachments = response.json()["attachments"]
+        self.assertEqual([item["id"] for item in attachments], [str(active.id), str(link.id)])
+        self.assertEqual(attachments[1]["sourceUrl"], "https://example.com/reference")
+        self.client.force_login(self.other_user)
+        self.assertEqual(
+            self.client.get(reverse("notes:attachment-list", args=[self.note.id])).status_code,
+            404,
+        )
+
     def test_download_requires_authentication_and_owner(self) -> None:
         attachment = self.create_attachment()
         url = reverse("notes:attachment-download", args=[attachment.id])

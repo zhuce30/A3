@@ -65,7 +65,7 @@ class AttachmentNotFound(AttachmentServiceError):
 
 
 def serialize_attachment(attachment: NoteAttachment) -> dict[str, Any]:
-    return {
+    payload = {
         "id": str(attachment.id),
         "noteId": str(attachment.note_id),
         "kind": attachment.kind,
@@ -80,6 +80,9 @@ def serialize_attachment(attachment: NoteAttachment) -> dict[str, Any]:
         "createdAt": attachment.created_at.isoformat() if attachment.created_at else None,
         "updatedAt": attachment.updated_at.isoformat() if attachment.updated_at else None,
     }
+    if attachment.kind == NoteAttachment.Kind.LINK:
+        payload["sourceUrl"] = attachment.source_url
+    return payload
 
 
 def get_owned_note(user, note_id) -> Note:
@@ -87,6 +90,15 @@ def get_owned_note(user, note_id) -> Note:
         return Note.objects.get(user=user, pk=note_id, deleted_at__isnull=True)
     except (Note.DoesNotExist, ValueError) as exc:
         raise AttachmentNotFound("笔记不存在") from exc
+
+
+def list_attachments(user, note_id):
+    note = get_owned_note(user, note_id)
+    return NoteAttachment.objects.filter(
+        user=user,
+        note=note,
+        deleted_at__isnull=True,
+    ).order_by("created_at", "id")
 
 
 def get_owned_attachment(user, attachment_id, *, lock: bool = False) -> NoteAttachment:

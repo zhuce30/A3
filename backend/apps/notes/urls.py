@@ -12,6 +12,7 @@ urlpatterns = [
     path("exports/<uuid:export_id>/", views_notes.export_detail, name="export-detail"),
     path("notes/<uuid:note_id>/attachments/upload/", views_attachments.attachment_upload, name="attachment-upload"),
     path("notes/<uuid:note_id>/attachments/link/", views_attachments.attachment_link, name="attachment-link"),
+    path("notes/<uuid:note_id>/attachments/", views_attachments.attachment_list, name="attachment-list"),
     path("attachments/<uuid:attachment_id>/download/", views_attachments.attachment_download, name="attachment-download"),
     path("attachments/<uuid:attachment_id>/reparse/", views_attachments.attachment_reparse, name="attachment-reparse"),
     path("attachments/<uuid:attachment_id>/", views_attachments.attachment_detail, name="attachment-detail"),

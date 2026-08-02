@@ -61,16 +61,16 @@ export class NotesClient {
     return this.json<{ notes: NoteSummary[] }>('GET', this.withQuery('notes/', query));
   }
 
-  searchNotes(query: URLSearchParams | string) {
-    return this.json<{ notes: NoteSummary[] }>('GET', this.withQuery('search/', query));
+  searchNotes(query: URLSearchParams | string, options: { signal?: AbortSignal } = {}) {
+    return this.json<{ notes: NoteSummary[] }>('GET', this.withQuery('search/', query), undefined, options);
   }
 
   createNote(input: CreateNoteInput) {
     return this.json<{ note: NoteDetail }>('POST', 'notes/', input);
   }
 
-  getNote(noteId: string) {
-    return this.json<{ note: NoteDetail }>('GET', `notes/${encodeURIComponent(noteId)}/`);
+  getNote(noteId: string, options: { signal?: AbortSignal } = {}) {
+    return this.json<{ note: NoteDetail }>('GET', `notes/${encodeURIComponent(noteId)}/`, undefined, options);
   }
 
   saveNote(noteId: string, input: SaveNoteInput, options: { signal?: AbortSignal } = {}) {
@@ -98,6 +98,15 @@ export class NotesClient {
       'POST',
       `notes/${encodeURIComponent(noteId)}/revisions/${encodeURIComponent(revisionId)}/restore/`,
       input,
+    );
+  }
+
+  listAttachments(noteId: string, options: { signal?: AbortSignal } = {}) {
+    return this.json<{ attachments: NoteAttachment[] }>(
+      'GET',
+      `notes/${encodeURIComponent(noteId)}/attachments/`,
+      undefined,
+      options,
     );
   }
 

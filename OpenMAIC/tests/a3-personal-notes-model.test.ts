@@ -136,6 +136,24 @@ describe('personal notes frontend contracts', () => {
     expect(new Headers(uploadInit.headers).has('content-type')).toBe(false);
     expect(response).toBe(download);
   });
+
+  it('loads persisted note attachments through the typed note-scoped endpoint', async () => {
+    const attachment: NoteAttachment = {
+      id: 'attachment-1', noteId: note.id, kind: 'file', displayName: 'persisted.txt', mimeType: 'text/plain',
+      sizeBytes: 9, parseStatus: 'succeeded', parseGeneration: 1, parseStartedAt: null,
+      errorCode: '', errorMessage: '', createdAt: note.createdAt, updatedAt: note.updatedAt,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ success: true, attachments: [attachment] }));
+    const client = new NotesClient({ fetch: fetchMock });
+
+    const result = await client.listAttachments(note.id);
+
+    expect(result).toEqual({ success: true, attachments: [attachment] });
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/a3/notes/notes/${note.id}/attachments/`,
+      expect.objectContaining({ method: 'GET', credentials: 'include' }),
+    );
+  });
 });
 
 describe('secure personal notes proxy', () => {

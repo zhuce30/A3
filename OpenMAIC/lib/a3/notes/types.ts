@@ -62,6 +62,7 @@ export interface NoteAttachment {
   errorMessage: string;
   createdAt: string;
   updatedAt: string;
+  sourceUrl?: string;
 }
 
 export interface NoteAiSession {
