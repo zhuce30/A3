@@ -4,6 +4,7 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EditorView } from 'prosemirror-view';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
 import { NoteEditor } from '@/components/a3/notes/note-editor';
 import { NoteAttachments } from '@/components/a3/notes/note-attachments';
@@ -17,17 +18,24 @@ import {
 } from '@/lib/a3/notes/editor-schema';
 import type { NotesClient } from '@/lib/a3/notes/client';
 import type { NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
+import { NotesAutosaveController as RealNotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
+import { DexieNotesDraftPersistence, NotesDraftDatabase, NotesDraftStore } from '@/lib/a3/notes/draft-store';
 import type { NoteAttachment, NoteDetail } from '@/lib/a3/notes/types';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let root: Root | null = null;
+const draftDatabases: NotesDraftDatabase[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   act(() => root?.unmount());
   root = null;
   document.body.replaceChildren();
   vi.restoreAllMocks();
+  for (const database of draftDatabases.splice(0)) {
+    database.close();
+    await database.delete();
+  }
 });
 
 const now = '2026-08-02T08:00:00.000Z';
@@ -64,6 +72,24 @@ function clickByName(name: string) {
   expect(button, `button ${name}`).toBeTruthy();
   act(() => button!.click());
   return button!;
+}
+
+function autosaveStub(schedule = vi.fn().mockResolvedValue(undefined)) {
+  return { schedule, flush: vi.fn(), subscribe: vi.fn(() => () => undefined), dispose: vi.fn() } as unknown as NotesAutosaveController;
+}
+
+function realAutosave(response: unknown) {
+  const database = new NotesDraftDatabase(`note-editor-${crypto.randomUUID()}`, { indexedDB: new IDBFactory(), IDBKeyRange });
+  draftDatabases.push(database);
+  const store = new NotesDraftStore(new DexieNotesDraftPersistence(database));
+  const controller = new RealNotesAutosaveController({
+    store,
+    client: { saveNote: vi.fn().mockResolvedValue(response) },
+    userId: 'student-1',
+    debounceMs: 1,
+    onlineEvents: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
+  });
+  return { controller, store };
 }
 
 describe('personal note ProseMirror document contract', () => {
@@ -143,7 +169,7 @@ describe('personal note ProseMirror document contract', () => {
 describe('document-first note editor lifecycle and save state', () => {
   it('keeps one dominant editor view, emits JSON to autosave, and destroys it on note switch and unmount', async () => {
     const schedule = vi.fn().mockResolvedValue(undefined);
-    const autosave = { schedule, flush: vi.fn(), dispose: vi.fn() } as unknown as NotesAutosaveController;
+    const autosave = autosaveStub(schedule);
     const client = {} as NotesClient;
     const views: EditorView[] = [];
     const container = mount(
@@ -163,11 +189,20 @@ describe('document-first note editor lifecycle and save state', () => {
     });
     expect(JSON.stringify(schedule.mock.calls.at(-1)?.[0].content)).not.toContain('<p>');
 
+    const equivalentAutosave = autosaveStub();
     act(() => root!.render(
-      <NoteEditor note={note('note-2')} client={client} autosave={autosave} attachments={[]} onEditorReady={(view) => views.push(view)} />,
+      <NoteEditor note={{ ...note() }} client={client} autosave={equivalentAutosave} attachments={[]} onEditorReady={(next) => views.push(next)} />,
+    ));
+    expect(views).toHaveLength(1);
+    expect(firstDestroy).not.toHaveBeenCalled();
+    expect(first.state.doc.textContent).toContain('新内容');
+
+    act(() => root!.render(
+      <NoteEditor note={note('note-2')} client={client} autosave={equivalentAutosave} attachments={[]} onEditorReady={(view) => views.push(view)} />,
     ));
     expect(firstDestroy).toHaveBeenCalledTimes(1);
     expect(container.querySelectorAll('.ProseMirror')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('未修改');
 
     const secondDestroy = vi.spyOn(views[1]!, 'destroy');
     act(() => root!.unmount());
@@ -185,7 +220,7 @@ describe('document-first note editor lifecycle and save state', () => {
       <NoteEditor
         note={note()}
         client={{} as NotesClient}
-        autosave={{ schedule: vi.fn() } as unknown as NotesAutosaveController}
+        autosave={autosaveStub()}
         attachments={[]}
         saveState={saveState}
       />,
@@ -200,7 +235,7 @@ describe('document-first note editor lifecycle and save state', () => {
       <NoteEditor
         note={note()}
         client={{} as NotesClient}
-        autosave={{ schedule } as unknown as NotesAutosaveController}
+        autosave={autosaveStub(schedule)}
         attachments={[]}
         recoverableDraft={{ noteId: 'note-1', content: doc('本地草稿'), baseVersion: 2, clientMutationId: 'draft-1', updatedAt: now }}
       />,
@@ -209,6 +244,58 @@ describe('document-first note editor lifecycle and save state', () => {
     expect(container.textContent).toContain('发现本地草稿');
     clickByName('恢复草稿');
     expect(container.querySelector('.ProseMirror')?.textContent).toContain('本地草稿');
+  });
+
+  it('renders formulas with KaTeX while preserving LaTeX in editor JSON', () => {
+    const formulaNote = { ...note(), content: { type: 'doc', content: [
+      { type: 'paragraph', content: [{ type: 'math_inline', attrs: { latex: 'E=mc^2' } }] },
+      { type: 'math_display', attrs: { latex: 'x^2+y^2=z^2' } },
+    ] } };
+    const views: EditorView[] = [];
+    const container = mount(<NoteEditor note={formulaNote} client={{} as NotesClient} autosave={autosaveStub()} attachments={[]} onEditorReady={(view) => views.push(view)} />);
+
+    expect(container.querySelectorAll('.katex').length).toBeGreaterThanOrEqual(2);
+    expect(views[0]?.state.doc.toJSON()).toMatchObject({
+      content: [
+        { content: [{ type: 'math_inline', attrs: { latex: 'E=mc^2' } }] },
+        { type: 'math_display', attrs: { latex: 'x^2+y^2=z^2' } },
+      ],
+    });
+  });
+
+  it('does not carry one note save lifecycle state into another note', () => {
+    let listener: ((event: { type: 'scheduled'; noteId: string; clientMutationId: string }) => void) | undefined;
+    const firstAutosave = {
+      schedule: vi.fn(), flush: vi.fn(),
+      subscribe: vi.fn((_noteId: string, next: typeof listener) => { listener = next; return () => undefined; }),
+    } as unknown as NotesAutosaveController;
+    const container = mount(<NoteEditor note={note()} client={{} as NotesClient} autosave={firstAutosave} attachments={[]} />);
+    act(() => listener?.({ type: 'scheduled', noteId: 'note-1', clientMutationId: 'mutation-1' }));
+    expect(container.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('等待保存');
+
+    act(() => root!.render(<NoteEditor note={note('note-2')} client={{} as NotesClient} autosave={autosaveStub()} attachments={[]} />));
+    expect(container.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('未修改');
+  });
+
+  it('derives saved and conflict states from real autosave outcomes', async () => {
+    const savedSetup = realAutosave({ success: true, note: note('note-1', 4), resultingVersion: 4, idempotent: false });
+    const savedViews: EditorView[] = [];
+    const container = mount(<NoteEditor note={note()} client={{} as NotesClient} autosave={savedSetup.controller} draftStore={savedSetup.store} attachments={[]} onEditorReady={(view) => savedViews.push(view)} />);
+    act(() => savedViews[0]!.dispatch(savedViews[0]!.state.tr.insertText('已保存内容')));
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('已保存'));
+
+    act(() => root!.unmount());
+    root = null;
+    savedSetup.controller.dispose();
+
+    const serverNote = { ...note('note-2', 4), content: doc('服务器版本') };
+    const conflictSetup = realAutosave({ success: false, status: 409, code: 'note_version_conflict', error: '版本冲突', serverVersion: 4, serverNote });
+    const conflictViews: EditorView[] = [];
+    const conflictContainer = mount(<NoteEditor note={note('note-2')} client={{ createNote: vi.fn() } as unknown as NotesClient} autosave={conflictSetup.controller} draftStore={conflictSetup.store} attachments={[]} onEditorReady={(view) => conflictViews.push(view)} />);
+    act(() => conflictViews[0]!.dispatch(conflictViews[0]!.state.tr.insertText('本地版本')));
+    await vi.waitFor(() => expect(conflictContainer.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('存在冲突'));
+    await vi.waitFor(() => expect(document.body.textContent).toContain('笔记版本冲突'));
+    conflictSetup.controller.dispose();
   });
 });
 
@@ -276,14 +363,12 @@ describe('note attachments', () => {
     const uploadAttachment = vi.fn().mockResolvedValue({ success: true, attachment });
     const createLinkAttachment = vi.fn().mockResolvedValue({ success: true, attachment: { ...attachment, id: 'link-1', kind: 'link' } });
     const inserted = vi.fn();
-    const container = mount(
-      <NoteAttachments
-        noteId="note-1"
-        attachments={[attachment]}
-        client={{ reparseAttachment, deleteAttachment, uploadAttachment, createLinkAttachment } as unknown as NotesClient}
-        onInsert={inserted}
-      />,
-    );
+    const attachmentClient = { reparseAttachment, deleteAttachment, uploadAttachment, createLinkAttachment } as unknown as NotesClient;
+    function AttachmentHarness() {
+      const [values, setValues] = React.useState([attachment]);
+      return <NoteAttachments noteId="note-1" attachments={values} client={attachmentClient} onInsert={inserted} onChange={setValues} />;
+    }
+    const container = mount(<AttachmentHarness />);
     const row = container.querySelector('[data-testid="note-attachment-row"]')!;
     expect(row.className).toContain('h-');
     expect(row.querySelector<HTMLAnchorElement>('a[download]')?.href).toContain('/api/a3/notes/attachments/attachment-1/download/');
@@ -302,6 +387,46 @@ describe('note attachments', () => {
     Object.defineProperty(input, 'files', { configurable: true, value: [file] });
     await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })));
     expect(uploadAttachment).toHaveBeenCalledWith('note-1', file);
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="note-attachment-row"]')?.textContent).toContain('讲义.pdf'));
+    expect(container.querySelector('[data-testid="note-upload-row"]')).toBeNull();
     expect(container.textContent).not.toContain('100%');
+  });
+
+  it('shows a fixed-height truthful temporary upload row and a retry action after failure', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    const uploadAttachment = vi.fn().mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+    const container = mount(<NoteAttachments noteId="note-1" attachments={[]} client={{ uploadAttachment } as unknown as NotesClient} onInsert={() => undefined} />);
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(['draft'], '草稿.txt', { type: 'text/plain' });
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] });
+    act(() => input.dispatchEvent(new Event('change', { bubbles: true })));
+
+    const temporary = container.querySelector('[data-testid="note-upload-row"]');
+    expect(temporary?.className).toContain('h-12');
+    expect(temporary?.textContent).toContain('草稿.txt');
+    expect(temporary?.textContent).toContain('上传中');
+    expect(temporary?.textContent).not.toContain('100%');
+
+    await act(async () => release?.({ success: false, error: '网络中断' }));
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="note-upload-row"]')?.textContent).toContain('上传失败'));
+    expect(container.querySelector('button[aria-label="重试上传"]')).toBeTruthy();
+  });
+
+  it('uses newer server attachment props after a local reparse action', async () => {
+    const pending = { ...attachment, parseStatus: 'pending' as const };
+    const succeeded = { ...attachment, parseStatus: 'succeeded' as const, parseGeneration: 2 };
+    const reparseAttachment = vi.fn().mockResolvedValue({ success: true, attachment: pending });
+    const client = { reparseAttachment } as unknown as NotesClient;
+    const renderAttachments = (value: NoteAttachment[]) => (
+      <NoteAttachments noteId="note-1" attachments={value} client={client} onInsert={() => undefined} onChange={() => undefined} />
+    );
+    const container = mount(renderAttachments([attachment]));
+    clickByName('重试解析');
+    await act(async () => vi.waitFor(() => expect(reparseAttachment).toHaveBeenCalled()));
+    await act(async () => vi.waitFor(() => expect(container.querySelector<HTMLButtonElement>('[aria-label="删除附件"]')?.disabled).toBe(false)));
+    act(() => root!.render(renderAttachments([succeeded])));
+
+    expect(container.textContent).toContain('已解析');
+    expect(container.textContent).not.toContain('解析失败');
   });
 });

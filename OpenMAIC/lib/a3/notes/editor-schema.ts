@@ -1,4 +1,6 @@
 import { DOMParser as ProseMirrorDOMParser, Schema, type DOMOutputSpec, type MarkSpec, type Node as ProseMirrorNode, type NodeSpec } from 'prosemirror-model';
+import type { NodeView } from 'prosemirror-view';
+import katex from 'katex';
 
 import { schemaMarks, schemaNodes } from '@/lib/prosemirror/schema';
 
@@ -261,6 +263,23 @@ export function createAttachmentReference(input: { id: string; label: string; ki
 }
 
 export const isSafeNoteImage = safeHttpUrl;
+
+export function createMathNodeView(node: ProseMirrorNode): NodeView {
+  const displayMode = node.type.name === 'math_display';
+  const dom = document.createElement(displayMode ? 'div' : 'span');
+  const latex = String(node.attrs.latex ?? node.attrs.value ?? node.attrs.text ?? '');
+  dom.dataset[displayMode ? 'noteMathDisplay' : 'noteMathInline'] = latex;
+  dom.contentEditable = 'false';
+  katex.render(latex, dom, {
+    displayMode,
+    throwOnError: false,
+    strict: 'warn',
+    trust: false,
+    output: 'htmlAndMathml',
+    maxExpand: 1000,
+  });
+  return { dom };
+}
 
 function sanitizeDocumentJson(value: unknown): Record<string, unknown> {
   const sanitized = sanitizeNodeJson(value);

@@ -1,17 +1,17 @@
 'use client';
 
-import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { History, Paperclip, RefreshCw } from 'lucide-react';
 import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 
 import { Button } from '@/components/ui/button';
 import { buildPlugins } from '@/lib/prosemirror/plugins';
-import type { EditableNoteDraft, NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
+import type { AutosaveEvent, EditableNoteDraft, NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
 import type { NotesClient } from '@/lib/a3/notes/client';
 import type { NotesDraftStore } from '@/lib/a3/notes/draft-store';
 import type { NoteAttachment, NoteContent, NoteDetail } from '@/lib/a3/notes/types';
-import { noteEditorSchema, parseNoteDocument } from '@/lib/a3/notes/editor-schema';
+import { createMathNodeView, noteEditorSchema, parseNoteDocument } from '@/lib/a3/notes/editor-schema';
 import { NoteAttachments } from './note-attachments';
 import { NoteConflictDialog } from './note-conflict-dialog';
 import { NoteEditorToolbar, type NoteSaveState } from './note-editor-toolbar';
@@ -54,33 +54,55 @@ export function NoteEditor({
   const viewRef = useRef<EditorView | null>(null);
   const draftRef = useRef<EditableNoteDraft | null>(null);
   const baseVersionRef = useRef(note?.version ?? 0);
+  const noteRef = useRef(note);
+  const autosaveRef = useRef(autosave);
+  const onEditorReadyRef = useRef(onEditorReady);
+  const onNoteChangeRef = useRef(onNoteChange);
   const [view, setView] = useState<EditorView | null>(null);
   const selectedVersion = note ? `${note.id}:${note.version}` : '';
+  const noteId = note?.id;
   const [contentSnapshot, setContentSnapshot] = useState({ selectedVersion, content: note?.content ?? {} });
   if (contentSnapshot.selectedVersion !== selectedVersion) {
     setContentSnapshot({ selectedVersion, content: note?.content ?? {} });
   }
-  const [localSaveState, setLocalSaveState] = useState<NoteSaveState>('idle');
+  const [saveSnapshot, setSaveSnapshot] = useState<{ selectedVersion: string; state: NoteSaveState }>({ selectedVersion, state: 'idle' });
+  if (saveSnapshot.selectedVersion !== selectedVersion) {
+    setSaveSnapshot({ selectedVersion, state: 'idle' });
+  }
   const [historyOpen, setHistoryOpen] = useState(false);
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
-  const conflictKey = conflictServerNote ? `${conflictServerNote.id}:${conflictServerNote.version}` : '';
+  const [runtimeConflict, setRuntimeConflict] = useState<{ noteId: string; serverNote: NoteDetail } | null>(null);
+  const effectiveConflict = conflictServerNote ?? (runtimeConflict && runtimeConflict.noteId === note?.id ? runtimeConflict.serverNote : undefined);
+  const conflictKey = effectiveConflict ? `${effectiveConflict.id}:${effectiveConflict.version}` : '';
   const [conflictVisibility, setConflictVisibility] = useState({ key: conflictKey, open: Boolean(conflictKey) });
   if (conflictVisibility.key !== conflictKey) {
     setConflictVisibility({ key: conflictKey, open: Boolean(conflictKey) });
   }
 
   useLayoutEffect(() => {
-    if (!mountRef.current || !note || loadState !== 'ready') return;
-    baseVersionRef.current = note.version;
+    noteRef.current = note;
+    autosaveRef.current = autosave;
+    onEditorReadyRef.current = onEditorReady;
+    onNoteChangeRef.current = onNoteChange;
+  });
+
+  useLayoutEffect(() => {
+    const selectedNote = noteRef.current;
+    if (!mountRef.current || !selectedNote || loadState !== 'ready') return;
+    baseVersionRef.current = selectedNote.version;
     draftRef.current = null;
     const editorView = new EditorView(mountRef.current, {
       state: EditorState.create({
         schema: noteEditorSchema,
-        doc: parseNoteDocument(note.content),
+        doc: parseNoteDocument(selectedNote.content),
         plugins: buildPlugins(noteEditorSchema, { placeholder: '开始记录…' }),
       }),
+      nodeViews: {
+        math_inline: createMathNodeView,
+        math_display: createMathNodeView,
+      },
       attributes: {
-        'aria-label': `${note.title || '无标题笔记'}正文`,
+        'aria-label': `${selectedNote.title || '无标题笔记'}正文`,
         class: 'min-h-[34rem] w-full max-w-none px-5 py-8 text-[15px] leading-7 text-foreground outline-none sm:px-10 lg:px-16',
       },
       dispatchTransaction(transaction) {
@@ -89,16 +111,15 @@ export function NoteEditor({
         setView(editorView);
         if (!transaction.docChanged) return;
         const draft: EditableNoteDraft = {
-          noteId: note.id,
+          noteId: selectedNote.id,
           content: nextState.doc.toJSON() as NoteContent,
           baseVersion: baseVersionRef.current,
           clientMutationId: crypto.randomUUID(),
           updatedAt: new Date().toISOString(),
         };
         draftRef.current = draft;
-        setContentSnapshot({ selectedVersion: `${note.id}:${baseVersionRef.current}`, content: draft.content });
-        setLocalSaveState('saving');
-        void autosave.schedule(draft);
+        setContentSnapshot({ selectedVersion: `${selectedNote.id}:${baseVersionRef.current}`, content: draft.content });
+        void autosaveRef.current.schedule(draft);
       },
       transformPastedHTML(html) {
         return html;
@@ -106,31 +127,41 @@ export function NoteEditor({
     });
     viewRef.current = editorView;
     setView(editorView);
-    onEditorReady?.(editorView);
+    onEditorReadyRef.current?.(editorView);
     return () => {
       if (viewRef.current === editorView) viewRef.current = null;
       setView((current) => current === editorView ? null : current);
       editorView.destroy();
     };
-  }, [autosave, loadState, note, onEditorReady]);
+  }, [loadState, selectedVersion]);
+
+  useEffect(() => {
+    if (!noteId) return;
+    return autosave.subscribe(noteId, (event: AutosaveEvent) => {
+      if (event.type === 'scheduled') {
+        setSaveSnapshot({ selectedVersion, state: 'scheduled' });
+      } else if (event.type === 'saving') {
+        setSaveSnapshot({ selectedVersion, state: 'saving' });
+      } else if (event.type === 'saved') {
+        baseVersionRef.current = event.resultingVersion;
+        setSaveSnapshot({ selectedVersion, state: 'saved' });
+        setRuntimeConflict(null);
+      } else if (event.type === 'offline') {
+        setSaveSnapshot({ selectedVersion, state: 'offline' });
+      } else if (event.type === 'conflict') {
+        setSaveSnapshot({ selectedVersion, state: 'conflict' });
+        setRuntimeConflict({ noteId: event.noteId, serverNote: event.serverNote });
+      } else {
+        setSaveSnapshot({ selectedVersion, state: 'error' });
+      }
+    });
+  }, [autosave, noteId, selectedVersion]);
 
   const retrySave = useCallback(async () => {
     const current = draftRef.current;
     if (!current) return;
-    setLocalSaveState('saving');
-    const result = await autosave.flush(current);
-    if (result.kind === 'saved') {
-      baseVersionRef.current = result.resultingVersion;
-      setLocalSaveState('saved');
-    } else if (result.kind === 'conflict') {
-      setLocalSaveState('conflict');
-      setConflictVisibility({ key: conflictKey, open: true });
-    } else if (result.kind === 'queued') {
-      setLocalSaveState('offline');
-    } else if (result.kind === 'permanent-error') {
-      setLocalSaveState('error');
-    }
-  }, [autosave, conflictKey]);
+    await autosaveRef.current.flush(current);
+  }, []);
 
   const recoverDraft = () => {
     const current = viewRef.current;
@@ -180,7 +211,7 @@ export function NoteEditor({
           <Button type="button" variant="ghost" size="icon-sm" aria-label="附件" aria-expanded={attachmentsOpen} onClick={() => setAttachmentsOpen((value) => !value)} className="size-8 rounded-md"><Paperclip className="size-4" /></Button>
         </div>
       </div>
-      <NoteEditorToolbar view={view} saveState={saveState ?? localSaveState} onRetry={() => void retrySave()} />
+      <NoteEditorToolbar view={view} saveState={saveState ?? saveSnapshot.state} onRetry={() => void retrySave()} />
       {recoverableDraft && recoverableDraft.noteId === note.id && (
         <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 border-b border-amber-300/60 bg-amber-50 px-4 py-2 text-sm text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/35 dark:text-amber-100" role="status">
           <span>发现本地草稿</span>
@@ -204,16 +235,16 @@ export function NoteEditor({
         <div ref={mountRef} />
       </article>
       <NoteHistoryDialog open={historyOpen} onOpenChange={setHistoryOpen} note={note} client={client} onRestored={(restored) => { baseVersionRef.current = restored.version; onNoteChange?.(restored); }} />
-      {draftStore && conflictServerNote && (
+      {draftStore && effectiveConflict && (
         <NoteConflictDialog
           open={conflictVisibility.open}
           onOpenChange={(open) => setConflictVisibility({ key: conflictKey, open })}
           note={note}
           localContent={contentSnapshot.content}
-          serverNote={conflictServerNote}
+          serverNote={effectiveConflict}
           client={client}
           draftStore={draftStore}
-          onAdoptServer={(server) => { baseVersionRef.current = server.version; onNoteChange?.(server); }}
+          onAdoptServer={(server) => { baseVersionRef.current = server.version; setRuntimeConflict(null); onNoteChangeRef.current?.(server); }}
         />
       )}
     </section>

@@ -253,6 +253,73 @@ describe('personal notes autosave', () => {
     controller.dispose();
   });
 
+  it('publishes isolated scheduled, saving, and acknowledged lifecycle events per note', async () => {
+    vi.useFakeTimers();
+    const { controller, saveNote } = setup();
+    const noteOneEvents: Array<{ type: string; noteId: string }> = [];
+    const noteTwoEvents: Array<{ type: string; noteId: string }> = [];
+    const unsubscribe = controller.subscribe('note-1', (event) => noteOneEvents.push(event));
+    controller.subscribe('note-2', (event) => noteTwoEvents.push(event));
+
+    await controller.schedule(localDraft());
+    await controller.schedule(localDraft({ noteId: 'note-2', clientMutationId: 'mutation-2' }));
+    expect(noteOneEvents.map((event) => event.type)).toEqual(['scheduled']);
+    expect(noteTwoEvents.map((event) => event.type)).toEqual(['scheduled']);
+
+    await vi.advanceTimersByTimeAsync(1500);
+    await vi.waitFor(() => expect(saveNote).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(noteOneEvents.map((event) => event.type)).toEqual(['scheduled', 'saving', 'saved']));
+    expect(noteOneEvents.every((event) => event.noteId === 'note-1')).toBe(true);
+    expect(noteTwoEvents.every((event) => event.noteId === 'note-2')).toBe(true);
+
+    unsubscribe();
+    await controller.schedule(localDraft({ clientMutationId: 'mutation-3' }));
+    expect(noteOneEvents.map((event) => event.type)).toEqual(['scheduled', 'saving', 'saved']);
+  });
+
+  it('publishes the server note on 409 and removes every subscriber on dispose', async () => {
+    const serverNote = saved(8).note;
+    const conflictClient = vi.fn<AutosaveNotesClient['saveNote']>().mockResolvedValue({
+      success: false,
+      status: 409,
+      code: 'note_version_conflict',
+      error: '版本冲突',
+      serverVersion: 8,
+      serverNote,
+    });
+    const { controller } = setup(conflictClient);
+    const events: unknown[] = [];
+    controller.subscribe('note-1', (event) => events.push(event));
+
+    await controller.flush(localDraft());
+    expect(events).toContainEqual({ type: 'saving', noteId: 'note-1', clientMutationId: 'mutation-1' });
+    expect(events).toContainEqual({ type: 'conflict', noteId: 'note-1', serverVersion: 8, serverNote });
+
+    controller.dispose();
+    await controller.schedule(localDraft({ clientMutationId: 'after-dispose' }));
+    expect(events).toHaveLength(2);
+  });
+
+  it('publishes retryable failures as offline and permanent failures as rejected', async () => {
+    const retryable = setup(vi.fn<AutosaveNotesClient['saveNote']>().mockResolvedValue({
+      success: false, status: 503, code: 'unavailable', error: '稍后重试',
+    }));
+    const retryableEvents: unknown[] = [];
+    retryable.controller.subscribe('note-1', (event) => retryableEvents.push(event));
+    await retryable.controller.flush(localDraft());
+    expect(retryableEvents.at(-1)).toEqual({ type: 'offline', noteId: 'note-1', reason: 'server' });
+
+    const rejected = setup(vi.fn<AutosaveNotesClient['saveNote']>().mockResolvedValue({
+      success: false, status: 422, code: 'invalid_note', error: '内容不可保存',
+    }));
+    const rejectedEvents: unknown[] = [];
+    rejected.controller.subscribe('note-1', (event) => rejectedEvents.push(event));
+    await rejected.controller.flush(localDraft());
+    expect(rejectedEvents.at(-1)).toEqual({
+      type: 'rejected', noteId: 'note-1', status: 422, code: 'invalid_note', error: '内容不可保存',
+    });
+  });
+
   it('serializes concurrent schedules and leaves only the newest mutation replayable', async () => {
     vi.useFakeTimers();
     const persistence = new MemoryPersistence();

@@ -28,6 +28,16 @@ export type AutosaveResult =
   | { kind: 'permanent-error'; noteId: string; status: number; code?: string; error: string }
   | { kind: 'disposed'; noteId: string };
 
+export type AutosaveEvent =
+  | { type: 'scheduled'; noteId: string; clientMutationId: string }
+  | { type: 'saving'; noteId: string; clientMutationId: string }
+  | { type: 'saved'; noteId: string; resultingVersion: number; idempotent: boolean }
+  | { type: 'offline'; noteId: string; reason: Extract<AutosaveResult, { kind: 'queued' }>['reason'] }
+  | { type: 'conflict'; noteId: string; serverVersion: number; serverNote: NoteConflict['serverNote'] }
+  | { type: 'rejected'; noteId: string; status: number; code?: string; error: string };
+
+export type AutosaveEventListener = (event: AutosaveEvent) => void;
+
 interface NotesAutosaveControllerOptions {
   store: NotesDraftStore;
   client: AutosaveNotesClient;
@@ -52,6 +62,7 @@ export class NotesAutosaveController {
   private readonly localOperationChains = new Map<string, Promise<void>>();
   private readonly activeRequests = new Set<AbortController>();
   private readonly acknowledgedMutationIds = new Set<string>();
+  private readonly listeners = new Map<string, Set<AutosaveEventListener>>();
   private initialization?: Promise<AccountActivation>;
   private replay?: Promise<AutosaveResult[]>;
   private disposed = false;
@@ -78,6 +89,18 @@ export class NotesAutosaveController {
     return { account, replay };
   }
 
+  subscribe(noteId: string, listener: AutosaveEventListener) {
+    if (this.disposed) return () => undefined;
+    const noteListeners = this.listeners.get(noteId) ?? new Set<AutosaveEventListener>();
+    noteListeners.add(listener);
+    this.listeners.set(noteId, noteListeners);
+    return () => {
+      const current = this.listeners.get(noteId);
+      current?.delete(listener);
+      if (current?.size === 0) this.listeners.delete(noteId);
+    };
+  }
+
   schedule(draft: EditableNoteDraft) {
     return this.runLocalOperation(draft.noteId, async () => {
       if (this.disposed) return;
@@ -96,6 +119,7 @@ export class NotesAutosaveController {
         void this.enqueue(draft.noteId, draft.clientMutationId);
       }, this.debounceMs);
       this.scheduled.set(draft.noteId, { handle, mutationId: draft.clientMutationId });
+      this.emit({ type: 'scheduled', noteId: draft.noteId, clientMutationId: draft.clientMutationId });
     });
   }
 
@@ -118,7 +142,11 @@ export class NotesAutosaveController {
       }
       await this.discardSuperseded(previous, draft.clientMutationId);
       return undefined;
-    }).then((result) => result ?? this.enqueue(draft.noteId, draft.clientMutationId));
+    }).then((result) => {
+      if (!result) return this.enqueue(draft.noteId, draft.clientMutationId);
+      this.publishResult(result);
+      return result;
+    });
   }
 
   async resume(): Promise<AutosaveResult[]> {
@@ -147,6 +175,7 @@ export class NotesAutosaveController {
     for (const request of this.activeRequests) request.abort();
     this.activeRequests.clear();
     this.onlineEvents?.removeEventListener('online', this.handleOnline);
+    this.listeners.clear();
   }
 
   private readonly handleOnline = () => {
@@ -163,7 +192,11 @@ export class NotesAutosaveController {
   private enqueue(noteId: string, mutationId: string) {
     const previous = this.chains.get(noteId);
     const current = (previous ? previous.catch(() => ({ kind: 'queued', noteId, reason: 'offline' } as const)) : Promise.resolve())
-      .then(() => this.send(noteId, mutationId));
+      .then(() => this.send(noteId, mutationId))
+      .then((result) => {
+        this.publishResult(result);
+        return result;
+      });
     this.chains.set(noteId, current);
     void current.finally(() => {
       if (this.chains.get(noteId) === current) this.chains.delete(noteId);
@@ -196,6 +229,7 @@ export class NotesAutosaveController {
     }
     const abortController = new AbortController();
     this.activeRequests.add(abortController);
+    this.emit({ type: 'saving', noteId, clientMutationId: mutation.clientMutationId });
     let response: ApiResult<SaveNoteSuccess>;
     try {
       response = await this.client.saveNote(noteId, requestFromMutation(mutation), { signal: abortController.signal });
@@ -281,6 +315,23 @@ export class NotesAutosaveController {
   private async discardSuperseded(scheduled: ScheduledSave | undefined, currentMutationId: string) {
     if (scheduled && scheduled.mutationId !== currentMutationId) {
       await this.store.discardMutation(scheduled.mutationId);
+    }
+  }
+
+  private emit(event: AutosaveEvent) {
+    if (this.disposed) return;
+    for (const listener of this.listeners.get(event.noteId) ?? []) listener(event);
+  }
+
+  private publishResult(result: AutosaveResult) {
+    if (result.kind === 'saved') {
+      this.emit({ type: 'saved', noteId: result.noteId, resultingVersion: result.resultingVersion, idempotent: result.idempotent });
+    } else if (result.kind === 'queued') {
+      this.emit({ type: 'offline', noteId: result.noteId, reason: result.reason });
+    } else if (result.kind === 'conflict') {
+      this.emit({ type: 'conflict', noteId: result.noteId, serverVersion: result.serverVersion, serverNote: result.serverNote });
+    } else if (result.kind === 'permanent-error') {
+      this.emit({ type: 'rejected', noteId: result.noteId, status: result.status, code: result.code, error: result.error });
     }
   }
 }

@@ -21,9 +21,15 @@ interface NoteAttachmentsProps {
   onChange?: (attachments: NoteAttachment[]) => void;
 }
 
+interface TemporaryUpload {
+  id: string;
+  file: File;
+  status: 'uploading' | 'failed';
+  error: string;
+}
+
 export function NoteAttachments({ noteId, attachments, client, onInsert, onChange }: NoteAttachmentsProps) {
-  const [localItems, setLocalItems] = useState<NoteAttachment[] | null>(null);
-  const [uploading, setUploading] = useState(false);
+  const [uploads, setUploads] = useState<TemporaryUpload[]>([]);
   const [linkOpen, setLinkOpen] = useState(false);
   const [linkUrl, setLinkUrl] = useState('');
   const [linkName, setLinkName] = useState('');
@@ -32,25 +38,31 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
   const [error, setError] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const items = localItems ?? attachments;
-
   const update = (next: NoteAttachment[]) => {
-    setLocalItems(next);
     onChange?.(next);
   };
 
-  const upload = async (file?: File) => {
-    if (!file) return;
-    setUploading(true);
-    setError('');
-    const result = await client.uploadAttachment(noteId, file);
-    setUploading(false);
+  const upload = async (item: TemporaryUpload) => {
+    setUploads((current) => current.map((uploadItem) => uploadItem.id === item.id
+      ? { ...uploadItem, status: 'uploading', error: '' }
+      : uploadItem));
+    const result = await client.uploadAttachment(noteId, item.file);
     if (!result.success) {
-      setError(result.error);
+      setUploads((current) => current.map((uploadItem) => uploadItem.id === item.id
+        ? { ...uploadItem, status: 'failed', error: result.error }
+        : uploadItem));
       return;
     }
-    update([...items, result.attachment]);
+    setUploads((current) => current.filter((uploadItem) => uploadItem.id !== item.id));
+    update([...attachments.filter((attachment) => attachment.id !== result.attachment.id), result.attachment]);
     if (fileRef.current) fileRef.current.value = '';
+  };
+
+  const selectFile = (file?: File) => {
+    if (!file) return;
+    const item: TemporaryUpload = { id: crypto.randomUUID(), file, status: 'uploading', error: '' };
+    setUploads((current) => [...current, item]);
+    void upload(item);
   };
 
   const createLink = async () => {
@@ -64,7 +76,7 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
       setError(result.error);
       return;
     }
-    update([...items, result.attachment]);
+    update([...attachments.filter((attachment) => attachment.id !== result.attachment.id), result.attachment]);
     setLinkUrl('');
     setLinkName('');
     setLinkOpen(false);
@@ -79,7 +91,7 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
       setError(result.error);
       return;
     }
-    update(items.map((item) => item.id === attachment.id ? result.attachment : item));
+    update(attachments.map((item) => item.id === attachment.id ? result.attachment : item));
   };
 
   const remove = async (attachment: NoteAttachment) => {
@@ -92,24 +104,23 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
       return;
     }
     setConfirmDeleteId(null);
-    update(items.filter((item) => item.id !== attachment.id));
+    update(attachments.filter((item) => item.id !== attachment.id));
   };
 
   return (
     <aside className="border-b border-border bg-muted/20" aria-label="笔记附件">
       <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 px-3 py-1.5">
-        <span className="text-xs font-medium text-muted-foreground">附件 {items.length}</span>
+        <span className="text-xs font-medium text-muted-foreground">附件 {attachments.length + uploads.length}</span>
         <div className="flex items-center gap-1">
           <input
             ref={fileRef}
             type="file"
             aria-label="上传附件"
             className="sr-only"
-            onChange={(event) => void upload(event.currentTarget.files?.[0])}
+            onChange={(event) => selectFile(event.currentTarget.files?.[0])}
           />
-          <Button type="button" variant="ghost" size="sm" disabled={uploading} onClick={() => fileRef.current?.click()}>
-            {uploading ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
-            {uploading ? '上传中' : '上传'}
+          <Button type="button" variant="ghost" size="sm" onClick={() => fileRef.current?.click()}>
+            <Plus className="size-4" />上传
           </Button>
           <Button type="button" variant="ghost" size="sm" onClick={() => setLinkOpen((value) => !value)}>
             <LinkIcon className="size-4" />链接
@@ -124,11 +135,14 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
         </div>
       )}
       {error && <p className="border-t border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">{error}</p>}
-      {items.length === 0 && !uploading ? (
+      {attachments.length === 0 && uploads.length === 0 ? (
         <div className="border-t border-border/60 px-3 py-4 text-center text-sm text-muted-foreground">暂无附件</div>
       ) : (
         <div className="border-t border-border/60">
-          {items.map((attachment) => (
+          {uploads.map((uploadItem) => (
+            <UploadRow key={uploadItem.id} upload={uploadItem} onRetry={() => void upload(uploadItem)} />
+          ))}
+          {attachments.map((attachment) => (
             <AttachmentRow
               key={attachment.id}
               attachment={attachment}
@@ -144,6 +158,26 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
         </div>
       )}
     </aside>
+  );
+}
+
+function UploadRow({ upload, onRetry }: { upload: TemporaryUpload; onRetry: () => void }) {
+  const Icon = upload.file.type.startsWith('image/') ? FileImage : upload.file.type.includes('text') ? FileText : File;
+  return (
+    <div data-testid="note-upload-row" className="flex h-12 min-w-0 items-center gap-2 border-b border-border/50 px-3 last:border-b-0">
+      <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium">{upload.file.name}</div>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span>{upload.file.type || '未知类型'}</span>
+          <span className={cn(upload.status === 'failed' && 'text-destructive')}>{upload.status === 'uploading' ? '上传中' : '上传失败'}</span>
+          {upload.status === 'uploading' && <LoaderCircle className="size-3 animate-spin" aria-label="上传中" />}
+        </div>
+      </div>
+      {upload.status === 'failed' && (
+        <Button type="button" size="icon-sm" variant="ghost" aria-label="重试上传" title={upload.error} onClick={onRetry}><RefreshCw className="size-4" /></Button>
+      )}
+    </div>
   );
 }
 

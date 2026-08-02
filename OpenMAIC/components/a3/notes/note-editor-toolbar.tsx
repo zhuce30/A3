@@ -16,7 +16,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils';
 import { isSafeNoteImage, noteEditorSchema } from '@/lib/a3/notes/editor-schema';
 
-export type NoteSaveState = 'idle' | 'saving' | 'saved' | 'offline' | 'conflict' | 'error';
+export type NoteSaveState = 'idle' | 'scheduled' | 'saving' | 'saved' | 'offline' | 'conflict' | 'error';
 
 interface NoteEditorToolbarProps {
   view: EditorView | null;
@@ -26,6 +26,7 @@ interface NoteEditorToolbarProps {
 
 const saveLabels: Record<NoteSaveState, string> = {
   idle: '未修改',
+  scheduled: '等待保存',
   saving: '正在保存',
   saved: '已保存',
   offline: '离线待同步',
