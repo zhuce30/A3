@@ -181,9 +181,8 @@ export interface NoteConflict extends ApiFailure {
 export type ApiResult<T> = SuccessfulApiResult<T> | ApiFailure | NoteConflict;
 
 export interface SaveNoteInput {
-  title: string;
+  title?: string;
   content: NoteContent;
-  contentText?: string;
   baseVersion: number;
   clientMutationId: string;
   notebookId?: string | null;

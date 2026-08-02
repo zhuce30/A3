@@ -5,22 +5,22 @@ import type { NoteContent } from './types';
 export interface NoteDraft {
   userId: string;
   noteId: string;
-  title: string;
   content: NoteContent;
-  contentText: string;
   baseVersion: number;
   clientMutationId: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export type PendingNoteMutation = NoteDraft;
+export interface PendingNoteMutation extends NoteDraft {
+  state: 'pending' | 'conflict';
+  conflictAt?: string;
+  serverVersion?: number;
+}
 
 export interface PersistableNoteDraft {
   noteId: string;
-  title: string;
   content: NoteContent;
-  contentText: string;
   baseVersion: number;
   clientMutationId: string;
   updatedAt: string;
@@ -32,8 +32,8 @@ export type AccountActivation =
   | {
       kind: 'account-changed';
       warningRequired: true;
-      clearedDraftCount: number;
-      clearedMutationCount: number;
+      foreignDraftCount: number;
+      foreignMutationCount: number;
     };
 
 export interface NotesDraftPersistence {
@@ -45,6 +45,8 @@ export interface NotesDraftPersistence {
   deleteAccounts(userIds: string[]): Promise<void>;
   acknowledge(userId: string, mutation: PendingNoteMutation): Promise<void>;
   rebaseNewer(userId: string, mutation: PendingNoteMutation, resultingVersion: number): Promise<void>;
+  markConflict(userId: string, clientMutationId: string, conflictAt: string, serverVersion: number): Promise<void>;
+  resetConflict(userId: string, clientMutationId: string, baseVersion: number): Promise<void>;
   discardMutation(clientMutationId: string): Promise<void>;
   clear(): Promise<void>;
 }
@@ -112,6 +114,38 @@ export class DexieNotesDraftPersistence implements NotesDraftPersistence {
     });
   }
 
+  async markConflict(userId: string, clientMutationId: string, conflictAt: string, serverVersion: number) {
+    await this.database.transaction('rw', this.database.mutations, async () => {
+      const mutation = await this.database.mutations.get(clientMutationId);
+      if (mutation?.userId === userId) {
+        await this.database.mutations.put({
+          ...mutation,
+          state: 'conflict',
+          conflictAt,
+          serverVersion,
+        });
+      }
+    });
+  }
+
+  async resetConflict(userId: string, clientMutationId: string, baseVersion: number) {
+    await this.database.transaction('rw', this.database.drafts, this.database.mutations, async () => {
+      const mutation = await this.database.mutations.get(clientMutationId);
+      if (mutation?.userId !== userId) return;
+      await this.database.mutations.put({
+        ...mutation,
+        state: 'pending',
+        baseVersion,
+        conflictAt: undefined,
+        serverVersion: undefined,
+      });
+      const draft = await this.database.drafts.get(mutation.noteId);
+      if (draft?.userId === userId && draft.clientMutationId === clientMutationId) {
+        await this.database.drafts.put({ ...draft, baseVersion });
+      }
+    });
+  }
+
   async discardMutation(clientMutationId: string) {
     await this.database.mutations.delete(clientMutationId);
   }
@@ -126,14 +160,19 @@ export class DexieNotesDraftPersistence implements NotesDraftPersistence {
 
 export class NotesDraftStore {
   private userId: string | null = null;
+  private pendingUserId: string | null = null;
+  private pendingActivation: AccountActivation | null = null;
 
   constructor(private readonly persistence: NotesDraftPersistence = new DexieNotesDraftPersistence()) {}
 
   async activateUser(userId: string | null): Promise<AccountActivation> {
     if (!userId) {
       this.userId = null;
+      this.pendingUserId = null;
+      this.pendingActivation = null;
       return { kind: 'logged-out', warningRequired: false };
     }
+    if (this.pendingUserId === userId && this.pendingActivation) return this.pendingActivation;
     const [drafts, mutations] = await Promise.all([
       this.persistence.allDrafts(),
       this.persistence.allMutations(),
@@ -141,13 +180,40 @@ export class NotesDraftStore {
     const foreignUserIds = new Set<string>();
     for (const item of [...drafts, ...mutations]) if (item.userId !== userId) foreignUserIds.add(item.userId);
     const accountChanged = this.userId !== null && this.userId !== userId;
-    const clearedDraftCount = drafts.filter((item) => foreignUserIds.has(item.userId)).length;
-    const clearedMutationCount = mutations.filter((item) => foreignUserIds.has(item.userId)).length;
-    if (foreignUserIds.size > 0) await this.persistence.deleteAccounts([...foreignUserIds]);
-    this.userId = userId;
+    const foreignDraftCount = drafts.filter((item) => foreignUserIds.has(item.userId)).length;
+    const foreignMutationCount = mutations.filter((item) => foreignUserIds.has(item.userId)).length;
     if (accountChanged || foreignUserIds.size > 0) {
-      return { kind: 'account-changed', warningRequired: true, clearedDraftCount, clearedMutationCount };
+      this.userId = null;
+      this.pendingUserId = userId;
+      this.pendingActivation = {
+        kind: 'account-changed',
+        warningRequired: true,
+        foreignDraftCount,
+        foreignMutationCount,
+      };
+      return this.pendingActivation;
     }
+    this.userId = userId;
+    this.pendingUserId = null;
+    this.pendingActivation = null;
+    return { kind: 'ready', warningRequired: false };
+  }
+
+  async confirmAccountSwitch(): Promise<AccountActivation> {
+    if (!this.pendingUserId) throw new Error('No pending notes account switch');
+    const targetUserId = this.pendingUserId;
+    const [drafts, mutations] = await Promise.all([
+      this.persistence.allDrafts(),
+      this.persistence.allMutations(),
+    ]);
+    const foreignUserIds = new Set<string>();
+    for (const item of [...drafts, ...mutations]) {
+      if (item.userId !== targetUserId) foreignUserIds.add(item.userId);
+    }
+    await this.persistence.deleteAccounts([...foreignUserIds]);
+    this.userId = targetUserId;
+    this.pendingUserId = null;
+    this.pendingActivation = null;
     return { kind: 'ready', warningRequired: false };
   }
 
@@ -157,8 +223,19 @@ export class NotesDraftStore {
     const createdAt = existing?.userId === userId
       ? existing.createdAt
       : await this.uniqueCreatedAt(input.updatedAt);
-    const record: NoteDraft = { ...input, userId, createdAt };
-    await this.persistence.putDraftAndMutation(record, { ...record });
+    const record: NoteDraft = {
+      userId,
+      noteId: input.noteId,
+      content: input.content,
+      baseVersion: input.baseVersion,
+      clientMutationId: input.clientMutationId,
+      createdAt,
+      updatedAt: input.updatedAt,
+    };
+    const retryState = existing?.userId === userId && existing.state === 'conflict'
+      ? { state: existing.state, conflictAt: existing.conflictAt, serverVersion: existing.serverVersion }
+      : { state: 'pending' as const };
+    await this.persistence.putDraftAndMutation(record, { ...record, ...retryState });
   }
 
   async getDraft(noteId: string) {
@@ -176,7 +253,9 @@ export class NotesDraftStore {
   async listMutations() {
     if (!this.userId) return [];
     const mutations = await this.persistence.allMutations();
-    return mutations.filter((item) => item.userId === this.userId).sort(mutationOrder);
+    return mutations
+      .filter((item) => item.userId === this.userId && item.state !== 'conflict')
+      .sort(mutationOrder);
   }
 
   async acknowledge(mutation: PendingNoteMutation, resultingVersion: number) {
@@ -188,6 +267,25 @@ export class NotesDraftStore {
   async discardMutation(clientMutationId: string) {
     const mutation = await this.getMutation(clientMutationId);
     if (mutation) await this.persistence.discardMutation(clientMutationId);
+  }
+
+  async markConflict(clientMutationId: string, serverVersion: number) {
+    const userId = this.requireUser();
+    await this.persistence.markConflict(userId, clientMutationId, new Date().toISOString(), serverVersion);
+  }
+
+  async resolveConflict(
+    clientMutationId: string,
+    resolution: { kind: 'retry'; baseVersion: number } | { kind: 'discard' },
+  ) {
+    const userId = this.requireUser();
+    const mutation = await this.getMutation(clientMutationId);
+    if (!mutation || mutation.state !== 'conflict') throw new Error('Conflict mutation not found');
+    if (resolution.kind === 'discard') {
+      await this.persistence.acknowledge(userId, mutation);
+      return;
+    }
+    await this.persistence.resetConflict(userId, clientMutationId, resolution.baseVersion);
   }
 
   private requireUser() {

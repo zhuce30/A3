@@ -1,4 +1,9 @@
-import type { NotesDraftStore, PendingNoteMutation, PersistableNoteDraft } from './draft-store';
+import type {
+  AccountActivation,
+  NotesDraftStore,
+  PendingNoteMutation,
+  PersistableNoteDraft,
+} from './draft-store';
 import type { ApiResult, NoteConflict, SaveNoteInput, SaveNoteSuccess } from './types';
 
 export type EditableNoteDraft = PersistableNoteDraft;
@@ -18,7 +23,7 @@ export interface OnlineEventSource {
 
 export type AutosaveResult =
   | { kind: 'saved'; noteId: string; resultingVersion: number; idempotent: boolean }
-  | { kind: 'queued'; noteId: string; reason: 'offline' | 'server' | 'conflict-blocked' | 'version-mismatch' }
+  | { kind: 'queued'; noteId: string; reason: 'offline' | 'server' | 'conflict-blocked' | 'version-mismatch' | 'account-switch-required' }
   | { kind: 'conflict'; noteId: string; serverVersion: number; serverNote: NoteConflict['serverNote'] }
   | { kind: 'disposed'; noteId: string };
 
@@ -43,11 +48,10 @@ export class NotesAutosaveController {
   private readonly onlineEvents?: OnlineEventSource;
   private readonly scheduled = new Map<string, ScheduledSave>();
   private readonly chains = new Map<string, Promise<AutosaveResult>>();
-  private readonly persistenceChains = new Map<string, Promise<void>>();
+  private readonly persistenceChains = new Map<string, Promise<boolean>>();
   private readonly activeRequests = new Set<AbortController>();
   private readonly acknowledgedMutationIds = new Set<string>();
-  private readonly blockedNotes = new Set<string>();
-  private initialization?: Promise<void>;
+  private initialization?: Promise<AccountActivation>;
   private replay?: Promise<AutosaveResult[]>;
   private disposed = false;
 
@@ -61,14 +65,22 @@ export class NotesAutosaveController {
   }
 
   async initialize() {
-    await this.ensureInitialized();
-    return this.resume();
+    const account = await this.ensureInitialized();
+    const replay = account.warningRequired ? [] : await this.resume();
+    return { account, replay };
+  }
+
+  async confirmAccountSwitch() {
+    const account = await this.store.confirmAccountSwitch();
+    this.initialization = Promise.resolve(account);
+    const replay = await this.resume();
+    return { account, replay };
   }
 
   async schedule(draft: EditableNoteDraft) {
     if (this.disposed) return;
     if (this.acknowledgedMutationIds.has(draft.clientMutationId)) return;
-    await this.persistDraft(draft);
+    if (!await this.persistDraft(draft)) return;
     const previous = this.scheduled.get(draft.noteId);
     if (previous) {
       clearTimeout(previous.handle);
@@ -86,12 +98,15 @@ export class NotesAutosaveController {
     if (this.acknowledgedMutationIds.has(draft.clientMutationId)) {
       return Promise.resolve({ kind: 'saved', noteId: draft.noteId, resultingVersion: draft.baseVersion + 1, idempotent: true });
     }
-    return this.persistDraft(draft).then(() => this.enqueue(draft.noteId, draft.clientMutationId));
+    return this.persistDraft(draft).then((persisted) => persisted
+      ? this.enqueue(draft.noteId, draft.clientMutationId)
+      : { kind: 'queued', noteId: draft.noteId, reason: 'account-switch-required' });
   }
 
   async resume(): Promise<AutosaveResult[]> {
     if (this.disposed) return [];
-    await this.ensureInitialized();
+    const account = await this.ensureInitialized();
+    if (account.warningRequired) return [];
     if (this.replay) return this.replay;
     this.replay = (async () => {
       const results: AutosaveResult[] = [];
@@ -122,7 +137,7 @@ export class NotesAutosaveController {
 
   private async ensureInitialized() {
     if (!this.initialization) {
-      this.initialization = this.store.activateUser(this.userId).then(() => undefined);
+      this.initialization = this.store.activateUser(this.userId);
     }
     return this.initialization;
   }
@@ -149,9 +164,9 @@ export class NotesAutosaveController {
         idempotent: true,
       };
     }
-    if (this.blockedNotes.has(noteId)) return { kind: 'queued', noteId, reason: 'conflict-blocked' };
     const mutation = await this.store.getMutation(mutationId);
     if (!mutation) return { kind: 'saved', noteId, resultingVersion: 0, idempotent: true };
+    if (mutation.state === 'conflict') return { kind: 'queued', noteId, reason: 'conflict-blocked' };
     const abortController = new AbortController();
     this.activeRequests.add(abortController);
     let response: ApiResult<SaveNoteSuccess>;
@@ -165,7 +180,7 @@ export class NotesAutosaveController {
     }
     if (!response.success) {
       if (isConflict(response)) {
-        this.blockedNotes.add(noteId);
+        await this.store.markConflict(mutation.clientMutationId, response.serverVersion);
         return {
           kind: 'conflict',
           noteId,
@@ -194,8 +209,12 @@ export class NotesAutosaveController {
     const current = previous
       .catch(() => undefined)
       .then(async () => {
-        await this.ensureInitialized();
-        if (!this.disposed) await this.store.persist(draft);
+        const account = await this.ensureInitialized();
+        if (!this.disposed && !account.warningRequired) {
+          await this.store.persist(draft);
+          return true;
+        }
+        return false;
       });
     this.persistenceChains.set(draft.noteId, current);
     void current.finally(() => {
@@ -207,9 +226,7 @@ export class NotesAutosaveController {
 
 function requestFromMutation(mutation: PendingNoteMutation): SaveNoteInput {
   return {
-    title: mutation.title,
     content: mutation.content,
-    contentText: mutation.contentText,
     baseVersion: mutation.baseVersion,
     clientMutationId: mutation.clientMutationId,
   };
