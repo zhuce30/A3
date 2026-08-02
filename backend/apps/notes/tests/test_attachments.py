@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import yaml
 from celery.exceptions import SoftTimeLimitExceeded
 from django.contrib.auth import get_user_model
 from django.conf import settings as django_settings
@@ -24,6 +25,46 @@ EMPTY_DOC = {"type": "doc", "content": []}
 
 
 class NotesStorageSettingsTests(SimpleTestCase):
+    def test_compose_persists_notes_for_backend_and_celery_only(self) -> None:
+        class ComposeLoader(yaml.SafeLoader):
+            pass
+
+        ComposeLoader.add_constructor(
+            "!reset",
+            lambda loader, node: loader.construct_sequence(node),
+        )
+        project_root = django_settings.BASE_DIR.parent
+        mount = "a3-notes-data:/app/storage/a3-notes"
+
+        for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
+            with self.subTest(filename=filename):
+                compose = yaml.load(
+                    (project_root / filename).read_text(encoding="utf-8"),
+                    Loader=ComposeLoader,
+                )
+                services = compose["services"]
+
+                self.assertIn("a3-notes-data", compose["volumes"])
+                for service_name in ("backend", "celery"):
+                    service = services[service_name]
+                    self.assertIn(mount, service.get("volumes", []))
+                    self.assertEqual(
+                        service.get("environment", {}).get("A3_NOTES_STORAGE_ROOT"),
+                        "/app/storage/a3-notes",
+                    )
+
+                for service_name in (
+                    "frontend",
+                    "caddy",
+                    "resource-worker",
+                    "video-worker",
+                ):
+                    service_volumes = services.get(service_name, {}).get("volumes", [])
+                    self.assertFalse(
+                        any(str(volume).startswith("a3-notes-data:") for volume in service_volumes),
+                        f"{filename}: {service_name} must not mount personal note storage",
+                    )
+
     def test_unset_and_blank_storage_root_use_backend_default(self) -> None:
         from backend.config.settings import resolve_path_setting
 
