@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from time import sleep
 from typing import Any
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, transaction
 
 from backend.apps.compat.agent_kernel import AgentContext, SafetyAgent, VerifierAgent
 from backend.apps.compat.llm import generate_tutoring_answer
@@ -15,6 +16,7 @@ from backend.apps.notes.services import context_service
 MAX_MESSAGE_CHARACTERS = 4_000
 MAX_ANSWER_CHARACTERS = 12_000
 PARTIAL_WRITE_CHARACTERS = 512
+MAX_CHAT_TRANSACTION_ATTEMPTS = 6
 retrieve_course_evidence = context_service.retrieve_course_evidence
 
 
@@ -114,21 +116,14 @@ def _uuid_field(value: Any, *, field: str, code: str) -> uuid.UUID:
         ) from exc
 
 
-def submit_chat(user, payload: dict[str, Any]) -> ChatSubmission:
-    session_id = _uuid_field(
-        payload.get("sessionId"), field="sessionId", code="invalid_session_id"
-    )
-    request_id = _uuid_field(
-        payload.get("clientRequestId"),
-        field="clientRequestId",
-        code="invalid_client_request_id",
-    )
-    message_text = str(payload.get("message") or "").strip()
-    if not message_text or len(message_text) > MAX_MESSAGE_CHARACTERS:
-        raise AssistantServiceError(
-            f"消息必须是 1 至 {MAX_MESSAGE_CHARACTERS} 个字符", code="invalid_message"
-        )
-    include_course = payload.get("includeCourseEvidence") is True
+def _persist_chat(
+    user,
+    *,
+    session_id: uuid.UUID,
+    request_id: uuid.UUID,
+    message_text: str,
+    include_course: bool,
+) -> ChatSubmission:
     with transaction.atomic():
         session = NoteAiSession.objects.select_for_update().filter(
             user=user, id=session_id, status=NoteAiSession.Status.ACTIVE
@@ -152,20 +147,52 @@ def submit_chat(user, payload: dict[str, Any]) -> ChatSubmission:
             client_request_id=user_request_id,
             metadata={"requestId": str(request_id), "includeCourseEvidence": include_course},
         )
-        try:
-            assistant_message = NoteAiMessage.objects.create(
-                session=session,
-                role=NoteAiMessage.Role.ASSISTANT,
-                status=NoteAiMessage.Status.QUEUED,
-                client_request_id=request_id,
-                metadata={
-                    "userMessageId": str(user_message.id),
-                    "includeCourseEvidence": include_course,
-                },
-            )
-        except IntegrityError:
-            raise AssistantServiceError("请求正在处理", code="request_in_progress", status=409)
+        assistant_message = NoteAiMessage.objects.create(
+            session=session,
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.QUEUED,
+            client_request_id=request_id,
+            metadata={
+                "userMessageId": str(user_message.id),
+                "includeCourseEvidence": include_course,
+            },
+        )
     return ChatSubmission(user_message, assistant_message, True)
+
+
+def submit_chat(user, payload: dict[str, Any]) -> ChatSubmission:
+    session_id = _uuid_field(
+        payload.get("sessionId"), field="sessionId", code="invalid_session_id"
+    )
+    request_id = _uuid_field(
+        payload.get("clientRequestId"),
+        field="clientRequestId",
+        code="invalid_client_request_id",
+    )
+    message_text = str(payload.get("message") or "").strip()
+    if not message_text or len(message_text) > MAX_MESSAGE_CHARACTERS:
+        raise AssistantServiceError(
+            f"消息必须是 1 至 {MAX_MESSAGE_CHARACTERS} 个字符", code="invalid_message"
+        )
+    include_course = payload.get("includeCourseEvidence") is True
+    for attempt in range(MAX_CHAT_TRANSACTION_ATTEMPTS):
+        try:
+            return _persist_chat(
+                user,
+                session_id=session_id,
+                request_id=request_id,
+                message_text=message_text,
+                include_course=include_course,
+            )
+        except (IntegrityError, OperationalError) as exc:
+            if attempt + 1 >= MAX_CHAT_TRANSACTION_ATTEMPTS:
+                raise AssistantServiceError(
+                    "AI 会话请求繁忙，请重试",
+                    code="assistant_transaction_busy",
+                    status=503,
+                ) from exc
+            sleep(0.01 * (attempt + 1))
+    raise AssertionError("unreachable")
 
 
 def run_safety(user, question: str) -> dict[str, Any]:
