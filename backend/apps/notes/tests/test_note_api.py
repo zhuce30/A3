@@ -734,6 +734,145 @@ class SearchAndValidationTests(NoteApiTestCase):
                 self.assertEqual(response.status_code, 201)
                 self.assertEqual(response.json()["note"]["content"], content)
 
+    def test_required_node_attributes_are_rejected_when_missing_empty_or_wrong_type(self) -> None:
+        inline_math_types = {"math_inline", "inline_math", "inline_equation"}
+        invalid_nodes = [
+            {"type": "image"},
+            {"type": "image", "attrs": {"src": ""}},
+            {"type": "image", "attrs": {"src": 123}},
+            {"type": "attachment_reference"},
+            {"type": "attachment_reference", "attrs": {"attachmentId": "  "}},
+            {"type": "attachment_reference", "attrs": {"attachmentId": 123}},
+        ]
+        formula_types = (
+            "math_inline",
+            "math_display",
+            "inline_math",
+            "block_math",
+            "equation",
+            "inline_equation",
+            "block_equation",
+        )
+        invalid_nodes.extend({"type": node_type} for node_type in formula_types)
+        invalid_nodes.extend(
+            [
+                {"type": "math_inline", "attrs": {"latex": ""}},
+                {"type": "math_inline", "attrs": {"value": 42}},
+                {"type": "equation", "attrs": {"text": "   "}},
+            ]
+        )
+
+        for index, node in enumerate(invalid_nodes):
+            with self.subTest(index=index, node=node):
+                content = (
+                    {"type": "doc", "content": [{"type": "paragraph", "content": [node]}]}
+                    if node["type"] in {"image", "attachment_reference", *inline_math_types}
+                    else {"type": "doc", "content": [node]}
+                )
+                response = self.post_json(
+                    reverse("notes:note-list"),
+                    {"title": f"缺少属性 {index}", "content": content},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["code"], "invalid_note_content")
+        self.assertFalse(Note.objects.filter(user=self.user, title__startswith="缺少属性").exists())
+
+    def test_required_mark_attributes_are_rejected(self) -> None:
+        invalid_marks = (
+            {"type": "link"},
+            {"type": "link", "attrs": {"href": ""}},
+            {"type": "link", "attrs": {"href": 123}},
+            {"type": "forecolor"},
+            {"type": "backcolor", "attrs": {"backcolor": ""}},
+            {"type": "fontsize", "attrs": {"fontsize": None}},
+            {"type": "fontname", "attrs": {"fontname": 12}},
+        )
+        for index, mark in enumerate(invalid_marks):
+            with self.subTest(index=index, mark=mark):
+                response = self.post_json(
+                    reverse("notes:note-list"),
+                    {
+                        "title": f"非法 mark {index}",
+                        "content": {
+                            "type": "doc",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "链接", "marks": [mark]}],
+                                }
+                            ],
+                        },
+                    },
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["code"], "invalid_note_content")
+        self.assertFalse(Note.objects.filter(user=self.user, title__startswith="非法 mark").exists())
+
+    def test_valid_required_attributes_and_omitted_defaults_are_accepted(self) -> None:
+        content = {
+            "type": "doc",
+            "content": [
+                {"type": "heading", "content": [{"type": "text", "text": "默认一级标题"}]},
+                {
+                    "type": "ordered_list",
+                    "content": [
+                        {
+                            "type": "list_item",
+                            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "有序"}]}],
+                        }
+                    ],
+                },
+                {
+                    "type": "bullet_list",
+                    "content": [
+                        {
+                            "type": "list_item",
+                            "content": [{"type": "paragraph", "content": [{"type": "text", "text": "无序"}]}],
+                        }
+                    ],
+                },
+                {
+                    "type": "table",
+                    "content": [
+                        {
+                            "type": "table_row",
+                            "content": [
+                                {
+                                    "type": "table_cell",
+                                    "content": [
+                                        {
+                                            "type": "paragraph",
+                                            "content": [{"type": "text", "text": "默认单元格"}],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {"type": "image", "attrs": {"src": "https://example.com/image.png"}},
+                        {"type": "attachment_reference", "attrs": {"attachmentId": str(uuid.uuid4())}},
+                        {"type": "math_inline", "content": [{"type": "text", "text": "E=mc^2"}]},
+                        {
+                            "type": "text",
+                            "text": "资料",
+                            "marks": [{"type": "link", "attrs": {"href": "https://example.com"}}],
+                        },
+                    ],
+                },
+                {"type": "math_display", "attrs": {"value": "x+y=z"}},
+                {"type": "equation", "attrs": {"text": "a=b"}},
+            ],
+        }
+
+        response = self.post_json(reverse("notes:note-list"), {"title": "有效必填属性", "content": content})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["note"]["content"], content)
+
     def test_patch_requires_version_and_mutation_id(self) -> None:
         note = self.create_note()
         for payload in ({"clientMutationId": str(uuid.uuid4())}, {"baseVersion": 1}):

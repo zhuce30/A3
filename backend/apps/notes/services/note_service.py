@@ -214,7 +214,7 @@ def extract_note_text(content: dict[str, Any]) -> str:
             return "\n"
         if node_type in MATH_TYPES:
             attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
-            formula = attrs.get("latex") or attrs.get("value")
+            formula = attrs.get("latex") or attrs.get("value") or attrs.get("text")
             if isinstance(formula, str):
                 return formula
         if node_type in {"attachment_reference", "attachment_ref"}:
@@ -253,13 +253,13 @@ NODE_ATTRS = {
     "table_row": set(),
     "table_cell": {"colspan", "rowspan", "colwidth", "background"},
     "table_header": {"colspan", "rowspan", "colwidth", "background"},
-    "math_inline": {"latex", "value"},
-    "math_display": {"latex", "value"},
-    "inline_math": {"latex", "value"},
-    "block_math": {"latex", "value"},
-    "equation": {"latex", "value", "display"},
-    "inline_equation": {"latex", "value"},
-    "block_equation": {"latex", "value"},
+    "math_inline": {"latex", "value", "text"},
+    "math_display": {"latex", "value", "text"},
+    "inline_math": {"latex", "value", "text"},
+    "block_math": {"latex", "value", "text"},
+    "equation": {"latex", "value", "text", "display"},
+    "inline_equation": {"latex", "value", "text"},
+    "block_equation": {"latex", "value", "text"},
     "attachment_reference": {"attachmentId", "label", "kind", "mimeType"},
     "attachment_ref": {"attachmentId", "label", "kind", "mimeType"},
 }
@@ -277,6 +277,13 @@ MARK_ATTRS = {
     "underline": set(),
     "link": {"href", "title", "target"},
     "mark": {"index"},
+}
+REQUIRED_MARK_STRING_ATTRS = {
+    "fontsize": "fontsize",
+    "fontname": "fontname",
+    "forecolor": "color",
+    "backcolor": "backcolor",
+    "link": "href",
 }
 INLINE_NODES = {
     "text",
@@ -327,6 +334,46 @@ def _validate_attrs(owner_type: str, attrs: Any, allowed: set[str]) -> None:
             _invalid_content(f"{owner_type} 的属性值格式不正确")
 
 
+def _require_nonempty_string(attrs: dict[str, Any], key: str, owner_type: str) -> None:
+    value = attrs.get(key)
+    if not isinstance(value, str) or not value.strip():
+        _invalid_content(f"{owner_type} 必须包含非空字符串属性 {key}")
+
+
+def _validate_node_attrs(node_type: str, attrs: dict[str, Any]) -> None:
+    _validate_attrs(node_type, attrs, NODE_ATTRS[node_type])
+    if node_type == "image":
+        _require_nonempty_string(attrs, "src", node_type)
+    elif node_type in {"attachment_reference", "attachment_ref"}:
+        _require_nonempty_string(attrs, "attachmentId", node_type)
+
+    if node_type == "heading" and "level" in attrs:
+        level = attrs["level"]
+        if isinstance(level, bool) or not isinstance(level, int) or not 1 <= level <= 6:
+            _invalid_content("heading.level 必须是 1 到 6 的整数")
+    if node_type == "ordered_list" and "order" in attrs:
+        order = attrs["order"]
+        if isinstance(order, bool) or not isinstance(order, int) or order < 1:
+            _invalid_content("ordered_list.order 必须是正整数")
+    if node_type in {"table_cell", "table_header"}:
+        for key in ("colspan", "rowspan"):
+            if key in attrs:
+                value = attrs[key]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    _invalid_content(f"{node_type}.{key} 必须是正整数")
+    if node_type == "equation" and "display" in attrs and not isinstance(attrs["display"], bool):
+        _invalid_content("equation.display 必须是布尔值")
+
+    string_or_null_attrs = {
+        "image": {"alt", "title"},
+        "attachment_reference": {"label", "kind", "mimeType"},
+        "attachment_ref": {"label", "kind", "mimeType"},
+    }
+    for key in string_or_null_attrs.get(node_type, set()):
+        if key in attrs and attrs[key] is not None and not isinstance(attrs[key], str):
+            _invalid_content(f"{node_type}.{key} 必须是字符串或 null")
+
+
 def _validate_marks(node_type: str, marks: Any) -> None:
     if node_type not in INLINE_NODES:
         _invalid_content("块级节点不能包含 marks")
@@ -338,8 +385,15 @@ def _validate_marks(node_type: str, marks: Any) -> None:
         mark_type = mark.get("type")
         if mark_type not in MARK_ATTRS:
             _invalid_content("笔记包含不支持的 mark")
-        if "attrs" in mark:
-            _validate_attrs(str(mark_type), mark["attrs"], MARK_ATTRS[mark_type])
+        attrs = mark.get("attrs", {})
+        _validate_attrs(str(mark_type), attrs, MARK_ATTRS[mark_type])
+        required_attr = REQUIRED_MARK_STRING_ATTRS.get(mark_type)
+        if required_attr:
+            _require_nonempty_string(attrs, required_attr, str(mark_type))
+        if mark_type == "link":
+            for key in ("title", "target"):
+                if key in attrs and attrs[key] is not None and not isinstance(attrs[key], str):
+                    _invalid_content(f"link.{key} 必须是字符串或 null")
 
 
 def _allowed_children(node_type: str) -> set[str]:
@@ -371,8 +425,8 @@ def validate_content(value: Any) -> dict[str, Any]:
             _invalid_content("笔记包含不支持的节点类型")
         if parent_type and node_type not in _allowed_children(parent_type):
             _invalid_content(f"{node_type} 不能放在 {parent_type} 中")
-        if "attrs" in node:
-            _validate_attrs(str(node_type), node["attrs"], NODE_ATTRS[node_type])
+        attrs = node.get("attrs", {})
+        _validate_node_attrs(str(node_type), attrs)
         if "marks" in node:
             _validate_marks(str(node_type), node["marks"])
 
@@ -406,6 +460,18 @@ def validate_content(value: Any) -> dict[str, Any]:
             _invalid_content("list_item 必须以 paragraph 开始")
         for child in children:
             validate_node(child, parent_type=str(node_type))
+        if node_type in MATH_TYPES:
+            formula_attrs = (attrs.get("latex"), attrs.get("value"), attrs.get("text"))
+            for formula_attr in formula_attrs:
+                if formula_attr is not None and (
+                    not isinstance(formula_attr, str) or not formula_attr.strip()
+                ):
+                    _invalid_content(f"{node_type} 的公式属性必须是非空字符串")
+            child_text = "".join(
+                child.get("text", "") for child in children if isinstance(child, dict) and child.get("type") == "text"
+            )
+            if not any(isinstance(item, str) and item.strip() for item in formula_attrs) and not child_text.strip():
+                _invalid_content(f"{node_type} 必须包含非空公式内容")
 
     if not isinstance(value, dict) or value.get("type") != "doc":
         _invalid_content("笔记内容必须是有效的 ProseMirror doc")
