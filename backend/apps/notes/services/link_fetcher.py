@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
+import re
 import socket
 import ssl
 import threading
@@ -16,6 +17,9 @@ MAX_LINK_REDIRECTS = 3
 TOTAL_TIMEOUT_SECONDS = 5.0
 READ_SIZE = 64 * 1024
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+VALID_PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+PATH_SAFE_CHARACTERS = "/:@!$&'()*+,;=-._~"
+QUERY_SAFE_CHARACTERS = "/?:@!$&'()*+,;=-._~"
 
 
 class SafeLinkError(Exception):
@@ -78,10 +82,46 @@ def _resolve_addresses(hostname: str, port: int, deadline: float) -> list[tuple]
     return outcome.get("records", [])
 
 
+def _quote_iri_component(value: str, *, safe: str) -> str:
+    encoded: list[str] = []
+    offset = 0
+    for match in VALID_PERCENT_ESCAPE.finditer(value):
+        encoded.append(
+            urllib.parse.quote(
+                value[offset:match.start()],
+                safe=safe,
+                encoding="utf-8",
+                errors="strict",
+            )
+        )
+        encoded.append(match.group(0))
+        offset = match.end()
+    encoded.append(
+        urllib.parse.quote(
+            value[offset:],
+            safe=safe,
+            encoding="utf-8",
+            errors="strict",
+        )
+    )
+    return "".join(encoded)
+
+
+def _ascii_request_target(parsed: urllib.parse.SplitResult) -> str:
+    path = _quote_iri_component(parsed.path or "/", safe=PATH_SAFE_CHARACTERS)
+    if not parsed.query:
+        return path
+    query = _quote_iri_component(parsed.query, safe=QUERY_SAFE_CHARACTERS)
+    return f"{path}?{query}"
+
+
 def _resolve_public_url(url: str, deadline: float) -> _ResolvedTarget:
     if not isinstance(url, str) or len(url) > 2048 or any(ord(char) < 32 for char in url):
         raise SafeLinkError("链接格式无效", code="unsafe_note_link")
-    parsed = urllib.parse.urlsplit(url)
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except (UnicodeError, ValueError) as exc:
+        raise SafeLinkError("链接地址编码无效", code="unsafe_note_link") from exc
     scheme = parsed.scheme.lower()
     if scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise SafeLinkError("仅支持安全的 HTTP(S) 链接", code="unsafe_note_link")
@@ -100,7 +140,10 @@ def _resolve_public_url(url: str, deadline: float) -> _ResolvedTarget:
     if parsed.fragment:
         parsed = parsed._replace(fragment="")
         url = urllib.parse.urlunsplit(parsed)
-    request_target = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    try:
+        request_target = _ascii_request_target(parsed)
+    except (UnicodeError, ValueError) as exc:
+        raise SafeLinkError("链接地址编码无效", code="unsafe_note_link") from exc
     return _ResolvedTarget(
         url=url,
         scheme=scheme,

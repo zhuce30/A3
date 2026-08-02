@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -8,6 +9,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+from django.urls import reverse
 
 from backend.apps.notes.models import NoteAttachment
 from backend.apps.notes.tests.test_attachments import AttachmentTestCase
@@ -76,6 +79,71 @@ class _LocalServer:
 def _dns_record(address: str, port: int):
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
     return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port))]
+
+
+class UnicodeRequestTargetTests(AttachmentTestCase):
+    @patch(
+        "backend.apps.notes.services.link_fetcher.socket.getaddrinfo",
+        return_value=_dns_record(PUBLIC_IPV4, 80),
+    )
+    def test_unicode_path_and_query_are_component_encoded_without_double_encoding(self, _dns) -> None:
+        from backend.apps.notes.services.link_fetcher import _resolve_public_url
+
+        target = _resolve_public_url(
+            "http://example.test/中文/%E4%B8%AD?关键词=值&next=%2fok",
+            time.monotonic() + 1,
+        )
+
+        self.assertEqual(target.hostname, "example.test")
+        self.assertEqual(
+            target.request_target,
+            "/%E4%B8%AD%E6%96%87/%E4%B8%AD?%E5%85%B3%E9%94%AE%E8%AF%8D=%E5%80%BC&next=%2fok",
+        )
+        self.assertTrue(target.request_target.isascii())
+
+    @patch("backend.apps.notes.services.link_fetcher._fetch_target")
+    @patch(
+        "backend.apps.notes.services.link_fetcher.socket.getaddrinfo",
+        return_value=_dns_record(PUBLIC_IPV4, 80),
+    )
+    def test_link_endpoint_sends_ascii_target_for_normal_chinese_url(self, _dns, fetch_target) -> None:
+        response = Mock(status=200)
+        response.getheader.side_effect = lambda name, default="": {
+            "Content-Type": "text/plain",
+        }.get(name, default)
+        response.read1.side_effect = [b"validated", b""]
+        fetch_target.return_value = Mock(), response, Mock(), Mock()
+
+        result = self.client.post(
+            reverse("notes:attachment-link", args=[self.note.id]),
+            data=json.dumps({"url": "http://example.test/中文?关键词=值", "displayName": "reference"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(result.status_code, 201)
+        target = fetch_target.call_args.args[0]
+        self.assertEqual(
+            target.request_target,
+            "/%E4%B8%AD%E6%96%87?%E5%85%B3%E9%94%AE%E8%AF%8D=%E5%80%BC",
+        )
+        self.assertEqual(target.hostname, "example.test")
+
+    @patch(
+        "backend.apps.notes.services.link_fetcher.socket.getaddrinfo",
+        return_value=_dns_record(PUBLIC_IPV4, 80),
+    )
+    def test_malformed_unicode_returns_stable_json_error(self, _dns) -> None:
+        self.client.raise_request_exception = False
+
+        result = self.client.post(
+            reverse("notes:attachment-link", args=[self.note.id]),
+            data=b'{"url":"http://example.test/\\ud800","displayName":"bad"}',
+            content_type="application/json",
+        )
+
+        self.assertEqual(result.status_code, 400)
+        self.assertEqual(result.json()["code"], "unsafe_note_link")
+        self.assertEqual(result.json()["error"], "链接地址编码无效")
 
 
 class PinnedTransportProbeTests(AttachmentTestCase):
