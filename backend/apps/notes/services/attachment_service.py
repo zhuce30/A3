@@ -3,10 +3,8 @@ from __future__ import annotations
 import hashlib
 import html.parser
 import io
-import ipaddress
 import os
 import re
-import socket
 import stat
 import tempfile
 import unicodedata
@@ -16,8 +14,6 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-import requests
-from requests.auth import AuthBase
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
@@ -25,12 +21,10 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from backend.apps.notes.models import Note, NoteAttachment
+from backend.apps.notes.services.link_fetcher import SafeLinkError, fetch_safe_link
 
 
 MAX_ATTACHMENTS_PER_NOTE = 30
-MAX_LINK_BYTES = 2 * 1024 * 1024
-MAX_LINK_REDIRECTS = 3
-LINK_TIMEOUT_SECONDS = 5
 MAX_ARCHIVE_ENTRIES = 10_000
 MAX_ARCHIVE_RATIO = 200
 
@@ -53,29 +47,9 @@ ALLOWED_TYPES = {
     ".webp": {"image/webp"},
 }
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
-TEXT_MIMES = {"text/plain", "text/markdown", "text/x-markdown"}
-KNOWLEDGE_BASE_PARSERS = {
-    "application/pdf": "_parse_pdf",
-    OFFICE_MIMES[".docx"]: "_parse_docx",
-    OFFICE_MIMES[".pptx"]: "_parse_pptx",
-    OFFICE_MIMES[".xlsx"]: "_parse_xlsx",
-    "image/png": "_parse_image",
-    "image/jpeg": "_parse_image",
-    "image/webp": "_parse_image",
-}
 OFFICE_ROOTS = {".docx": "word/document.xml", ".pptx": "ppt/presentation.xml", ".xlsx": "xl/workbook.xml"}
 ACTIVE_OFFICE_PARTS = ("vbaproject", "activex/", "embeddings/", "oleobject")
 EXECUTABLE_SIGNATURES = (b"MZ", b"\x7fELF", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe")
-
-
-class _NoAuth(AuthBase):
-    def __call__(self, request):
-        request.headers.pop("Authorization", None)
-        request.headers.pop("Cookie", None)
-        return request
-
-
-NO_AUTH = _NoAuth()
 
 
 class AttachmentServiceError(Exception):
@@ -99,6 +73,8 @@ def serialize_attachment(attachment: NoteAttachment) -> dict[str, Any]:
         "mimeType": attachment.mime_type,
         "sizeBytes": attachment.size_bytes,
         "parseStatus": attachment.parse_status,
+        "parseGeneration": attachment.parse_generation,
+        "parseStartedAt": attachment.parse_started_at.isoformat() if attachment.parse_started_at else None,
         "errorCode": attachment.error_code,
         "errorMessage": attachment.error_message,
         "createdAt": attachment.created_at.isoformat() if attachment.created_at else None,
@@ -265,7 +241,11 @@ def _check_capacity(user, note: Note, incoming_bytes: int) -> None:
     active = NoteAttachment.objects.filter(user=user, deleted_at__isnull=True)
     if active.filter(note=note).count() >= MAX_ATTACHMENTS_PER_NOTE:
         raise AttachmentServiceError("每条笔记最多可保留 30 个附件", code="attachment_count_exceeded", status=409)
-    used = active.aggregate(total=Sum("size_bytes"))["total"] or 0
+    physically_stored = NoteAttachment.objects.filter(
+        user=user,
+        kind__in=[NoteAttachment.Kind.FILE, NoteAttachment.Kind.IMAGE],
+    ).exclude(relative_path="")
+    used = physically_stored.aggregate(total=Sum("size_bytes"))["total"] or 0
     if used + incoming_bytes > int(settings.A3_NOTES_USER_QUOTA_BYTES):
         raise AttachmentServiceError("个人附件空间不足", code="attachment_quota_exceeded", status=409)
 
@@ -313,123 +293,38 @@ def create_file_attachment(user, note_id, upload) -> NoteAttachment:
             temporary_path.unlink(missing_ok=True)
 
 
-def _validate_public_url(url: str) -> tuple[str, set[str]]:
-    if not isinstance(url, str) or len(url) > 2048:
-        raise AttachmentServiceError("链接格式无效", code="unsafe_note_link")
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-        raise AttachmentServiceError("仅支持安全的 HTTP(S) 链接", code="unsafe_note_link")
-    if parsed.fragment:
-        parsed = parsed._replace(fragment="")
-        url = urllib.parse.urlunsplit(parsed)
-    try:
-        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-        records = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
-    except (OSError, ValueError, UnicodeError) as exc:
-        raise AttachmentServiceError("链接地址无法安全解析", code="unsafe_note_link") from exc
-    addresses = {str(record[4][0]).split("%", 1)[0] for record in records}
-    if not addresses:
-        raise AttachmentServiceError("链接地址无法安全解析", code="unsafe_note_link")
-    for address in addresses:
-        try:
-            ip = ipaddress.ip_address(address)
-        except ValueError as exc:
-            raise AttachmentServiceError("链接地址无法安全解析", code="unsafe_note_link") from exc
-        if not ip.is_global:
-            raise AttachmentServiceError("链接目标不是公网地址", code="unsafe_note_link")
-    return url, addresses
-
-
-def _response_peer_ip(response) -> str | None:
-    candidates = (
-        getattr(getattr(getattr(response, "raw", None), "_connection", None), "sock", None),
-        getattr(getattr(getattr(response, "raw", None), "connection", None), "sock", None),
-    )
-    for sock in candidates:
-        if sock is not None:
-            try:
-                return str(sock.getpeername()[0]).split("%", 1)[0]
-            except (OSError, AttributeError, TypeError):
-                continue
-    return None
-
-
-def fetch_safe_link(url: str) -> tuple[str, bytes, str]:
-    current = url
-    for redirect_count in range(MAX_LINK_REDIRECTS + 1):
-        current, resolved_addresses = _validate_public_url(current)
-        try:
-            response = requests.get(
-                current,
-                allow_redirects=False,
-                stream=True,
-                timeout=LINK_TIMEOUT_SECONDS,
-                headers={"User-Agent": "A3-Notes-LinkValidator/1.0", "Accept": "text/plain,text/html,application/xhtml+xml"},
-                auth=NO_AUTH,
-                cookies={},
-            )
-        except requests.RequestException as exc:
-            raise AttachmentServiceError("链接暂时无法访问", code="note_link_unavailable") from exc
-        peer_ip = _response_peer_ip(response)
-        if peer_ip is not None and peer_ip not in resolved_addresses:
-            response.close()
-            raise AttachmentServiceError("链接解析结果在请求期间发生变化", code="unsafe_note_link")
-        if response.status_code in {301, 302, 303, 307, 308}:
-            location = response.headers.get("Location", "")
-            response.close()
-            if redirect_count >= MAX_LINK_REDIRECTS or not location:
-                raise AttachmentServiceError("链接重定向次数过多", code="unsafe_note_link")
-            current = urllib.parse.urljoin(current, location)
-            continue
-        if response.status_code < 200 or response.status_code >= 300:
-            response.close()
-            raise AttachmentServiceError("链接暂时无法访问", code="note_link_unavailable")
-        try:
-            declared_length = int(response.headers.get("Content-Length", "0") or 0)
-        except ValueError:
-            declared_length = 0
-        if declared_length > MAX_LINK_BYTES:
-            response.close()
-            raise AttachmentServiceError("链接内容超过大小限制", code="note_link_too_large")
-        chunks: list[bytes] = []
-        total = 0
-        try:
-            try:
-                for chunk in response.iter_content(chunk_size=64 * 1024):
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > MAX_LINK_BYTES:
-                        raise AttachmentServiceError("链接内容超过大小限制", code="note_link_too_large")
-                    chunks.append(chunk)
-            except requests.RequestException as exc:
-                raise AttachmentServiceError("链接暂时无法访问", code="note_link_unavailable") from exc
-        finally:
-            response.close()
-        mime_type = str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip().lower()
-        return current, b"".join(chunks), mime_type
-    raise AttachmentServiceError("链接重定向次数过多", code="unsafe_note_link")
-
-
-@transaction.atomic
 def create_link_attachment(user, note_id, data: dict[str, Any]) -> NoteAttachment:
     note = get_owned_note(user, note_id)
     url = data.get("url")
-    final_url, body, mime_type = fetch_safe_link(url)
-    display_name = data.get("displayName") or urllib.parse.urlsplit(final_url).hostname or "网页链接"
+    try:
+        fetched = fetch_safe_link(url)
+    except SafeLinkError as exc:
+        raise AttachmentServiceError(str(exc), code=exc.code) from exc
+    display_name = data.get("displayName") or urllib.parse.urlsplit(fetched.final_url).hostname or "网页链接"
     if not isinstance(display_name, str) or not display_name.strip() or len(display_name.strip()) > 255:
         raise AttachmentServiceError("链接名称无效", code="invalid_attachment_name")
-    _check_capacity(user, note, 0)
-    return NoteAttachment.objects.create(
-        user=user,
-        note=note,
-        kind=NoteAttachment.Kind.LINK,
-        display_name=unicodedata.normalize("NFKC", display_name).strip(),
-        source_url=final_url,
-        mime_type=mime_type,
-        size_bytes=0,
-        sha256=hashlib.sha256(body).hexdigest(),
+    extracted_text = _decode_web_body(
+        fetched.body,
+        fetched.mime_type,
+        maximum=int(settings.A3_NOTES_EXTRACTED_TEXT_MAX_CHARS),
     )
+    with transaction.atomic():
+        _check_capacity(user, note, 0)
+        if not Note.objects.filter(user=user, pk=note.pk, deleted_at__isnull=True).exists():
+            raise AttachmentNotFound("笔记不存在")
+        return NoteAttachment.objects.create(
+            user=user,
+            note=note,
+            kind=NoteAttachment.Kind.LINK,
+            display_name=unicodedata.normalize("NFKC", display_name).strip(),
+            source_url=fetched.final_url,
+            mime_type=fetched.mime_type,
+            size_bytes=0,
+            sha256=hashlib.sha256(fetched.body).hexdigest(),
+            parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+            extracted_text=extracted_text,
+            preview_metadata={"parser": "safe_link", "truncated": len(extracted_text) >= int(settings.A3_NOTES_EXTRACTED_TEXT_MAX_CHARS)},
+        )
 
 
 def soft_delete_attachment(user, attachment_id) -> NoteAttachment:
@@ -443,22 +338,27 @@ def soft_delete_attachment(user, attachment_id) -> NoteAttachment:
 def reset_attachment_for_reparse(user, attachment_id) -> NoteAttachment:
     with transaction.atomic():
         attachment = get_owned_attachment(user, attachment_id, lock=True)
+        attachment.parse_generation += 1
         attachment.parse_status = NoteAttachment.ParseStatus.PENDING
+        attachment.parse_started_at = None
         attachment.extracted_text = ""
         attachment.error_code = ""
         attachment.error_message = ""
         attachment.preview_metadata = {}
         attachment.save(update_fields={
-            "parse_status", "extracted_text", "error_code", "error_message", "preview_metadata", "updated_at"
+            "parse_generation", "parse_status", "parse_started_at", "extracted_text",
+            "error_code", "error_message", "preview_metadata", "updated_at"
         })
         return attachment
 
 
 class _TextExtractor(html.parser.HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, maximum: int) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.hidden_depth = 0
+        self.maximum = max(0, int(maximum))
+        self.length = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:
         if tag in {"script", "style", "noscript"}:
@@ -469,58 +369,58 @@ class _TextExtractor(html.parser.HTMLParser):
             self.hidden_depth -= 1
 
     def handle_data(self, data: str) -> None:
-        if not self.hidden_depth and data.strip():
-            self.parts.append(data.strip())
+        text = data.strip()
+        if self.hidden_depth or not text or self.length >= self.maximum:
+            return
+        prefix = "\n" if self.parts else ""
+        remaining = self.maximum - self.length
+        value = (prefix + text)[:remaining]
+        self.parts.append(value)
+        self.length += len(value)
 
 
-def _decode_web_body(body: bytes, mime_type: str) -> str:
+def _decode_web_body(body: bytes, mime_type: str, *, maximum: int) -> str:
     text = body.decode("utf-8", errors="replace")
     if mime_type in {"text/html", "application/xhtml+xml"}:
-        parser = _TextExtractor()
+        parser = _TextExtractor(maximum)
         parser.feed(text)
-        return "\n".join(parser.parts)
-    return text
+        return "".join(parser.parts)
+    return text[:maximum]
 
 
 def extract_attachment_text(attachment: NoteAttachment) -> tuple[str, dict[str, Any]]:
     maximum = int(settings.A3_NOTES_EXTRACTED_TEXT_MAX_CHARS)
     if attachment.kind == NoteAttachment.Kind.LINK:
-        _, body, mime_type = fetch_safe_link(attachment.source_url)
-        text = _decode_web_body(body, mime_type)
-        return text[:maximum], {"truncated": len(text) > maximum, "parser": "safe_link"}
+        try:
+            fetched = fetch_safe_link(attachment.source_url)
+        except SafeLinkError as exc:
+            raise AttachmentServiceError(str(exc), code=exc.code) from exc
+        text = _decode_web_body(fetched.body, fetched.mime_type, maximum=maximum)
+        return text, {"truncated": len(text) >= maximum, "parser": "safe_link"}
     path = resolve_relative_path(attachment.relative_path, require_file=True)
     mime_type = str(attachment.mime_type or "").split(";", 1)[0].strip().lower()
-    if mime_type in TEXT_MIMES:
-        text = path.read_text(encoding="utf-8")
-        parser_name = "utf8_text"
-    elif mime_type in KNOWLEDGE_BASE_PARSERS:
-        from backend.domains.knowledge_base import multimodal_parser
+    from backend.domains.knowledge_base.attachment_text_parser import parse_attachment_text
 
-        parser = getattr(multimodal_parser, KNOWLEDGE_BASE_PARSERS[mime_type])
-        result = parser(path)
-        if result.status == "failed":
-            raise ValueError("document parser failed")
-        text = "\n\n".join(
-            block.text for page in result.pages for block in page.blocks if block.text.strip()
-        )
-        parser_name = "knowledge_base_multimodal"
-    else:
-        raise ValueError("unsupported persisted attachment MIME type")
-    return text[:maximum], {"truncated": len(text) > maximum, "parser": parser_name}
+    result = parse_attachment_text(path, mime_type, max_chars=maximum)
+    return result.text, result.metadata
 
 
-def parse_and_persist_attachment(attachment: NoteAttachment) -> dict[str, Any]:
+def parse_and_persist_attachment(attachment: NoteAttachment, expected_generation: int) -> dict[str, Any]:
     text, metadata = extract_attachment_text(attachment)
     updated = NoteAttachment.objects.filter(
         pk=attachment.pk,
         deleted_at__isnull=True,
+        parse_generation=expected_generation,
         parse_status=NoteAttachment.ParseStatus.PROCESSING,
     ).update(
         parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+        parse_started_at=None,
         extracted_text=text,
         preview_metadata=metadata,
         error_code="",
         error_message="",
         updated_at=timezone.now(),
     )
-    return {"status": "succeeded" if updated else "skipped", "attachmentId": str(attachment.pk)}
+    if not updated:
+        return {"skipped": True, "attachmentId": str(attachment.pk)}
+    return {"status": "succeeded", "attachmentId": str(attachment.pk)}

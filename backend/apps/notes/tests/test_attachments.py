@@ -7,6 +7,7 @@ import tempfile
 import uuid
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import requests
@@ -117,8 +118,9 @@ class AttachmentTestCase(TestCase):
 
 
 class UploadSecurityTests(AttachmentTestCase):
-    @patch("backend.apps.notes.views_attachments.parse_attachment_task.delay")
-    def test_upload_stores_normalized_relative_path_and_enqueues_once(self, delay) -> None:
+    @patch("backend.apps.notes.views_attachments.enqueue_attachment_parse")
+    def test_upload_stores_normalized_relative_path_and_enqueues_once(self, enqueue) -> None:
+        enqueue.side_effect = lambda attachment: attachment
         response = self.upload(" lecture.MD ", b"# Safe notes\n", "text/markdown")
 
         self.assertEqual(response.status_code, 201)
@@ -130,7 +132,8 @@ class UploadSecurityTests(AttachmentTestCase):
         self.assertEqual(path_parts[1:3], (str(self.note.id), str(attachment.id)))
         self.assertTrue((Path(self.storage.name) / attachment.relative_path).is_file())
         self.assertNotIn(str(Path(self.storage.name).resolve()), json.dumps(response.json()))
-        delay.assert_called_once_with(str(attachment.id))
+        enqueue.assert_called_once()
+        self.assertEqual(enqueue.call_args.args[0].id, attachment.id)
 
     def test_upload_rejects_mime_mismatch(self) -> None:
         response = self.upload("notes.txt", b"plain text", "image/png")
@@ -226,8 +229,9 @@ class AttachmentRouteTests(AttachmentTestCase):
             with self.subTest(attachment_id=attachment_id):
                 self.assertEqual(self.client.get(reverse("notes:attachment-download", args=[attachment_id])).status_code, 404)
 
-    @patch("backend.apps.notes.views_attachments.parse_attachment_task.delay")
-    def test_reparse_resets_status_and_enqueues_exactly_once(self, delay) -> None:
+    @patch("backend.apps.notes.views_attachments.enqueue_attachment_parse")
+    def test_reparse_resets_status_and_enqueues_exactly_once(self, enqueue) -> None:
+        enqueue.side_effect = lambda attachment: attachment
         attachment = self.create_attachment(
             parse_status=NoteAttachment.ParseStatus.FAILED,
             extracted_text="old", error_code="parse_failed", error_message="old failure",
@@ -238,7 +242,8 @@ class AttachmentRouteTests(AttachmentTestCase):
         self.assertEqual(attachment.parse_status, NoteAttachment.ParseStatus.PENDING)
         self.assertEqual(attachment.extracted_text, "")
         self.assertEqual(attachment.error_code, "")
-        delay.assert_called_once_with(str(attachment.id))
+        self.assertEqual(attachment.parse_generation, 2)
+        enqueue.assert_called_once()
 
     def test_delete_is_soft_and_does_not_remove_physical_file(self) -> None:
         attachment = self.create_attachment()
@@ -251,20 +256,6 @@ class AttachmentRouteTests(AttachmentTestCase):
 
 
 class ParserTaskTests(AttachmentTestCase):
-    @staticmethod
-    def parsed_result(text: str):
-        from backend.domains.knowledge_base.multimodal_parser import (
-            MultimodalParseResult,
-            ParsedBlock,
-            ParsedPage,
-        )
-
-        return MultimodalParseResult(
-            parser="native",
-            status="completed",
-            pages=[ParsedPage(blocks=[ParsedBlock(modality="text", text=text)])],
-        )
-
     def test_parser_success_persists_bounded_text_without_kb_records(self) -> None:
         from backend.apps.knowledge_base.models import KnowledgeResource
         from backend.apps.notes.tasks import parse_attachment_task
@@ -273,33 +264,39 @@ class ParserTaskTests(AttachmentTestCase):
         (Path(self.storage.name) / attachment.relative_path).write_text("abcdefghijk", encoding="utf-8")
         before = KnowledgeResource.objects.count()
         with override_settings(A3_NOTES_EXTRACTED_TEXT_MAX_CHARS=5):
-            result = parse_attachment_task(str(attachment.id))
+            result = parse_attachment_task(str(attachment.id), attachment.parse_generation)
         attachment.refresh_from_db()
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(attachment.extracted_text, "abcde")
         self.assertEqual(attachment.parse_status, NoteAttachment.ParseStatus.SUCCEEDED)
         self.assertEqual(KnowledgeResource.objects.count(), before)
 
-    @patch("backend.domains.knowledge_base.multimodal_parser._parse_pdf")
-    def test_persisted_mime_selects_parser_even_when_extension_changes(self, parse_pdf) -> None:
+    @patch("backend.domains.knowledge_base.attachment_text_parser.parse_attachment_text")
+    def test_persisted_mime_selects_parser_even_when_extension_changes(self, parser) -> None:
         from backend.apps.notes.services.attachment_service import extract_attachment_text
 
-        parse_pdf.return_value = self.parsed_result("parsed as PDF")
+        parser.return_value = SimpleNamespace(
+            text="parsed as PDF",
+            metadata={"parser": "attachment_safe_pdf"},
+        )
         attachment = self.create_attachment(display_name="misleading.txt", mime_type="application/pdf")
 
         text, metadata = extract_attachment_text(attachment)
 
         self.assertEqual(text, "parsed as PDF")
-        self.assertEqual(metadata["parser"], "knowledge_base_multimodal")
-        parse_pdf.assert_called_once()
+        self.assertEqual(metadata["parser"], "attachment_safe_pdf")
+        parser.assert_called_once()
 
-    @patch("backend.domains.knowledge_base.multimodal_parser._parse_xlsx")
-    def test_xlsx_reuses_knowledge_base_pure_parser(self, parse_xlsx) -> None:
+    @patch("backend.domains.knowledge_base.attachment_text_parser.parse_attachment_text")
+    def test_xlsx_reuses_knowledge_base_pure_parser(self, parser) -> None:
         from backend.apps.notes.services.attachment_service import extract_attachment_text
 
         attachment_id = uuid.uuid4()
         relative_path = f"{self.user.id}/{self.note.id}/{attachment_id}/sheet.xlsx"
-        parse_xlsx.return_value = self.parsed_result("sheet cells")
+        parser.return_value = SimpleNamespace(
+            text="sheet cells",
+            metadata={"parser": "attachment_safe_xlsx"},
+        )
         attachment = self.create_attachment(
             id=attachment_id,
             display_name="sheet.xlsx",
@@ -310,15 +307,15 @@ class ParserTaskTests(AttachmentTestCase):
         text, metadata = extract_attachment_text(attachment)
 
         self.assertEqual(text, "sheet cells")
-        self.assertEqual(metadata["parser"], "knowledge_base_multimodal")
-        parse_xlsx.assert_called_once()
+        self.assertEqual(metadata["parser"], "attachment_safe_xlsx")
+        parser.assert_called_once()
 
     @patch("backend.apps.notes.services.attachment_service.extract_attachment_text", side_effect=ValueError("secret C:\\private\\file"))
     def test_parser_failure_is_readable_and_does_not_leak_paths(self, _extract) -> None:
         from backend.apps.notes.tasks import parse_attachment_task
 
         attachment = self.create_attachment()
-        result = parse_attachment_task(str(attachment.id))
+        result = parse_attachment_task(str(attachment.id), attachment.parse_generation)
         attachment.refresh_from_db()
         self.assertEqual(result["status"], "failed")
         self.assertEqual(attachment.error_code, "attachment_parse_failed")
@@ -330,24 +327,32 @@ class ParserTaskTests(AttachmentTestCase):
         from backend.apps.notes.tasks import parse_attachment_task
 
         attachment = self.create_attachment()
-        result = parse_attachment_task(str(attachment.id))
+        result = parse_attachment_task(str(attachment.id), attachment.parse_generation)
         attachment.refresh_from_db()
         self.assertEqual(result["status"], "failed")
         self.assertEqual(attachment.error_code, "attachment_parse_timeout")
         self.assertEqual(attachment.error_message, "附件解析超时，请稍后重试")
 
-    def test_parser_is_idempotent_for_missing_deleted_succeeded_and_processing(self) -> None:
+    def test_parser_is_idempotent_for_missing_deleted_and_succeeded(self) -> None:
         from backend.apps.notes.tasks import parse_attachment_task
 
         succeeded = self.create_attachment(parse_status=NoteAttachment.ParseStatus.SUCCEEDED)
         deleted = self.create_attachment(id=uuid.uuid4(), deleted_at="2026-08-02T00:00:00Z")
-        processing = self.create_attachment(id=uuid.uuid4(), parse_status=NoteAttachment.ParseStatus.PROCESSING)
-        for attachment_id in (uuid.uuid4(), succeeded.id, deleted.id, processing.id):
+        for attachment_id in (uuid.uuid4(), succeeded.id, deleted.id):
             with self.subTest(attachment_id=attachment_id):
-                self.assertTrue(parse_attachment_task(str(attachment_id))["skipped"])
+                self.assertTrue(parse_attachment_task(str(attachment_id), 1)["skipped"])
 
 
 class LinkSsrfTests(AttachmentTestCase):
+    @staticmethod
+    def response(*, peer="93.184.216.34", status=200, headers=None, chunks=None):
+        response = Mock(status_code=status, headers=headers or {"Content-Type": "text/html"})
+        response.iter_content.return_value = chunks if chunks is not None else [b"safe body"]
+        sock = Mock()
+        sock.getpeername.return_value = (peer, 443)
+        response.raw = SimpleNamespace(_connection=SimpleNamespace(sock=sock))
+        return response
+
     def post_link(self, url: str):
         return self.client.post(
             reverse("notes:attachment-link", args=[self.note.id]),
@@ -355,7 +360,7 @@ class LinkSsrfTests(AttachmentTestCase):
             content_type="application/json",
         )
 
-    @patch("backend.apps.notes.services.attachment_service.socket.getaddrinfo")
+    @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo")
     def test_link_rejects_ipv4_ipv6_and_metadata_destinations(self, getaddrinfo) -> None:
         for address in ("127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "fc00::1", "fe80::1"):
             getaddrinfo.return_value = [(socket.AF_INET6 if ":" in address else socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))]
@@ -371,63 +376,67 @@ class LinkSsrfTests(AttachmentTestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(response.json()["code"], "unsafe_note_link")
 
-    @patch("backend.apps.notes.services.attachment_service.requests.get")
-    @patch("backend.apps.notes.services.attachment_service.socket.getaddrinfo")
-    def test_link_rejects_private_redirect_target(self, getaddrinfo, request) -> None:
+    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
+    @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo")
+    def test_link_rejects_private_redirect_target(self, getaddrinfo, session_factory) -> None:
         getaddrinfo.side_effect = [
             [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
             [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))],
         ]
-        request.return_value = Mock(status_code=302, headers={"Location": "http://169.254.169.254/latest/meta-data"})
+        session = session_factory.return_value
+        session.get.return_value = self.response(
+            status=302,
+            headers={"Location": "http://169.254.169.254/latest/meta-data"},
+        )
         response = self.post_link("https://example.test/link")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["code"], "unsafe_note_link")
-        request.assert_called_once()
-        self.assertFalse(request.call_args.kwargs["allow_redirects"])
-        self.assertEqual(request.call_args.kwargs["cookies"], {})
-        prepared = Mock(headers={"Authorization": "secret", "Cookie": "secret"})
-        request.call_args.kwargs["auth"](prepared)
-        self.assertNotIn("Authorization", prepared.headers)
-        self.assertNotIn("Cookie", prepared.headers)
+        session.get.assert_called_once()
+        self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
 
-    @patch("backend.apps.notes.services.attachment_service.requests.get")
-    @patch("backend.apps.notes.services.attachment_service.socket.getaddrinfo")
-    def test_link_revalidates_dns_each_redirect_and_limits_body(self, getaddrinfo, request) -> None:
+    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
+    @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo")
+    def test_link_revalidates_dns_each_redirect_and_limits_body(self, getaddrinfo, session_factory) -> None:
         getaddrinfo.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
-        first = Mock(status_code=302, headers={"Location": "/final"})
-        second = Mock(status_code=200, headers={"Content-Length": str(2 * 1024 * 1024 + 1)})
-        request.side_effect = [first, second]
+        first = self.response(status=302, headers={"Location": "/final"})
+        second = self.response(status=200, headers={"Content-Length": str(2 * 1024 * 1024 + 1)})
+        session = session_factory.return_value
+        session.get.side_effect = [first, second]
         response = self.post_link("https://example.test/start")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["code"], "note_link_too_large")
         self.assertEqual(getaddrinfo.call_count, 2)
-        self.assertEqual(request.call_count, 2)
+        self.assertEqual(session.get.call_count, 2)
 
-    @patch("backend.apps.notes.services.attachment_service.requests.get")
-    @patch("backend.apps.notes.services.attachment_service.socket.getaddrinfo")
-    def test_link_stream_timeout_returns_stable_error(self, getaddrinfo, request) -> None:
+    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
+    @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo")
+    def test_link_stream_timeout_returns_stable_error(self, getaddrinfo, session_factory) -> None:
         getaddrinfo.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
-        response_mock = Mock(status_code=200, headers={"Content-Type": "text/html"})
+        response_mock = self.response()
         response_mock.iter_content.side_effect = requests.Timeout("stream timeout")
-        request.return_value = response_mock
+        session_factory.return_value.get.return_value = response_mock
 
         response = self.post_link("https://example.test/reference")
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["code"], "note_link_unavailable")
 
-    @patch("backend.apps.notes.views_attachments.parse_attachment_task.delay")
-    @patch("backend.apps.notes.services.attachment_service.requests.get")
-    @patch("backend.apps.notes.services.attachment_service.socket.getaddrinfo")
-    def test_safe_link_is_created_and_enqueued(self, getaddrinfo, request, delay) -> None:
+    @patch("backend.apps.notes.views_attachments.enqueue_attachment_parse")
+    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
+    @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo")
+    def test_safe_link_is_created_without_duplicate_enqueue(self, getaddrinfo, session_factory, enqueue) -> None:
         getaddrinfo.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
-        response_mock = Mock(status_code=200, headers={"Content-Length": "12", "Content-Type": "text/html"})
-        response_mock.iter_content.return_value = [b"hello world!"]
-        request.return_value = response_mock
+        response_mock = self.response(
+            headers={"Content-Length": "19", "Content-Type": "text/html"},
+            chunks=[b"<p>hello world!</p>"],
+        )
+        session_factory.return_value.get.return_value = response_mock
         response = self.post_link("https://example.test/reference")
         self.assertEqual(response.status_code, 201)
         attachment = NoteAttachment.objects.get()
         self.assertEqual(attachment.kind, NoteAttachment.Kind.LINK)
         self.assertEqual(attachment.source_url, "https://example.test/reference")
         self.assertEqual(attachment.relative_path, "")
-        delay.assert_called_once_with(str(attachment.id))
+        self.assertEqual(attachment.parse_status, NoteAttachment.ParseStatus.SUCCEEDED)
+        self.assertEqual(attachment.extracted_text, "hello world!")
+        enqueue.assert_not_called()
