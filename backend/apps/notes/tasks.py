@@ -22,6 +22,7 @@ ASSISTANT_STALE_MINUTES = 10
 
 
 def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
+    attempted_at = timezone.now()
     with transaction.atomic():
         queued = NoteAiMessage.objects.select_for_update().filter(
             id=message.id,
@@ -35,12 +36,16 @@ def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
         queued.run_lease_token = uuid.uuid4()
         queued.run_started_at = None
         queued.run_heartbeat_at = None
+        queued.dispatch_attempted_at = attempted_at
+        queued.dispatch_confirmed_at = None
         queued.save(
             update_fields={
                 "run_generation",
                 "run_lease_token",
                 "run_started_at",
                 "run_heartbeat_at",
+                "dispatch_attempted_at",
+                "dispatch_confirmed_at",
             }
         )
         generation = queued.run_generation
@@ -54,7 +59,11 @@ def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
             status=NoteAiMessage.Status.QUEUED,
             run_generation=generation,
             run_lease_token=lease_token,
-        ).update(error_code="", error_message="")
+        ).update(
+            dispatch_confirmed_at=timezone.now(),
+            error_code="",
+            error_message="",
+        )
     except Exception:
         NoteAiMessage.objects.filter(
             id=message.id,
@@ -62,6 +71,7 @@ def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
             run_generation=generation,
             run_lease_token=lease_token,
         ).update(
+            dispatch_confirmed_at=None,
             error_code="assistant_enqueue_failed",
             error_message="AI 助手任务暂时无法提交，请重试",
         )
@@ -124,6 +134,7 @@ def _claim_assistant_lease(
         content="",
         error_code="",
         error_message="",
+        dispatch_confirmed_at=now,
         run_started_at=now,
         run_heartbeat_at=now,
     )
@@ -280,27 +291,43 @@ def generate_assistant_message_task(
             degraded = True
             error_code = "assistant_verifier_degraded"
             error_message = "回答已生成，但引用验证暂时不可用"
-        verified = bool(verification.get("verified")) and bool(context.citations)
+        replacement = verification.get("answer")
+        final_answer = (
+            str(replacement)[: assistant_service.MAX_ANSWER_CHARACTERS]
+            if isinstance(replacement, str) and replacement.strip()
+            else answer
+        )
+        verifier_citations = verification.get("citations")
+        final_citations = (
+            verifier_citations
+            if isinstance(verifier_citations, list)
+            else context.citations
+        )
+        verified = bool(verification.get("verified")) and bool(final_citations)
         claims = verification.get("claims") if isinstance(verification.get("claims"), list) else []
         final_safety = verification.get("safety") if isinstance(verification.get("safety"), dict) else safety
+        refusal_reason = verification.get("refusalReason")
+        final_metadata = {
+            **message.metadata,
+            "traceId": trace_id,
+            "provider": str(generated.get("provider") or ""),
+            "model": str(generated.get("model") or ""),
+            "contextCharacters": context.character_count,
+            "contextTokens": context.token_count,
+        }
+        if isinstance(refusal_reason, str):
+            final_metadata["refusalReason"] = refusal_reason
         updated = _assistant_lease_filter(message.id, generation, lease_token).update(
             status=NoteAiMessage.Status.SUCCEEDED,
-            content=answer,
-            citations=context.citations,
+            content=final_answer,
+            citations=final_citations,
             verified=verified,
             claims=claims,
             safety=final_safety,
             degraded=degraded,
             error_code=error_code,
             error_message=error_message,
-            metadata={
-                **message.metadata,
-                "traceId": trace_id,
-                "provider": str(generated.get("provider") or ""),
-                "model": str(generated.get("model") or ""),
-                "contextCharacters": context.character_count,
-                "contextTokens": context.token_count,
-            },
+            metadata=final_metadata,
             run_lease_token=None,
             run_heartbeat_at=timezone.now(),
         )
@@ -365,6 +392,41 @@ def _recover_stale_assistant_messages(cutoff, limit: int) -> tuple[int, int]:
                     "error_message",
                 }
             )
+        enqueue_assistant_message(message)
+        if message.error_code == "assistant_enqueue_failed":
+            failed += 1
+        else:
+            recovered += 1
+    return recovered, failed
+
+
+def _recover_stale_assistant_dispatches(cutoff, limit: int) -> tuple[int, int]:
+    stale_ids = list(
+        NoteAiMessage.objects.filter(
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.QUEUED,
+        )
+        .filter(
+            Q(dispatch_attempted_at__isnull=True)
+            | Q(
+                dispatch_confirmed_at__isnull=True,
+                dispatch_attempted_at__lt=cutoff,
+            )
+            | Q(dispatch_confirmed_at__lt=cutoff)
+        )
+        .order_by("dispatch_attempted_at", "created_at")
+        .values_list("id", flat=True)[:limit]
+    )
+    recovered = 0
+    failed = 0
+    for message_id in stale_ids:
+        message = NoteAiMessage.objects.filter(
+            id=message_id,
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.QUEUED,
+        ).first()
+        if message is None:
+            continue
         enqueue_assistant_message(message)
         if message.error_code == "assistant_enqueue_failed":
             failed += 1
@@ -755,6 +817,9 @@ def cleanup_stale_jobs_task() -> dict:
     assistant_recovered, assistant_failed = _recover_stale_assistant_messages(
         now - timedelta(minutes=ASSISTANT_STALE_MINUTES), limit
     )
+    dispatch_recovered, dispatch_failed = _recover_stale_assistant_dispatches(
+        now - timedelta(minutes=ASSISTANT_STALE_MINUTES), limit
+    )
     return {
         "parseRecovered": parse_recovered,
         "parseFailed": parse_failed,
@@ -762,4 +827,6 @@ def cleanup_stale_jobs_task() -> dict:
         "exportFailed": export_failed,
         "assistantRecovered": assistant_recovered,
         "assistantFailed": assistant_failed,
+        "assistantDispatchRecovered": dispatch_recovered,
+        "assistantDispatchFailed": dispatch_failed,
     }

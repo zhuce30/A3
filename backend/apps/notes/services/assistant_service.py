@@ -81,6 +81,9 @@ def _public_message_metadata(metadata: Any) -> dict[str, Any]:
             result[key] = value
     if isinstance(metadata.get("includeCourseEvidence"), bool):
         result["includeCourseEvidence"] = metadata["includeCourseEvidence"]
+    refusal_reason = metadata.get("refusalReason")
+    if isinstance(refusal_reason, str):
+        result["refusalReason"] = refusal_reason[:240]
     return result
 
 
@@ -97,11 +100,17 @@ def serialize_session(session: NoteAiSession) -> dict[str, Any]:
 
 
 def serialize_message(message: NoteAiMessage) -> dict[str, Any]:
+    public_content = message.content
+    if (
+        message.role == NoteAiMessage.Role.ASSISTANT
+        and message.status != NoteAiMessage.Status.SUCCEEDED
+    ):
+        public_content = ""
     return {
         "id": str(message.id),
         "sessionId": str(message.session_id),
         "role": message.role,
-        "content": message.content,
+        "content": public_content,
         "status": message.status,
         "clientRequestId": str(message.client_request_id),
         "citations": message.citations,

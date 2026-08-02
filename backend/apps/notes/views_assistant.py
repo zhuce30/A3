@@ -54,7 +54,14 @@ def chat(request):
         submission = assistant_service.submit_chat(request.user, parse_json_body(request))
         from backend.apps.notes.tasks import enqueue_assistant_message
 
-        if submission.created or submission.assistant_message.error_code == "assistant_enqueue_failed":
+        should_dispatch = submission.created or (
+            submission.assistant_message.status == "queued"
+            and (
+                submission.assistant_message.error_code == "assistant_enqueue_failed"
+                or submission.assistant_message.dispatch_confirmed_at is None
+            )
+        )
+        if should_dispatch:
             enqueue_assistant_message(submission.assistant_message)
         submission.assistant_message.refresh_from_db()
         return JsonResponse(

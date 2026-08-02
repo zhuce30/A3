@@ -287,6 +287,10 @@ def _paragraphs(snapshot: _SnapshotNote) -> list[tuple[int, int, int, str]]:
 def _citation(paragraph: _Paragraph, snippet: str) -> dict[str, Any]:
     citation = {
         "sourceKind": "personal_note",
+        "type": "RAG",
+        "score": float(round(paragraph.score, 6)),
+        "sourceOrigin": "personal_note_snapshot",
+        "origin": {"kind": "personal_note", "scope": "owned_snapshot"},
         "noteId": str(paragraph.snapshot.note.id),
         "noteVersion": paragraph.snapshot.version,
         "title": paragraph.snapshot.title,

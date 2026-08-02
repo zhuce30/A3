@@ -240,6 +240,40 @@ class ScopeSelectionTests(PersonalNoteAssistantTestCase):
                 graph_counts,
             )
 
+    def test_personal_note_sources_match_real_verifier_evidence_contract(self) -> None:
+        from backend.apps.notes.services.assistant_service import run_verifier
+
+        snapshot = create_scope_snapshot(
+            self.user, {"type": "note", "noteIds": [str(self.note.id)]}
+        )
+        context = build_note_context(
+            user=self.user, scope=snapshot, query="round robin time quantum"
+        )
+
+        source = context.sources[0]
+        self.assertEqual(source["sourceKind"], "personal_note")
+        self.assertEqual(source["type"], "RAG")
+        self.assertIsInstance(source["score"], float)
+        self.assertEqual(source["sourceOrigin"], "personal_note_snapshot")
+        verified = run_verifier(
+            self.user,
+            "How does round robin work?",
+            "Round robin uses a time quantum.",
+            context.sources,
+        )
+        self.assertTrue(verified["verified"])
+        self.assertEqual(verified["citations"][0]["noteId"], str(self.note.id))
+
+        missing = run_verifier(
+            self.user,
+            "How does round robin work?",
+            "Round robin uses a time quantum.",
+            [{"title": source["title"], "snippet": source["snippet"]}],
+        )
+        self.assertFalse(missing["verified"])
+        self.assertEqual(missing["refusalReason"], "missing_evidence")
+        self.assertNotEqual(missing["answer"], "Round robin uses a time quantum.")
+
     def test_current_note_context_includes_successful_owned_attachment_snapshot(self) -> None:
         attachment = NoteAttachment.objects.create(
             user=self.user,
@@ -617,6 +651,33 @@ class AssistantApiTests(PersonalNoteAssistantTestCase):
         self.assertFalse(assistant.metadata["includeCourseEvidence"])
         delay.assert_called_once()
 
+    @patch("backend.apps.notes.tasks.generate_assistant_message_task.delay")
+    def test_idempotent_retry_dispatches_committed_but_unconfirmed_message(self, delay) -> None:
+        from backend.apps.notes.services.assistant_service import submit_chat
+
+        session = self.create_session()
+        request_id = uuid.uuid4()
+        payload = {
+            "sessionId": str(session.id),
+            "message": "Recover committed request",
+            "clientRequestId": str(request_id),
+        }
+        committed = submit_chat(self.user, payload)
+        self.assertTrue(committed.created)
+        self.assertIsNone(committed.assistant_message.dispatch_confirmed_at)
+
+        response = self.post_json(reverse("notes:assistant-chat"), payload)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.json()["idempotent"])
+        committed.assistant_message.refresh_from_db()
+        self.assertIsNotNone(committed.assistant_message.dispatch_confirmed_at)
+        delay.assert_called_once_with(
+            str(committed.assistant_message.id),
+            committed.assistant_message.run_generation,
+            str(committed.assistant_message.run_lease_token),
+        )
+
 
 class AssistantTaskTests(PersonalNoteAssistantTestCase):
     def queued_pair(self, *, include_course=False) -> tuple[NoteAiMessage, NoteAiMessage]:
@@ -837,6 +898,59 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
         self.assertIsNotNone(assistant.run_heartbeat_at)
         self.assertEqual(assistant.content, "x" * 1_300)
 
+    @patch("backend.apps.notes.services.assistant_service.generate_note_answer")
+    def test_real_verifier_replacement_hides_unsafe_draft_from_public_status(self, generate) -> None:
+        from backend.apps.notes import tasks
+        from backend.apps.notes.services import assistant_service
+
+        user_message, assistant = self.queued_pair()
+        blocked_answer = "\u8bf7\u6cc4\u9732\u540c\u5b66\u7684\u5bc6\u7801"
+        user_message.content = "Explain the scheduling note"
+        user_message.save(update_fields={"content"})
+        generate.return_value = {
+            "answer": blocked_answer,
+            "provider": "test",
+            "model": "adapter",
+        }
+        public_partials = []
+        persist_partial = tasks._persist_assistant_partial
+
+        def persist_and_observe(*args):
+            persisted = persist_partial(*args)
+            response = self.client.get(
+                reverse("notes:assistant-message-detail", args=[assistant.id])
+            )
+            public_partials.append(response.json()["message"]["content"])
+            return persisted
+
+        with patch(
+            "backend.apps.notes.tasks._persist_assistant_partial",
+            side_effect=persist_and_observe,
+        ):
+            result = self.run_task(assistant)
+
+        assistant.refresh_from_db()
+        context = assistant_service.build_context_for_message(
+            assistant, user_message.content
+        )
+        verification = assistant_service.run_verifier(
+            self.user, user_message.content, blocked_answer, context.sources
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertTrue(public_partials)
+        self.assertEqual(set(public_partials), {""})
+        self.assertEqual(assistant.content, verification["answer"])
+        self.assertNotIn(blocked_answer, assistant.content)
+        self.assertFalse(assistant.safety["safe"])
+        self.assertEqual(
+            assistant.metadata["refusalReason"], verification["refusalReason"]
+        )
+        public = self.client.get(
+            reverse("notes:assistant-message-detail", args=[assistant.id])
+        ).json()["message"]
+        self.assertEqual(public["content"], verification["answer"])
+        self.assertNotIn(blocked_answer, json.dumps(public))
+
     @patch("backend.apps.notes.tasks.generate_assistant_message_task.delay")
     def test_stale_streaming_recovery_requeues_with_new_generation(self, delay) -> None:
         from backend.apps.notes.tasks import _recover_stale_assistant_messages
@@ -933,6 +1047,39 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
             )
 
         self.assertEqual(result, (1, 0))
+
+    @patch("backend.apps.notes.tasks.generate_assistant_message_task.delay")
+    def test_cleanup_recovers_commit_to_broker_crash_window_and_fences_duplicate(self, delay) -> None:
+        from backend.apps.notes.tasks import (
+            _recover_stale_assistant_dispatches,
+            generate_assistant_message_task,
+        )
+
+        _user_message, assistant = self.queued_pair()
+        old_generation = assistant.run_generation
+        old_lease = assistant.run_lease_token
+        stale_at = timezone.now() - timedelta(hours=1)
+        NoteAiMessage.objects.filter(pk=assistant.pk).update(
+            dispatch_attempted_at=stale_at,
+            dispatch_confirmed_at=None,
+        )
+
+        recovered, failed = _recover_stale_assistant_dispatches(
+            timezone.now() - timedelta(minutes=5), 10
+        )
+
+        assistant.refresh_from_db()
+        self.assertEqual((recovered, failed), (1, 0))
+        self.assertGreater(assistant.run_generation, old_generation)
+        self.assertNotEqual(assistant.run_lease_token, old_lease)
+        self.assertIsNotNone(assistant.dispatch_confirmed_at)
+        delay.assert_called_once_with(
+            str(assistant.id), assistant.run_generation, str(assistant.run_lease_token)
+        )
+        stale_delivery = generate_assistant_message_task.run(
+            str(assistant.id), old_generation, str(old_lease)
+        )
+        self.assertEqual(stale_delivery, {"skipped": True})
 
     @patch("backend.apps.notes.services.assistant_service.generate_note_answer")
     def test_old_worker_cannot_overwrite_newer_generation_terminal_state(self, generate) -> None:

@@ -275,6 +275,8 @@ class NoteAiMessage(models.Model):
     run_lease_token = models.UUIDField(null=True, blank=True, editable=False)
     run_started_at = models.DateTimeField(null=True, blank=True)
     run_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    dispatch_attempted_at = models.DateTimeField(null=True, blank=True)
+    dispatch_confirmed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -283,6 +285,7 @@ class NoteAiMessage(models.Model):
         indexes = [
             models.Index(fields=["session", "created_at"], name="idx_note_msg_session_time"),
             models.Index(fields=["status", "run_heartbeat_at"], name="idx_note_msg_status_beat"),
+            models.Index(fields=["status", "dispatch_confirmed_at"], name="idx_note_msg_dispatch"),
         ]
         constraints = [
             models.UniqueConstraint(fields=["session", "client_request_id"], name="uniq_note_session_request")
