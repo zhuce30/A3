@@ -4,6 +4,7 @@ import {
   ClipboardCheck,
   Database,
   LineChart,
+  NotebookPen,
   PlayCircle,
   ShieldCheck,
   Users,
@@ -57,6 +58,12 @@ export const a3NavItems: A3NavItem[] = [
     ],
   },
   {
+    href: '/a3/notes',
+    label: '个人笔记',
+    icon: NotebookPen,
+    roles: ['student'],
+  },
+  {
     href: '/a3/knowledge-base',
     label: '知识库',
     icon: Database,
@@ -78,6 +85,10 @@ export const a3NavItems: A3NavItem[] = [
     ],
   },
 ];
+
+export function a3GetNavItemsForRole(role: 'student' | 'teacher' | 'admin' | null | undefined) {
+  return a3NavItems.filter((item) => !item.roles || Boolean(role && item.roles.includes(role)));
+}
 
 const secondaryNavOwners: Array<{ prefix: string; owner: string }> = [
   { prefix: '/a3/dashboard', owner: '/a3/today' },

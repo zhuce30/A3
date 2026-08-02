@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import React, { act } from 'react';
+import NotesPage from '@/app/a3/notes/page';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EditorView } from 'prosemirror-view';
@@ -10,6 +11,7 @@ import { NoteEditor } from '@/components/a3/notes/note-editor';
 import { NoteAttachments } from '@/components/a3/notes/note-attachments';
 import { NoteConflictDialog } from '@/components/a3/notes/note-conflict-dialog';
 import { NoteHistoryDialog } from '@/components/a3/notes/note-history-dialog';
+import { NotesWorkspace } from '@/components/a3/notes/notes-workspace';
 import {
   createAttachmentReference,
   noteEditorSchema,
@@ -57,6 +59,19 @@ const note = (id = 'note-1', version = 3): NoteDetail => ({
   createdAt: now,
   updatedAt: now,
 });
+
+function workspaceClient(overrides: Partial<NotesClient> = {}) {
+  return {
+    listNotebooks: vi.fn().mockResolvedValue({ success: true, notebooks: [] }),
+    listTags: vi.fn().mockResolvedValue({ success: true, tags: [] }),
+    searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [] }),
+    createNote: vi.fn().mockResolvedValue({ success: true, note: note() }),
+    getNote: vi.fn().mockResolvedValue({ success: true, note: note() }),
+    restoreNote: vi.fn().mockResolvedValue({ success: true, note: note() }),
+    saveNote: vi.fn(),
+    ...overrides,
+  } as unknown as NotesClient;
+}
 
 function mount(element: React.ReactNode) {
   const container = document.createElement('div');
@@ -552,5 +567,115 @@ describe('note attachments', () => {
     await vi.waitFor(() => expect(container.querySelectorAll('[data-testid="note-attachment-row"]')).toHaveLength(2));
     expect(container.textContent).toContain('并发上传.txt');
     expect(container.textContent).toContain('并发链接');
+  });
+});
+
+describe('personal notes route and responsive workspace', () => {
+  const notebook = { id: 'book-1', name: '课程笔记', sortOrder: 0, isArchived: false, noteCount: 1, createdAt: now, updatedAt: now };
+  const tag = { id: 'tag-1', name: '期末复习', color: '#2563eb', createdAt: now, updatedAt: now };
+
+  afterEach(() => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    window.history.replaceState(null, '', '/');
+  });
+
+  it('assembles the top-level notes route and creates the first real note from the empty state', async () => {
+    expect(React.isValidElement(NotesPage())).toBe(true);
+    const client = workspaceClient();
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} />);
+
+    await vi.waitFor(() => expect(container.textContent).toContain('还没有笔记'));
+    clickByName('新建笔记');
+
+    await vi.waitFor(() => expect(client.createNote).toHaveBeenCalledWith({ title: '无标题笔记' }));
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="note-editor-canvas"]')).toBeTruthy());
+  });
+
+  it('uses editor-dominant desktop tracks and does not render a Phase 1 AI rail', async () => {
+    const client = workspaceClient({
+      searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [note()] }),
+    });
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} />);
+
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="notes-workspace"]')).toBeTruthy());
+    expect(container.querySelector('[data-testid="notes-workspace"]')?.className).toContain('md:grid-cols-[220px_minmax(560px,1fr)]');
+    expect(container.querySelector('[data-testid="notes-editor-pane"]')?.className).toContain('min-h-0');
+    expect(container.querySelector('[data-testid="notes-editor-pane"]')?.className).toContain('[&>section]:!min-h-0');
+    expect(container.querySelector('[data-testid="notes-ai-rail"]')).toBeNull();
+    expect(container.querySelector('[data-page-card]')).toBeNull();
+  });
+
+  it('sends notebook and tag filters through the typed search client', async () => {
+    const searchNotes = vi.fn().mockResolvedValue({ success: true, notes: [note()] });
+    const client = workspaceClient({
+      listNotebooks: vi.fn().mockResolvedValue({ success: true, notebooks: [notebook] }),
+      listTags: vi.fn().mockResolvedValue({ success: true, tags: [tag] }),
+      searchNotes,
+    });
+    mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} />);
+    await vi.waitFor(() => expect(document.body.textContent).toContain('课程笔记'));
+
+    clickByName('课程笔记');
+    await vi.waitFor(() => expect(searchNotes.mock.calls.some(([query]) => query.toString().includes('notebookId=book-1'))).toBe(true));
+    clickByName('期末复习');
+    await vi.waitFor(() => expect(searchNotes.mock.calls.some(([query]) => query.toString().includes('tag=tag-1'))).toBe(true));
+  });
+
+  it('loads the trash smart view and restores through the backend client', async () => {
+    const deleted = { ...note(), deletedAt: now };
+    const searchNotes = vi.fn(async (query: URLSearchParams) => ({
+      success: true as const,
+      notes: query.toString().includes('view=trash') ? [deleted] : [],
+    }));
+    const restoreNote = vi.fn().mockResolvedValue({ success: true, note: { ...deleted, deletedAt: null } });
+    mount(<NotesWorkspace client={workspaceClient({ searchNotes, restoreNote })} userId="student-1" autosave={autosaveStub()} />);
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain('还没有笔记'));
+    clickByName('回收站');
+    await vi.waitFor(() => expect(document.body.textContent).toContain(deleted.title));
+    clickByName('恢复笔记');
+    await vi.waitFor(() => expect(restoreNote).toHaveBeenCalledWith('note-1'));
+    await vi.waitFor(() => expect(document.body.textContent).toContain('回收站为空'));
+  });
+
+  it('renders one mobile view, updates browser history, and restores list focus on back', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    const client = workspaceClient({ searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [note()] }) });
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} />);
+
+    await vi.waitFor(() => expect(container.querySelector('[data-notes-mobile-view="list"]')).toBeTruthy());
+    await vi.waitFor(() => expect(container.querySelector(`button[aria-label="${note().title}"]`)).toBeTruthy());
+    expect(container.querySelector('[data-notes-mobile-view="editor"]')).toBeNull();
+    clickByName(note().title);
+    await vi.waitFor(() => expect(container.querySelector('[data-notes-mobile-view="editor"]')).toBeTruthy());
+    expect(window.location.search).toContain('note=note-1');
+    expect(container.querySelector('[data-notes-mobile-view="list"]')).toBeNull();
+
+    clickByName('返回笔记列表');
+    await vi.waitFor(() => expect(container.querySelector('[data-notes-mobile-view="list"]')).toBeTruthy());
+    await vi.waitFor(() => expect(window.location.search).toBe(''));
+    await vi.waitFor(() => expect(document.activeElement?.textContent).toContain(note().title));
+  });
+
+  it('returns a directly opened mobile note to the list without leaving a stale note query', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    window.history.replaceState(null, '', '/a3/notes?note=note-1');
+    const client = workspaceClient({ searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [note()] }) });
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} />);
+
+    await vi.waitFor(() => expect(container.querySelector('[data-notes-mobile-view="editor"]')).toBeTruthy());
+    clickByName('返回笔记列表');
+    await vi.waitFor(() => expect(container.querySelector('[data-notes-mobile-view="list"]')).toBeTruthy());
+    expect(window.location.search).toBe('');
+  });
+
+  it('offers the real IndexedDB draft after the workspace reloads a note', async () => {
+    const recoverable = { noteId: 'note-1', content: doc('离线草稿'), baseVersion: 2, clientMutationId: 'offline-1', updatedAt: now };
+    const draftStore = { getDraft: vi.fn().mockResolvedValue(recoverable) } as unknown as NotesDraftStore;
+    const client = workspaceClient({ searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [note()] }) });
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} draftStore={draftStore} />);
+
+    await vi.waitFor(() => expect(container.textContent).toContain('发现本地草稿'));
+    expect(draftStore.getDraft).toHaveBeenCalledWith('note-1');
   });
 });

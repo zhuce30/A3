@@ -14,7 +14,7 @@ import { A3TopActions } from '@/components/a3/layout/a3-top-actions';
 import { a3PostJson } from '@/lib/a3/api-client';
 import { useA3Locale } from '@/lib/a3/i18n';
 import { isA3PublicPath } from '@/lib/a3/auth-navigation';
-import { a3GetActiveNavHref, a3NavItems } from '@/lib/a3/navigation';
+import { a3GetActiveNavHref, a3GetNavItemsForRole, a3NavItems } from '@/lib/a3/navigation';
 import { cn } from '@/lib/utils';
 
 const A3_SIDEBAR_STORAGE_KEY = 'a3-sidebar-collapsed';
@@ -54,7 +54,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
   const focusedPageTitle = pathname === '/a3/coaching' ? messages.coachingTitle : messages.classroomTitle;
   const pageTitle = pathname === '/a3/report' ? messages.reportTitle : pathname === '/a3/help' ? messages.helpCenter : '';
   const compactHeader = pathname === '/a3/dashboard' || Boolean(pageTitle);
-  const visibleNavItems = a3NavItems.filter((item) => !item.roles || (user?.role && item.roles.includes(user.role)));
+  const visibleNavItems = a3GetNavItemsForRole(user?.role);
   const navLabels: Record<string, string> = {
     '/a3/dashboard': messages.navDashboard,
     '/a3/today': messages.navToday,
@@ -78,6 +78,7 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
     '/a3/favorites': messages.navFavorites,
     '/a3/notifications': messages.navNotifications,
     '/a3/teacher': messages.navTeacher,
+    '/a3/notes': '个人笔记',
     '/a3/knowledge-base': messages.navKnowledgeBase,
     '/a3/settings': messages.navSettings,
     '/a3/admin/overview': '系统管理',
@@ -366,7 +367,11 @@ export function A3Shell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className={cn('mx-auto max-w-[1720px] p-5 xl:p-6', focusedHeader && 'max-w-[1840px]')}>
+        <main className={cn(
+          'mx-auto max-w-[1720px] p-5 xl:p-6',
+          focusedHeader && 'max-w-[1840px]',
+          pathname === '/a3/notes' && 'h-[calc(100dvh-72px)] max-w-none overflow-hidden bg-background p-0 xl:p-0',
+        )}>
           {children}
         </main>
       </div>
