@@ -12,7 +12,10 @@ from django.db.models.signals import m2m_changed
 from django.dispatch import receiver
 from django.utils import timezone
 
-from backend.apps.notes.validators import validate_audit_metadata, validate_relative_path
+from backend.apps.notes.validators import validate_finite_number, validate_note_metadata, validate_relative_path
+
+
+MAX_MEMORY_SUPERSESSION_DEPTH = 64
 
 
 def normalize_tag_name(value: str) -> str:
@@ -105,7 +108,7 @@ class Note(ValidatedModel):
             raise ValidationError({"notebook": "Notebook must belong to the note owner."})
 
 
-class NoteRevision(models.Model):
+class NoteRevision(ValidatedModel):
     class Source(models.TextChoices):
         CHECKPOINT = "checkpoint", "Checkpoint"
         MANUAL = "manual", "Manual"
@@ -119,7 +122,7 @@ class NoteRevision(models.Model):
     title_snapshot = models.CharField(max_length=240, blank=True)
     content_json_snapshot = models.JSONField(default=dict, blank=True)
     content_text_snapshot = models.TextField(blank=True)
-    actor_metadata = models.JSONField(default=dict, blank=True)
+    actor_metadata = models.JSONField(default=dict, blank=True, validators=[validate_note_metadata])
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -185,6 +188,15 @@ class NoteAttachment(ValidatedModel):
         indexes = [
             models.Index(fields=["user", "note", "deleted_at"], name="idx_note_att_user_note"),
             models.Index(fields=["parse_status", "created_at"], name="idx_note_att_parse_time"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(kind="link", relative_path="") & ~models.Q(source_url="")
+                    | models.Q(kind__in=["file", "image"], source_url="") & ~models.Q(relative_path="")
+                ),
+                name="chk_note_att_kind_location",
+            )
         ]
 
     def clean(self) -> None:
@@ -353,8 +365,14 @@ class NoteMemory(ValidatedModel):
     memory_type = models.CharField(max_length=16, choices=MemoryType.choices)
     content = models.TextField()
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.CANDIDATE)
-    importance = models.FloatField(default=0.5, validators=[MinValueValidator(0), MaxValueValidator(5)])
-    confidence = models.FloatField(default=0.5, validators=[MinValueValidator(0), MaxValueValidator(1)])
+    importance = models.FloatField(
+        default=0.5,
+        validators=[validate_finite_number, MinValueValidator(0), MaxValueValidator(5)],
+    )
+    confidence = models.FloatField(
+        default=0.5,
+        validators=[validate_finite_number, MinValueValidator(0), MaxValueValidator(1)],
+    )
     source_session = models.ForeignKey(
         NoteAiSession,
         on_delete=models.SET_NULL,
@@ -400,6 +418,18 @@ class NoteMemory(ValidatedModel):
                 condition=models.Q(confidence__gte=0, confidence__lte=1),
                 name="chk_note_memory_confidence",
             ),
+            models.CheckConstraint(
+                condition=models.Q(valid_until__isnull=True) | models.Q(valid_until__gt=models.F("valid_from")),
+                name="chk_note_memory_validity",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(status="confirmed") | models.Q(confirmed_at__isnull=False),
+                name="chk_note_memory_confirmed",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(superseded_by__isnull=True) | ~models.Q(id=models.F("superseded_by")),
+                name="chk_note_memory_not_self",
+            ),
         ]
 
     def clean(self) -> None:
@@ -423,20 +453,22 @@ class NoteMemory(ValidatedModel):
                 errors["superseded_by"] = "A memory cannot supersede itself."
             elif self.user_id and self.superseded_by.user_id != self.user_id:
                 errors["superseded_by"] = "Superseding memory must belong to the same user."
-            elif self._supersession_chain_has_cycle():
-                errors["superseded_by"] = "Memory supersession cannot contain a cycle."
+            elif self._supersession_chain_is_invalid():
+                errors["superseded_by"] = "Memory supersession cannot contain a cycle or exceed 64 nodes."
         if errors:
             raise ValidationError(errors)
 
-    def _supersession_chain_has_cycle(self) -> bool:
+    def _supersession_chain_is_invalid(self) -> bool:
         current_id = self.superseded_by_id
         seen = {self.pk}
-        while current_id is not None:
+        for _ in range(MAX_MEMORY_SUPERSESSION_DEPTH):
+            if current_id is None:
+                return False
             if current_id in seen:
                 return True
             seen.add(current_id)
             current_id = type(self).objects.filter(pk=current_id).values_list("superseded_by_id", flat=True).first()
-        return False
+        return current_id is not None
 
     @property
     def is_usable(self) -> bool:
@@ -486,7 +518,7 @@ class NoteAuditEvent(ValidatedModel):
     action = models.CharField(max_length=64)
     object_type = models.CharField(max_length=64)
     object_id = models.UUIDField()
-    metadata = models.JSONField(default=dict, blank=True, validators=[validate_audit_metadata])
+    metadata = models.JSONField(default=dict, blank=True, validators=[validate_note_metadata])
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

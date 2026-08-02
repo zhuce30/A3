@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import timedelta
 import uuid
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.test import TestCase
 from django.utils import timezone
 
@@ -19,6 +20,7 @@ from backend.apps.notes.models import (
     NoteMemory,
     NoteMutation,
     Notebook,
+    NoteRevision,
     NoteTag,
     NoteWritebackPreview,
 )
@@ -271,6 +273,23 @@ class NoteMemoryModelTests(TestCase):
                     **values,
                 )
 
+    def test_memory_scores_reject_nan_and_infinity(self) -> None:
+        for field, value in (
+            ("importance", float("nan")),
+            ("importance", float("inf")),
+            ("importance", float("-inf")),
+            ("confidence", float("nan")),
+            ("confidence", float("inf")),
+            ("confidence", float("-inf")),
+        ):
+            with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
+                NoteMemory.objects.create(
+                    user=self.user,
+                    memory_type=NoteMemory.MemoryType.CORE,
+                    content="Non-finite score",
+                    **{field: value},
+                )
+
     def test_memory_score_database_constraints_reject_invalid_updates(self) -> None:
         memory = NoteMemory.objects.create(
             user=self.user,
@@ -291,6 +310,24 @@ class NoteMemoryModelTests(TestCase):
                 valid_from=now,
                 valid_until=now,
             )
+
+    def test_memory_database_constraints_enforce_validity_and_confirmation(self) -> None:
+        now = timezone.now()
+        memory = NoteMemory.objects.create(
+            user=self.user,
+            memory_type=NoteMemory.MemoryType.EPISODIC,
+            content="Database constraints",
+            valid_from=now,
+            valid_until=now + timedelta(days=1),
+        )
+        invalid_updates = (
+            {"valid_until": now - timedelta(seconds=1)},
+            {"status": NoteMemory.Status.CONFIRMED, "confirmed_at": None},
+            {"superseded_by": F("pk")},
+        )
+        for values in invalid_updates:
+            with self.subTest(values=values), self.assertRaises(IntegrityError), transaction.atomic():
+                NoteMemory.objects.filter(pk=memory.pk).update(**values)
 
     def test_confirmed_memory_requires_confirmation_timestamp(self) -> None:
         with self.assertRaises(ValidationError):
@@ -331,6 +368,18 @@ class NoteMemoryModelTests(TestCase):
 
         with self.assertRaises(ValidationError):
             third.save()
+
+    def test_memory_rejects_overlong_supersession_chain(self) -> None:
+        chain = [
+            NoteMemory.objects.create(user=self.user, memory_type="core", content=f"Chain {index}")
+            for index in range(66)
+        ]
+        for index in range(64):
+            NoteMemory.objects.filter(pk=chain[index].pk).update(superseded_by=chain[index + 1])
+        chain[65].superseded_by = chain[0]
+
+        with self.assertRaises(ValidationError):
+            chain[65].save()
 
 
 class PathAndKindValidationTests(TestCase):
@@ -384,6 +433,32 @@ class PathAndKindValidationTests(TestCase):
         )
         self.assertEqual(link.source_url, "https://example.com/reference")
 
+    def test_attachment_database_constraints_enforce_kind_location(self) -> None:
+        file_attachment = NoteAttachment.objects.create(
+            user=self.user,
+            note=self.note,
+            kind=NoteAttachment.Kind.FILE,
+            display_name="file.txt",
+            relative_path="notes/files/file.txt",
+        )
+        link_attachment = NoteAttachment.objects.create(
+            user=self.user,
+            note=self.note,
+            kind=NoteAttachment.Kind.LINK,
+            display_name="Reference",
+            source_url="https://example.com/reference",
+        )
+        invalid_updates = (
+            (file_attachment, {"source_url": "https://example.com/file"}),
+            (file_attachment, {"kind": NoteAttachment.Kind.LINK}),
+            (link_attachment, {"relative_path": "notes/links/reference"}),
+        )
+        for attachment, values in invalid_updates:
+            with self.subTest(attachment=attachment.pk, values=values), self.assertRaises(
+                IntegrityError
+            ), transaction.atomic():
+                NoteAttachment.objects.filter(pk=attachment.pk).update(**values)
+
     def test_export_job_validates_relative_paths(self) -> None:
         job = NoteExportJob.objects.create(
             user=self.user,
@@ -429,13 +504,68 @@ class AuditMetadataValidationTests(TestCase):
                 metadata={"reason": "x" * 20_000},
             )
 
+    def test_audit_event_rejects_unknown_and_non_scalar_metadata(self) -> None:
+        for metadata in ({"debug": "value"}, {"source": {"noteId": str(uuid.uuid4())}}):
+            with self.subTest(metadata=metadata), self.assertRaises(ValidationError):
+                NoteAuditEvent.objects.create(
+                    user=self.user,
+                    action="note.changed",
+                    object_type="note",
+                    object_id=uuid.uuid4(),
+                    metadata=metadata,
+                )
+
     def test_audit_event_accepts_minimal_metadata(self) -> None:
         event = NoteAuditEvent.objects.create(
             user=self.user,
             action="memory.confirmed",
             object_type="note_memory",
             object_id=uuid.uuid4(),
-            metadata={"from_status": "candidate", "to_status": "confirmed"},
+            metadata={
+                "actorId": str(self.user.pk),
+                "memoryId": str(uuid.uuid4()),
+                "previousStatus": "candidate",
+                "nextStatus": "confirmed",
+                "noteIds": [str(uuid.uuid4()), str(uuid.uuid4())],
+            },
         )
 
         self.assertIsNotNone(event.pk)
+
+
+class RevisionMetadataValidationTests(TestCase):
+    def setUp(self) -> None:
+        self.user = get_user_model().objects.create_user(phone="13800001401", password="test-password")
+        self.note = Note.objects.create(user=self.user, title="Revision metadata")
+
+    def test_revision_accepts_allowlisted_scalar_metadata(self) -> None:
+        revision = NoteRevision.objects.create(
+            note=self.note,
+            version=1,
+            source=NoteRevision.Source.MANUAL,
+            actor_metadata={
+                "actorId": str(self.user.pk),
+                "source": "manual",
+                "fromVersion": 0,
+                "toVersion": 1,
+                "traceId": "trace-1",
+            },
+        )
+
+        self.assertIsNotNone(revision.pk)
+
+    def test_revision_rejects_unknown_nested_and_sensitive_metadata(self) -> None:
+        invalid_metadata = (
+            {"content": "full note body"},
+            {"source": {"prompt": "hidden"}},
+            {"arbitrary": "value"},
+            {"noteIds": [[str(uuid.uuid4())]]},
+        )
+        for metadata in invalid_metadata:
+            with self.subTest(metadata=metadata), self.assertRaises(ValidationError):
+                NoteRevision.objects.create(
+                    note=self.note,
+                    version=1,
+                    source=NoteRevision.Source.MANUAL,
+                    actor_metadata=metadata,
+                )

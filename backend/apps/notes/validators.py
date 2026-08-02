@@ -1,28 +1,29 @@
 from __future__ import annotations
 
 import json
+import math
 import re
-import unicodedata
 
 from django.core.exceptions import ValidationError
 
 
 _DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:")
-_SENSITIVE_AUDIT_KEYS = {
-    "api_key",
-    "body",
-    "content",
-    "content_json",
-    "content_text",
-    "password",
-    "prompt",
-    "secret",
-    "signed_url",
-    "token",
+_ALLOWED_METADATA_SCALAR_KEYS = {
+    "actorId",
+    "fromVersion",
+    "memoryId",
+    "nextStatus",
+    "noteId",
+    "previewId",
+    "previousStatus",
+    "reasonCode",
+    "source",
+    "toVersion",
+    "traceId",
 }
-_MAX_AUDIT_METADATA_BYTES = 16 * 1024
-_MAX_AUDIT_METADATA_DEPTH = 8
-_MAX_AUDIT_METADATA_NODES = 1_000
+_ALLOWED_METADATA_ID_LIST_KEYS = {"memoryIds", "noteIds"}
+_MAX_METADATA_BYTES = 16 * 1024
+_MAX_METADATA_ID_LIST_ITEMS = 100
 
 
 def validate_relative_path(value: str) -> None:
@@ -35,30 +36,34 @@ def validate_relative_path(value: str) -> None:
         raise ValidationError("Path must not contain empty or traversal segments.")
 
 
-def validate_audit_metadata(value: object) -> None:
+def validate_finite_number(value: float) -> None:
+    if not math.isfinite(value):
+        raise ValidationError("Value must be a finite number.")
+
+
+def validate_note_metadata(value: object) -> None:
     try:
-        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        serialized = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         encoded = serialized.encode("utf-8")
     except (TypeError, ValueError, RecursionError) as exc:
-        raise ValidationError("Audit metadata must be valid JSON.") from exc
-    if len(encoded) > _MAX_AUDIT_METADATA_BYTES:
-        raise ValidationError("Audit metadata is too large.")
+        raise ValidationError("Note metadata must be valid JSON.") from exc
+    if len(encoded) > _MAX_METADATA_BYTES:
+        raise ValidationError("Note metadata is too large.")
 
-    node_count = 0
+    metadata = json.loads(serialized)
+    if not isinstance(metadata, dict):
+        raise ValidationError("Note metadata must be an object.")
+    unknown_keys = set(metadata) - _ALLOWED_METADATA_SCALAR_KEYS - _ALLOWED_METADATA_ID_LIST_KEYS
+    if unknown_keys:
+        raise ValidationError("Note metadata contains unsupported keys.")
 
-    def walk(item: object, depth: int) -> None:
-        nonlocal node_count
-        node_count += 1
-        if depth > _MAX_AUDIT_METADATA_DEPTH or node_count > _MAX_AUDIT_METADATA_NODES:
-            raise ValidationError("Audit metadata is too deeply nested or complex.")
-        if isinstance(item, dict):
-            for key, nested in item.items():
-                normalized_key = unicodedata.normalize("NFKC", str(key)).strip().casefold().replace("-", "_")
-                if normalized_key in _SENSITIVE_AUDIT_KEYS:
-                    raise ValidationError("Audit metadata contains a prohibited key.")
-                walk(nested, depth + 1)
-        elif isinstance(item, list):
-            for nested in item:
-                walk(nested, depth + 1)
-
-    walk(json.loads(serialized), 0)
+    scalar_types = (str, int, float, bool, type(None))
+    for key, item in metadata.items():
+        if key in _ALLOWED_METADATA_SCALAR_KEYS:
+            if not isinstance(item, scalar_types):
+                raise ValidationError("Note metadata scalar fields cannot contain nested values.")
+            continue
+        if not isinstance(item, list) or len(item) > _MAX_METADATA_ID_LIST_ITEMS:
+            raise ValidationError("Note metadata ID lists must be bounded arrays.")
+        if any(not isinstance(identifier, str) for identifier in item):
+            raise ValidationError("Note metadata ID lists may contain only string identifiers.")
