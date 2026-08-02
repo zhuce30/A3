@@ -11,13 +11,193 @@ from django.db import close_old_connections, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from backend.apps.notes.models import NoteAttachment, NoteExportJob
+from backend.apps.notes.models import NoteAiMessage, NoteAttachment, NoteExportJob
 
 
 PARSE_HARD_LIMIT = max(11, int(settings.A3_NOTES_PARSE_TIMEOUT_SECONDS))
 PARSE_SOFT_LIMIT = max(1, PARSE_HARD_LIMIT - 10)
 MAX_PARSE_ATTEMPTS = 3
 STALE_JOB_MINUTES = 30
+
+
+def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
+    if message.status != NoteAiMessage.Status.QUEUED:
+        return message
+    try:
+        generate_assistant_message_task.delay(str(message.id))
+        NoteAiMessage.objects.filter(
+            id=message.id, status=NoteAiMessage.Status.QUEUED
+        ).update(error_code="", error_message="")
+    except Exception:
+        NoteAiMessage.objects.filter(
+            id=message.id, status=NoteAiMessage.Status.QUEUED
+        ).update(
+            error_code="assistant_enqueue_failed",
+            error_message="AI 助手任务暂时无法提交，请重试",
+        )
+    message.refresh_from_db()
+    return message
+
+
+def _persist_assistant_failure(
+    message_id, code: str, error_message: str, *, trace_id: str = ""
+) -> bool:
+    message = NoteAiMessage.objects.filter(
+        id=message_id,
+        role=NoteAiMessage.Role.ASSISTANT,
+        status=NoteAiMessage.Status.STREAMING,
+    ).first()
+    if message is None:
+        return False
+    return bool(
+        NoteAiMessage.objects.filter(
+            id=message_id,
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.STREAMING,
+        ).update(
+            status=NoteAiMessage.Status.FAILED,
+            degraded=True,
+            verified=False,
+            error_code=code,
+            error_message=error_message,
+            metadata={**message.metadata, "traceId": trace_id or str(uuid.uuid4())},
+        )
+    )
+
+
+@shared_task(name="notes.generate_assistant_message", acks_late=True, reject_on_worker_lost=True)
+def generate_assistant_message_task(message_id: str) -> dict:
+    from backend.apps.notes.services import assistant_service
+
+    close_old_connections()
+    trace_id = ""
+    try:
+        claimed = NoteAiMessage.objects.filter(
+            id=message_id,
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.QUEUED,
+        ).update(
+            status=NoteAiMessage.Status.STREAMING,
+            content="",
+            error_code="",
+            error_message="",
+        )
+        if not claimed:
+            return {"skipped": True}
+        message = NoteAiMessage.objects.select_related("session", "session__user").get(id=message_id)
+        user_message_id = message.metadata.get("userMessageId")
+        user_message = NoteAiMessage.objects.filter(
+            id=user_message_id,
+            session=message.session,
+            role=NoteAiMessage.Role.USER,
+        ).first()
+        if user_message is None:
+            _persist_assistant_failure(
+                message.id, "assistant_user_message_missing", "用户消息不存在，无法生成回答"
+            )
+            return {"status": "failed", "messageId": str(message.id)}
+
+        trace_id = str(uuid.uuid4())
+        safety = assistant_service.run_safety(message.session.user, user_message.content)
+        if safety.get("safe") is not True:
+            updated = NoteAiMessage.objects.filter(
+                id=message.id, status=NoteAiMessage.Status.STREAMING
+            ).update(
+                status=NoteAiMessage.Status.SUCCEEDED,
+                content="这个请求涉及安全或权限风险，我不能按原请求处理。请改为不包含隐私、越权或危险行为的学习问题。",
+                safety=safety,
+                verified=False,
+                claims=[],
+                citations=[],
+                metadata={**message.metadata, "traceId": trace_id},
+            )
+            if not updated:
+                return {"skipped": True}
+            return {"status": "succeeded", "messageId": str(message.id), "refused": True}
+
+        context = assistant_service.build_context_for_message(message, user_message.content)
+        updated = NoteAiMessage.objects.filter(
+            id=message.id, status=NoteAiMessage.Status.STREAMING
+        ).update(
+            safety=safety,
+            citations=context.citations,
+            metadata={
+                **message.metadata,
+                "traceId": trace_id,
+                "contextCharacters": context.character_count,
+                "contextTokens": context.token_count,
+            },
+        )
+        if not updated:
+            return {"skipped": True}
+        generated = assistant_service.generate_note_answer(
+            user_message.content, context_text=context.text, sources=context.sources
+        )
+        answer = str(generated.get("answer") or "")[: assistant_service.MAX_ANSWER_CHARACTERS]
+        if not answer:
+            raise RuntimeError("empty assistant answer")
+        for end in range(assistant_service.PARTIAL_WRITE_CHARACTERS, len(answer), assistant_service.PARTIAL_WRITE_CHARACTERS):
+            updated = NoteAiMessage.objects.filter(
+                id=message.id, status=NoteAiMessage.Status.STREAMING
+            ).update(content=answer[:end])
+            if not updated:
+                return {"skipped": True}
+        updated = NoteAiMessage.objects.filter(
+            id=message.id, status=NoteAiMessage.Status.STREAMING
+        ).update(content=answer)
+        if not updated:
+            return {"skipped": True}
+
+        degraded = bool(generated.get("fallback"))
+        error_code = ""
+        error_message = ""
+        try:
+            verification = assistant_service.run_verifier(
+                message.session.user, user_message.content, answer, context.sources
+            )
+        except Exception:
+            verification = {"verified": False, "claims": []}
+            degraded = True
+            error_code = "assistant_verifier_degraded"
+            error_message = "回答已生成，但引用验证暂时不可用"
+        verified = bool(verification.get("verified")) and bool(context.citations)
+        claims = verification.get("claims") if isinstance(verification.get("claims"), list) else []
+        final_safety = verification.get("safety") if isinstance(verification.get("safety"), dict) else safety
+        updated = NoteAiMessage.objects.filter(
+            id=message.id, status=NoteAiMessage.Status.STREAMING
+        ).update(
+            status=NoteAiMessage.Status.SUCCEEDED,
+            content=answer,
+            citations=context.citations,
+            verified=verified,
+            claims=claims,
+            safety=final_safety,
+            degraded=degraded,
+            error_code=error_code,
+            error_message=error_message,
+            metadata={
+                **message.metadata,
+                "traceId": trace_id,
+                "provider": str(generated.get("provider") or ""),
+                "model": str(generated.get("model") or ""),
+                "contextCharacters": context.character_count,
+                "contextTokens": context.token_count,
+            },
+        )
+        return {
+            "status": "succeeded" if updated else "skipped",
+            "messageId": str(message.id),
+        }
+    except Exception:
+        _persist_assistant_failure(
+            message_id,
+            "assistant_generation_failed",
+            "AI 回答生成失败，请稍后重试",
+            trace_id=trace_id,
+        )
+        return {"status": "failed", "messageId": str(message_id)}
+    finally:
+        close_old_connections()
 
 
 def enqueue_attachment_parse(attachment: NoteAttachment) -> NoteAttachment:

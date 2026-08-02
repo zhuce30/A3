@@ -2,11 +2,23 @@ from __future__ import annotations
 
 from django.urls import path
 
-from backend.apps.notes import views_attachments, views_notes
+from backend.apps.notes import views_assistant, views_attachments, views_notes
 
 
 app_name = "notes"
 urlpatterns = [
+    path("assistant/sessions/", views_assistant.sessions, name="assistant-session-list"),
+    path(
+        "assistant/sessions/<uuid:session_id>/messages/",
+        views_assistant.session_messages,
+        name="assistant-session-messages",
+    ),
+    path("assistant/chat/", views_assistant.chat, name="assistant-chat"),
+    path(
+        "assistant/messages/<uuid:message_id>/",
+        views_assistant.message_detail,
+        name="assistant-message-detail",
+    ),
     path("exports/", views_notes.exports, name="export-list"),
     path("exports/<uuid:export_id>/download/", views_notes.export_download, name="export-download"),
     path("exports/<uuid:export_id>/", views_notes.export_detail, name="export-detail"),
