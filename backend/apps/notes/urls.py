@@ -7,6 +7,9 @@ from backend.apps.notes import views_attachments, views_notes
 
 app_name = "notes"
 urlpatterns = [
+    path("exports/", views_notes.exports, name="export-list"),
+    path("exports/<uuid:export_id>/download/", views_notes.export_download, name="export-download"),
+    path("exports/<uuid:export_id>/", views_notes.export_detail, name="export-detail"),
     path("notes/<uuid:note_id>/attachments/upload/", views_attachments.attachment_upload, name="attachment-upload"),
     path("notes/<uuid:note_id>/attachments/link/", views_attachments.attachment_link, name="attachment-link"),
     path("attachments/<uuid:attachment_id>/download/", views_attachments.attachment_download, name="attachment-download"),

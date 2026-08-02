@@ -176,6 +176,14 @@ A3_NOTES_ATTACHMENT_MAX_BYTES = int(os.getenv("A3_NOTES_ATTACHMENT_MAX_BYTES", s
 A3_NOTES_USER_QUOTA_BYTES = int(os.getenv("A3_NOTES_USER_QUOTA_BYTES", str(512 * 1024 * 1024)))
 A3_NOTES_PARSE_TIMEOUT_SECONDS = int(os.getenv("A3_NOTES_PARSE_TIMEOUT_SECONDS", "90"))
 A3_NOTES_EXTRACTED_TEXT_MAX_CHARS = int(os.getenv("A3_NOTES_EXTRACTED_TEXT_MAX_CHARS", "500000"))
+A3_NOTES_EXPORT_MAX_BYTES = int(os.getenv("A3_NOTES_EXPORT_MAX_BYTES", str(1024 * 1024 * 1024)))
+A3_NOTES_EXPORT_MAX_FILES = int(os.getenv("A3_NOTES_EXPORT_MAX_FILES", "500"))
+A3_NOTES_EXPORT_STALE_MINUTES = int(os.getenv("A3_NOTES_EXPORT_STALE_MINUTES", "60"))
+A3_NOTES_CLEANUP_BATCH_SIZE = int(os.getenv("A3_NOTES_CLEANUP_BATCH_SIZE", "100"))
+A3_NOTES_TRASH_RETENTION_DAYS = int(os.getenv("A3_NOTES_TRASH_RETENTION_DAYS", "30"))
+A3_NOTES_DELETED_ATTACHMENT_RETENTION_HOURS = int(
+    os.getenv("A3_NOTES_DELETED_ATTACHMENT_RETENTION_HOURS", "24")
+)
 A3_SOFFICE_PATH = os.getenv("A3_SOFFICE_PATH", "soffice")
 A3_DOCX_PREVIEW_TIMEOUT_SECONDS = int(os.getenv("A3_DOCX_PREVIEW_TIMEOUT_SECONDS", "60"))
 A3_VIDEO_STORAGE_ROOT = Path(
@@ -189,6 +197,8 @@ CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", os.getenv("REDIS_URL", "redis
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "cache+memory://")
 CELERY_TASK_IGNORE_RESULT = True
 CELERY_TASK_TRACK_STARTED = True
+CELERY_ENABLE_UTC = True
+CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "14400"))
 CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "13800"))
 RESOURCE_GENERATION_CELERY_STALE_MINUTES = int(os.getenv("RESOURCE_GENERATION_CELERY_STALE_MINUTES", "240"))
@@ -199,7 +209,19 @@ CELERY_BEAT_SCHEDULE = {
         "task": "learning.evaluate_optimization_policy_outcomes",
         "schedule": crontab(hour=CELERY_BEAT_POLICY_OUTCOME_HOUR, minute=CELERY_BEAT_POLICY_OUTCOME_MINUTE),
         "kwargs": {"days": 7},
-    }
+    },
+    "a3-notes-cleanup-expired-exports-daily": {
+        "task": "notes.cleanup_expired_exports",
+        "schedule": crontab(hour=2, minute=10),
+    },
+    "a3-notes-cleanup-trash-daily": {
+        "task": "notes.cleanup_trashed_notes",
+        "schedule": crontab(hour=2, minute=30),
+    },
+    "a3-notes-cleanup-stale-jobs-quarter-hour": {
+        "task": "notes.cleanup_stale_jobs",
+        "schedule": crontab(minute="*/15"),
+    },
 }
 
 A3_AGENT_CIRCUIT_RECENT_LIMIT = int(os.getenv("A3_AGENT_CIRCUIT_RECENT_LIMIT", "12"))

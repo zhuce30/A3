@@ -454,4 +454,7 @@ def purge_note(user, note_id) -> None:
         note = Note.objects.select_for_update().get(user=user, pk=note_id, deleted_at__isnull=False)
     except (Note.DoesNotExist, ValueError) as exc:
         raise NoteNotFound("回收站中没有该笔记") from exc
+    from backend.apps.notes.services.cleanup_service import register_attachment_cleanup
+
+    register_attachment_cleanup(list(note.attachments.all()))
     note.delete()

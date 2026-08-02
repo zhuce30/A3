@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import wraps
 
-from django.http import JsonResponse
+from django.http import FileResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from backend.apps.notes.serializers import (
@@ -14,7 +14,7 @@ from backend.apps.notes.serializers import (
     serialize_revision,
     serialize_tag,
 )
-from backend.apps.notes.services import note_service
+from backend.apps.notes.services import export_service, note_service
 
 
 def authenticated(view):
@@ -188,3 +188,55 @@ def search(request):
         return JsonResponse({"success": True, "notes": [serialize_note_summary(item) for item in items]})
     except note_service.NoteServiceError as exc:
         return _error_response(exc)
+
+
+def _export_error_response(exc: export_service.ExportServiceError) -> JsonResponse:
+    return JsonResponse(
+        {"success": False, "code": exc.code, "error": str(exc)}, status=exc.status
+    )
+
+
+@authenticated
+@require_http_methods(["POST"])
+def exports(request):
+    try:
+        data = parse_json_body(request)
+        job = export_service.create_export_job(
+            user=request.user, note_ids=data.get("noteIds"), format=data.get("format")
+        )
+        from backend.apps.notes.tasks import enqueue_export
+
+        job = enqueue_export(job)
+        return JsonResponse(
+            {"success": True, "export": export_service.serialize_export(job)}, status=202
+        )
+    except JsonBodyError as exc:
+        return _error_response(exc)
+    except export_service.ExportServiceError as exc:
+        return _export_error_response(exc)
+
+
+@authenticated
+@require_http_methods(["GET"])
+def export_detail(request, export_id):
+    try:
+        job = export_service.get_owned_export(request.user, export_id)
+        return JsonResponse({"success": True, "export": export_service.serialize_export(job)})
+    except export_service.ExportServiceError as exc:
+        return _export_error_response(exc)
+
+
+@authenticated
+@require_http_methods(["GET"])
+def export_download(request, export_id):
+    try:
+        job = export_service.get_owned_export(request.user, export_id)
+        path = export_service.resolve_export_download(job)
+        return FileResponse(
+            path.open("rb"),
+            as_attachment=True,
+            filename=f"personal-notes-{job.id}.zip",
+            content_type="application/zip",
+        )
+    except export_service.ExportServiceError as exc:
+        return _export_error_response(exc)

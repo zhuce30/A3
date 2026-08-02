@@ -504,6 +504,8 @@ class NoteExportJob(ValidatedModel):
     format = models.CharField(max_length=16, choices=Format.choices)
     selection_snapshot = models.JSONField(default=dict, blank=True)
     relative_path = models.CharField(max_length=500, blank=True, validators=[validate_relative_path])
+    output_size_bytes = models.PositiveBigIntegerField(default=0)
+    output_sha256 = models.CharField(max_length=64, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
     error_message = models.TextField(blank=True)

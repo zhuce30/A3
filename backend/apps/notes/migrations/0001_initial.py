@@ -178,6 +178,8 @@ class Migration(migrations.Migration):
                 ('format', models.CharField(choices=[('markdown_zip', 'Markdown ZIP'), ('json_zip', 'JSON ZIP')], max_length=16)),
                 ('selection_snapshot', models.JSONField(blank=True, default=dict)),
                 ('relative_path', models.CharField(blank=True, max_length=500, validators=[backend.apps.notes.validators.validate_relative_path])),
+                ('output_size_bytes', models.PositiveBigIntegerField(default=0)),
+                ('output_sha256', models.CharField(blank=True, max_length=64)),
                 ('expires_at', models.DateTimeField(blank=True, null=True)),
                 ('error_code', models.CharField(blank=True, max_length=64)),
                 ('error_message', models.TextField(blank=True)),
