@@ -92,6 +92,8 @@ class Migration(migrations.Migration):
                 ('sha256', models.CharField(blank=True, max_length=64)),
                 ('parse_status', models.CharField(choices=[('pending', 'Pending'), ('processing', 'Processing'), ('succeeded', 'Succeeded'), ('failed', 'Failed')], default='pending', max_length=16)),
                 ('parse_generation', models.PositiveIntegerField(default=1)),
+                ('parse_attempts', models.PositiveSmallIntegerField(default=0)),
+                ('parse_lease_token', models.UUIDField(blank=True, editable=False, null=True)),
                 ('parse_started_at', models.DateTimeField(blank=True, null=True)),
                 ('extracted_text', models.TextField(blank=True)),
                 ('preview_metadata', models.JSONField(blank=True, default=dict)),

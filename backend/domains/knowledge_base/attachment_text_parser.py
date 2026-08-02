@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -134,21 +135,19 @@ def _parse_pptx_text(path: Path, max_chars: int) -> AttachmentTextResult:
                 collector.truncated = True
                 break
             slides_read += 1
-            for shape in list(slide.shapes)[:MAX_SHAPES_PER_SLIDE]:
-                if collector.full:
-                    collector.truncated = True
+            shapes = iter(islice(slide.shapes, MAX_SHAPES_PER_SLIDE))
+            while not collector.full:
+                try:
+                    shape = next(shapes)
+                except StopIteration:
                     break
                 if getattr(shape, "has_text_frame", False):
                     collector.add(shape.text)
                 if getattr(shape, "has_table", False):
-                    for row_index, row in enumerate(shape.table.rows):
-                        if row_index >= MAX_XLSX_ROWS_PER_SHEET:
-                            collector.truncated = True
-                            break
+                    for row in islice(shape.table.rows, MAX_XLSX_ROWS_PER_SHEET):
                         collector.add(
                             " | ".join(
-                                cell.text for cell_index, cell in enumerate(row.cells)
-                                if cell_index < MAX_XLSX_CELLS_PER_ROW
+                                cell.text for cell in islice(row.cells, MAX_XLSX_CELLS_PER_ROW)
                             )
                         )
                         if collector.full:
@@ -176,7 +175,11 @@ def _parse_xlsx_text(path: Path, max_chars: int) -> AttachmentTextResult:
                     break
                 sheets_read += 1
                 collector.add(worksheet.title, separator="\n\n")
-                for row in worksheet.iter_rows(max_row=MAX_XLSX_ROWS_PER_SHEET, values_only=True):
+                for row in worksheet.iter_rows(
+                    max_row=MAX_XLSX_ROWS_PER_SHEET,
+                    max_col=MAX_XLSX_CELLS_PER_ROW,
+                    values_only=True,
+                ):
                     values: list[str] = []
                     for value in row[:MAX_XLSX_CELLS_PER_ROW]:
                         cells_read += 1

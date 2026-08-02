@@ -339,6 +339,8 @@ def reset_attachment_for_reparse(user, attachment_id) -> NoteAttachment:
     with transaction.atomic():
         attachment = get_owned_attachment(user, attachment_id, lock=True)
         attachment.parse_generation += 1
+        attachment.parse_attempts = 0
+        attachment.parse_lease_token = None
         attachment.parse_status = NoteAttachment.ParseStatus.PENDING
         attachment.parse_started_at = None
         attachment.extracted_text = ""
@@ -346,7 +348,7 @@ def reset_attachment_for_reparse(user, attachment_id) -> NoteAttachment:
         attachment.error_message = ""
         attachment.preview_metadata = {}
         attachment.save(update_fields={
-            "parse_generation", "parse_status", "parse_started_at", "extracted_text",
+            "parse_generation", "parse_attempts", "parse_lease_token", "parse_status", "parse_started_at", "extracted_text",
             "error_code", "error_message", "preview_metadata", "updated_at"
         })
         return attachment
@@ -405,12 +407,17 @@ def extract_attachment_text(attachment: NoteAttachment) -> tuple[str, dict[str, 
     return result.text, result.metadata
 
 
-def parse_and_persist_attachment(attachment: NoteAttachment, expected_generation: int) -> dict[str, Any]:
+def parse_and_persist_attachment(
+    attachment: NoteAttachment,
+    expected_generation: int,
+    expected_lease_token,
+) -> dict[str, Any]:
     text, metadata = extract_attachment_text(attachment)
     updated = NoteAttachment.objects.filter(
         pk=attachment.pk,
         deleted_at__isnull=True,
         parse_generation=expected_generation,
+        parse_lease_token=expected_lease_token,
         parse_status=NoteAttachment.ParseStatus.PROCESSING,
     ).update(
         parse_status=NoteAttachment.ParseStatus.SUCCEEDED,

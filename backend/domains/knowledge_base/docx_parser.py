@@ -38,6 +38,7 @@ def parse_docx_blocks(
     document = Document(str(path))
     blocks: list[DocxContentBlock] = []
     paragraph_buffer: list[tuple[int, str]] = []
+    paragraph_buffer_chars = 0
     section = path.stem
     heading_level = 0
     paragraph_index = 0
@@ -69,7 +70,7 @@ def parse_docx_blocks(
             exhausted = True
 
     def flush_paragraphs() -> None:
-        nonlocal paragraph_buffer
+        nonlocal paragraph_buffer, paragraph_buffer_chars
         for chunk in _chunk_paragraphs(paragraph_buffer):
             append_block(
                 DocxContentBlock(
@@ -85,6 +86,7 @@ def parse_docx_blocks(
             if exhausted:
                 break
         paragraph_buffer = []
+        paragraph_buffer_chars = 0
 
     for child in document.element.body.iterchildren():
         if exhausted:
@@ -103,7 +105,14 @@ def parse_docx_blocks(
                 section = text
                 heading_level = next_heading_level
                 continue
-            paragraph_buffer.append((paragraph_index, _paragraph_markdown(paragraph, text)))
+            markdown = _paragraph_markdown(paragraph, text)
+            paragraph_buffer_chars += len(markdown) + (2 if paragraph_buffer else 0)
+            paragraph_buffer.append((paragraph_index, markdown))
+            remaining_chars = None if max_chars is None else max_chars - emitted_chars
+            if paragraph_buffer_chars >= DOCX_TEXT_CHUNK_MAX_CHARS or (
+                remaining_chars is not None and paragraph_buffer_chars >= remaining_chars
+            ):
+                flush_paragraphs()
             continue
 
         if isinstance(child, CT_Tbl):

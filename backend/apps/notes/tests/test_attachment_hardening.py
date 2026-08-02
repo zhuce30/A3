@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,99 +25,62 @@ def dns_result(address: str = PUBLIC_IPV4):
     return [(family, socket.SOCK_STREAM, 6, "", (address, 443))]
 
 
-def http_response(
-    *,
-    peer: str | None = PUBLIC_IPV4,
-    status: int = 200,
-    headers: dict[str, str] | None = None,
-    chunks: list[bytes] | None = None,
-):
-    response = Mock(status_code=status, headers=headers or {"Content-Type": "text/html"})
-    response.iter_content.return_value = chunks if chunks is not None else [b"safe body"]
-    if peer is None:
-        response.raw = SimpleNamespace()
-    else:
-        sock = Mock()
-        sock.getpeername.return_value = (peer, 443)
-        response.raw = SimpleNamespace(_connection=SimpleNamespace(sock=sock))
-    return response
-
-
 class SsrfTransportHardeningTests(AttachmentTestCase):
-    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
-    @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo", return_value=dns_result())
-    def test_session_disables_environment_transport_state(self, _dns, session_factory) -> None:
-        from backend.apps.notes.services.link_fetcher import fetch_safe_link
+    def test_transport_connects_numeric_ip_and_keeps_original_host(self) -> None:
+        from backend.apps.notes.services.link_fetcher import _PinnedHTTPConnection, _ResolvedTarget
 
-        session = session_factory.return_value
-        session.get.return_value = http_response()
+        target = _ResolvedTarget(
+            url="http://example.test/reference",
+            scheme="http",
+            hostname="example.test",
+            port=80,
+            request_target="/reference",
+            approved_ips=(PUBLIC_IPV4,),
+        )
+        peer = Mock()
+        peer.getpeername.return_value = (PUBLIC_IPV4, 80)
+        with patch("backend.apps.notes.services.link_fetcher.socket.create_connection", return_value=peer) as connect:
+            connection = _PinnedHTTPConnection(target, PUBLIC_IPV4, time.monotonic() + 1)
+            connection.connect()
 
-        fetch_safe_link("https://example.test/reference")
+        connect.assert_called_once()
+        self.assertEqual(connect.call_args.args[0], (PUBLIC_IPV4, 80))
+        self.assertEqual(connection.host, "example.test")
 
-        self.assertFalse(session.trust_env)
-        self.assertIsNone(session.auth)
-        session.cookies.clear.assert_called()
-        session.proxies.clear.assert_called()
-        self.assertNotIn("auth", session.get.call_args.kwargs)
-        self.assertNotIn("cookies", session.get.call_args.kwargs)
-        self.assertIsInstance(session.get.call_args.kwargs["timeout"], tuple)
-        session.close.assert_called_once()
+    def test_missing_peer_fails_closed_and_closes_socket(self) -> None:
+        from backend.apps.notes.services.link_fetcher import SafeLinkError, _verify_connected_peer
 
-    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
-    @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo", return_value=dns_result())
-    def test_missing_peer_fails_closed_and_closes_response(self, _dns, session_factory) -> None:
-        from backend.apps.notes.services.link_fetcher import SafeLinkError, fetch_safe_link
-
-        response = http_response(peer=None)
-        session_factory.return_value.get.return_value = response
-
+        peer = Mock()
+        peer.getpeername.side_effect = OSError("missing")
         with self.assertRaises(SafeLinkError) as raised:
-            fetch_safe_link("https://example.test/reference")
-
-        self.assertEqual(raised.exception.code, "unsafe_note_link")
-        response.close.assert_called_once()
-
-    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
-    @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo", return_value=dns_result())
-    def test_peer_outside_approved_dns_set_is_rejected(self, _dns, session_factory) -> None:
-        from backend.apps.notes.services.link_fetcher import SafeLinkError, fetch_safe_link
-
-        session_factory.return_value.get.return_value = http_response(peer="93.184.216.35")
-
-        with self.assertRaises(SafeLinkError) as raised:
-            fetch_safe_link("https://example.test/reference")
-
+            _verify_connected_peer(peer, PUBLIC_IPV4)
         self.assertEqual(raised.exception.code, "unsafe_note_link")
 
-    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
-    @patch(
-        "backend.apps.notes.services.link_fetcher.socket.getaddrinfo",
-        return_value=dns_result("::ffff:93.184.216.34"),
-    )
-    def test_ipv4_mapped_ipv6_matches_ipv4_peer(self, _dns, session_factory) -> None:
-        from backend.apps.notes.services.link_fetcher import fetch_safe_link
+    def test_peer_outside_selected_ip_is_rejected(self) -> None:
+        from backend.apps.notes.services.link_fetcher import SafeLinkError, _verify_connected_peer
 
-        session_factory.return_value.get.return_value = http_response(peer=PUBLIC_IPV4)
-
-        result = fetch_safe_link("https://example.test/reference")
-
-        self.assertEqual(result.body, b"safe body")
-
-    @patch("backend.apps.notes.services.link_fetcher.time.monotonic")
-    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
-    @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo", return_value=dns_result())
-    def test_total_deadline_applies_during_streaming(self, _dns, session_factory, monotonic) -> None:
-        from backend.apps.notes.services.link_fetcher import SafeLinkError, fetch_safe_link
-
-        monotonic.side_effect = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 1.0, 1.1, 4.9, 5.1]
-        response = http_response(chunks=[b"one", b"two", b"three"])
-        session_factory.return_value.get.return_value = response
-
+        peer = Mock()
+        peer.getpeername.return_value = ("93.184.216.35", 443)
         with self.assertRaises(SafeLinkError) as raised:
-            fetch_safe_link("https://example.test/reference")
+            _verify_connected_peer(peer, PUBLIC_IPV4)
+        self.assertEqual(raised.exception.code, "unsafe_note_link")
 
+    def test_ipv4_mapped_ipv6_matches_ipv4_peer(self) -> None:
+        from backend.apps.notes.services.link_fetcher import _verify_connected_peer
+
+        peer = Mock()
+        peer.getpeername.return_value = (PUBLIC_IPV4, 443)
+        _verify_connected_peer(peer, f"::ffff:{PUBLIC_IPV4}")
+
+    def test_socket_read_timeout_returns_stable_timeout(self) -> None:
+        from backend.apps.notes.services.link_fetcher import SafeLinkError, _read_bounded_body
+
+        response = Mock()
+        response.read1.side_effect = socket.timeout("slow")
+        connection = SimpleNamespace(sock=Mock())
+        with self.assertRaises(SafeLinkError) as raised:
+            _read_bounded_body(response, connection, time.monotonic() + 1)
         self.assertEqual(raised.exception.code, "note_link_timeout")
-        response.close.assert_called_once()
 
 
 class LinkCreationHardeningTests(AttachmentTestCase):
@@ -206,7 +170,8 @@ class ParseGenerationHardeningTests(AttachmentTestCase):
     def test_old_generation_cannot_overwrite_reparse(self, extract) -> None:
         from backend.apps.notes.tasks import parse_attachment_task
 
-        attachment = self.create_attachment(parse_generation=1)
+        lease = uuid.uuid4()
+        attachment = self.create_attachment(parse_generation=1, parse_lease_token=lease)
 
         def finish_after_reparse(_attachment):
             NoteAttachment.objects.filter(pk=attachment.pk).update(
@@ -217,7 +182,7 @@ class ParseGenerationHardeningTests(AttachmentTestCase):
             return "old generation", {"parser": "test"}
 
         extract.side_effect = finish_after_reparse
-        result = parse_attachment_task(str(attachment.id), 1)
+        result = parse_attachment_task(str(attachment.id), 1, str(lease))
 
         attachment.refresh_from_db()
         self.assertTrue(result["skipped"])
@@ -228,7 +193,8 @@ class ParseGenerationHardeningTests(AttachmentTestCase):
     def test_old_generation_failure_is_reported_as_skipped(self, extract) -> None:
         from backend.apps.notes.tasks import parse_attachment_task
 
-        attachment = self.create_attachment(parse_generation=1)
+        lease = uuid.uuid4()
+        attachment = self.create_attachment(parse_generation=1, parse_lease_token=lease)
 
         def fail_after_reparse(_attachment):
             NoteAttachment.objects.filter(pk=attachment.pk).update(
@@ -240,23 +206,27 @@ class ParseGenerationHardeningTests(AttachmentTestCase):
 
         extract.side_effect = fail_after_reparse
 
-        result = parse_attachment_task(str(attachment.id), 1)
+        result = parse_attachment_task(str(attachment.id), 1, str(lease))
 
         attachment.refresh_from_db()
         self.assertTrue(result["skipped"])
         self.assertEqual(attachment.parse_generation, 2)
         self.assertEqual(attachment.error_code, "")
 
+    @patch("backend.apps.notes.tasks._task_was_redelivered", return_value=True)
     @patch("backend.apps.notes.services.attachment_service.extract_attachment_text", return_value=("recovered", {}))
-    def test_same_generation_redelivery_recovers_processing_state(self, _extract) -> None:
+    def test_same_generation_redelivery_recovers_processing_state(self, _extract, _redelivered) -> None:
         from backend.apps.notes.tasks import parse_attachment_task
 
+        lease = uuid.uuid4()
         attachment = self.create_attachment(
             parse_generation=4,
             parse_status=NoteAttachment.ParseStatus.PROCESSING,
+            parse_attempts=1,
+            parse_lease_token=lease,
         )
 
-        result = parse_attachment_task(str(attachment.id), 4)
+        result = parse_attachment_task(str(attachment.id), 4, str(lease))
 
         attachment.refresh_from_db()
         self.assertEqual(result["status"], "succeeded")
@@ -315,7 +285,9 @@ class BrokerFailureHardeningTests(AttachmentTestCase):
         self.assertEqual(retried.status_code, 202)
         self.assertEqual(attachment.parse_generation, 3)
         self.assertEqual(attachment.parse_status, NoteAttachment.ParseStatus.PENDING)
-        delay.assert_called_once_with(str(attachment.id), 3)
+        delay.assert_called_once()
+        self.assertEqual(delay.call_args.args[:2], (str(attachment.id), 3))
+        self.assertEqual(uuid.UUID(delay.call_args.args[2]), attachment.parse_lease_token)
 
 
 class AttachmentSafeParserTests(AttachmentTestCase):

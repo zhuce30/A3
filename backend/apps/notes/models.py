@@ -175,6 +175,8 @@ class NoteAttachment(ValidatedModel):
     sha256 = models.CharField(max_length=64, blank=True)
     parse_status = models.CharField(max_length=16, choices=ParseStatus.choices, default=ParseStatus.PENDING)
     parse_generation = models.PositiveIntegerField(default=1)
+    parse_attempts = models.PositiveSmallIntegerField(default=0)
+    parse_lease_token = models.UUIDField(null=True, blank=True, editable=False)
     parse_started_at = models.DateTimeField(null=True, blank=True)
     extracted_text = models.TextField(blank=True)
     preview_metadata = models.JSONField(default=dict, blank=True)

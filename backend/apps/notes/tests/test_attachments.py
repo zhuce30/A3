@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import requests
 from celery.exceptions import SoftTimeLimitExceeded
 from django.contrib.auth import get_user_model
 from django.conf import settings as django_settings
@@ -260,11 +259,14 @@ class ParserTaskTests(AttachmentTestCase):
         from backend.apps.knowledge_base.models import KnowledgeResource
         from backend.apps.notes.tasks import parse_attachment_task
 
-        attachment = self.create_attachment(display_name="notes.txt", mime_type="text/plain")
+        lease = uuid.uuid4()
+        attachment = self.create_attachment(
+            display_name="notes.txt", mime_type="text/plain", parse_lease_token=lease
+        )
         (Path(self.storage.name) / attachment.relative_path).write_text("abcdefghijk", encoding="utf-8")
         before = KnowledgeResource.objects.count()
         with override_settings(A3_NOTES_EXTRACTED_TEXT_MAX_CHARS=5):
-            result = parse_attachment_task(str(attachment.id), attachment.parse_generation)
+            result = parse_attachment_task(str(attachment.id), attachment.parse_generation, str(lease))
         attachment.refresh_from_db()
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(attachment.extracted_text, "abcde")
@@ -314,8 +316,9 @@ class ParserTaskTests(AttachmentTestCase):
     def test_parser_failure_is_readable_and_does_not_leak_paths(self, _extract) -> None:
         from backend.apps.notes.tasks import parse_attachment_task
 
-        attachment = self.create_attachment()
-        result = parse_attachment_task(str(attachment.id), attachment.parse_generation)
+        lease = uuid.uuid4()
+        attachment = self.create_attachment(parse_lease_token=lease)
+        result = parse_attachment_task(str(attachment.id), attachment.parse_generation, str(lease))
         attachment.refresh_from_db()
         self.assertEqual(result["status"], "failed")
         self.assertEqual(attachment.error_code, "attachment_parse_failed")
@@ -326,8 +329,9 @@ class ParserTaskTests(AttachmentTestCase):
     def test_parser_timeout_is_persisted(self, _extract) -> None:
         from backend.apps.notes.tasks import parse_attachment_task
 
-        attachment = self.create_attachment()
-        result = parse_attachment_task(str(attachment.id), attachment.parse_generation)
+        lease = uuid.uuid4()
+        attachment = self.create_attachment(parse_lease_token=lease)
+        result = parse_attachment_task(str(attachment.id), attachment.parse_generation, str(lease))
         attachment.refresh_from_db()
         self.assertEqual(result["status"], "failed")
         self.assertEqual(attachment.error_code, "attachment_parse_timeout")
@@ -336,22 +340,36 @@ class ParserTaskTests(AttachmentTestCase):
     def test_parser_is_idempotent_for_missing_deleted_and_succeeded(self) -> None:
         from backend.apps.notes.tasks import parse_attachment_task
 
-        succeeded = self.create_attachment(parse_status=NoteAttachment.ParseStatus.SUCCEEDED)
-        deleted = self.create_attachment(id=uuid.uuid4(), deleted_at="2026-08-02T00:00:00Z")
-        for attachment_id in (uuid.uuid4(), succeeded.id, deleted.id):
+        lease = uuid.uuid4()
+        succeeded = self.create_attachment(
+            parse_status=NoteAttachment.ParseStatus.SUCCEEDED, parse_lease_token=lease
+        )
+        deleted = self.create_attachment(
+            id=uuid.uuid4(), deleted_at="2026-08-02T00:00:00Z", parse_lease_token=lease
+        )
+        for attachment_id, token in (
+            (uuid.uuid4(), uuid.uuid4()),
+            (succeeded.id, lease),
+            (deleted.id, lease),
+        ):
             with self.subTest(attachment_id=attachment_id):
-                self.assertTrue(parse_attachment_task(str(attachment_id), 1)["skipped"])
+                self.assertTrue(parse_attachment_task(str(attachment_id), 1, str(token))["skipped"])
 
 
 class LinkSsrfTests(AttachmentTestCase):
     @staticmethod
-    def response(*, peer="93.184.216.34", status=200, headers=None, chunks=None):
-        response = Mock(status_code=status, headers=headers or {"Content-Type": "text/html"})
-        response.iter_content.return_value = chunks if chunks is not None else [b"safe body"]
-        sock = Mock()
-        sock.getpeername.return_value = (peer, 443)
-        response.raw = SimpleNamespace(_connection=SimpleNamespace(sock=sock))
+    def response(*, status=200, headers=None, chunks=None):
+        response = Mock(status=status)
+        values = headers or {"Content-Type": "text/html"}
+        response.getheader.side_effect = lambda name, default="": values.get(name, default)
+        response.read1.side_effect = list(chunks or [b"safe body", b""])
         return response
+
+    @staticmethod
+    def fetched(response):
+        connection = Mock()
+        timer = Mock()
+        return connection, response, Mock(), timer
 
     def post_link(self, url: str):
         return self.client.post(
@@ -376,61 +394,58 @@ class LinkSsrfTests(AttachmentTestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(response.json()["code"], "unsafe_note_link")
 
-    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
+    @patch("backend.apps.notes.services.link_fetcher._fetch_target")
     @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo")
-    def test_link_rejects_private_redirect_target(self, getaddrinfo, session_factory) -> None:
+    def test_link_rejects_private_redirect_target(self, getaddrinfo, fetch_target) -> None:
         getaddrinfo.side_effect = [
             [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
             [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))],
         ]
-        session = session_factory.return_value
-        session.get.return_value = self.response(
+        fetch_target.return_value = self.fetched(self.response(
             status=302,
             headers={"Location": "http://169.254.169.254/latest/meta-data"},
-        )
+        ))
         response = self.post_link("https://example.test/link")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["code"], "unsafe_note_link")
-        session.get.assert_called_once()
-        self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
+        fetch_target.assert_called_once()
 
-    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
+    @patch("backend.apps.notes.services.link_fetcher._fetch_target")
     @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo")
-    def test_link_revalidates_dns_each_redirect_and_limits_body(self, getaddrinfo, session_factory) -> None:
+    def test_link_revalidates_dns_each_redirect_and_limits_body(self, getaddrinfo, fetch_target) -> None:
         getaddrinfo.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
         first = self.response(status=302, headers={"Location": "/final"})
         second = self.response(status=200, headers={"Content-Length": str(2 * 1024 * 1024 + 1)})
-        session = session_factory.return_value
-        session.get.side_effect = [first, second]
+        fetch_target.side_effect = [self.fetched(first), self.fetched(second)]
         response = self.post_link("https://example.test/start")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["code"], "note_link_too_large")
         self.assertEqual(getaddrinfo.call_count, 2)
-        self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(fetch_target.call_count, 2)
 
-    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
+    @patch("backend.apps.notes.services.link_fetcher._fetch_target")
     @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo")
-    def test_link_stream_timeout_returns_stable_error(self, getaddrinfo, session_factory) -> None:
+    def test_link_stream_timeout_returns_stable_error(self, getaddrinfo, fetch_target) -> None:
         getaddrinfo.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
         response_mock = self.response()
-        response_mock.iter_content.side_effect = requests.Timeout("stream timeout")
-        session_factory.return_value.get.return_value = response_mock
+        response_mock.read1.side_effect = socket.timeout("stream timeout")
+        fetch_target.return_value = self.fetched(response_mock)
 
         response = self.post_link("https://example.test/reference")
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["code"], "note_link_unavailable")
+        self.assertEqual(response.json()["code"], "note_link_timeout")
 
     @patch("backend.apps.notes.views_attachments.enqueue_attachment_parse")
-    @patch("backend.apps.notes.services.link_fetcher.requests.Session")
-    @patch("backend.apps.notes.services.link_fetcher.socket.getaddrinfo")
-    def test_safe_link_is_created_without_duplicate_enqueue(self, getaddrinfo, session_factory, enqueue) -> None:
-        getaddrinfo.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
-        response_mock = self.response(
-            headers={"Content-Length": "19", "Content-Type": "text/html"},
-            chunks=[b"<p>hello world!</p>"],
+    @patch("backend.apps.notes.services.attachment_service.fetch_safe_link")
+    def test_safe_link_is_created_without_duplicate_enqueue(self, fetch, enqueue) -> None:
+        from backend.apps.notes.services.link_fetcher import SafeLinkResponse
+
+        fetch.return_value = SafeLinkResponse(
+            final_url="https://example.test/reference",
+            body=b"<p>hello world!</p>",
+            mime_type="text/html",
         )
-        session_factory.return_value.get.return_value = response_mock
         response = self.post_link("https://example.test/reference")
         self.assertEqual(response.status_code, 201)
         attachment = NoteAttachment.objects.get()
