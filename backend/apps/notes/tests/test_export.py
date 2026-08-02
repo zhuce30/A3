@@ -206,6 +206,64 @@ class ExportBuildTests(ExportTestCase):
         self.assertEqual(result["status"], NoteExportJob.Status.FAILED)
         self.assertEqual(list(outside.rglob("*.zip")), [])
 
+    def test_internal_target_attachment_symlinks_are_rejected_at_final_and_intermediate_components(self) -> None:
+        attachment = self.create_attachment()
+        original = Path(self.storage.name) / attachment.relative_path
+        internal_target = Path(self.storage.name) / "internal-attachment-target.txt"
+        original.replace(internal_target)
+        try:
+            os.symlink(internal_target, original)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        final_job = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
+
+        final_result = build_note_export(str(final_job.id))
+
+        self.assertEqual(final_result["status"], NoteExportJob.Status.FAILED)
+
+        original.unlink()
+        original.parent.rmdir()
+        internal_directory = Path(self.storage.name) / "internal-attachment-directory"
+        internal_directory.mkdir()
+        (internal_directory / original.name).write_bytes(b"attachment body")
+        os.symlink(internal_directory, original.parent, target_is_directory=True)
+        intermediate_job = create_export_job(
+            user=self.user, note_ids=[self.note.id], format="markdown_zip"
+        )
+
+        intermediate_result = build_note_export(str(intermediate_job.id))
+
+        self.assertEqual(intermediate_result["status"], NoteExportJob.Status.FAILED)
+
+    def test_internal_target_output_symlinks_are_rejected_at_intermediate_and_final_components(self) -> None:
+        internal_exports = Path(self.storage.name) / "internal-exports"
+        internal_exports.mkdir()
+        try:
+            os.symlink(internal_exports, Path(self.storage.name) / "exports", target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        intermediate_job = create_export_job(
+            user=self.user, note_ids=[self.note.id], format="markdown_zip"
+        )
+        self.assertEqual(
+            build_note_export(str(intermediate_job.id))["status"], NoteExportJob.Status.FAILED
+        )
+
+        (Path(self.storage.name) / "exports").unlink()
+        final_job = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
+        final_parent = (
+            Path(self.storage.name) / "exports" / str(self.user.id) / str(final_job.id)
+        )
+        final_parent.mkdir(parents=True)
+        internal_target = Path(self.storage.name) / "internal-output.zip"
+        internal_target.write_bytes(b"keep")
+        os.symlink(internal_target, final_parent / f"notes-{final_job.id}.zip")
+
+        final_result = build_note_export(str(final_job.id))
+
+        self.assertEqual(final_result["status"], NoteExportJob.Status.FAILED)
+        self.assertEqual(internal_target.read_bytes(), b"keep")
+
     def test_duplicate_unicode_names_are_normalized_and_deduped(self) -> None:
         second = Note.objects.create(
             user=self.user, title="Ａ", content_json=EMPTY_DOC, content_text="second"
@@ -301,8 +359,151 @@ class ExportApiTests(ExportTestCase):
         self.assertEqual(self.client.get(reverse("notes:export-detail", args=[foreign.id])).status_code, 404)
         self.assertEqual(self.client.get(reverse("notes:export-download", args=[uuid.uuid4()])).status_code, 404)
 
+    def test_download_rejects_internal_target_final_and_intermediate_symlinks(self) -> None:
+        final_job = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
+        build_note_export(str(final_job.id))
+        final_job.refresh_from_db()
+        final_path = Path(self.storage.name) / final_job.relative_path
+        internal_target = Path(self.storage.name) / "internal-download.zip"
+        final_path.replace(internal_target)
+        try:
+            os.symlink(internal_target, final_path)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        final_response = self.client.get(reverse("notes:export-download", args=[final_job.id]))
+        final_status = final_response.status_code
+        final_response.close()
+        self.assertEqual(final_status, 404)
+
+        final_path.unlink()
+        intermediate_job = create_export_job(
+            user=self.user, note_ids=[self.note.id], format="markdown_zip"
+        )
+        build_note_export(str(intermediate_job.id))
+        intermediate_job.refresh_from_db()
+        job_directory = (Path(self.storage.name) / intermediate_job.relative_path).parent
+        real_directory = Path(self.storage.name) / "internal-download-directory"
+        job_directory.replace(real_directory)
+        os.symlink(real_directory, job_directory, target_is_directory=True)
+        intermediate_response = self.client.get(
+            reverse("notes:export-download", args=[intermediate_job.id])
+        )
+        intermediate_status = intermediate_response.status_code
+        intermediate_response.close()
+        self.assertEqual(intermediate_status, 404)
+
 
 class ExportCleanupAndScheduleTests(ExportTestCase):
+    def test_completed_expired_rows_do_not_starve_newer_cleanup_batches(self) -> None:
+        from backend.apps.notes.services.cleanup_service import cleanup_expired_exports
+
+        old_time = timezone.now() - timedelta(days=2)
+        for _ in range(3):
+            NoteExportJob.objects.create(
+                user=self.user,
+                format="markdown_zip",
+                status=NoteExportJob.Status.EXPIRED,
+                selection_snapshot={"notes": []},
+                expires_at=old_time,
+                error_code="export_expired",
+            )
+        eligible: list[NoteExportJob] = []
+        for _ in range(2):
+            job = create_export_job(
+                user=self.user, note_ids=[self.note.id], format="markdown_zip"
+            )
+            build_note_export(str(job.id))
+            NoteExportJob.objects.filter(pk=job.pk).update(expires_at=timezone.now() - timedelta(hours=1))
+            eligible.append(job)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            first = cleanup_expired_exports(limit=2)
+        with self.captureOnCommitCallbacks(execute=True):
+            second = cleanup_expired_exports(limit=2)
+
+        self.assertEqual(first["exportsCleaned"], 2)
+        self.assertEqual(second["exportsCleaned"], 0)
+        for job in eligible:
+            job.refresh_from_db()
+            self.assertEqual(job.status, NoteExportJob.Status.EXPIRED)
+            self.assertEqual(job.relative_path, "")
+
+    def test_failed_export_unlink_keeps_state_and_retries_next_cleanup(self) -> None:
+        from backend.apps.notes.services.cleanup_service import cleanup_expired_exports
+
+        job = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
+        build_note_export(str(job.id))
+        job.refresh_from_db()
+        path = Path(self.storage.name) / job.relative_path
+        original_relative = job.relative_path
+        original_size = job.output_size_bytes
+        original_sha = job.output_sha256
+        NoteExportJob.objects.filter(pk=job.pk).update(
+            expires_at=timezone.now() - timedelta(seconds=1)
+        )
+
+        with patch.object(Path, "unlink", side_effect=OSError("locked")):
+            with self.captureOnCommitCallbacks(execute=True):
+                cleanup_expired_exports(limit=1)
+
+        job.refresh_from_db()
+        self.assertTrue(path.exists())
+        self.assertEqual(job.status, NoteExportJob.Status.SUCCEEDED)
+        self.assertEqual(job.relative_path, original_relative)
+        self.assertEqual(job.output_size_bytes, original_size)
+        self.assertEqual(job.output_sha256, original_sha)
+        self.assertEqual(
+            self.client.get(reverse("notes:export-download", args=[job.id])).status_code,
+            410,
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            cleanup_expired_exports(limit=1)
+
+        job.refresh_from_db()
+        self.assertFalse(path.exists())
+        self.assertEqual(job.status, NoteExportJob.Status.EXPIRED)
+        self.assertEqual(job.relative_path, "")
+        self.assertEqual(job.output_size_bytes, 0)
+        self.assertEqual(job.output_sha256, "")
+
+    def test_cleanup_rejects_internal_target_final_and_intermediate_symlinks(self) -> None:
+        from backend.apps.notes.services.cleanup_service import cleanup_expired_exports
+
+        job = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
+        build_note_export(str(job.id))
+        job.refresh_from_db()
+        path = Path(self.storage.name) / job.relative_path
+        internal_target = Path(self.storage.name) / "internal-cleanup.zip"
+        path.replace(internal_target)
+        try:
+            os.symlink(internal_target, path)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        NoteExportJob.objects.filter(pk=job.pk).update(
+            expires_at=timezone.now() - timedelta(seconds=1)
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            cleanup_expired_exports(limit=1)
+
+        job.refresh_from_db()
+        self.assertTrue(internal_target.exists())
+        self.assertEqual(job.status, NoteExportJob.Status.SUCCEEDED)
+        self.assertNotEqual(job.relative_path, "")
+
+        path.unlink()
+        real_directory = Path(self.storage.name) / "internal-cleanup-directory"
+        path.parent.replace(real_directory)
+        os.symlink(real_directory, path.parent, target_is_directory=True)
+        with self.captureOnCommitCallbacks(execute=True):
+            cleanup_expired_exports(limit=1)
+
+        job.refresh_from_db()
+        self.assertTrue(internal_target.exists())
+        self.assertEqual(job.status, NoteExportJob.Status.SUCCEEDED)
+        self.assertNotEqual(job.relative_path, "")
+
     def test_stale_queued_export_is_reenqueued_once_not_every_schedule_tick(self) -> None:
         from backend.apps.notes.tasks import cleanup_stale_jobs_task
 
@@ -394,7 +595,8 @@ class ExportCleanupAndScheduleTests(ExportTestCase):
         self.assertFalse(own_path.exists())
         self.assertTrue(other_path.exists())
         self.assertTrue(outside.exists())
-        self.assertEqual(malicious.relative_path, "")
+        self.assertEqual(malicious.status, NoteExportJob.Status.SUCCEEDED)
+        self.assertEqual(malicious.relative_path, "../" + outside.name)
 
     def test_trash_cleanup_purges_rows_and_physical_files_without_cross_user_deletion(self) -> None:
         from backend.apps.notes.tasks import cleanup_trashed_notes_task

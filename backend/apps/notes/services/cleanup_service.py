@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import timedelta
+from functools import partial
 from pathlib import Path, PurePosixPath
 
 from django.conf import settings
@@ -10,34 +11,31 @@ from django.db import transaction
 from django.utils import timezone
 
 from backend.apps.notes.models import Note, NoteAttachment, NoteExportJob
-from backend.apps.notes.services.attachment_service import storage_root
+from backend.apps.notes.services.attachment_service import (
+    AttachmentNotFound,
+    resolve_relative_path,
+    storage_root,
+)
+
+
+class UnsafeCleanupPath(OSError):
+    pass
 
 
 def _contained_path(relative_path: str) -> Path | None:
-    pure = PurePosixPath(str(relative_path))
-    if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
-        return None
-    root = storage_root()
-    lexical = root
-    for part in pure.parts:
-        lexical = lexical / part
-        if lexical.is_symlink() or bool(getattr(lexical, "is_junction", lambda: False)()):
-            return None
-    resolved = lexical.resolve()
     try:
-        resolved.relative_to(root)
-    except ValueError:
+        return resolve_relative_path(relative_path)
+    except AttachmentNotFound:
         return None
-    return resolved
 
 
 def _delete_export_file(relative_path: str, user_id, job_id) -> None:
     pure = PurePosixPath(str(relative_path))
     if pure.parts[:3] != ("exports", str(user_id), str(job_id)):
-        return
+        raise UnsafeCleanupPath("unexpected export path")
     path = _contained_path(relative_path)
     if path is None:
-        return
+        raise UnsafeCleanupPath("unsafe export path")
     path.unlink(missing_ok=True)
     parent = path.parent
     root = storage_root()
@@ -110,8 +108,9 @@ def cleanup_expired_exports(*, now=None, limit: int | None = None) -> dict[str, 
     limit = limit or int(settings.A3_NOTES_CLEANUP_BATCH_SIZE)
     ids = list(
         NoteExportJob.objects.filter(expires_at__lte=now)
+        .exclude(status=NoteExportJob.Status.EXPIRED)
         .exclude(status=NoteExportJob.Status.PROCESSING)
-        .order_by("expires_at")
+        .order_by("updated_at", "expires_at")
         .values_list("id", flat=True)[:limit]
     )
     cleaned = 0
@@ -123,22 +122,59 @@ def cleanup_expired_exports(*, now=None, limit: int | None = None) -> dict[str, 
             relative = job.relative_path
             if relative:
                 transaction.on_commit(
-                    lambda path=relative, user_id=job.user_id, identifier=job.id: _delete_export_file(
-                        path, user_id, identifier
-                    )
+                    partial(_delete_and_finalize_export, job.id, job.user_id, relative, now)
                 )
-            job.status = NoteExportJob.Status.EXPIRED
-            job.relative_path = ""
-            job.output_size_bytes = 0
-            job.output_sha256 = ""
-            job.error_code = "export_expired"
-            job.error_message = "导出文件已过期"
-            job.save(update_fields={
-                "status", "relative_path", "output_size_bytes", "output_sha256",
-                "error_code", "error_message", "updated_at",
-            })
+            else:
+                job.status = NoteExportJob.Status.EXPIRED
+                job.output_size_bytes = 0
+                job.output_sha256 = ""
+                job.error_code = "export_expired"
+                job.error_message = "导出文件已过期"
+                job.save(update_fields={
+                    "status", "output_size_bytes", "output_sha256",
+                    "error_code", "error_message", "updated_at",
+                })
             cleaned += 1
     return {"exportsCleaned": cleaned}
+
+
+def _delete_and_finalize_export(job_id, user_id, relative_path: str, cutoff) -> None:
+    with transaction.atomic():
+        job = (
+            NoteExportJob.objects.select_for_update()
+            .filter(
+                pk=job_id,
+                user_id=user_id,
+                relative_path=relative_path,
+                expires_at__lte=cutoff,
+            )
+            .exclude(status__in=[
+                NoteExportJob.Status.EXPIRED,
+                NoteExportJob.Status.PROCESSING,
+            ])
+            .first()
+        )
+        if job is None:
+            return
+        try:
+            _delete_export_file(relative_path, user_id, job_id)
+        except OSError:
+            NoteExportJob.objects.filter(pk=job.pk, relative_path=relative_path).update(
+                error_code="export_cleanup_failed",
+                error_message="导出文件清理失败，将自动重试",
+                updated_at=timezone.now(),
+            )
+            return
+        job.status = NoteExportJob.Status.EXPIRED
+        job.relative_path = ""
+        job.output_size_bytes = 0
+        job.output_sha256 = ""
+        job.error_code = "export_expired"
+        job.error_message = "导出文件已过期"
+        job.save(update_fields={
+            "status", "relative_path", "output_size_bytes", "output_sha256",
+            "error_code", "error_message", "updated_at",
+        })
 
 
 def cleanup_trashed_notes(*, now=None, limit: int | None = None) -> dict[str, int]:

@@ -226,7 +226,16 @@ def resolve_relative_path(relative_path: str, *, require_file: bool = False) -> 
     if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
         raise AttachmentNotFound()
     root = storage_root()
-    candidate = root.joinpath(*pure.parts).resolve()
+    unresolved = root
+    for part in pure.parts:
+        unresolved = unresolved / part
+        try:
+            mode = unresolved.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode) or bool(getattr(unresolved, "is_junction", lambda: False)()):
+            raise AttachmentNotFound()
+    candidate = unresolved.resolve()
     try:
         candidate.relative_to(root)
     except ValueError as exc:

@@ -176,6 +176,10 @@ def _json_bytes(payload: Any) -> bytes:
 
 def _safe_export_destination(relative: PurePosixPath) -> Path:
     root = storage_root()
+    try:
+        resolve_relative_path(relative.as_posix())
+    except AttachmentNotFound as exc:
+        raise ExportBuildError("export_unsafe_path", "导出目录不安全") from exc
     current = root
     for part in relative.parts[:-1]:
         current = current / part
@@ -189,7 +193,10 @@ def _safe_export_destination(relative: PurePosixPath) -> Path:
     final_path = current / relative.name
     if final_path.is_symlink() or bool(getattr(final_path, "is_junction", lambda: False)()):
         raise ExportBuildError("export_unsafe_path", "导出路径不安全")
-    return final_path
+    try:
+        return resolve_relative_path(relative.as_posix())
+    except AttachmentNotFound as exc:
+        raise ExportBuildError("export_unsafe_path", "导出路径不安全") from exc
 
 
 def _claim_job(job_id: str) -> NoteExportJob | None:
