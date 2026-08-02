@@ -18,19 +18,49 @@ PARSE_HARD_LIMIT = max(11, int(settings.A3_NOTES_PARSE_TIMEOUT_SECONDS))
 PARSE_SOFT_LIMIT = max(1, PARSE_HARD_LIMIT - 10)
 MAX_PARSE_ATTEMPTS = 3
 STALE_JOB_MINUTES = 30
+ASSISTANT_STALE_MINUTES = 10
 
 
 def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
-    if message.status != NoteAiMessage.Status.QUEUED:
-        return message
+    with transaction.atomic():
+        queued = NoteAiMessage.objects.select_for_update().filter(
+            id=message.id,
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.QUEUED,
+        ).first()
+        if queued is None:
+            message.refresh_from_db()
+            return message
+        queued.run_generation += 1
+        queued.run_lease_token = uuid.uuid4()
+        queued.run_started_at = None
+        queued.run_heartbeat_at = None
+        queued.save(
+            update_fields={
+                "run_generation",
+                "run_lease_token",
+                "run_started_at",
+                "run_heartbeat_at",
+            }
+        )
+        generation = queued.run_generation
+        lease_token = queued.run_lease_token
     try:
-        generate_assistant_message_task.delay(str(message.id))
+        generate_assistant_message_task.delay(
+            str(message.id), generation, str(lease_token)
+        )
         NoteAiMessage.objects.filter(
-            id=message.id, status=NoteAiMessage.Status.QUEUED
+            id=message.id,
+            status=NoteAiMessage.Status.QUEUED,
+            run_generation=generation,
+            run_lease_token=lease_token,
         ).update(error_code="", error_message="")
     except Exception:
         NoteAiMessage.objects.filter(
-            id=message.id, status=NoteAiMessage.Status.QUEUED
+            id=message.id,
+            status=NoteAiMessage.Status.QUEUED,
+            run_generation=generation,
+            run_lease_token=lease_token,
         ).update(
             error_code="assistant_enqueue_failed",
             error_message="AI 助手任务暂时无法提交，请重试",
@@ -39,52 +69,137 @@ def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
     return message
 
 
-def _persist_assistant_failure(
-    message_id, code: str, error_message: str, *, trace_id: str = ""
-) -> bool:
-    message = NoteAiMessage.objects.filter(
+def _assistant_lease_filter(message_id, generation: int, lease_token: uuid.UUID):
+    return NoteAiMessage.objects.filter(
         id=message_id,
         role=NoteAiMessage.Role.ASSISTANT,
         status=NoteAiMessage.Status.STREAMING,
-    ).first()
+        run_generation=generation,
+        run_lease_token=lease_token,
+    )
+
+
+def _persist_assistant_failure(
+    message_id,
+    generation: int,
+    lease_token: uuid.UUID,
+    code: str,
+    error_message: str,
+    *,
+    trace_id: str = "",
+) -> bool:
+    message = _assistant_lease_filter(message_id, generation, lease_token).first()
     if message is None:
         return False
     return bool(
-        NoteAiMessage.objects.filter(
-            id=message_id,
-            role=NoteAiMessage.Role.ASSISTANT,
-            status=NoteAiMessage.Status.STREAMING,
-        ).update(
+        _assistant_lease_filter(message_id, generation, lease_token).update(
             status=NoteAiMessage.Status.FAILED,
             degraded=True,
             verified=False,
             error_code=code,
             error_message=error_message,
             metadata={**message.metadata, "traceId": trace_id or str(uuid.uuid4())},
+            run_lease_token=None,
+            run_heartbeat_at=timezone.now(),
+        )
+    )
+
+
+def _claim_assistant_lease(
+    message_id: str,
+    generation: int,
+    lease_token: uuid.UUID,
+    *,
+    redelivered: bool,
+) -> tuple[NoteAiMessage | None, uuid.UUID]:
+    now = timezone.now()
+    claimed = NoteAiMessage.objects.filter(
+        id=message_id,
+        role=NoteAiMessage.Role.ASSISTANT,
+        status=NoteAiMessage.Status.QUEUED,
+        run_generation=generation,
+        run_lease_token=lease_token,
+    ).update(
+        status=NoteAiMessage.Status.STREAMING,
+        content="",
+        error_code="",
+        error_message="",
+        run_started_at=now,
+        run_heartbeat_at=now,
+    )
+    active_lease = lease_token
+    if not claimed and redelivered:
+        with transaction.atomic():
+            stale = NoteAiMessage.objects.select_for_update().filter(
+                id=message_id,
+                role=NoteAiMessage.Role.ASSISTANT,
+                status=NoteAiMessage.Status.STREAMING,
+                run_generation=generation,
+                run_lease_token=lease_token,
+                run_heartbeat_at__lt=now - timedelta(minutes=ASSISTANT_STALE_MINUTES),
+            ).first()
+            if stale is not None:
+                active_lease = uuid.uuid4()
+                stale.run_lease_token = active_lease
+                stale.run_started_at = now
+                stale.run_heartbeat_at = now
+                stale.save(
+                    update_fields={
+                        "run_lease_token",
+                        "run_started_at",
+                        "run_heartbeat_at",
+                    }
+                )
+                claimed = 1
+    if not claimed:
+        return None, active_lease
+    message = NoteAiMessage.objects.select_related("session", "session__user").filter(
+        id=message_id,
+        status=NoteAiMessage.Status.STREAMING,
+        run_generation=generation,
+        run_lease_token=active_lease,
+    ).first()
+    return message, active_lease
+
+
+def _persist_assistant_partial(
+    message_id: str,
+    generation: int,
+    lease_token: uuid.UUID,
+    content: str,
+) -> bool:
+    return bool(
+        _assistant_lease_filter(message_id, generation, lease_token).update(
+            content=content,
+            run_heartbeat_at=timezone.now(),
         )
     )
 
 
 @shared_task(name="notes.generate_assistant_message", acks_late=True, reject_on_worker_lost=True)
-def generate_assistant_message_task(message_id: str) -> dict:
+def generate_assistant_message_task(
+    message_id: str, expected_generation: int, expected_lease_token: str
+) -> dict:
     from backend.apps.notes.services import assistant_service
 
     close_old_connections()
     trace_id = ""
+    generation = 0
+    lease_token = uuid.uuid4()
     try:
-        claimed = NoteAiMessage.objects.filter(
-            id=message_id,
-            role=NoteAiMessage.Role.ASSISTANT,
-            status=NoteAiMessage.Status.QUEUED,
-        ).update(
-            status=NoteAiMessage.Status.STREAMING,
-            content="",
-            error_code="",
-            error_message="",
-        )
-        if not claimed:
+        try:
+            generation = int(expected_generation)
+            lease_token = uuid.UUID(str(expected_lease_token))
+        except (TypeError, ValueError, AttributeError):
             return {"skipped": True}
-        message = NoteAiMessage.objects.select_related("session", "session__user").get(id=message_id)
+        message, lease_token = _claim_assistant_lease(
+            message_id,
+            generation,
+            lease_token,
+            redelivered=_task_was_redelivered(generate_assistant_message_task),
+        )
+        if message is None:
+            return {"skipped": True}
         user_message_id = message.metadata.get("userMessageId")
         user_message = NoteAiMessage.objects.filter(
             id=user_message_id,
@@ -93,15 +208,19 @@ def generate_assistant_message_task(message_id: str) -> dict:
         ).first()
         if user_message is None:
             _persist_assistant_failure(
-                message.id, "assistant_user_message_missing", "用户消息不存在，无法生成回答"
+                message.id,
+                generation,
+                lease_token,
+                "assistant_user_message_missing",
+                "用户消息不存在，无法生成回答",
             )
             return {"status": "failed", "messageId": str(message.id)}
 
         trace_id = str(uuid.uuid4())
         safety = assistant_service.run_safety(message.session.user, user_message.content)
         if safety.get("safe") is not True:
-            updated = NoteAiMessage.objects.filter(
-                id=message.id, status=NoteAiMessage.Status.STREAMING
+            updated = _assistant_lease_filter(
+                message.id, generation, lease_token
             ).update(
                 status=NoteAiMessage.Status.SUCCEEDED,
                 content="这个请求涉及安全或权限风险，我不能按原请求处理。请改为不包含隐私、越权或危险行为的学习问题。",
@@ -110,17 +229,18 @@ def generate_assistant_message_task(message_id: str) -> dict:
                 claims=[],
                 citations=[],
                 metadata={**message.metadata, "traceId": trace_id},
+                run_lease_token=None,
+                run_heartbeat_at=timezone.now(),
             )
             if not updated:
                 return {"skipped": True}
             return {"status": "succeeded", "messageId": str(message.id), "refused": True}
 
         context = assistant_service.build_context_for_message(message, user_message.content)
-        updated = NoteAiMessage.objects.filter(
-            id=message.id, status=NoteAiMessage.Status.STREAMING
-        ).update(
+        updated = _assistant_lease_filter(message.id, generation, lease_token).update(
             safety=safety,
             citations=context.citations,
+            run_heartbeat_at=timezone.now(),
             metadata={
                 **message.metadata,
                 "traceId": trace_id,
@@ -137,14 +257,14 @@ def generate_assistant_message_task(message_id: str) -> dict:
         if not answer:
             raise RuntimeError("empty assistant answer")
         for end in range(assistant_service.PARTIAL_WRITE_CHARACTERS, len(answer), assistant_service.PARTIAL_WRITE_CHARACTERS):
-            updated = NoteAiMessage.objects.filter(
-                id=message.id, status=NoteAiMessage.Status.STREAMING
-            ).update(content=answer[:end])
+            updated = _persist_assistant_partial(
+                str(message.id), generation, lease_token, answer[:end]
+            )
             if not updated:
                 return {"skipped": True}
-        updated = NoteAiMessage.objects.filter(
-            id=message.id, status=NoteAiMessage.Status.STREAMING
-        ).update(content=answer)
+        updated = _persist_assistant_partial(
+            str(message.id), generation, lease_token, answer
+        )
         if not updated:
             return {"skipped": True}
 
@@ -163,9 +283,7 @@ def generate_assistant_message_task(message_id: str) -> dict:
         verified = bool(verification.get("verified")) and bool(context.citations)
         claims = verification.get("claims") if isinstance(verification.get("claims"), list) else []
         final_safety = verification.get("safety") if isinstance(verification.get("safety"), dict) else safety
-        updated = NoteAiMessage.objects.filter(
-            id=message.id, status=NoteAiMessage.Status.STREAMING
-        ).update(
+        updated = _assistant_lease_filter(message.id, generation, lease_token).update(
             status=NoteAiMessage.Status.SUCCEEDED,
             content=answer,
             citations=context.citations,
@@ -183,6 +301,8 @@ def generate_assistant_message_task(message_id: str) -> dict:
                 "contextCharacters": context.character_count,
                 "contextTokens": context.token_count,
             },
+            run_lease_token=None,
+            run_heartbeat_at=timezone.now(),
         )
         return {
             "status": "succeeded" if updated else "skipped",
@@ -191,6 +311,8 @@ def generate_assistant_message_task(message_id: str) -> dict:
     except Exception:
         _persist_assistant_failure(
             message_id,
+            generation,
+            lease_token,
             "assistant_generation_failed",
             "AI 回答生成失败，请稍后重试",
             trace_id=trace_id,
@@ -198,6 +320,57 @@ def generate_assistant_message_task(message_id: str) -> dict:
         return {"status": "failed", "messageId": str(message_id)}
     finally:
         close_old_connections()
+
+
+def _recover_stale_assistant_messages(cutoff, limit: int) -> tuple[int, int]:
+    stale_ids = list(
+        NoteAiMessage.objects.filter(
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.STREAMING,
+        )
+        .filter(
+            Q(run_heartbeat_at__lt=cutoff)
+            | Q(run_heartbeat_at__isnull=True, run_started_at__lt=cutoff)
+        )
+        .order_by("run_heartbeat_at", "run_started_at")
+        .values_list("id", flat=True)[:limit]
+    )
+    recovered = 0
+    failed = 0
+    for message_id in stale_ids:
+        with transaction.atomic():
+            message = NoteAiMessage.objects.select_for_update().filter(
+                id=message_id,
+                role=NoteAiMessage.Role.ASSISTANT,
+                status=NoteAiMessage.Status.STREAMING,
+            ).filter(
+                Q(run_heartbeat_at__lt=cutoff)
+                | Q(run_heartbeat_at__isnull=True, run_started_at__lt=cutoff)
+            ).first()
+            if message is None:
+                continue
+            message.status = NoteAiMessage.Status.QUEUED
+            message.run_lease_token = None
+            message.run_started_at = None
+            message.run_heartbeat_at = None
+            message.error_code = "assistant_stale_requeued"
+            message.error_message = "AI 助手任务中断，已自动重新提交"
+            message.save(
+                update_fields={
+                    "status",
+                    "run_lease_token",
+                    "run_started_at",
+                    "run_heartbeat_at",
+                    "error_code",
+                    "error_message",
+                }
+            )
+        enqueue_assistant_message(message)
+        if message.error_code == "assistant_enqueue_failed":
+            failed += 1
+        else:
+            recovered += 1
+    return recovered, failed
 
 
 def enqueue_attachment_parse(attachment: NoteAttachment) -> NoteAttachment:
@@ -579,9 +752,14 @@ def cleanup_stale_jobs_task() -> dict:
         limit,
         enqueue_failure_cutoff=now - timedelta(minutes=15),
     )
+    assistant_recovered, assistant_failed = _recover_stale_assistant_messages(
+        now - timedelta(minutes=ASSISTANT_STALE_MINUTES), limit
+    )
     return {
         "parseRecovered": parse_recovered,
         "parseFailed": parse_failed,
         "exportRecovered": export_recovered,
         "exportFailed": export_failed,
+        "assistantRecovered": assistant_recovered,
+        "assistantFailed": assistant_failed,
     }

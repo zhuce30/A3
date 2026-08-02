@@ -34,12 +34,62 @@ class ChatSubmission:
     created: bool
 
 
+def _public_scope_snapshot(snapshot: Any) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    result: dict[str, Any] = {"type": str(snapshot.get("type") or "")}
+    if snapshot.get("notebookId"):
+        result["notebookId"] = str(snapshot["notebookId"])
+    notes = []
+    for item in snapshot.get("notes") if isinstance(snapshot.get("notes"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        note = {
+            "id": str(item.get("id") or ""),
+            "version": item.get("version"),
+        }
+        attachments = []
+        for attachment in item.get("attachments") if isinstance(item.get("attachments"), list) else []:
+            if not isinstance(attachment, dict):
+                continue
+            attachments.append(
+                {
+                    "id": str(attachment.get("id") or ""),
+                    "parseGeneration": attachment.get("parseGeneration"),
+                    "sha256": str(attachment.get("sha256") or ""),
+                    "displayName": str(attachment.get("displayName") or ""),
+                    "contentCharacters": attachment.get("contentCharacters"),
+                }
+            )
+        if attachments:
+            note["attachments"] = attachments
+        notes.append(note)
+    result["notes"] = notes
+    return result
+
+
+def _public_message_metadata(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    result: dict[str, Any] = {}
+    trace_id = metadata.get("traceId")
+    if isinstance(trace_id, str):
+        result["traceId"] = trace_id[:128]
+    for key in ("contextCharacters", "contextTokens"):
+        value = metadata.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            result[key] = value
+    if isinstance(metadata.get("includeCourseEvidence"), bool):
+        result["includeCourseEvidence"] = metadata["includeCourseEvidence"]
+    return result
+
+
 def serialize_session(session: NoteAiSession) -> dict[str, Any]:
     return {
         "id": str(session.id),
         "title": session.title,
         "scopeType": session.scope_type,
-        "scopeSnapshot": session.scope_snapshot,
+        "scopeSnapshot": _public_scope_snapshot(session.scope_snapshot),
         "status": session.status,
         "createdAt": session.created_at.isoformat(),
         "updatedAt": session.updated_at.isoformat(),
@@ -61,7 +111,7 @@ def serialize_message(message: NoteAiMessage) -> dict[str, Any]:
         "degraded": message.degraded,
         "errorCode": message.error_code,
         "errorMessage": message.error_message,
-        "metadata": message.metadata,
+        "metadata": _public_message_metadata(message.metadata),
         "createdAt": message.created_at.isoformat(),
     }
 

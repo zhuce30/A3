@@ -3,18 +3,21 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
-from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from backend.apps.compat.agent_kernel import AgentContext, RetrieverAgent
-from backend.apps.notes.models import Note, NoteRevision, Notebook
+from backend.apps.notes.models import Note, NoteAttachment, NoteRevision, Notebook
 
 
 DEFAULT_CONTEXT_CHARACTER_BUDGET = 8_000
 DEFAULT_CONTEXT_TOKEN_BUDGET = 2_000
 MAX_SCOPE_NOTES = 100
 MAX_COURSE_SOURCES = 5
+MAX_ATTACHMENT_SNAPSHOT_CHARACTERS = 25_000
+MAX_SCOPE_ATTACHMENT_SNAPSHOT_CHARACTERS = 100_000
 _TERM_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
 
 
@@ -35,11 +38,24 @@ class NoteContext:
 
 
 @dataclass(frozen=True)
+class _SnapshotAttachment:
+    id: uuid.UUID
+    parse_generation: int
+    sha256: str
+    display_name: str
+    text: str
+
+
+@dataclass(frozen=True)
 class _SnapshotNote:
     note: Note
     version: int
     title: str
     text: str
+    ranking_title: str
+    ranking_tags: tuple[str, ...]
+    ranking_last_edited_at: datetime
+    attachments: tuple[_SnapshotAttachment, ...]
 
 
 @dataclass(frozen=True)
@@ -50,6 +66,7 @@ class _Paragraph:
     end: int
     text: str
     score: float
+    attachment: _SnapshotAttachment | None = None
 
 
 def _parse_uuid(value: Any, field: str) -> uuid.UUID:
@@ -106,10 +123,55 @@ def create_scope_snapshot(user, scope: Any) -> dict[str, Any]:
         extra = {"notebookId": str(notebook.id)}
     else:
         raise ContextServiceError("不支持的作用范围", code="invalid_scope")
+    attachment_characters_remaining = (
+        MAX_SCOPE_ATTACHMENT_SNAPSHOT_CHARACTERS if scope_type == "note" else 0
+    )
+    note_snapshots = []
+    for note in notes:
+        attachments = []
+        if attachment_characters_remaining > 0:
+            queryset = NoteAttachment.objects.filter(
+                user=user,
+                note=note,
+                deleted_at__isnull=True,
+                parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+            ).exclude(extracted_text="")
+            for attachment in queryset.order_by("created_at"):
+                text = attachment.extracted_text[: min(
+                    MAX_ATTACHMENT_SNAPSHOT_CHARACTERS,
+                    attachment_characters_remaining,
+                )]
+                if not text:
+                    continue
+                attachments.append(
+                    {
+                        "id": str(attachment.id),
+                        "parseGeneration": int(attachment.parse_generation),
+                        "sha256": attachment.sha256,
+                        "displayName": attachment.display_name,
+                        "contentSnapshot": text,
+                        "contentCharacters": len(text),
+                    }
+                )
+                attachment_characters_remaining -= len(text)
+                if attachment_characters_remaining <= 0:
+                    break
+        note_snapshots.append(
+            {
+                "id": str(note.id),
+                "version": int(note.version),
+                "ranking": {
+                    "title": note.title,
+                    "tags": [tag.name for tag in note.tags.all()],
+                    "lastEditedAt": note.last_edited_at.isoformat(),
+                },
+                "attachments": attachments,
+            }
+        )
     return {
         "type": scope_type,
         **extra,
-        "notes": [{"id": str(note.id), "version": int(note.version)} for note in notes],
+        "notes": note_snapshots,
     }
 
 
@@ -145,7 +207,47 @@ def _validate_snapshot(user, scope: Any) -> tuple[str, list[_SnapshotNote]]:
                     status=409,
                 )
             title, text = revision.title_snapshot, revision.content_text_snapshot
-        snapshots.append(_SnapshotNote(note=note, version=version, title=title, text=text))
+        ranking = raw.get("ranking") if isinstance(raw.get("ranking"), dict) else {}
+        ranking_title = str(ranking.get("title") or title)
+        raw_tags = ranking.get("tags") if isinstance(ranking.get("tags"), list) else []
+        ranking_tags = tuple(str(item)[:64] for item in raw_tags if isinstance(item, str))
+        ranking_last_edited_at = parse_datetime(str(ranking.get("lastEditedAt") or ""))
+        if ranking_last_edited_at is None:
+            ranking_last_edited_at = note.last_edited_at
+        raw_attachments = raw.get("attachments") if isinstance(raw.get("attachments"), list) else []
+        attachments = []
+        for item in raw_attachments:
+            if not isinstance(item, dict):
+                continue
+            try:
+                attachment_id = _parse_uuid(item.get("id"), "scope.attachments.id")
+                parse_generation = int(item.get("parseGeneration"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            content_snapshot = str(item.get("contentSnapshot") or "")
+            if parse_generation < 1 or not content_snapshot:
+                continue
+            attachments.append(
+                _SnapshotAttachment(
+                    id=attachment_id,
+                    parse_generation=parse_generation,
+                    sha256=str(item.get("sha256") or "")[:64],
+                    display_name=str(item.get("displayName") or "附件")[:255],
+                    text=content_snapshot[:MAX_ATTACHMENT_SNAPSHOT_CHARACTERS],
+                )
+            )
+        snapshots.append(
+            _SnapshotNote(
+                note=note,
+                version=version,
+                title=title,
+                text=text,
+                ranking_title=ranking_title,
+                ranking_tags=ranking_tags,
+                ranking_last_edited_at=ranking_last_edited_at,
+                attachments=tuple(attachments),
+            )
+        )
     return str(scope["type"]), snapshots
 
 
@@ -183,7 +285,7 @@ def _paragraphs(snapshot: _SnapshotNote) -> list[tuple[int, int, int, str]]:
 
 
 def _citation(paragraph: _Paragraph, snippet: str) -> dict[str, Any]:
-    return {
+    citation = {
         "sourceKind": "personal_note",
         "noteId": str(paragraph.snapshot.note.id),
         "noteVersion": paragraph.snapshot.version,
@@ -194,6 +296,17 @@ def _citation(paragraph: _Paragraph, snippet: str) -> dict[str, Any]:
         "charEnd": min(paragraph.end, paragraph.start + len(snippet)),
         "snippet": snippet,
     }
+    if paragraph.attachment is not None:
+        citation.update(
+            {
+                "attachmentId": str(paragraph.attachment.id),
+                "attachmentParseGeneration": paragraph.attachment.parse_generation,
+                "attachmentSha256": paragraph.attachment.sha256,
+                "title": paragraph.attachment.display_name,
+                "location": f"附件第 {paragraph.index + 1} 段",
+            }
+        )
+    return citation
 
 
 def retrieve_course_evidence(user, query: str) -> list[dict[str, Any]]:
@@ -265,12 +378,10 @@ def build_note_context(
     scope_type, snapshots = _validate_snapshot(user, scope)
     query_terms = _terms(query)
     candidates: list[_Paragraph] = []
-    now = timezone.now()
     for snapshot in snapshots:
-        title_terms = _terms(snapshot.title)
-        tag_terms = _terms(" ".join(tag.name for tag in snapshot.note.tags.all()))
-        age_days = max(0.0, (now - snapshot.note.last_edited_at).total_seconds() / 86_400)
-        recency = 1.0 / (1.0 + age_days)
+        title_terms = _terms(snapshot.ranking_title)
+        tag_terms = _terms(" ".join(snapshot.ranking_tags))
+        recency = snapshot.ranking_last_edited_at.timestamp() / 1_000_000_000
         for index, start, end, paragraph_text in _paragraphs(snapshot):
             paragraph_terms = _terms(paragraph_text)
             score = (
@@ -282,30 +393,91 @@ def build_note_context(
             candidates.append(
                 _Paragraph(snapshot, index, start, end, paragraph_text, score)
             )
+        if scope_type == "note":
+            for attachment in snapshot.attachments:
+                attachment_snapshot = _SnapshotNote(
+                    note=snapshot.note,
+                    version=snapshot.version,
+                    title=snapshot.title,
+                    text=attachment.text,
+                    ranking_title=attachment.display_name,
+                    ranking_tags=snapshot.ranking_tags,
+                    ranking_last_edited_at=snapshot.ranking_last_edited_at,
+                    attachments=(),
+                )
+                attachment_title_terms = _terms(attachment.display_name)
+                for index, start, end, paragraph_text in _paragraphs(attachment_snapshot):
+                    paragraph_terms = _terms(paragraph_text)
+                    score = (
+                        8.0 * len(query_terms & attachment_title_terms)
+                        + 5.0 * len(query_terms & tag_terms)
+                        + 2.0 * len(query_terms & paragraph_terms)
+                        + recency
+                    )
+                    candidates.append(
+                        _Paragraph(
+                            attachment_snapshot,
+                            index,
+                            start,
+                            end,
+                            paragraph_text,
+                            score,
+                            attachment,
+                        )
+                    )
     if scope_type != "note":
         candidates.sort(
-            key=lambda item: (item.score, item.snapshot.note.last_edited_at, -item.index),
+            key=lambda item: (
+                item.score,
+                item.snapshot.ranking_last_edited_at,
+                -item.index,
+            ),
             reverse=True,
         )
+    elif any(item.attachment is not None for item in candidates):
+        note_candidates = [item for item in candidates if item.attachment is None]
+        attachment_candidates = [item for item in candidates if item.attachment is not None]
+        candidates = [*note_candidates, *attachment_candidates]
 
     parts: list[str] = []
     citations: list[dict[str, Any]] = []
     remaining = personal_budget
     remaining_tokens = personal_token_budget
-    for candidate in candidates:
-        separator_size = 2 if parts else 0
-        available = remaining - separator_size
-        if available <= 0 or remaining_tokens <= 0:
-            break
-        snippet, used_tokens = _truncate_to_budget(
-            candidate.text, available, remaining_tokens
+
+    def consume(selected: list[_Paragraph], character_cap: int, token_cap: int) -> None:
+        nonlocal remaining, remaining_tokens
+        local_characters = min(remaining, character_cap)
+        local_tokens = min(remaining_tokens, token_cap)
+        for candidate in selected:
+            separator_size = 2 if parts else 0
+            available = min(remaining, local_characters) - separator_size
+            available_tokens = min(remaining_tokens, local_tokens)
+            if available <= 0 or available_tokens <= 0:
+                break
+            snippet, used_tokens = _truncate_to_budget(
+                candidate.text, available, available_tokens
+            )
+            if not snippet:
+                continue
+            parts.append(snippet)
+            used_characters = len(snippet) + separator_size
+            remaining -= used_characters
+            remaining_tokens -= used_tokens
+            local_characters -= used_characters
+            local_tokens -= used_tokens
+            citations.append(_citation(candidate, snippet))
+
+    attachment_candidates = [item for item in candidates if item.attachment is not None]
+    if scope_type == "note" and attachment_candidates:
+        note_candidates = [item for item in candidates if item.attachment is None]
+        consume(
+            note_candidates,
+            max(1, personal_budget * 3 // 4),
+            max(1, personal_token_budget * 3 // 4),
         )
-        if not snippet:
-            continue
-        parts.append(snippet)
-        remaining -= len(snippet) + separator_size
-        remaining_tokens -= used_tokens
-        citations.append(_citation(candidate, snippet))
+        consume(attachment_candidates, remaining, remaining_tokens)
+    else:
+        consume(candidates, remaining, remaining_tokens)
 
     text = "\n\n".join(parts)
     if include_course_evidence:

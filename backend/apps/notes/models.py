@@ -271,12 +271,19 @@ class NoteAiMessage(models.Model):
     error_code = models.CharField(max_length=64, blank=True)
     error_message = models.TextField(blank=True)
     metadata = models.JSONField(default=dict, blank=True)
+    run_generation = models.PositiveIntegerField(default=0)
+    run_lease_token = models.UUIDField(null=True, blank=True, editable=False)
+    run_started_at = models.DateTimeField(null=True, blank=True)
+    run_heartbeat_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "a3_note_ai_messages"
         ordering = ["created_at"]
-        indexes = [models.Index(fields=["session", "created_at"], name="idx_note_msg_session_time")]
+        indexes = [
+            models.Index(fields=["session", "created_at"], name="idx_note_msg_session_time"),
+            models.Index(fields=["status", "run_heartbeat_at"], name="idx_note_msg_status_beat"),
+        ]
         constraints = [
             models.UniqueConstraint(fields=["session", "client_request_id"], name="uniq_note_session_request")
         ]

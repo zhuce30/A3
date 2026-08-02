@@ -4,8 +4,9 @@ import json
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections
@@ -13,7 +14,15 @@ from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from backend.apps.notes.models import Note, NoteAiMessage, NoteAiSession, NoteRevision, Notebook
+from backend.apps.notes.models import (
+    Note,
+    NoteAiMessage,
+    NoteAiSession,
+    NoteAttachment,
+    NoteRevision,
+    NoteTag,
+    Notebook,
+)
 from backend.apps.knowledge_base.models import (
     KnowledgeGraphClaim,
     KnowledgeGraphEntity,
@@ -104,9 +113,15 @@ class ScopeSelectionTests(PersonalNoteAssistantTestCase):
             self.user, {"type": "notebook", "notebookId": str(self.notebook.id)}
         )
 
-        self.assertEqual(note_scope["notes"], [{"id": str(self.note.id), "version": 3}])
         self.assertEqual(
-            selection_scope["notes"],
+            [{"id": item["id"], "version": item["version"]} for item in note_scope["notes"]],
+            [{"id": str(self.note.id), "version": 3}],
+        )
+        self.assertEqual(
+            [
+                {"id": item["id"], "version": item["version"]}
+                for item in selection_scope["notes"]
+            ],
             [{"id": str(second.id), "version": 7}, {"id": str(self.note.id), "version": 3}],
         )
         self.assertEqual({item["id"] for item in notebook_scope["notes"]}, {str(self.note.id), str(second.id)})
@@ -225,6 +240,145 @@ class ScopeSelectionTests(PersonalNoteAssistantTestCase):
                 graph_counts,
             )
 
+    def test_current_note_context_includes_successful_owned_attachment_snapshot(self) -> None:
+        attachment = NoteAttachment.objects.create(
+            user=self.user,
+            note=self.note,
+            kind=NoteAttachment.Kind.FILE,
+            display_name="scheduler.txt",
+            relative_path="attachments/scheduler.txt",
+            parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+            parse_generation=4,
+            sha256="a" * 64,
+            extracted_text="Attachment explains multilevel feedback queues.",
+        )
+        snapshot = create_scope_snapshot(
+            self.user, {"type": "note", "noteIds": [str(self.note.id)]}
+        )
+
+        context = build_note_context(user=self.user, scope=snapshot, query="feedback queues")
+
+        self.assertIn("multilevel feedback queues", context.text)
+        citation = next(item for item in context.citations if item.get("attachmentId"))
+        self.assertEqual(citation["sourceKind"], "personal_note")
+        self.assertEqual(citation["attachmentId"], str(attachment.id))
+        self.assertEqual(citation["attachmentParseGeneration"], 4)
+        self.assertEqual(citation["attachmentSha256"], "a" * 64)
+        self.assertIn("charStart", citation)
+        self.assertIn("charEnd", citation)
+
+    def test_attachment_snapshot_is_immutable_and_filters_unusable_attachments(self) -> None:
+        stable = NoteAttachment.objects.create(
+            user=self.user,
+            note=self.note,
+            kind=NoteAttachment.Kind.FILE,
+            display_name="stable.txt",
+            relative_path="attachments/stable.txt",
+            parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+            parse_generation=2,
+            sha256="b" * 64,
+            extracted_text="stable attachment evidence",
+        )
+        NoteAttachment.objects.create(
+            user=self.user,
+            note=self.note,
+            kind=NoteAttachment.Kind.FILE,
+            display_name="failed.txt",
+            relative_path="attachments/failed.txt",
+            parse_status=NoteAttachment.ParseStatus.FAILED,
+            extracted_text="failed attachment must not appear",
+        )
+        NoteAttachment.objects.create(
+            user=self.user,
+            note=self.note,
+            kind=NoteAttachment.Kind.FILE,
+            display_name="deleted.txt",
+            relative_path="attachments/deleted.txt",
+            parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+            extracted_text="deleted attachment must not appear",
+            deleted_at=timezone.now(),
+        )
+        snapshot = create_scope_snapshot(
+            self.user, {"type": "note", "noteIds": [str(self.note.id)]}
+        )
+        stable.extracted_text = "mutated attachment evidence"
+        stable.parse_generation = 3
+        stable.sha256 = "c" * 64
+        stable.save(update_fields={"extracted_text", "parse_generation", "sha256", "updated_at"})
+
+        context = build_note_context(user=self.user, scope=snapshot, query="attachment evidence")
+
+        self.assertIn("stable attachment evidence", context.text)
+        self.assertNotIn("mutated attachment evidence", context.text)
+        self.assertNotIn("failed attachment", context.text)
+        self.assertNotIn("deleted attachment", context.text)
+        citation = next(item for item in context.citations if item.get("attachmentId"))
+        self.assertEqual(citation["attachmentParseGeneration"], 2)
+        self.assertEqual(citation["attachmentSha256"], "b" * 64)
+
+    def test_large_current_note_reserves_bounded_attachment_context(self) -> None:
+        self.note.content_text = "note token " * 1_000
+        self.note.save(update_fields={"content_text", "updated_at"})
+        attachment = NoteAttachment.objects.create(
+            user=self.user,
+            note=self.note,
+            kind=NoteAttachment.Kind.FILE,
+            display_name="bounded.txt",
+            relative_path="attachments/bounded.txt",
+            parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+            extracted_text="attachment evidence remains visible",
+        )
+        snapshot = create_scope_snapshot(
+            self.user, {"type": "note", "noteIds": [str(self.note.id)]}
+        )
+
+        context = build_note_context(
+            user=self.user,
+            scope=snapshot,
+            query="evidence",
+            character_budget=120,
+            token_budget=30,
+        )
+
+        self.assertLessEqual(context.character_count, 120)
+        self.assertLessEqual(context.token_count, 30)
+        self.assertIn(
+            str(attachment.id),
+            {item.get("attachmentId") for item in context.citations},
+        )
+
+    def test_multi_note_ranking_uses_snapshot_tags_and_recency_only(self) -> None:
+        old_time = timezone.now() - timedelta(days=30)
+        first = self.create_note(title="First", text="first candidate paragraph")
+        second = self.create_note(title="Second", text="second candidate paragraph")
+        target_tag = NoteTag.objects.create(user=self.user, name="target")
+        first.tags.add(target_tag)
+        first.last_edited_at = timezone.now()
+        first.save(update_fields={"last_edited_at", "updated_at"})
+        second.last_edited_at = old_time
+        second.save(update_fields={"last_edited_at", "updated_at"})
+        snapshot = create_scope_snapshot(
+            self.user,
+            {"type": "selection", "noteIds": [str(first.id), str(second.id)]},
+        )
+        before = build_note_context(
+            user=self.user, scope=snapshot, query="target", character_budget=25
+        )
+
+        first.tags.clear()
+        second.tags.add(target_tag)
+        first.last_edited_at = old_time
+        second.last_edited_at = timezone.now()
+        first.save(update_fields={"last_edited_at", "updated_at"})
+        second.save(update_fields={"last_edited_at", "updated_at"})
+        after = build_note_context(
+            user=self.user, scope=snapshot, query="target", character_budget=25
+        )
+
+        self.assertEqual(before.text, after.text)
+        self.assertEqual(before.citations[0]["noteId"], str(first.id))
+        self.assertEqual(after.citations[0]["noteId"], str(first.id))
+
 
 class AssistantApiTests(PersonalNoteAssistantTestCase):
     def test_assistant_endpoints_require_authentication(self) -> None:
@@ -282,7 +436,11 @@ class AssistantApiTests(PersonalNoteAssistantTestCase):
 
         self.assertEqual(response.status_code, 201)
         session = NoteAiSession.objects.get(pk=response.json()["session"]["id"])
-        self.assertEqual(session.scope_snapshot["notes"], [{"id": str(self.note.id), "version": 3}])
+        note_snapshot = session.scope_snapshot["notes"][0]
+        self.assertEqual(note_snapshot["id"], str(self.note.id))
+        self.assertEqual(note_snapshot["version"], 3)
+        self.assertEqual(note_snapshot["ranking"]["title"], self.note.title)
+        self.assertIn("lastEditedAt", note_snapshot["ranking"])
 
     @patch("backend.apps.notes.tasks.generate_assistant_message_task.delay")
     def test_chat_is_idempotent_and_creates_exactly_one_message_pair(self, delay) -> None:
@@ -340,6 +498,125 @@ class AssistantApiTests(PersonalNoteAssistantTestCase):
         self.assertEqual(response.json()["code"], "invalid_session_id")
         self.assertTrue(response.json()["error"])
 
+    def test_message_metadata_uses_recursive_public_allowlist(self) -> None:
+        session = self.create_session()
+        message = NoteAiMessage.objects.create(
+            session=session,
+            role=NoteAiMessage.Role.ASSISTANT,
+            metadata={
+                "traceId": "trace-public",
+                "contextCharacters": 42,
+                "contextTokens": 9,
+                "includeCourseEvidence": True,
+                "provider": "internal-provider",
+                "apiKey": "secret-key",
+                "prompt": "secret prompt",
+                "systemInstruction": "secret instruction",
+                "nested": {
+                    "traceId": "nested-trace",
+                    "apiKey": "nested-secret",
+                    "prompt": ["deep-secret"],
+                },
+            },
+        )
+
+        response = self.client.get(
+            reverse("notes:assistant-message-detail", args=[message.id])
+        )
+
+        self.assertEqual(response.status_code, 200)
+        serialized = response.json()["message"]["metadata"]
+        self.assertEqual(
+            serialized,
+            {
+                "traceId": "trace-public",
+                "contextCharacters": 42,
+                "contextTokens": 9,
+                "includeCourseEvidence": True,
+            },
+        )
+        body = json.dumps(response.json())
+        self.assertNotIn("secret", body)
+        self.assertNotIn("internal-provider", body)
+
+    def test_public_session_scope_redacts_attachment_content_snapshot(self) -> None:
+        NoteAttachment.objects.create(
+            user=self.user,
+            note=self.note,
+            kind=NoteAttachment.Kind.FILE,
+            display_name="private.txt",
+            relative_path="attachments/private.txt",
+            parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+            extracted_text="private extracted snapshot text",
+        )
+
+        response = self.post_json(
+            reverse("notes:assistant-session-list"),
+            {"scope": {"type": "note", "noteIds": [str(self.note.id)]}},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        body = json.dumps(response.json())
+        self.assertNotIn("private extracted snapshot text", body)
+        self.assertNotIn("contentSnapshot", body)
+
+    def test_retry_after_broker_failure_reuses_pair_and_clears_error(self) -> None:
+        session = self.create_session()
+        request_id = uuid.uuid4()
+        payload = {
+            "sessionId": str(session.id),
+            "message": "Explain retry",
+            "clientRequestId": str(request_id),
+        }
+        with patch(
+            "backend.apps.notes.tasks.generate_assistant_message_task.delay",
+            side_effect=RuntimeError("broker down"),
+        ):
+            first = self.post_json(reverse("notes:assistant-chat"), payload)
+        with patch("backend.apps.notes.tasks.generate_assistant_message_task.delay") as delay:
+            second = self.post_json(reverse("notes:assistant-chat"), payload)
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(first.json()["message"]["id"], second.json()["message"]["id"])
+        self.assertTrue(second.json()["idempotent"])
+        assistant = session.messages.get(role=NoteAiMessage.Role.ASSISTANT)
+        self.assertEqual(assistant.error_code, "")
+        self.assertEqual(session.messages.count(), 2)
+        delay.assert_called_once_with(
+            str(assistant.id), assistant.run_generation, str(assistant.run_lease_token)
+        )
+
+    @patch("backend.apps.notes.tasks.generate_assistant_message_task.delay")
+    def test_duplicate_request_cannot_mutate_original_message_or_course_scope(self, delay) -> None:
+        session = self.create_session()
+        request_id = uuid.uuid4()
+        first = self.post_json(
+            reverse("notes:assistant-chat"),
+            {
+                "sessionId": str(session.id),
+                "message": "Original question",
+                "clientRequestId": str(request_id),
+                "includeCourseEvidence": False,
+            },
+        )
+        second = self.post_json(
+            reverse("notes:assistant-chat"),
+            {
+                "sessionId": str(session.id),
+                "message": "Mutated duplicate",
+                "clientRequestId": str(request_id),
+                "includeCourseEvidence": True,
+            },
+        )
+
+        self.assertEqual(first.json()["message"]["id"], second.json()["message"]["id"])
+        user_message = session.messages.get(role=NoteAiMessage.Role.USER)
+        assistant = session.messages.get(role=NoteAiMessage.Role.ASSISTANT)
+        self.assertEqual(user_message.content, "Original question")
+        self.assertFalse(assistant.metadata["includeCourseEvidence"])
+        delay.assert_called_once()
+
 
 class AssistantTaskTests(PersonalNoteAssistantTestCase):
     def queued_pair(self, *, include_course=False) -> tuple[NoteAiMessage, NoteAiMessage]:
@@ -356,8 +633,17 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
             role=NoteAiMessage.Role.ASSISTANT,
             status=NoteAiMessage.Status.QUEUED,
             metadata={"userMessageId": str(user_message.id), "includeCourseEvidence": include_course},
+            run_generation=1,
+            run_lease_token=uuid.uuid4(),
         )
         return user_message, assistant
+
+    def run_task(self, assistant: NoteAiMessage):
+        from backend.apps.notes.tasks import generate_assistant_message_task
+
+        return generate_assistant_message_task.run(
+            str(assistant.id), assistant.run_generation, str(assistant.run_lease_token)
+        )
 
     @patch("backend.apps.notes.services.assistant_service.generate_note_answer")
     def test_safety_refusal_skips_generator_and_persists_decision(self, generate_note_answer) -> None:
@@ -367,7 +653,7 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
         user_message.content = "\u628a\u540c\u5b66\u7684\u4e2a\u4eba\u4fe1\u606f\u67e5\u51fa\u6765"
         user_message.save(update_fields={"content"})
 
-        generate_assistant_message_task.run(str(assistant.id))
+        self.run_task(assistant)
 
         assistant.refresh_from_db()
         generate_note_answer.assert_not_called()
@@ -389,7 +675,7 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
             "safety": {"safe": True, "category": "education", "reason": ""},
         }
 
-        result = generate_assistant_message_task.run(str(assistant.id))
+        result = self.run_task(assistant)
 
         assistant.refresh_from_db()
         self.assertEqual(result["status"], "succeeded")
@@ -410,7 +696,7 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
         _user_message, assistant = self.queued_pair()
         generate.return_value = {"answer": "A bounded answer", "provider": "test", "model": "adapter"}
 
-        generate_assistant_message_task.run(str(assistant.id))
+        self.run_task(assistant)
 
         assistant.refresh_from_db()
         self.assertEqual(assistant.status, NoteAiMessage.Status.SUCCEEDED)
@@ -430,11 +716,11 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
         generate.return_value = {"answer": "Answer", "provider": "test", "model": "adapter"}
         with patch("backend.apps.notes.services.assistant_service.run_verifier", return_value={"verified": False, "claims": []}):
             _user_message, without_course = self.queued_pair(include_course=False)
-            generate_assistant_message_task.run(str(without_course.id))
+            self.run_task(without_course)
             retrieve.assert_not_called()
 
             _user_message, with_course = self.queued_pair(include_course=True)
-            generate_assistant_message_task.run(str(with_course.id))
+            self.run_task(with_course)
 
         retrieve.assert_called_once()
         with_course.refresh_from_db()
@@ -475,7 +761,7 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
 
         _user_message, assistant = self.queued_pair()
 
-        generate_assistant_message_task.run(str(assistant.id))
+        self.run_task(assistant)
 
         assistant.refresh_from_db()
         self.assertEqual(assistant.status, NoteAiMessage.Status.FAILED)
@@ -494,7 +780,7 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
         assistant.content = "Already complete"
         assistant.save(update_fields={"status", "content"})
 
-        result = generate_assistant_message_task.run(str(assistant.id))
+        result = self.run_task(assistant)
 
         assistant.refresh_from_db()
         self.assertEqual(result, {"skipped": True})
@@ -521,13 +807,158 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
 
         build_context.side_effect = transition_to_failed
 
-        result = generate_assistant_message_task.run(str(assistant.id))
+        result = self.run_task(assistant)
 
         assistant.refresh_from_db()
         self.assertEqual(result, {"skipped": True})
         self.assertEqual(assistant.status, NoteAiMessage.Status.FAILED)
         self.assertEqual(assistant.content, "Stopped elsewhere")
         generate.assert_not_called()
+
+    @patch("backend.apps.notes.services.assistant_service.run_verifier")
+    @patch("backend.apps.notes.services.assistant_service.generate_note_answer")
+    def test_intermediate_partials_persist_with_heartbeat(self, generate, verifier) -> None:
+        from backend.apps.notes import tasks
+
+        _user_message, assistant = self.queued_pair()
+        generate.return_value = {"answer": "x" * 1_300, "provider": "test", "model": "adapter"}
+        verifier.return_value = {"verified": False, "claims": []}
+        with patch(
+            "backend.apps.notes.tasks._persist_assistant_partial",
+            wraps=tasks._persist_assistant_partial,
+        ) as persist_partial:
+            result = self.run_task(assistant)
+
+        assistant.refresh_from_db()
+        lengths = [len(item.args[3]) for item in persist_partial.call_args_list]
+        self.assertEqual(lengths, [512, 1_024, 1_300])
+        self.assertEqual(result["status"], "succeeded")
+        self.assertIsNotNone(assistant.run_started_at)
+        self.assertIsNotNone(assistant.run_heartbeat_at)
+        self.assertEqual(assistant.content, "x" * 1_300)
+
+    @patch("backend.apps.notes.tasks.generate_assistant_message_task.delay")
+    def test_stale_streaming_recovery_requeues_with_new_generation(self, delay) -> None:
+        from backend.apps.notes.tasks import _recover_stale_assistant_messages
+
+        _user_message, assistant = self.queued_pair()
+        old_generation = assistant.run_generation
+        old_lease = assistant.run_lease_token
+        stale_at = timezone.now() - timedelta(hours=1)
+        NoteAiMessage.objects.filter(pk=assistant.pk).update(
+            status=NoteAiMessage.Status.STREAMING,
+            content="partial before crash",
+            run_started_at=stale_at,
+            run_heartbeat_at=stale_at,
+        )
+
+        recovered, failed = _recover_stale_assistant_messages(
+            timezone.now() - timedelta(minutes=10), 10
+        )
+
+        assistant.refresh_from_db()
+        self.assertEqual((recovered, failed), (1, 0))
+        self.assertEqual(assistant.status, NoteAiMessage.Status.QUEUED)
+        self.assertGreater(assistant.run_generation, old_generation)
+        self.assertNotEqual(assistant.run_lease_token, old_lease)
+        self.assertIsNone(assistant.run_started_at)
+        self.assertIsNone(assistant.run_heartbeat_at)
+        self.assertEqual(assistant.content, "partial before crash")
+        delay.assert_called_once_with(
+            str(assistant.id), assistant.run_generation, str(assistant.run_lease_token)
+        )
+
+    def test_stale_redelivery_rotates_lease_and_fences_previous_worker(self) -> None:
+        from backend.apps.notes.tasks import (
+            _claim_assistant_lease,
+            _persist_assistant_partial,
+        )
+
+        _user_message, assistant = self.queued_pair()
+        old_lease = assistant.run_lease_token
+        stale_at = timezone.now() - timedelta(hours=1)
+        NoteAiMessage.objects.filter(pk=assistant.pk).update(
+            status=NoteAiMessage.Status.STREAMING,
+            run_started_at=stale_at,
+            run_heartbeat_at=stale_at,
+        )
+
+        claimed, active_lease = _claim_assistant_lease(
+            str(assistant.id),
+            assistant.run_generation,
+            old_lease,
+            redelivered=True,
+        )
+
+        self.assertIsNotNone(claimed)
+        self.assertNotEqual(active_lease, old_lease)
+        self.assertGreater(claimed.run_started_at, stale_at)
+        self.assertFalse(
+            _persist_assistant_partial(
+                str(assistant.id), assistant.run_generation, old_lease, "old worker"
+            )
+        )
+        self.assertTrue(
+            _persist_assistant_partial(
+                str(assistant.id), assistant.run_generation, active_lease, "redelivered worker"
+            )
+        )
+
+    def test_stale_recovery_counts_eager_terminal_handoff_as_recovered(self) -> None:
+        from backend.apps.notes.tasks import _recover_stale_assistant_messages
+
+        _user_message, assistant = self.queued_pair()
+        stale_at = timezone.now() - timedelta(hours=1)
+        NoteAiMessage.objects.filter(pk=assistant.pk).update(
+            status=NoteAiMessage.Status.STREAMING,
+            run_started_at=stale_at,
+            run_heartbeat_at=stale_at,
+        )
+
+        def complete_eagerly(message):
+            NoteAiMessage.objects.filter(pk=message.pk).update(
+                status=NoteAiMessage.Status.SUCCEEDED,
+                error_code="",
+                error_message="",
+            )
+            message.refresh_from_db()
+            return message
+
+        with patch(
+            "backend.apps.notes.tasks.enqueue_assistant_message",
+            side_effect=complete_eagerly,
+        ):
+            result = _recover_stale_assistant_messages(
+                timezone.now() - timedelta(minutes=10), 10
+            )
+
+        self.assertEqual(result, (1, 0))
+
+    @patch("backend.apps.notes.services.assistant_service.generate_note_answer")
+    def test_old_worker_cannot_overwrite_newer_generation_terminal_state(self, generate) -> None:
+        _user_message, assistant = self.queued_pair()
+        old_generation = assistant.run_generation
+        old_lease = assistant.run_lease_token
+
+        def complete_new_generation(*_args, **_kwargs):
+            NoteAiMessage.objects.filter(pk=assistant.pk).update(
+                status=NoteAiMessage.Status.SUCCEEDED,
+                content="new generation answer",
+                run_generation=old_generation + 1,
+                run_lease_token=None,
+            )
+            return {"answer": "old generation answer", "provider": "test", "model": "adapter"}
+
+        generate.side_effect = complete_new_generation
+
+        result = self.run_task(assistant)
+
+        assistant.refresh_from_db()
+        self.assertEqual(result, {"skipped": True})
+        self.assertEqual(assistant.status, NoteAiMessage.Status.SUCCEEDED)
+        self.assertEqual(assistant.content, "new generation answer")
+        self.assertEqual(assistant.run_generation, old_generation + 1)
+        self.assertNotEqual(assistant.run_lease_token, old_lease)
 
 
 class ConcurrentChatSubmissionTests(TransactionTestCase):

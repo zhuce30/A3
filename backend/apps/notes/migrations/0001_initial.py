@@ -71,6 +71,10 @@ class Migration(migrations.Migration):
                 ('error_code', models.CharField(blank=True, max_length=64)),
                 ('error_message', models.TextField(blank=True)),
                 ('metadata', models.JSONField(blank=True, default=dict)),
+                ('run_generation', models.PositiveIntegerField(default=0)),
+                ('run_lease_token', models.UUIDField(blank=True, editable=False, null=True)),
+                ('run_started_at', models.DateTimeField(blank=True, null=True)),
+                ('run_heartbeat_at', models.DateTimeField(blank=True, null=True)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('session', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='messages', to='notes.noteaisession')),
             ],
@@ -327,6 +331,10 @@ class Migration(migrations.Migration):
         migrations.AddIndex(
             model_name='noteaimessage',
             index=models.Index(fields=['session', 'created_at'], name='idx_note_msg_session_time'),
+        ),
+        migrations.AddIndex(
+            model_name='noteaimessage',
+            index=models.Index(fields=['status', 'run_heartbeat_at'], name='idx_note_msg_status_beat'),
         ),
         migrations.AddConstraint(
             model_name='noteaimessage',
