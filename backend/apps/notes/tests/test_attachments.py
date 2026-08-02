@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import io
 import json
 import socket
@@ -24,8 +25,11 @@ from backend.apps.notes.models import Note, NoteAttachment
 EMPTY_DOC = {"type": "doc", "content": []}
 
 
-class NotesStorageSettingsTests(SimpleTestCase):
-    def test_compose_persists_notes_for_backend_and_celery_only(self) -> None:
+class NoteStorageDeploymentTests(SimpleTestCase):
+    notes_mount = "a3-notes-data:/app/storage/a3-notes"
+
+    @staticmethod
+    def load_compose(filename: str) -> dict:
         class ComposeLoader(yaml.SafeLoader):
             pass
 
@@ -34,36 +38,85 @@ class NotesStorageSettingsTests(SimpleTestCase):
             lambda loader, node: loader.construct_sequence(node),
         )
         project_root = django_settings.BASE_DIR.parent
-        mount = "a3-notes-data:/app/storage/a3-notes"
+        return yaml.load(
+            (project_root / filename).read_text(encoding="utf-8"),
+            Loader=ComposeLoader,
+        )
 
+    @staticmethod
+    def volume_endpoints(volume: object) -> tuple[str, str]:
+        if isinstance(volume, dict):
+            return str(volume.get("source", "")), str(volume.get("target", ""))
+        parts = str(volume).split(":")
+        return parts[0], parts[1] if len(parts) > 1 else ""
+
+    def assert_notes_storage_isolated(self, compose: dict, filename: str) -> None:
+        services = compose["services"]
+
+        self.assertIn("a3-notes-data", compose["volumes"])
+        for service_name in ("backend", "celery"):
+            service = services[service_name]
+            self.assertIn(self.notes_mount, service.get("volumes", []))
+            self.assertEqual(
+                service.get("environment", {}).get("A3_NOTES_STORAGE_ROOT"),
+                "/app/storage/a3-notes",
+            )
+
+        for service_name, service in services.items():
+            if service_name in {"backend", "celery"}:
+                continue
+            for volume in service.get("volumes", []) or []:
+                source, target = self.volume_endpoints(volume)
+                self.assertNotEqual(
+                    source,
+                    "a3-notes-data",
+                    f"{filename}: {service_name} must not mount personal note storage",
+                )
+                self.assertNotEqual(
+                    target,
+                    "/app/storage/a3-notes",
+                    f"{filename}: {service_name} must not mount personal note storage",
+                )
+
+    def test_compose_persists_notes_for_backend_and_celery_only(self) -> None:
         for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
             with self.subTest(filename=filename):
-                compose = yaml.load(
-                    (project_root / filename).read_text(encoding="utf-8"),
-                    Loader=ComposeLoader,
-                )
-                services = compose["services"]
+                self.assert_notes_storage_isolated(self.load_compose(filename), filename)
 
-                self.assertIn("a3-notes-data", compose["volumes"])
-                for service_name in ("backend", "celery"):
-                    service = services[service_name]
-                    self.assertIn(mount, service.get("volumes", []))
-                    self.assertEqual(
-                        service.get("environment", {}).get("A3_NOTES_STORAGE_ROOT"),
-                        "/app/storage/a3-notes",
-                    )
+    def test_isolation_contract_rejects_mounts_on_every_non_owner_and_future_services(self) -> None:
+        forbidden_mounts = (
+            "a3-notes-data:/tmp/personal-notes",
+            {
+                "type": "volume",
+                "source": "other-data",
+                "target": "/app/storage/a3-notes",
+                "read_only": True,
+            },
+        )
 
-                for service_name in (
-                    "frontend",
-                    "caddy",
-                    "resource-worker",
-                    "video-worker",
-                ):
-                    service_volumes = services.get(service_name, {}).get("volumes", [])
-                    self.assertFalse(
-                        any(str(volume).startswith("a3-notes-data:") for volume in service_volumes),
-                        f"{filename}: {service_name} must not mount personal note storage",
-                    )
+        for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
+            compose = self.load_compose(filename)
+            non_owners = [
+                service_name
+                for service_name in compose["services"]
+                if service_name not in {"backend", "celery"}
+            ]
+            non_owners.append("future-service")
+            for service_name in non_owners:
+                for forbidden_mount in forbidden_mounts:
+                    with self.subTest(
+                        filename=filename,
+                        service_name=service_name,
+                        forbidden_mount=forbidden_mount,
+                    ):
+                        mutated = copy.deepcopy(compose)
+                        service = mutated["services"].setdefault(service_name, {})
+                        service.setdefault("volumes", []).append(forbidden_mount)
+                        with self.assertRaisesRegex(AssertionError, service_name):
+                            self.assert_notes_storage_isolated(mutated, filename)
+
+
+class NotesStorageSettingsTests(SimpleTestCase):
 
     def test_unset_and_blank_storage_root_use_backend_default(self) -> None:
         from backend.config.settings import resolve_path_setting
