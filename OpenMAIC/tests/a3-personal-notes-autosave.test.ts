@@ -681,6 +681,33 @@ describe('personal notes autosave', () => {
     expect(persistence.acknowledgeAndRebaseCalls).toBe(2);
   });
 
+  it('keeps a rebased queued mutation version when retry receives a stale draft snapshot', async () => {
+    let releaseOld: ((result: ApiResult<SaveNoteSuccess>) => void) | undefined;
+    const saveNote = vi.fn<AutosaveNotesClient['saveNote']>()
+      .mockImplementationOnce(() => new Promise((resolve) => { releaseOld = resolve; }))
+      .mockResolvedValueOnce(saved(9));
+    const { controller, store } = setup(saveNote);
+    const events: Array<{ type: string; pendingMutationId?: string }> = [];
+    controller.subscribe('note-1', (event) => events.push(event));
+    const oldSave = controller.flush(localDraft({ clientMutationId: 'old', content: doc('old') }));
+    await vi.waitFor(() => expect(saveNote).toHaveBeenCalledTimes(1));
+    const staleNewDraft = localDraft({ clientMutationId: 'new', content: doc('new'), baseVersion: 7 });
+    await controller.schedule(staleNewDraft);
+
+    releaseOld?.(saved(8));
+    await oldSave;
+
+    expect(await store.getDraft('note-1')).toMatchObject({ clientMutationId: 'new', baseVersion: 8 });
+    expect(events.filter((event) => event.type === 'saved')).toContainEqual(expect.objectContaining({
+      type: 'saved',
+      pendingMutationId: 'new',
+    }));
+
+    await controller.flush(staleNewDraft);
+    expect(saveNote.mock.calls[1]?.[1]).toMatchObject({ clientMutationId: 'new', baseVersion: 8 });
+    controller.dispose();
+  });
+
   it('removes timers and online listeners when disposed', async () => {
     vi.useFakeTimers();
     const { controller, events, saveNote } = setup();

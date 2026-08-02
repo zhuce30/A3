@@ -72,7 +72,7 @@ export function NoteEditor({
   }
   const [historyOpen, setHistoryOpen] = useState(false);
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
-  const [runtimeConflict, setRuntimeConflict] = useState<{ noteId: string; serverNote: NoteDetail; localContent: NoteContent } | null>(null);
+  const [runtimeConflict, setRuntimeConflict] = useState<{ noteId: string; serverNote: NoteDetail; draft: EditableNoteDraft } | null>(null);
   const effectiveConflict = conflictServerNote ?? (runtimeConflict && runtimeConflict.noteId === note?.id ? runtimeConflict.serverNote : undefined);
   const conflictKey = effectiveConflict ? `${effectiveConflict.id}:${effectiveConflict.version}` : '';
   const [conflictVisibility, setConflictVisibility] = useState({ key: conflictKey, open: Boolean(conflictKey) });
@@ -146,14 +146,17 @@ export function NoteEditor({
       } else if (event.type === 'saving') {
         setSaveSnapshot({ selectedVersion, state: 'saving' });
       } else if (event.type === 'saved') {
-        baseVersionRef.current = event.resultingVersion;
-        setSaveSnapshot({ selectedVersion, state: 'saved' });
+        baseVersionRef.current = Math.max(baseVersionRef.current, event.resultingVersion);
+        if (draftRef.current && draftRef.current.baseVersion < event.resultingVersion) {
+          draftRef.current = { ...draftRef.current, baseVersion: event.resultingVersion };
+        }
+        setSaveSnapshot({ selectedVersion, state: event.pendingMutationId ? 'scheduled' : 'saved' });
         setRuntimeConflict(null);
       } else if (event.type === 'offline') {
-        setSaveSnapshot({ selectedVersion, state: 'offline' });
+        setSaveSnapshot({ selectedVersion, state: event.reason === 'conflict-blocked' ? 'conflict' : 'offline' });
       } else if (event.type === 'conflict') {
         setSaveSnapshot({ selectedVersion, state: 'conflict' });
-        setRuntimeConflict({ noteId: event.noteId, serverNote: event.serverNote, localContent: event.draft.content });
+        setRuntimeConflict({ noteId: event.noteId, serverNote: event.serverNote, draft: event.draft });
       } else {
         setSaveSnapshot({ selectedVersion, state: 'error' });
       }
@@ -215,6 +218,20 @@ export function NoteEditor({
         </div>
       </div>
       <NoteEditorToolbar view={view} saveState={saveState ?? saveSnapshot.state} onRetry={() => void retrySave()} />
+      {effectiveConflict && !conflictVisibility.open && (
+        <div className="flex min-h-10 items-center justify-between gap-3 border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-sm" role="status">
+          <span className="text-destructive">存在未处理的版本冲突</span>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            aria-label="重新打开冲突处理"
+            onClick={() => setConflictVisibility({ key: conflictKey, open: true })}
+          >
+            处理冲突
+          </Button>
+        </div>
+      )}
       {recoverableDraft && recoverableDraft.noteId === note.id && (
         <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 border-b border-amber-300/60 bg-amber-50 px-4 py-2 text-sm text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/35 dark:text-amber-100" role="status">
           <span>发现本地草稿</span>
@@ -243,7 +260,7 @@ export function NoteEditor({
           open={conflictVisibility.open}
           onOpenChange={(open) => setConflictVisibility({ key: conflictKey, open })}
           note={note}
-          localContent={runtimeConflict?.noteId === note.id ? runtimeConflict.localContent : contentSnapshot.content}
+          localContent={contentSnapshot.content}
           serverNote={effectiveConflict}
           client={client}
           draftStore={draftStore}

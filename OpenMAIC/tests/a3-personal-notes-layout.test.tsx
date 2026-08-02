@@ -17,7 +17,7 @@ import {
   parseNoteHtml,
 } from '@/lib/a3/notes/editor-schema';
 import type { NotesClient } from '@/lib/a3/notes/client';
-import type { NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
+import type { AutosaveEvent, NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
 import { NotesAutosaveController as RealNotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
 import { DexieNotesDraftPersistence, NotesDraftDatabase, NotesDraftStore } from '@/lib/a3/notes/draft-store';
 import type { NoteAttachment, NoteDetail } from '@/lib/a3/notes/types';
@@ -72,6 +72,15 @@ function clickByName(name: string) {
   expect(button, `button ${name}`).toBeTruthy();
   act(() => button!.click());
   return button!;
+}
+
+function changeInput(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  act(() => {
+    setter?.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
 }
 
 function autosaveStub(schedule = vi.fn().mockResolvedValue(undefined)) {
@@ -278,6 +287,23 @@ describe('document-first note editor lifecycle and save state', () => {
     expect(container.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('未修改');
   });
 
+  it('does not show saved for an older ACK while a newer mutation remains pending', () => {
+    let listener: ((event: AutosaveEvent) => void) | undefined;
+    const autosave = {
+      schedule: vi.fn(), flush: vi.fn(),
+      subscribe: vi.fn((_noteId: string, next: typeof listener) => { listener = next; return () => undefined; }),
+    } as unknown as NotesAutosaveController;
+    const container = mount(<NoteEditor note={note()} client={{} as NotesClient} autosave={autosave} attachments={[]} />);
+
+    act(() => listener?.({ type: 'scheduled', noteId: 'note-1', clientMutationId: 'new' }));
+    act(() => listener?.({
+      type: 'saved', noteId: 'note-1', resultingVersion: 4, idempotent: false, pendingMutationId: 'new',
+    }));
+
+    expect(container.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('等待保存');
+    expect(container.querySelector('[data-testid="note-save-status"]')?.textContent).not.toContain('已保存');
+  });
+
   it('derives saved and conflict states from real autosave outcomes', async () => {
     const savedSetup = realAutosave({ success: true, note: note('note-1', 4), resultingVersion: 4, idempotent: false });
     const savedViews: EditorView[] = [];
@@ -339,15 +365,23 @@ describe('document-first note editor lifecycle and save state', () => {
     await vi.waitFor(() => expect(setup.saveNote).toHaveBeenCalledTimes(2));
     expect(setup.saveNote.mock.calls[1]?.[1]).toMatchObject({ baseVersion: 4, content: doc('编辑 B') });
     await vi.waitFor(() => expect(document.body.textContent).toContain('笔记版本冲突'));
+    clickByName('关闭');
+    expect(document.querySelector('[aria-label="版本差异"]')).toBeNull();
+    expect(document.querySelector('button[aria-label="重新打开冲突处理"]')).toBeTruthy();
+
+    replaceDocument('编辑 C');
+    clickByName('重新打开冲突处理');
     clickByName('查看差异');
     const localDiff = document.querySelector('[aria-label="版本差异"] section');
-    expect(localDiff?.textContent).toContain('编辑 B');
+    expect(localDiff?.textContent).toContain('编辑 C');
+    expect(localDiff?.textContent).not.toContain('编辑 B');
     expect(localDiff?.textContent).not.toContain('编辑 A');
 
     clickByName('保留为副本');
     await vi.waitFor(() => expect(createNote).toHaveBeenCalled());
     expect(createNote.mock.calls[0]?.[0].content).toMatchObject({ type: 'doc' });
-    expect(JSON.stringify(createNote.mock.calls[0]?.[0].content)).toContain('编辑 B');
+    expect(JSON.stringify(createNote.mock.calls[0]?.[0].content)).toContain('编辑 C');
+    expect(JSON.stringify(createNote.mock.calls[0]?.[0].content)).not.toContain('编辑 B');
     expect(JSON.stringify(createNote.mock.calls[0]?.[0].content)).not.toContain('编辑 A');
     setup.controller.dispose();
   });
@@ -482,5 +516,41 @@ describe('note attachments', () => {
 
     expect(container.textContent).toContain('已解析');
     expect(container.textContent).not.toContain('解析失败');
+  });
+
+  it('keeps overlapping upload and link successes when they complete out of order', async () => {
+    let releaseUpload: ((value: unknown) => void) | undefined;
+    let releaseLink: ((value: unknown) => void) | undefined;
+    const uploaded = { ...attachment, id: 'upload-1', displayName: '并发上传.txt', parseStatus: 'pending' as const };
+    const linked = { ...attachment, id: 'link-1', kind: 'link' as const, displayName: '并发链接', parseStatus: 'succeeded' as const };
+    const uploadAttachment = vi.fn(() => new Promise((resolve) => { releaseUpload = resolve; }));
+    const createLinkAttachment = vi.fn(() => new Promise((resolve) => { releaseLink = resolve; }));
+    const client = { uploadAttachment, createLinkAttachment } as unknown as NotesClient;
+    function AttachmentHarness() {
+      const [values, setValues] = React.useState<NoteAttachment[]>([]);
+      return <NoteAttachments noteId="note-1" attachments={values} client={client} onInsert={() => undefined} onChange={setValues} />;
+    }
+    const container = mount(<AttachmentHarness />);
+
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(['concurrent'], '并发上传.txt', { type: 'text/plain' });
+    Object.defineProperty(fileInput, 'files', { configurable: true, value: [file] });
+    act(() => fileInput.dispatchEvent(new Event('change', { bubbles: true })));
+    clickByName('链接');
+    changeInput(container.querySelector<HTMLInputElement>('input[aria-label="链接地址"]')!, 'https://example.com/reference');
+    changeInput(container.querySelector<HTMLInputElement>('input[aria-label="链接名称"]')!, '并发链接');
+    clickByName('添加');
+    expect(uploadAttachment).toHaveBeenCalledTimes(1);
+    expect(createLinkAttachment).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseLink?.({ success: true, attachment: linked });
+      await Promise.resolve();
+      releaseUpload?.({ success: true, attachment: uploaded });
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(container.querySelectorAll('[data-testid="note-attachment-row"]')).toHaveLength(2));
+    expect(container.textContent).toContain('并发上传.txt');
+    expect(container.textContent).toContain('并发链接');
   });
 });

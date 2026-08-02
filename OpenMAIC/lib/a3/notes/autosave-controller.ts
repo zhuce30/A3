@@ -22,7 +22,7 @@ export interface OnlineEventSource {
 }
 
 export type AutosaveResult =
-  | { kind: 'saved'; noteId: string; resultingVersion: number; idempotent: boolean }
+  | { kind: 'saved'; noteId: string; resultingVersion: number; idempotent: boolean; pendingMutationId?: string }
   | { kind: 'queued'; noteId: string; reason: 'offline' | 'server' | 'conflict-blocked' | 'version-mismatch' | 'account-switch-required' }
   | { kind: 'conflict'; noteId: string; serverVersion: number; serverNote: NoteConflict['serverNote']; draft: EditableNoteDraft }
   | { kind: 'permanent-error'; noteId: string; status: number; code?: string; error: string }
@@ -31,7 +31,7 @@ export type AutosaveResult =
 export type AutosaveEvent =
   | { type: 'scheduled'; noteId: string; clientMutationId: string }
   | { type: 'saving'; noteId: string; clientMutationId: string }
-  | { type: 'saved'; noteId: string; resultingVersion: number; idempotent: boolean }
+  | { type: 'saved'; noteId: string; resultingVersion: number; idempotent: boolean; pendingMutationId?: string }
   | { type: 'offline'; noteId: string; reason: Extract<AutosaveResult, { kind: 'queued' }>['reason'] }
   | { type: 'conflict'; noteId: string; serverVersion: number; serverNote: NoteConflict['serverNote']; draft: EditableNoteDraft }
   | { type: 'rejected'; noteId: string; status: number; code?: string; error: string };
@@ -279,11 +279,15 @@ export class NotesAutosaveController {
     );
     if (!acknowledged) return { kind: 'queued', noteId, reason: 'version-mismatch' };
     this.acknowledgedMutationIds.add(mutation.clientMutationId);
+    const currentDraft = await this.store.getDraft(noteId);
     return {
       kind: 'saved',
       noteId,
       resultingVersion: response.resultingVersion,
       idempotent: response.idempotent,
+      ...(currentDraft && currentDraft.clientMutationId !== mutation.clientMutationId
+        ? { pendingMutationId: currentDraft.clientMutationId }
+        : {}),
     };
   }
 
@@ -326,7 +330,13 @@ export class NotesAutosaveController {
 
   private publishResult(result: AutosaveResult) {
     if (result.kind === 'saved') {
-      this.emit({ type: 'saved', noteId: result.noteId, resultingVersion: result.resultingVersion, idempotent: result.idempotent });
+      this.emit({
+        type: 'saved',
+        noteId: result.noteId,
+        resultingVersion: result.resultingVersion,
+        idempotent: result.idempotent,
+        ...(result.pendingMutationId ? { pendingMutationId: result.pendingMutationId } : {}),
+      });
     } else if (result.kind === 'queued') {
       this.emit({ type: 'offline', noteId: result.noteId, reason: result.reason });
     } else if (result.kind === 'conflict') {

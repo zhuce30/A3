@@ -293,6 +293,9 @@ export class NotesDraftStore {
   async persist(input: PersistableNoteDraft) {
     const userId = this.requireUser();
     const existing = await this.persistence.getMutation(input.clientMutationId);
+    const baseVersion = existing?.userId === userId
+      ? Math.max(input.baseVersion, existing.baseVersion)
+      : input.baseVersion;
     const createdAt = existing?.userId === userId
       ? existing.createdAt
       : await this.uniqueCreatedAt(input.updatedAt);
@@ -300,7 +303,7 @@ export class NotesDraftStore {
       userId,
       noteId: input.noteId,
       content: input.content,
-      baseVersion: input.baseVersion,
+      baseVersion,
       clientMutationId: input.clientMutationId,
       createdAt,
       updatedAt: input.updatedAt,

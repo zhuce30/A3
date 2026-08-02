@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import {
   Download, ExternalLink, File, FileImage, FileText, Link as LinkIcon,
   LoaderCircle, Paperclip, Plus, RefreshCw, Trash2, X,
@@ -37,8 +37,15 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
+  const attachmentsRef = useRef(attachments);
 
-  const update = (next: NoteAttachment[]) => {
+  useLayoutEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+
+  const update = (change: (current: NoteAttachment[]) => NoteAttachment[]) => {
+    const next = change(attachmentsRef.current);
+    attachmentsRef.current = next;
     onChange?.(next);
   };
 
@@ -54,7 +61,7 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
       return;
     }
     setUploads((current) => current.filter((uploadItem) => uploadItem.id !== item.id));
-    update([...attachments.filter((attachment) => attachment.id !== result.attachment.id), result.attachment]);
+    update((current) => [...current.filter((attachment) => attachment.id !== result.attachment.id), result.attachment]);
     if (fileRef.current) fileRef.current.value = '';
   };
 
@@ -76,7 +83,7 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
       setError(result.error);
       return;
     }
-    update([...attachments.filter((attachment) => attachment.id !== result.attachment.id), result.attachment]);
+    update((current) => [...current.filter((attachment) => attachment.id !== result.attachment.id), result.attachment]);
     setLinkUrl('');
     setLinkName('');
     setLinkOpen(false);
@@ -91,7 +98,7 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
       setError(result.error);
       return;
     }
-    update(attachments.map((item) => item.id === attachment.id ? result.attachment : item));
+    update((current) => current.map((item) => item.id === attachment.id ? result.attachment : item));
   };
 
   const remove = async (attachment: NoteAttachment) => {
@@ -104,7 +111,7 @@ export function NoteAttachments({ noteId, attachments, client, onInsert, onChang
       return;
     }
     setConfirmDeleteId(null);
-    update(attachments.filter((item) => item.id !== attachment.id));
+    update((current) => current.filter((item) => item.id !== attachment.id));
   };
 
   return (
