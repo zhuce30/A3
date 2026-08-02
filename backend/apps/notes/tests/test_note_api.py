@@ -280,6 +280,29 @@ class NoteLifecycleApiTests(NoteApiTestCase):
         note.refresh_from_db()
         self.assertEqual(note.title, "第一位写入")
 
+    def test_zero_base_version_returns_conflict_without_overwrite(self) -> None:
+        note = self.create_note()
+        response = self.patch_json(
+            reverse("notes:note-detail", args=[note.id]),
+            {
+                "baseVersion": 0,
+                "clientMutationId": str(uuid.uuid4()),
+                "title": "不应写入",
+                "content": doc("不应写入"),
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.json()
+        self.assertEqual(payload["code"], "note_version_conflict")
+        self.assertEqual(payload["serverVersion"], 1)
+        self.assertEqual(payload["serverNote"]["id"], str(note.id))
+        self.assertEqual(payload["serverNote"]["version"], 1)
+        note.refresh_from_db()
+        self.assertEqual(note.title, "线性代数")
+        self.assertEqual(note.content_json, doc("矩阵与向量"))
+        self.assertFalse(NoteMutation.objects.filter(note=note).exists())
+
     def test_mutation_retry_is_idempotent_and_different_mutation_conflicts(self) -> None:
         note = self.create_note()
         mutation_id = uuid.uuid4()
@@ -570,6 +593,146 @@ class SearchAndValidationTests(NoteApiTestCase):
                 payload = response.json()
                 self.assertEqual(payload["code"], expected_code)
                 self.assertTrue(payload["error"])
+
+    def test_unknown_nested_node_is_rejected_without_persisting(self) -> None:
+        response = self.post_json(
+            reverse("notes:note-list"),
+            {
+                "title": "非法文档",
+                "content": {
+                    "type": "doc",
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [{"type": "script", "attrs": {"html": "<script>bad()</script>"}}],
+                        }
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], "invalid_note_content")
+        self.assertTrue(response.json()["error"])
+        self.assertFalse(Note.objects.filter(user=self.user, title="非法文档").exists())
+
+    def test_malformed_content_text_and_marks_are_rejected_without_overwrite(self) -> None:
+        note = self.create_note()
+        malformed_documents = (
+            {"type": "doc", "content": {"type": "paragraph"}},
+            {
+                "type": "doc",
+                "content": [{"type": "paragraph", "content": "not-an-array"}],
+            },
+            {
+                "type": "doc",
+                "content": [{"type": "paragraph", "content": [{"type": "text"}]}],
+            },
+            {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": "x", "marks": {"type": "strong"}}],
+                    }
+                ],
+            },
+            {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": "x", "marks": [{"type": "blink"}]}],
+                    }
+                ],
+            },
+        )
+
+        for content in malformed_documents:
+            with self.subTest(content=content):
+                response = self.patch_json(
+                    reverse("notes:note-detail", args=[note.id]),
+                    {
+                        "baseVersion": 1,
+                        "clientMutationId": str(uuid.uuid4()),
+                        "content": content,
+                    },
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["code"], "invalid_note_content")
+                note.refresh_from_db()
+                self.assertEqual(note.version, 1)
+                self.assertEqual(note.content_json, doc("矩阵与向量"))
+        self.assertFalse(NoteMutation.objects.filter(note=note).exists())
+
+    def test_valid_extended_prosemirror_documents_are_accepted(self) -> None:
+        valid_documents = (
+            {"type": "doc", "content": []},
+            {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "heading",
+                        "attrs": {"level": 2, "align": "center"},
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "标题",
+                                "marks": [{"type": "strong"}, {"type": "forecolor", "attrs": {"color": "#123456"}}],
+                            }
+                        ],
+                    },
+                    {
+                        "type": "table",
+                        "content": [
+                            {
+                                "type": "table_row",
+                                "content": [
+                                    {
+                                        "type": "table_header",
+                                        "attrs": {"colspan": 1, "rowspan": 1, "colwidth": [120]},
+                                        "content": [{"type": "paragraph", "content": [{"type": "text", "text": "列"}]}],
+                                    },
+                                    {
+                                        "type": "table_cell",
+                                        "content": [{"type": "paragraph", "content": [{"type": "text", "text": "值"}]}],
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            },
+            {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": "公式："},
+                            {"type": "math_inline", "attrs": {"latex": "E=mc^2"}},
+                            {"type": "image", "attrs": {"src": "https://example.com/a.png", "alt": "示意图"}},
+                            {
+                                "type": "attachment_reference",
+                                "attrs": {"attachmentId": str(uuid.uuid4()), "label": "讲义.pdf", "kind": "file"},
+                            },
+                        ],
+                    },
+                    {"type": "math_display", "attrs": {"latex": "x^2+y^2=z^2"}},
+                    {"type": "equation", "attrs": {"latex": "a+b=c"}},
+                    {"type": "horizontal_rule"},
+                ],
+            },
+        )
+
+        for index, content in enumerate(valid_documents):
+            with self.subTest(index=index):
+                response = self.post_json(
+                    reverse("notes:note-list"),
+                    {"title": f"合法文档 {index}", "content": content},
+                )
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(response.json()["note"]["content"], content)
 
     def test_patch_requires_version_and_mutation_id(self) -> None:
         note = self.create_note()

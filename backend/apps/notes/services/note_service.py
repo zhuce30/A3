@@ -187,7 +187,16 @@ def search_notes(user, params) -> list[Note]:
     return list(queryset.distinct()[:limit])
 
 
-BLOCK_TYPES = {"paragraph", "heading", "blockquote", "codeBlock", "listItem"}
+BLOCK_TYPES = {"paragraph", "heading", "blockquote", "code_block", "codeBlock", "list_item", "listItem"}
+MATH_TYPES = {
+    "math_inline",
+    "math_display",
+    "inline_math",
+    "block_math",
+    "equation",
+    "inline_equation",
+    "block_equation",
+}
 
 
 def extract_note_text(content: dict[str, Any]) -> str:
@@ -201,8 +210,21 @@ def extract_note_text(content: dict[str, Any]) -> str:
             return node.get("text", "") if isinstance(node.get("text"), str) else ""
         if node_type == "hardBreak":
             return "\n"
+        if node_type == "hard_break":
+            return "\n"
+        if node_type in MATH_TYPES:
+            attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+            formula = attrs.get("latex") or attrs.get("value")
+            if isinstance(formula, str):
+                return formula
+        if node_type in {"attachment_reference", "attachment_ref"}:
+            attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+            return attrs.get("label", "") if isinstance(attrs.get("label"), str) else ""
+        if node_type == "image":
+            attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+            return attrs.get("alt", "") if isinstance(attrs.get("alt"), str) else ""
         children = node.get("content") if isinstance(node.get("content"), list) else []
-        if node_type == "tableRow":
+        if node_type in {"table_row", "tableRow"}:
             cells = [render(child).strip() for child in children]
             return "\t".join(cell for cell in cells if cell) + "\n"
         rendered = "".join(render(child) for child in children)
@@ -214,21 +236,179 @@ def extract_note_text(content: dict[str, Any]) -> str:
     return "\n".join(line for line in lines if line).strip()
 
 
+NODE_ATTRS = {
+    "doc": set(),
+    "paragraph": {"align", "indent", "textIndent"},
+    "heading": {"level", "align", "indent", "textIndent"},
+    "text": set(),
+    "blockquote": set(),
+    "code_block": {"params", "language"},
+    "hard_break": set(),
+    "horizontal_rule": set(),
+    "image": {"src", "alt", "title", "width", "height"},
+    "bullet_list": {"listStyleType", "fontsize", "color"},
+    "ordered_list": {"order", "listStyleType", "fontsize", "color"},
+    "list_item": set(),
+    "table": set(),
+    "table_row": set(),
+    "table_cell": {"colspan", "rowspan", "colwidth", "background"},
+    "table_header": {"colspan", "rowspan", "colwidth", "background"},
+    "math_inline": {"latex", "value"},
+    "math_display": {"latex", "value"},
+    "inline_math": {"latex", "value"},
+    "block_math": {"latex", "value"},
+    "equation": {"latex", "value", "display"},
+    "inline_equation": {"latex", "value"},
+    "block_equation": {"latex", "value"},
+    "attachment_reference": {"attachmentId", "label", "kind", "mimeType"},
+    "attachment_ref": {"attachmentId", "label", "kind", "mimeType"},
+}
+MARK_ATTRS = {
+    "em": set(),
+    "strong": set(),
+    "code": set(),
+    "fontsize": {"fontsize"},
+    "fontname": {"fontname"},
+    "forecolor": {"color"},
+    "backcolor": {"backcolor"},
+    "subscript": set(),
+    "superscript": set(),
+    "strikethrough": set(),
+    "underline": set(),
+    "link": {"href", "title", "target"},
+    "mark": {"index"},
+}
+INLINE_NODES = {
+    "text",
+    "hard_break",
+    "image",
+    "math_inline",
+    "inline_math",
+    "inline_equation",
+    "attachment_reference",
+    "attachment_ref",
+}
+BLOCK_NODES = {
+    "paragraph",
+    "heading",
+    "blockquote",
+    "code_block",
+    "horizontal_rule",
+    "bullet_list",
+    "ordered_list",
+    "table",
+    "math_display",
+    "block_math",
+    "equation",
+    "block_equation",
+    "attachment_reference",
+    "attachment_ref",
+}
+LEAF_NODES = {"text", "hard_break", "horizontal_rule", "image", "attachment_reference", "attachment_ref"}
+
+
+def _invalid_content(message: str) -> None:
+    raise NoteServiceError(message, code="invalid_note_content")
+
+
+def _validate_attrs(owner_type: str, attrs: Any, allowed: set[str]) -> None:
+    if not isinstance(attrs, dict):
+        _invalid_content(f"{owner_type} 的 attrs 必须是对象")
+    if set(attrs) - allowed:
+        _invalid_content(f"{owner_type} 包含不支持的属性")
+    for key, attr_value in attrs.items():
+        if key == "colwidth":
+            if not isinstance(attr_value, list) or any(
+                value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0)
+                for value in attr_value
+            ):
+                _invalid_content("colwidth 必须是正整数数组")
+        elif not isinstance(attr_value, (str, int, float, bool, type(None))):
+            _invalid_content(f"{owner_type} 的属性值格式不正确")
+
+
+def _validate_marks(node_type: str, marks: Any) -> None:
+    if node_type not in INLINE_NODES:
+        _invalid_content("块级节点不能包含 marks")
+    if not isinstance(marks, list):
+        _invalid_content("marks 必须是数组")
+    for mark in marks:
+        if not isinstance(mark, dict) or set(mark) - {"type", "attrs"}:
+            _invalid_content("mark 格式不正确")
+        mark_type = mark.get("type")
+        if mark_type not in MARK_ATTRS:
+            _invalid_content("笔记包含不支持的 mark")
+        if "attrs" in mark:
+            _validate_attrs(str(mark_type), mark["attrs"], MARK_ATTRS[mark_type])
+
+
+def _allowed_children(node_type: str) -> set[str]:
+    if node_type == "doc":
+        return BLOCK_NODES
+    if node_type in {"paragraph", "heading"}:
+        return INLINE_NODES
+    if node_type in {"blockquote", "table_cell", "table_header"}:
+        return BLOCK_NODES
+    if node_type == "code_block" or node_type in MATH_TYPES:
+        return {"text"}
+    if node_type in {"bullet_list", "ordered_list"}:
+        return {"list_item"}
+    if node_type == "list_item":
+        return BLOCK_NODES
+    if node_type == "table":
+        return {"table_row"}
+    if node_type == "table_row":
+        return {"table_cell", "table_header"}
+    return set()
+
+
 def validate_content(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or value.get("type") != "doc" or not isinstance(value.get("content", []), list):
-        raise NoteServiceError("笔记内容必须是有效的 ProseMirror doc", code="invalid_note_content")
+    def validate_node(node: Any, *, parent_type: str | None = None) -> None:
+        if not isinstance(node, dict) or set(node) - {"type", "attrs", "content", "marks", "text"}:
+            _invalid_content("笔记节点格式不正确")
+        node_type = node.get("type")
+        if node_type not in NODE_ATTRS:
+            _invalid_content("笔记包含不支持的节点类型")
+        if parent_type and node_type not in _allowed_children(parent_type):
+            _invalid_content(f"{node_type} 不能放在 {parent_type} 中")
+        if "attrs" in node:
+            _validate_attrs(str(node_type), node["attrs"], NODE_ATTRS[node_type])
+        if "marks" in node:
+            _validate_marks(str(node_type), node["marks"])
 
-    def validate_node(node: Any) -> None:
-        if not isinstance(node, dict) or not isinstance(node.get("type"), str):
-            raise NoteServiceError("笔记内容包含无效节点", code="invalid_note_content")
-        if node["type"] == "text" and not isinstance(node.get("text"), str):
-            raise NoteServiceError("文本节点缺少有效文本", code="invalid_note_content")
-        if "content" in node:
-            if not isinstance(node["content"], list):
-                raise NoteServiceError("笔记节点 content 必须是数组", code="invalid_note_content")
-            for child in node["content"]:
-                validate_node(child)
+        if node_type == "text":
+            if not isinstance(node.get("text"), str):
+                _invalid_content("文本节点的 text 必须是字符串")
+        elif "text" in node:
+            _invalid_content("非文本节点不能包含 text")
 
+        if node_type in LEAF_NODES:
+            if "content" in node:
+                _invalid_content(f"{node_type} 不能包含 content")
+            return
+
+        children = node.get("content", [])
+        if not isinstance(children, list):
+            _invalid_content("笔记节点 content 必须是数组")
+        if node_type in {
+            "blockquote",
+            "bullet_list",
+            "ordered_list",
+            "table",
+            "table_row",
+            "table_cell",
+            "table_header",
+        } and not children:
+            _invalid_content(f"{node_type} 的 content 不能为空")
+        if node_type == "list_item" and (
+            not children or not isinstance(children[0], dict) or children[0].get("type") != "paragraph"
+        ):
+            _invalid_content("list_item 必须以 paragraph 开始")
+        for child in children:
+            validate_node(child, parent_type=str(node_type))
+
+    if not isinstance(value, dict) or value.get("type") != "doc":
+        _invalid_content("笔记内容必须是有效的 ProseMirror doc")
     validate_node(value)
     return value
 
@@ -249,8 +429,8 @@ def parse_mutation_id(value: Any) -> uuid.UUID:
 
 
 def parse_base_version(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise NoteServiceError("baseVersion 必须是正整数", code="invalid_note_mutation")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise NoteServiceError("baseVersion 必须是非负整数", code="invalid_note_mutation")
     return value
 
 
