@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import Dexie from 'dexie';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
 import {
+  NotesDraftDatabase,
   NotesDraftStore,
   type NoteDraft,
   type NotesDraftPersistence,
@@ -17,59 +20,103 @@ import type { ApiResult, SaveNoteSuccess, SuccessfulApiResult } from '@/lib/a3/n
 class MemoryPersistence implements NotesDraftPersistence {
   drafts = new Map<string, NoteDraft>();
   mutations = new Map<string, PendingNoteMutation>();
+  acknowledgeAndRebaseCalls = 0;
 
   async allDrafts() { return [...this.drafts.values()]; }
   async allMutations() { return [...this.mutations.values()]; }
   async getDraft(noteId: string) { return this.drafts.get(noteId); }
   async getMutation(clientMutationId: string) { return this.mutations.get(clientMutationId); }
   async putDraftAndMutation(draft: NoteDraft, mutation: PendingNoteMutation) {
+    const block = [...this.mutations.values()].find(
+      (item) => item.userId === mutation.userId && item.noteId === mutation.noteId && item.state === 'conflict',
+    );
     this.drafts.set(draft.noteId, structuredClone(draft));
-    this.mutations.set(mutation.clientMutationId, structuredClone(mutation));
+    this.mutations.set(mutation.clientMutationId, structuredClone(
+      block && mutation.state === 'pending'
+        ? { ...mutation, state: 'conflict', conflictAt: block.conflictAt, serverVersion: block.serverVersion }
+        : mutation,
+    ));
   }
   async deleteAccounts(userIds: string[]) {
     const ids = new Set(userIds);
     for (const [key, value] of this.drafts) if (ids.has(value.userId)) this.drafts.delete(key);
     for (const [key, value] of this.mutations) if (ids.has(value.userId)) this.mutations.delete(key);
   }
-  async acknowledge(userId: string, mutation: PendingNoteMutation) {
+  async acknowledgeAndRebase(userId: string, mutation: PendingNoteMutation, resultingVersion: number) {
+    this.acknowledgeAndRebaseCalls += 1;
+    const stored = this.mutations.get(mutation.clientMutationId);
+    if (
+      stored?.userId !== userId
+      || stored.noteId !== mutation.noteId
+      || stored.createdAt !== mutation.createdAt
+      || stored.baseVersion !== mutation.baseVersion
+      || stored.state !== 'pending'
+    ) return false;
     this.mutations.delete(mutation.clientMutationId);
-    const draft = this.drafts.get(mutation.noteId);
-    if (draft?.userId === userId && draft.clientMutationId === mutation.clientMutationId) {
-      this.drafts.delete(mutation.noteId);
-    }
-  }
-  async rebaseNewer(userId: string, mutation: PendingNoteMutation, resultingVersion: number) {
     for (const [key, value] of this.mutations) {
       if (value.userId === userId && value.noteId === mutation.noteId && value.createdAt > mutation.createdAt) {
         this.mutations.set(key, { ...value, baseVersion: resultingVersion });
       }
     }
     const draft = this.drafts.get(mutation.noteId);
-    if (draft?.userId === userId && draft.clientMutationId !== mutation.clientMutationId) {
+    if (draft?.userId === userId && draft.clientMutationId === mutation.clientMutationId) {
+      this.drafts.delete(mutation.noteId);
+    } else if (draft?.userId === userId) {
       this.drafts.set(draft.noteId, { ...draft, baseVersion: resultingVersion });
     }
+    return true;
   }
-  async markConflict(userId: string, clientMutationId: string, conflictAt: string, serverVersion: number) {
-    const mutation = this.mutations.get(clientMutationId);
-    if (mutation?.userId === userId) {
-      this.mutations.set(clientMutationId, { ...mutation, state: 'conflict', conflictAt, serverVersion });
+  async markNoteConflict(userId: string, noteId: string, conflictAt: string, serverVersion: number) {
+    for (const [key, mutation] of this.mutations) {
+      if (mutation.userId === userId && mutation.noteId === noteId) {
+        this.mutations.set(key, { ...mutation, state: 'conflict', conflictAt, serverVersion });
+      }
     }
   }
-  async resetConflict(userId: string, clientMutationId: string, baseVersion: number) {
+  async markRejected(
+    userId: string,
+    clientMutationId: string,
+    rejectedAt: string,
+    status: number,
+    errorCode?: string,
+  ) {
     const mutation = this.mutations.get(clientMutationId);
     if (mutation?.userId === userId) {
       this.mutations.set(clientMutationId, {
         ...mutation,
+        state: 'rejected',
+        rejectedAt,
+        status,
+        errorCode,
+      });
+    }
+  }
+  async resolveNoteConflict(
+    userId: string,
+    noteId: string,
+    resolution: { kind: 'retry'; baseVersion: number } | { kind: 'discard' },
+  ) {
+    const noteMutations = [...this.mutations.values()].filter(
+      (mutation) => mutation.userId === userId && mutation.noteId === noteId && mutation.state === 'conflict',
+    );
+    if (resolution.kind === 'discard') {
+      for (const mutation of noteMutations) this.mutations.delete(mutation.clientMutationId);
+      const draft = this.drafts.get(noteId);
+      if (draft?.userId === userId) this.drafts.delete(noteId);
+      return noteMutations.length > 0;
+    }
+    for (const mutation of noteMutations) {
+      this.mutations.set(mutation.clientMutationId, {
+        ...mutation,
         state: 'pending',
-        baseVersion,
+        baseVersion: resolution.baseVersion,
         conflictAt: undefined,
         serverVersion: undefined,
       });
-      const draft = this.drafts.get(mutation.noteId);
-      if (draft?.userId === userId && draft.clientMutationId === clientMutationId) {
-        this.drafts.set(draft.noteId, { ...draft, baseVersion });
-      }
     }
+    const draft = this.drafts.get(noteId);
+    if (draft?.userId === userId) this.drafts.set(noteId, { ...draft, baseVersion: resolution.baseVersion });
+    return noteMutations.length > 0;
   }
   async discardMutation(clientMutationId: string) { this.mutations.delete(clientMutationId); }
   async clear() { this.drafts.clear(); this.mutations.clear(); }
@@ -206,6 +253,19 @@ describe('personal notes autosave', () => {
     controller.dispose();
   });
 
+  it('cancels a scheduled ghost save when a newer explicit flush supersedes it', async () => {
+    vi.useFakeTimers();
+    const { controller, persistence, saveNote } = setup();
+    await controller.schedule(localDraft({ clientMutationId: 'scheduled-old', content: doc('旧定时内容') }));
+
+    await controller.flush(localDraft({ clientMutationId: 'explicit-new', content: doc('显式新内容') }));
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(saveNote).toHaveBeenCalledTimes(1);
+    expect(saveNote.mock.calls[0]?.[1]).toMatchObject({ clientMutationId: 'explicit-new' });
+    expect(persistence.mutations.has('scheduled-old')).toBe(false);
+  });
+
   it('keeps a conflicting draft instead of overwriting it', async () => {
     const { controller, store, saveNote } = setup();
     saveNote.mockResolvedValue({
@@ -261,6 +321,53 @@ describe('personal notes autosave', () => {
     expect(await reloadedStore.getMutation('mutation-1')).toMatchObject({ state: 'conflict' });
   });
 
+  it('blocks later same-note edits durably after a 409 and across controller recreation', async () => {
+    const persistence = new MemoryPersistence();
+    const store = new NotesDraftStore(persistence);
+    let releaseConflict: ((result: ApiResult<SaveNoteSuccess>) => void) | undefined;
+    const firstClient = vi.fn<AutosaveNotesClient['saveNote']>().mockImplementation(
+      () => new Promise((resolve) => { releaseConflict = resolve; }),
+    );
+    const controller = new NotesAutosaveController({ store, client: { saveNote: firstClient }, userId: 'opaque-user-a' });
+    const conflicting = controller.flush(localDraft({ clientMutationId: 'conflicting-old' }));
+    await vi.waitFor(() => expect(firstClient).toHaveBeenCalledTimes(1));
+    const currentLater = controller.flush(localDraft({ clientMutationId: 'current-later', content: doc('请求中的编辑') }));
+    releaseConflict?.({
+      success: false,
+      status: 409,
+      code: 'note_version_conflict',
+      error: '版本冲突',
+      serverVersion: 8,
+      serverNote: saved(8).note,
+    });
+    await conflicting;
+    expect(await currentLater).toMatchObject({ kind: 'queued', reason: 'conflict-blocked' });
+    expect(await store.getMutation('current-later')).toMatchObject({ state: 'conflict', serverVersion: 8 });
+
+    const later = await controller.flush(localDraft({ clientMutationId: 'later-edit', content: doc('冲突后的编辑') }));
+    expect(later).toMatchObject({ kind: 'queued', reason: 'conflict-blocked' });
+    expect(firstClient).toHaveBeenCalledTimes(1);
+    expect(await store.getMutation('later-edit')).toMatchObject({ state: 'conflict', serverVersion: 8 });
+    controller.dispose();
+
+    const reloadedStore = new NotesDraftStore(persistence);
+    const replayClient = vi.fn<AutosaveNotesClient['saveNote']>()
+      .mockResolvedValueOnce(saved(9))
+      .mockResolvedValueOnce(saved(10))
+      .mockResolvedValueOnce(saved(11));
+    const reloaded = new NotesAutosaveController({
+      store: reloadedStore,
+      client: { saveNote: replayClient },
+      userId: 'opaque-user-a',
+    });
+    await reloaded.initialize();
+    expect(replayClient).not.toHaveBeenCalled();
+
+    await reloadedStore.resolveNoteConflict('note-1', { kind: 'retry', baseVersion: 8 });
+    await reloaded.resume();
+    expect(replayClient).toHaveBeenCalled();
+  });
+
   it('replays a conflict only after explicit resolution resets its base version', async () => {
     const { persistence, store, controller, saveNote } = setup();
     persistence.drafts.set('note-1', {
@@ -274,7 +381,7 @@ describe('personal notes autosave', () => {
 
     await controller.initialize();
     expect(saveNote).not.toHaveBeenCalled();
-    await store.resolveConflict('mutation-1', { kind: 'retry', baseVersion: 8 });
+    await store.resolveNoteConflict('note-1', { kind: 'retry', baseVersion: 8 });
     saveNote.mockResolvedValue(saved(9));
     await controller.resume();
 
@@ -328,6 +435,53 @@ describe('personal notes autosave', () => {
     await vi.waitFor(async () => expect(await store.listMutations()).toHaveLength(0));
   });
 
+  it.each([400, 401, 403, 404, 422])('persists HTTP %s as rejected and never replays it online or after reload', async (status) => {
+    const persistence = new MemoryPersistence();
+    const store = new NotesDraftStore(persistence);
+    const events = new FakeOnlineEvents();
+    const saveNote = vi.fn<AutosaveNotesClient['saveNote']>().mockResolvedValue({
+      success: false,
+      status,
+      code: 'request_rejected',
+      error: '请求不可重试',
+    });
+    const controller = new NotesAutosaveController({
+      store,
+      client: { saveNote },
+      userId: 'opaque-user-a',
+      onlineEvents: events,
+    });
+
+    const result = await controller.flush(localDraft());
+    expect(result).toMatchObject({ kind: 'permanent-error', status, code: 'request_rejected' });
+    expect(await store.getMutation('mutation-1')).toMatchObject({ state: 'rejected', status });
+    expect(await store.getDraft('note-1')).toBeTruthy();
+    events.emit();
+    await controller.resume();
+    expect(saveNote).toHaveBeenCalledTimes(1);
+    controller.dispose();
+
+    const reloadedStore = new NotesDraftStore(persistence);
+    const replayClient = vi.fn<AutosaveNotesClient['saveNote']>().mockResolvedValue(saved(8));
+    const reloaded = new NotesAutosaveController({
+      store: reloadedStore,
+      client: { saveNote: replayClient },
+      userId: 'opaque-user-a',
+    });
+    await reloaded.initialize();
+    expect(replayClient).not.toHaveBeenCalled();
+  });
+
+  it.each([408, 429, 500, 503])('keeps retryable HTTP %s pending', async (status) => {
+    const { controller, store, saveNote } = setup();
+    saveNote.mockResolvedValue({ success: false, status, code: 'retry_later', error: '稍后重试' });
+
+    const result = await controller.flush(localDraft());
+
+    expect(result).toMatchObject({ kind: 'queued' });
+    expect(await store.getMutation('mutation-1')).toMatchObject({ state: 'pending' });
+  });
+
   it('replays queued mutations on initialization in creation order', async () => {
     const persistence = new MemoryPersistence();
     const store = new NotesDraftStore(persistence);
@@ -370,7 +524,7 @@ describe('personal notes autosave', () => {
     const saveNote = vi.fn<AutosaveNotesClient['saveNote']>()
       .mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }))
       .mockResolvedValueOnce(saved(9));
-    const { controller, store } = setup(saveNote);
+    const { controller, store, persistence } = setup(saveNote);
 
     const oldSave = controller.flush(localDraft({ clientMutationId: 'old', content: doc('旧内容') }));
     await vi.waitFor(() => expect(saveNote).toHaveBeenCalledTimes(1));
@@ -380,6 +534,7 @@ describe('personal notes autosave', () => {
     expect(await store.getDraft('note-1')).toMatchObject({ content: doc('新内容'), clientMutationId: 'new', baseVersion: 8 });
     await newSave;
     expect(saveNote.mock.calls[1]?.[1]).toMatchObject({ content: doc('新内容'), baseVersion: 8 });
+    expect(persistence.acknowledgeAndRebaseCalls).toBe(2);
   });
 
   it('removes timers and online listeners when disposed', async () => {
@@ -393,5 +548,49 @@ describe('personal notes autosave', () => {
 
     expect(events.listeners.size).toBe(0);
     expect(saveNote).not.toHaveBeenCalled();
+  });
+});
+
+describe('personal notes Dexie migration', () => {
+  it('upgrades v1 records to version 2 and strips every non-allowlisted field', async () => {
+    const indexedDB = new IDBFactory();
+    const databaseName = `a3-notes-migration-${crypto.randomUUID()}`;
+    const options = { indexedDB, IDBKeyRange };
+    const legacy = new Dexie(databaseName, options);
+    legacy.version(1).stores({
+      drafts: 'noteId,userId,updatedAt',
+      mutations: 'clientMutationId,userId,noteId,createdAt',
+    });
+    await legacy.open();
+    const content = doc('迁移后保留');
+    const base = {
+      userId: 'opaque-user-a', noteId: 'note-1', content, baseVersion: 3,
+      clientMutationId: 'legacy-mutation', createdAt: now(), updatedAt: now(),
+      title: '必须移除', contentText: '必须移除', unknownSecret: '必须移除',
+    };
+    await legacy.table('drafts').put(base);
+    await legacy.table('mutations').put({ ...base, state: 'pending', extraMetadata: { secret: true } });
+    legacy.close();
+
+    const upgraded = new NotesDraftDatabase(databaseName, options);
+    await upgraded.open();
+    const draft = await upgraded.drafts.get('note-1');
+    const mutation = await upgraded.mutations.get('legacy-mutation');
+
+    expect(upgraded.verno).toBe(2);
+    expect(draft?.content).toEqual(content);
+    expect(Object.keys(draft ?? {}).sort()).toEqual([
+      'baseVersion', 'clientMutationId', 'content', 'createdAt', 'noteId', 'updatedAt', 'userId',
+    ]);
+    expect(Object.keys(mutation ?? {}).sort()).toEqual([
+      'baseVersion', 'clientMutationId', 'content', 'createdAt', 'noteId', 'state', 'updatedAt', 'userId',
+    ]);
+    upgraded.close();
+
+    const reopened = new NotesDraftDatabase(databaseName, options);
+    await reopened.open();
+    expect(await reopened.drafts.get('note-1')).toEqual(draft);
+    expect(await reopened.mutations.get('legacy-mutation')).toEqual(mutation);
+    await reopened.delete();
   });
 });

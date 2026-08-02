@@ -25,6 +25,7 @@ export type AutosaveResult =
   | { kind: 'saved'; noteId: string; resultingVersion: number; idempotent: boolean }
   | { kind: 'queued'; noteId: string; reason: 'offline' | 'server' | 'conflict-blocked' | 'version-mismatch' | 'account-switch-required' }
   | { kind: 'conflict'; noteId: string; serverVersion: number; serverNote: NoteConflict['serverNote'] }
+  | { kind: 'permanent-error'; noteId: string; status: number; code?: string; error: string }
   | { kind: 'disposed'; noteId: string };
 
 interface NotesAutosaveControllerOptions {
@@ -79,14 +80,16 @@ export class NotesAutosaveController {
 
   async schedule(draft: EditableNoteDraft) {
     if (this.disposed) return;
-    if (this.acknowledgedMutationIds.has(draft.clientMutationId)) return;
-    if (!await this.persistDraft(draft)) return;
-    const previous = this.scheduled.get(draft.noteId);
-    if (previous) {
-      clearTimeout(previous.handle);
-      if (previous.mutationId !== draft.clientMutationId) await this.store.discardMutation(previous.mutationId);
+    const previous = this.cancelScheduled(draft.noteId);
+    if (this.acknowledgedMutationIds.has(draft.clientMutationId)) {
+      await this.discardSuperseded(previous, draft.clientMutationId);
+      return;
     }
+    if (!await this.persistDraft(draft)) return;
+    await this.discardSuperseded(previous, draft.clientMutationId);
     const handle = setTimeout(() => {
+      const scheduled = this.scheduled.get(draft.noteId);
+      if (scheduled?.mutationId !== draft.clientMutationId) return;
       this.scheduled.delete(draft.noteId);
       void this.enqueue(draft.noteId, draft.clientMutationId);
     }, this.debounceMs);
@@ -95,12 +98,20 @@ export class NotesAutosaveController {
 
   flush(draft: EditableNoteDraft): Promise<AutosaveResult> {
     if (this.disposed) return Promise.resolve({ kind: 'disposed', noteId: draft.noteId });
+    const previous = this.cancelScheduled(draft.noteId);
     if (this.acknowledgedMutationIds.has(draft.clientMutationId)) {
-      return Promise.resolve({ kind: 'saved', noteId: draft.noteId, resultingVersion: draft.baseVersion + 1, idempotent: true });
+      return this.discardSuperseded(previous, draft.clientMutationId).then(() => ({
+        kind: 'saved',
+        noteId: draft.noteId,
+        resultingVersion: draft.baseVersion + 1,
+        idempotent: true,
+      }));
     }
-    return this.persistDraft(draft).then((persisted) => persisted
-      ? this.enqueue(draft.noteId, draft.clientMutationId)
-      : { kind: 'queued', noteId: draft.noteId, reason: 'account-switch-required' });
+    return this.persistDraft(draft).then(async (persisted) => {
+      if (!persisted) return { kind: 'queued', noteId: draft.noteId, reason: 'account-switch-required' };
+      await this.discardSuperseded(previous, draft.clientMutationId);
+      return this.enqueue(draft.noteId, draft.clientMutationId);
+    });
   }
 
   async resume(): Promise<AutosaveResult[]> {
@@ -167,6 +178,15 @@ export class NotesAutosaveController {
     const mutation = await this.store.getMutation(mutationId);
     if (!mutation) return { kind: 'saved', noteId, resultingVersion: 0, idempotent: true };
     if (mutation.state === 'conflict') return { kind: 'queued', noteId, reason: 'conflict-blocked' };
+    if (mutation.state === 'rejected') {
+      return {
+        kind: 'permanent-error',
+        noteId,
+        status: mutation.status ?? 400,
+        code: mutation.errorCode,
+        error: '请求无法自动重试',
+      };
+    }
     const abortController = new AbortController();
     this.activeRequests.add(abortController);
     let response: ApiResult<SaveNoteSuccess>;
@@ -180,7 +200,8 @@ export class NotesAutosaveController {
     }
     if (!response.success) {
       if (isConflict(response)) {
-        await this.store.markConflict(mutation.clientMutationId, response.serverVersion);
+        await this.persistenceChains.get(noteId);
+        await this.store.markNoteConflict(noteId, response.serverVersion);
         return {
           kind: 'conflict',
           noteId,
@@ -188,13 +209,28 @@ export class NotesAutosaveController {
           serverNote: response.serverNote,
         };
       }
-      return { kind: 'queued', noteId, reason: response.status && response.status >= 500 ? 'server' : 'offline' };
+      if (isPermanentClientFailure(response.status)) {
+        await this.store.markRejected(mutation.clientMutationId, response.status, response.code);
+        return {
+          kind: 'permanent-error',
+          noteId,
+          status: response.status,
+          code: response.code,
+          error: response.error,
+        };
+      }
+      return {
+        kind: 'queued',
+        noteId,
+        reason: response.status !== undefined ? 'server' : 'offline',
+      };
     }
     if (response.resultingVersion !== mutation.baseVersion + 1) {
       return { kind: 'queued', noteId, reason: 'version-mismatch' };
     }
     await this.persistenceChains.get(noteId);
-    await this.store.acknowledge(mutation, response.resultingVersion);
+    const acknowledged = await this.store.acknowledge(mutation, response.resultingVersion);
+    if (!acknowledged) return { kind: 'queued', noteId, reason: 'version-mismatch' };
     this.acknowledgedMutationIds.add(mutation.clientMutationId);
     return {
       kind: 'saved',
@@ -222,6 +258,20 @@ export class NotesAutosaveController {
     });
     return current;
   }
+
+  private cancelScheduled(noteId: string) {
+    const scheduled = this.scheduled.get(noteId);
+    if (!scheduled) return undefined;
+    clearTimeout(scheduled.handle);
+    this.scheduled.delete(noteId);
+    return scheduled;
+  }
+
+  private async discardSuperseded(scheduled: ScheduledSave | undefined, currentMutationId: string) {
+    if (scheduled && scheduled.mutationId !== currentMutationId) {
+      await this.store.discardMutation(scheduled.mutationId);
+    }
+  }
 }
 
 function requestFromMutation(mutation: PendingNoteMutation): SaveNoteInput {
@@ -241,6 +291,10 @@ function isConflict(result: Exclude<ApiResult<SaveNoteSuccess>, { success: true 
 
 function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function isPermanentClientFailure(status: number | undefined): status is number {
+  return status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 
 function browserOnlineEvents(): OnlineEventSource | undefined {

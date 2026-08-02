@@ -1,4 +1,4 @@
-import Dexie, { type Table } from 'dexie';
+import Dexie, { type DexieOptions, type Table } from 'dexie';
 
 import type { NoteContent } from './types';
 
@@ -13,9 +13,12 @@ export interface NoteDraft {
 }
 
 export interface PendingNoteMutation extends NoteDraft {
-  state: 'pending' | 'conflict';
+  state: 'pending' | 'conflict' | 'rejected';
   conflictAt?: string;
   serverVersion?: number;
+  rejectedAt?: string;
+  status?: number;
+  errorCode?: string;
 }
 
 export interface PersistableNoteDraft {
@@ -43,10 +46,20 @@ export interface NotesDraftPersistence {
   getMutation(clientMutationId: string): Promise<PendingNoteMutation | undefined>;
   putDraftAndMutation(draft: NoteDraft, mutation: PendingNoteMutation): Promise<void>;
   deleteAccounts(userIds: string[]): Promise<void>;
-  acknowledge(userId: string, mutation: PendingNoteMutation): Promise<void>;
-  rebaseNewer(userId: string, mutation: PendingNoteMutation, resultingVersion: number): Promise<void>;
-  markConflict(userId: string, clientMutationId: string, conflictAt: string, serverVersion: number): Promise<void>;
-  resetConflict(userId: string, clientMutationId: string, baseVersion: number): Promise<void>;
+  acknowledgeAndRebase(userId: string, mutation: PendingNoteMutation, resultingVersion: number): Promise<boolean>;
+  markNoteConflict(userId: string, noteId: string, conflictAt: string, serverVersion: number): Promise<void>;
+  markRejected(
+    userId: string,
+    clientMutationId: string,
+    rejectedAt: string,
+    status: number,
+    errorCode?: string,
+  ): Promise<void>;
+  resolveNoteConflict(
+    userId: string,
+    noteId: string,
+    resolution: { kind: 'retry'; baseVersion: number } | { kind: 'discard' },
+  ): Promise<boolean>;
   discardMutation(clientMutationId: string): Promise<void>;
   clear(): Promise<void>;
 }
@@ -55,11 +68,24 @@ export class NotesDraftDatabase extends Dexie {
   drafts!: Table<NoteDraft, string>;
   mutations!: Table<PendingNoteMutation, string>;
 
-  constructor(name = 'a3-personal-notes') {
-    super(name);
+  constructor(name = 'a3-personal-notes', options?: DexieOptions) {
+    super(name, options);
     this.version(1).stores({
       drafts: 'noteId,userId,updatedAt',
       mutations: 'clientMutationId,userId,noteId,createdAt',
+    });
+    this.version(2).stores({
+      drafts: 'noteId,userId,updatedAt',
+      mutations: 'clientMutationId,userId,noteId,createdAt',
+    }).upgrade(async (transaction) => {
+      const drafts = transaction.table('drafts');
+      const mutations = transaction.table('mutations');
+      const legacyDrafts = await drafts.toArray() as unknown[];
+      const legacyMutations = await mutations.toArray() as unknown[];
+      await drafts.clear();
+      await mutations.clear();
+      await drafts.bulkPut(legacyDrafts.map(sanitizeDraftRecord));
+      await mutations.bulkPut(legacyMutations.map(sanitizeMutationRecord));
     });
   }
 }
@@ -75,7 +101,18 @@ export class DexieNotesDraftPersistence implements NotesDraftPersistence {
   async putDraftAndMutation(draft: NoteDraft, mutation: PendingNoteMutation) {
     await this.database.transaction('rw', this.database.drafts, this.database.mutations, async () => {
       await this.database.drafts.put(draft);
-      await this.database.mutations.put(mutation);
+      const noteMutations = await this.database.mutations.where('noteId').equals(mutation.noteId).toArray();
+      const block = noteMutations.find(
+        (item) => item.userId === mutation.userId && item.state === 'conflict',
+      );
+      await this.database.mutations.put(block && mutation.state === 'pending'
+        ? {
+            ...mutation,
+            state: 'conflict',
+            conflictAt: block.conflictAt,
+            serverVersion: block.serverVersion,
+          }
+        : mutation);
     });
   }
 
@@ -92,58 +129,94 @@ export class DexieNotesDraftPersistence implements NotesDraftPersistence {
     });
   }
 
-  async acknowledge(userId: string, mutation: PendingNoteMutation) {
-    await this.database.transaction('rw', this.database.drafts, this.database.mutations, async () => {
-      await this.database.mutations.delete(mutation.clientMutationId);
+  async acknowledgeAndRebase(userId: string, mutation: PendingNoteMutation, resultingVersion: number) {
+    const result = await this.database.transaction('rw', this.database.drafts, this.database.mutations, async () => {
+      const stored = await this.database.mutations.get(mutation.clientMutationId);
+      if (
+        stored?.userId !== userId
+        || stored.noteId !== mutation.noteId
+        || stored.createdAt !== mutation.createdAt
+        || stored.baseVersion !== mutation.baseVersion
+        || stored.state !== 'pending'
+      ) return false;
+      const noteMutations = await this.database.mutations.where('noteId').equals(stored.noteId).toArray();
+      const newer = noteMutations.filter(
+        (item) => item.userId === userId && mutationOrder(item, stored) > 0,
+      );
+      await this.database.mutations.delete(stored.clientMutationId);
+      await Promise.all(newer.map((item) => this.database.mutations.put({ ...item, baseVersion: resultingVersion })));
       const draft = await this.database.drafts.get(mutation.noteId);
       if (draft?.userId === userId && draft.clientMutationId === mutation.clientMutationId) {
         await this.database.drafts.delete(mutation.noteId);
-      }
-    });
-  }
-
-  async rebaseNewer(userId: string, mutation: PendingNoteMutation, resultingVersion: number) {
-    await this.database.transaction('rw', this.database.drafts, this.database.mutations, async () => {
-      const pending = await this.database.mutations.where('noteId').equals(mutation.noteId).toArray();
-      const newer = pending.filter((item) => item.userId === userId && mutationOrder(item, mutation) > 0);
-      await Promise.all(newer.map((item) => this.database.mutations.put({ ...item, baseVersion: resultingVersion })));
-      const draft = await this.database.drafts.get(mutation.noteId);
-      if (draft?.userId === userId && draft.clientMutationId !== mutation.clientMutationId) {
+      } else if (draft?.userId === userId) {
         await this.database.drafts.put({ ...draft, baseVersion: resultingVersion });
       }
+      return true;
+    });
+    return result;
+  }
+
+  async markNoteConflict(userId: string, noteId: string, conflictAt: string, serverVersion: number) {
+    await this.database.transaction('rw', this.database.mutations, async () => {
+      const noteMutations = await this.database.mutations.where('noteId').equals(noteId).toArray();
+      const pending = noteMutations.filter((item) => item.userId === userId && item.state === 'pending');
+      await Promise.all(pending.map((mutation) => this.database.mutations.put({
+        ...mutation,
+        state: 'conflict',
+        conflictAt,
+        serverVersion,
+      })));
     });
   }
 
-  async markConflict(userId: string, clientMutationId: string, conflictAt: string, serverVersion: number) {
+  async markRejected(
+    userId: string,
+    clientMutationId: string,
+    rejectedAt: string,
+    status: number,
+    errorCode?: string,
+  ) {
     await this.database.transaction('rw', this.database.mutations, async () => {
       const mutation = await this.database.mutations.get(clientMutationId);
-      if (mutation?.userId === userId) {
-        await this.database.mutations.put({
-          ...mutation,
-          state: 'conflict',
-          conflictAt,
-          serverVersion,
-        });
-      }
+      if (mutation?.userId !== userId || mutation.state !== 'pending') return;
+      await this.database.mutations.put({
+        ...mutation,
+        state: 'rejected',
+        rejectedAt,
+        status,
+        errorCode,
+      });
     });
   }
 
-  async resetConflict(userId: string, clientMutationId: string, baseVersion: number) {
-    await this.database.transaction('rw', this.database.drafts, this.database.mutations, async () => {
-      const mutation = await this.database.mutations.get(clientMutationId);
-      if (mutation?.userId !== userId) return;
-      await this.database.mutations.put({
+  async resolveNoteConflict(
+    userId: string,
+    noteId: string,
+    resolution: { kind: 'retry'; baseVersion: number } | { kind: 'discard' },
+  ) {
+    const result = await this.database.transaction('rw', this.database.drafts, this.database.mutations, async () => {
+      const noteMutations = await this.database.mutations.where('noteId').equals(noteId).toArray();
+      const conflicts = noteMutations.filter((item) => item.userId === userId && item.state === 'conflict');
+      if (conflicts.length === 0) return false;
+      const draft = await this.database.drafts.get(noteId);
+      if (resolution.kind === 'discard') {
+        await this.database.mutations.bulkDelete(conflicts.map((item) => item.clientMutationId));
+        if (draft?.userId === userId) await this.database.drafts.delete(noteId);
+        return true;
+      }
+      await Promise.all(conflicts.map((mutation) => this.database.mutations.put({
         ...mutation,
         state: 'pending',
-        baseVersion,
+        baseVersion: resolution.baseVersion,
         conflictAt: undefined,
         serverVersion: undefined,
-      });
-      const draft = await this.database.drafts.get(mutation.noteId);
-      if (draft?.userId === userId && draft.clientMutationId === clientMutationId) {
-        await this.database.drafts.put({ ...draft, baseVersion });
+      })));
+      if (draft?.userId === userId) {
+        await this.database.drafts.put({ ...draft, baseVersion: resolution.baseVersion });
       }
+      return true;
     });
+    return result;
   }
 
   async discardMutation(clientMutationId: string) {
@@ -232,8 +305,8 @@ export class NotesDraftStore {
       createdAt,
       updatedAt: input.updatedAt,
     };
-    const retryState = existing?.userId === userId && existing.state === 'conflict'
-      ? { state: existing.state, conflictAt: existing.conflictAt, serverVersion: existing.serverVersion }
+    const retryState = existing?.userId === userId && existing.state !== 'pending'
+      ? mutationRetryState(existing)
       : { state: 'pending' as const };
     await this.persistence.putDraftAndMutation(record, { ...record, ...retryState });
   }
@@ -254,14 +327,13 @@ export class NotesDraftStore {
     if (!this.userId) return [];
     const mutations = await this.persistence.allMutations();
     return mutations
-      .filter((item) => item.userId === this.userId && item.state !== 'conflict')
+      .filter((item) => item.userId === this.userId && item.state === 'pending')
       .sort(mutationOrder);
   }
 
   async acknowledge(mutation: PendingNoteMutation, resultingVersion: number) {
     const userId = this.requireUser();
-    await this.persistence.rebaseNewer(userId, mutation, resultingVersion);
-    await this.persistence.acknowledge(userId, mutation);
+    return this.persistence.acknowledgeAndRebase(userId, mutation, resultingVersion);
   }
 
   async discardMutation(clientMutationId: string) {
@@ -269,23 +341,23 @@ export class NotesDraftStore {
     if (mutation) await this.persistence.discardMutation(clientMutationId);
   }
 
-  async markConflict(clientMutationId: string, serverVersion: number) {
+  async markNoteConflict(noteId: string, serverVersion: number) {
     const userId = this.requireUser();
-    await this.persistence.markConflict(userId, clientMutationId, new Date().toISOString(), serverVersion);
+    await this.persistence.markNoteConflict(userId, noteId, new Date().toISOString(), serverVersion);
   }
 
-  async resolveConflict(
-    clientMutationId: string,
+  async markRejected(clientMutationId: string, status: number, errorCode?: string) {
+    const userId = this.requireUser();
+    await this.persistence.markRejected(userId, clientMutationId, new Date().toISOString(), status, errorCode);
+  }
+
+  async resolveNoteConflict(
+    noteId: string,
     resolution: { kind: 'retry'; baseVersion: number } | { kind: 'discard' },
   ) {
     const userId = this.requireUser();
-    const mutation = await this.getMutation(clientMutationId);
-    if (!mutation || mutation.state !== 'conflict') throw new Error('Conflict mutation not found');
-    if (resolution.kind === 'discard') {
-      await this.persistence.acknowledge(userId, mutation);
-      return;
-    }
-    await this.persistence.resetConflict(userId, clientMutationId, resolution.baseVersion);
+    const resolved = await this.persistence.resolveNoteConflict(userId, noteId, resolution);
+    if (!resolved) throw new Error('Conflict note not found');
   }
 
   private requireUser() {
@@ -307,4 +379,60 @@ export class NotesDraftStore {
 
 function mutationOrder(left: PendingNoteMutation, right: PendingNoteMutation) {
   return left.createdAt.localeCompare(right.createdAt) || left.clientMutationId.localeCompare(right.clientMutationId);
+}
+
+function mutationRetryState(mutation: PendingNoteMutation): Pick<
+  PendingNoteMutation,
+  'state' | 'conflictAt' | 'serverVersion' | 'rejectedAt' | 'status' | 'errorCode'
+> {
+  return {
+    state: mutation.state,
+    ...(mutation.conflictAt ? { conflictAt: mutation.conflictAt } : {}),
+    ...(mutation.serverVersion !== undefined ? { serverVersion: mutation.serverVersion } : {}),
+    ...(mutation.rejectedAt ? { rejectedAt: mutation.rejectedAt } : {}),
+    ...(mutation.status !== undefined ? { status: mutation.status } : {}),
+    ...(mutation.errorCode ? { errorCode: mutation.errorCode } : {}),
+  };
+}
+
+function sanitizeDraftRecord(value: unknown): NoteDraft {
+  const record = asRecord(value);
+  return {
+    userId: stringValue(record.userId),
+    noteId: stringValue(record.noteId),
+    content: asRecord(record.content),
+    baseVersion: numberValue(record.baseVersion),
+    clientMutationId: stringValue(record.clientMutationId),
+    createdAt: stringValue(record.createdAt),
+    updatedAt: stringValue(record.updatedAt),
+  };
+}
+
+function sanitizeMutationRecord(value: unknown): PendingNoteMutation {
+  const record = asRecord(value);
+  const draft = sanitizeDraftRecord(record);
+  const state = record.state === 'conflict' || record.state === 'rejected' ? record.state : 'pending';
+  return {
+    ...draft,
+    state,
+    ...(state === 'conflict' && typeof record.conflictAt === 'string' ? { conflictAt: record.conflictAt } : {}),
+    ...(state === 'conflict' && typeof record.serverVersion === 'number' ? { serverVersion: record.serverVersion } : {}),
+    ...(state === 'rejected' && typeof record.rejectedAt === 'string' ? { rejectedAt: record.rejectedAt } : {}),
+    ...(state === 'rejected' && typeof record.status === 'number' ? { status: record.status } : {}),
+    ...(state === 'rejected' && typeof record.errorCode === 'string' ? { errorCode: record.errorCode } : {}),
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : '';
+}
+
+function numberValue(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
