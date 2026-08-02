@@ -54,7 +54,10 @@ export function preloadOpenCvDocumentDetector() {
   return openCvPromise;
 }
 
-export function detectDocumentRegions(video: HTMLVideoElement): RawBrowserDetectionCandidate[] {
+export function detectDocumentRegions(
+  video: HTMLVideoElement,
+  source: 'camera' | 'screen' = 'camera',
+): RawBrowserDetectionCandidate[] {
   const cv = openCvRuntime;
   if (!cv || !video.videoWidth || !video.videoHeight) return [];
   const canvas = document.createElement('canvas');
@@ -65,7 +68,7 @@ export function detectDocumentRegions(video: HTMLVideoElement): RawBrowserDetect
   if (!context) return [];
   context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-  const source = cv.imread(canvas);
+  const sourceMat = cv.imread(canvas);
   const gray = new cv.Mat();
   const blurred = new cv.Mat();
   const edges = new cv.Mat();
@@ -73,7 +76,7 @@ export function detectDocumentRegions(video: HTMLVideoElement): RawBrowserDetect
   const hierarchy = new cv.Mat();
   const contourCandidates: DocumentContourCandidate[] = [];
   try {
-    cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY);
+    cv.cvtColor(sourceMat, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
     cv.Canny(blurred, edges, 60, 160);
     cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
@@ -99,7 +102,7 @@ export function detectDocumentRegions(video: HTMLVideoElement): RawBrowserDetect
       }
     }
   } finally {
-    source.delete();
+    sourceMat.delete();
     gray.delete();
     blurred.delete();
     edges.delete();
@@ -107,7 +110,7 @@ export function detectDocumentRegions(video: HTMLVideoElement): RawBrowserDetect
     hierarchy.delete();
   }
 
-  return buildDocumentProposals(contourCandidates, { width: canvas.width, height: canvas.height })
+  return buildDocumentProposals(contourCandidates, { width: canvas.width, height: canvas.height, source })
     .map((candidate) => ({
       category: 'document',
       confidence: candidate.confidence,

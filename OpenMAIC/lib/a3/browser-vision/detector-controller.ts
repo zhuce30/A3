@@ -24,6 +24,7 @@ type ControllerOptions = {
   fps?: number;
   minimumConfidence?: number;
   maxResults?: number;
+  candidateHoldMs?: number;
   onCandidates?: (candidates: BrowserDetectionCandidate[]) => void;
   onStateChange?: (state: BrowserDetectionState) => void;
 };
@@ -74,14 +75,19 @@ export class RealtimeObjectDetectionController {
   private context = { active: true, hidden: false, locked: false };
   private inFlight = false;
   private lastStartedAt = Number.NEGATIVE_INFINITY;
+  private lastCandidateAt = Number.NEGATIVE_INFINITY;
+  private lastCandidateSource: BrowserDetectionFrame['source'] | null = null;
+  private lastCandidates: BrowserDetectionCandidate[] = [];
   private disposed = false;
   private readonly intervalMs: number;
+  private readonly candidateHoldMs: number;
 
   constructor(
     private readonly adapter: BrowserObjectDetectorAdapter,
     private readonly options: ControllerOptions = {},
   ) {
     this.intervalMs = 1_000 / normalizeDetectionFps(options.fps);
+    this.candidateHoldMs = Math.min(3_000, Math.max(0, options.candidateHoldMs ?? 1_200));
   }
 
   getState() {
@@ -132,7 +138,8 @@ export class RealtimeObjectDetectionController {
     try {
       const rawCandidates = await this.adapter.detect(frame, timestampMs);
       if (this.disposed) return rejected('not_ready');
-      const candidates = sanitizeDetectionCandidates(rawCandidates, this.options);
+      const detectedCandidates = sanitizeDetectionCandidates(rawCandidates, this.options);
+      const candidates = this.resolveVisibleCandidates(detectedCandidates, frame.source, timestampMs);
       this.options.onCandidates?.(candidates);
       return { accepted: true, candidates };
     } catch (error) {
@@ -152,8 +159,33 @@ export class RealtimeObjectDetectionController {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.lastCandidates = [];
+    this.lastCandidateSource = null;
+    this.lastCandidateAt = Number.NEGATIVE_INFINITY;
     this.adapter.dispose();
     this.setState({ status: 'idle', manualSelectionAvailable: true });
+  }
+
+  private resolveVisibleCandidates(
+    candidates: BrowserDetectionCandidate[],
+    source: BrowserDetectionFrame['source'],
+    timestampMs: number,
+  ) {
+    if (source !== this.lastCandidateSource) {
+      this.lastCandidates = [];
+      this.lastCandidateAt = Number.NEGATIVE_INFINITY;
+      this.lastCandidateSource = source;
+    }
+    if (candidates.length > 0) {
+      this.lastCandidates = candidates;
+      this.lastCandidateAt = timestampMs;
+      return candidates;
+    }
+    if (timestampMs - this.lastCandidateAt <= this.candidateHoldMs) {
+      return this.lastCandidates;
+    }
+    this.lastCandidates = [];
+    return [];
   }
 }
 

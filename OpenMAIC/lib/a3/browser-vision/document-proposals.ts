@@ -13,14 +13,19 @@ export type DocumentContourCandidate = {
 
 export function buildDocumentProposals(
   contours: DocumentContourCandidate[],
-  frame: { width: number; height: number },
+  frame: { width: number; height: number; source?: 'camera' | 'screen' },
 ): BrowserDetectionCandidate[] {
   if (frame.width <= 0 || frame.height <= 0) return [];
   const frameArea = frame.width * frame.height;
+  const isScreen = frame.source === 'screen';
   return contours
-    .filter((candidate) => candidate.convex && candidate.vertices === 4)
-    .filter((candidate) => candidate.area / frameArea >= 0.05 && candidate.area / frameArea <= 0.92)
-    .filter((candidate) => candidate.width / candidate.height >= 0.45 && candidate.width / candidate.height <= 2.2)
+    .filter((candidate) => candidate.convex && (
+      candidate.vertices === 4
+      || (isScreen && candidate.vertices >= 4 && candidate.vertices <= 6)
+    ))
+    .filter((candidate) => candidate.area / frameArea >= (isScreen ? 0.03 : 0.05) && candidate.area / frameArea <= (isScreen ? 0.96 : 0.92))
+    .filter((candidate) => candidate.width / candidate.height >= (isScreen ? 0.35 : 0.45) && candidate.width / candidate.height <= (isScreen ? 3 : 2.2))
+    .filter((candidate) => !isScreen || candidate.area / Math.max(1, candidate.width * candidate.height) >= 0.68)
     .sort((left, right) => right.area - left.area)
     .flatMap((candidate, index): BrowserDetectionCandidate[] => {
       const rectangularity = Math.min(1, candidate.area / Math.max(1, candidate.width * candidate.height));

@@ -78,6 +78,53 @@ describe('A3 browser object detection controller', () => {
     await accepted;
   });
 
+  it('keeps the latest candidates visible through brief detector misses', async () => {
+    const person: RawBrowserDetectionCandidate = {
+      category: 'person',
+      confidence: 0.91,
+      region: { x: 0.1, y: 0.1, width: 0.4, height: 0.8 },
+    };
+    const detect = vi.fn()
+      .mockResolvedValueOnce([person])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const onCandidates = vi.fn();
+    const controller = new RealtimeObjectDetectionController(createAdapter(detect), {
+      candidateHoldMs: 1_000,
+      onCandidates,
+    });
+    await controller.enable();
+
+    await controller.detect(createFrame(), 1_000);
+    await controller.detect(createFrame(), 1_500);
+    await controller.detect(createFrame(), 2_100);
+
+    expect(onCandidates).toHaveBeenNthCalledWith(1, [expect.objectContaining({ category: 'person' })]);
+    expect(onCandidates).toHaveBeenNthCalledWith(2, [expect.objectContaining({ category: 'person' })]);
+    expect(onCandidates).toHaveBeenNthCalledWith(3, []);
+  });
+
+  it('does not carry held candidates from camera into screen sharing', async () => {
+    const detect = vi.fn()
+      .mockResolvedValueOnce([{
+        category: 'person',
+        confidence: 0.91,
+        region: { x: 0.1, y: 0.1, width: 0.4, height: 0.8 },
+      }])
+      .mockResolvedValueOnce([]);
+    const onCandidates = vi.fn();
+    const controller = new RealtimeObjectDetectionController(createAdapter(detect), {
+      candidateHoldMs: 1_000,
+      onCandidates,
+    });
+    await controller.enable();
+
+    await controller.detect(createFrame('camera'), 1_000);
+    await controller.detect(createFrame('screen'), 1_500);
+
+    expect(onCandidates).toHaveBeenLastCalledWith([]);
+  });
+
   it('stops on hidden pages, focus exit, locked selection and disposal', async () => {
     const adapter = createAdapter();
     const controller = new RealtimeObjectDetectionController(adapter);
@@ -139,6 +186,29 @@ describe('A3 document proposals', () => {
         region: expect.objectContaining({ x: 0.1875, y: 0.166667, width: 0.5625, height: 0.666667 }),
       }),
     ]);
+  });
+
+  it('accepts a conservative rectangular content region in screen sharing', () => {
+    const screenFrame = { width: 1_280, height: 720, source: 'screen' as const };
+    const proposals = buildDocumentProposals([
+      { x: 280, y: 120, width: 320, height: 180, area: 51_000, convex: true, vertices: 5 },
+    ], screenFrame);
+
+    expect(proposals).toEqual([
+      expect.objectContaining({
+        label: '可能的文档区域',
+        method: 'document_proposal',
+      }),
+    ]);
+  });
+
+  it('keeps the stricter four-corner rule for camera frames', () => {
+    const cameraFrame = { width: 1_280, height: 720, source: 'camera' as const };
+    const proposals = buildDocumentProposals([
+      { x: 280, y: 120, width: 320, height: 180, area: 51_000, convex: true, vertices: 5 },
+    ], cameraFrame);
+
+    expect(proposals).toEqual([]);
   });
 });
 

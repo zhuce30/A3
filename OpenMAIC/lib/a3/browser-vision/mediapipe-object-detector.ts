@@ -20,7 +20,10 @@ type DetectorWorkerLike = {
 type MediaPipeAdapterOptions = {
   createWorker?: () => DetectorWorkerLike;
   createBitmap?: (video: HTMLVideoElement, width: number, height: number) => Promise<ImageBitmap>;
-  detectDocuments?: (video: HTMLVideoElement) => RawBrowserDetectionCandidate[];
+  detectDocuments?: (
+    video: HTMLVideoElement,
+    source: BrowserDetectionFrame['source'],
+  ) => RawBrowserDetectionCandidate[];
   loadTimeoutMs?: number;
 };
 
@@ -220,7 +223,7 @@ export function createMediaPipeObjectDetectorAdapter(
         }
       });
       const shouldDetectDocument = timestampMs - lastDocumentDetectionAt >= 1_000;
-      const documentCandidates = shouldDetectDocument ? detectDocuments(frame.video) : [];
+      const documentCandidates = shouldDetectDocument ? detectDocuments(frame.video, frame.source) : [];
       if (shouldDetectDocument) lastDocumentDetectionAt = timestampMs;
       return [...await objectCandidates, ...documentCandidates];
     },
