@@ -1,15 +1,31 @@
 from __future__ import annotations
 
+import hashlib
 import unicodedata
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models.signals import m2m_changed
+from django.dispatch import receiver
 from django.utils import timezone
+
+from backend.apps.notes.validators import validate_audit_metadata, validate_relative_path
 
 
 def normalize_tag_name(value: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+    return unicodedata.normalize("NFKC", value).strip().casefold()
+
+
+class ValidatedModel(models.Model):
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs) -> None:
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class Notebook(models.Model):
@@ -27,11 +43,12 @@ class Notebook(models.Model):
         indexes = [models.Index(fields=["user", "is_archived", "sort_order"], name="idx_note_book_user_sort")]
 
 
-class NoteTag(models.Model):
+class NoteTag(ValidatedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="note_tags")
     name = models.CharField(max_length=64)
-    normalized_name = models.CharField(max_length=64, editable=False)
+    normalized_name = models.CharField(max_length=255, editable=False)
+    normalized_key = models.CharField(max_length=64, editable=False)
     color = models.CharField(max_length=32, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -39,18 +56,22 @@ class NoteTag(models.Model):
     class Meta:
         db_table = "a3_note_tags"
         ordering = ["normalized_name", "created_at"]
-        indexes = [models.Index(fields=["user", "name"], name="idx_note_tag_user_name")]
+        indexes = [models.Index(fields=["user", "normalized_name"], name="idx_note_tag_user_norm")]
         constraints = [
-            models.UniqueConstraint(fields=["user", "normalized_name"], name="uniq_note_tag_user_norm")
+            models.UniqueConstraint(fields=["user", "normalized_key"], name="uniq_note_tag_user_key")
         ]
 
     def save(self, *args, **kwargs) -> None:
-        self.name = self.name.strip()
+        self.name = unicodedata.normalize("NFKC", self.name).strip()
         self.normalized_name = normalize_tag_name(self.name)
+        self.normalized_key = hashlib.sha256(self.normalized_name.encode("utf-8")).hexdigest()
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "name" in update_fields:
+            kwargs["update_fields"] = set(update_fields) | {"normalized_name", "normalized_key"}
         super().save(*args, **kwargs)
 
 
-class Note(models.Model):
+class Note(ValidatedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="personal_notes")
     notebook = models.ForeignKey(
@@ -79,6 +100,10 @@ class Note(models.Model):
             models.Index(fields=["user", "notebook", "deleted_at"], name="idx_note_user_book_deleted"),
         ]
 
+    def clean(self) -> None:
+        if self.notebook_id and self.user_id and self.notebook.user_id != self.user_id:
+            raise ValidationError({"notebook": "Notebook must belong to the note owner."})
+
 
 class NoteRevision(models.Model):
     class Source(models.TextChoices):
@@ -104,7 +129,7 @@ class NoteRevision(models.Model):
         constraints = [models.UniqueConstraint(fields=["note", "version"], name="uniq_note_revision_version")]
 
 
-class NoteMutation(models.Model):
+class NoteMutation(ValidatedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="note_mutations")
     note = models.ForeignKey(Note, on_delete=models.CASCADE, related_name="mutations")
@@ -118,8 +143,12 @@ class NoteMutation(models.Model):
         indexes = [models.Index(fields=["note", "-created_at"], name="idx_note_mut_note_time")]
         constraints = [models.UniqueConstraint(fields=["user", "mutation_id"], name="uniq_note_user_mutation")]
 
+    def clean(self) -> None:
+        if self.note_id and self.user_id and self.note.user_id != self.user_id:
+            raise ValidationError({"note": "Note must belong to the mutation owner."})
 
-class NoteAttachment(models.Model):
+
+class NoteAttachment(ValidatedModel):
     class Kind(models.TextChoices):
         FILE = "file", "File"
         IMAGE = "image", "Image"
@@ -136,7 +165,7 @@ class NoteAttachment(models.Model):
     note = models.ForeignKey(Note, on_delete=models.CASCADE, related_name="attachments")
     kind = models.CharField(max_length=16, choices=Kind.choices)
     display_name = models.CharField(max_length=255)
-    relative_path = models.CharField(max_length=500, blank=True)
+    relative_path = models.CharField(max_length=500, blank=True, validators=[validate_relative_path])
     source_url = models.URLField(max_length=2048, blank=True)
     mime_type = models.CharField(max_length=255, blank=True)
     size_bytes = models.PositiveBigIntegerField(default=0)
@@ -157,6 +186,23 @@ class NoteAttachment(models.Model):
             models.Index(fields=["user", "note", "deleted_at"], name="idx_note_att_user_note"),
             models.Index(fields=["parse_status", "created_at"], name="idx_note_att_parse_time"),
         ]
+
+    def clean(self) -> None:
+        errors = {}
+        if self.note_id and self.user_id and self.note.user_id != self.user_id:
+            errors["note"] = "Note must belong to the attachment owner."
+        if self.kind == self.Kind.LINK:
+            if not self.source_url:
+                errors["source_url"] = "Link attachments require a source URL."
+            if self.relative_path:
+                errors["relative_path"] = "Link attachments cannot have a relative path."
+        elif self.kind in {self.Kind.FILE, self.Kind.IMAGE}:
+            if not self.relative_path:
+                errors["relative_path"] = "File and image attachments require a relative path."
+            if self.source_url:
+                errors["source_url"] = "File and image attachments cannot have a source URL."
+        if errors:
+            raise ValidationError(errors)
 
 
 class NoteAiSession(models.Model):
@@ -220,7 +266,7 @@ class NoteAiMessage(models.Model):
         ]
 
 
-class NoteWritebackPreview(models.Model):
+class NoteWritebackPreview(ValidatedModel):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
         APPLIED = "applied", "Applied"
@@ -243,6 +289,15 @@ class NoteWritebackPreview(models.Model):
         db_table = "a3_note_writeback_previews"
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["user", "status", "expires_at"], name="idx_note_preview_user_exp")]
+
+    def clean(self) -> None:
+        errors = {}
+        if self.session_id and self.user_id and self.session.user_id != self.user_id:
+            errors["session"] = "Session must belong to the preview owner."
+        if self.target_note_id and self.user_id and self.target_note.user_id != self.user_id:
+            errors["target_note"] = "Target note must belong to the preview owner."
+        if errors:
+            raise ValidationError(errors)
 
 
 class NoteDailyDigest(models.Model):
@@ -281,7 +336,7 @@ class NoteDailyDigest(models.Model):
         ]
 
 
-class NoteMemory(models.Model):
+class NoteMemory(ValidatedModel):
     class MemoryType(models.TextChoices):
         CORE = "core", "Core"
         EPISODIC = "episodic", "Episodic"
@@ -298,8 +353,8 @@ class NoteMemory(models.Model):
     memory_type = models.CharField(max_length=16, choices=MemoryType.choices)
     content = models.TextField()
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.CANDIDATE)
-    importance = models.FloatField(default=0.5)
-    confidence = models.FloatField(default=0.5)
+    importance = models.FloatField(default=0.5, validators=[MinValueValidator(0), MaxValueValidator(5)])
+    confidence = models.FloatField(default=0.5, validators=[MinValueValidator(0), MaxValueValidator(1)])
     source_session = models.ForeignKey(
         NoteAiSession,
         on_delete=models.SET_NULL,
@@ -336,19 +391,66 @@ class NoteMemory(models.Model):
             models.Index(fields=["user", "status", "memory_type"], name="idx_note_memory_user_state"),
             models.Index(fields=["user", "valid_until"], name="idx_note_memory_user_exp"),
         ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(importance__gte=0, importance__lte=5),
+                name="chk_note_memory_importance",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(confidence__gte=0, confidence__lte=1),
+                name="chk_note_memory_confidence",
+            ),
+        ]
+
+    def clean(self) -> None:
+        errors = {}
+        if self.source_session_id and self.user_id and self.source_session.user_id != self.user_id:
+            errors["source_session"] = "Source session must belong to the memory owner."
+        if self.source_message_id and self.user_id and self.source_message.session.user_id != self.user_id:
+            errors["source_message"] = "Source message must belong to the memory owner."
+        if (
+            self.source_session_id
+            and self.source_message_id
+            and self.source_message.session_id != self.source_session_id
+        ):
+            errors["source_message"] = "Source message must belong to the selected source session."
+        if self.valid_until is not None and self.valid_from is not None and self.valid_until <= self.valid_from:
+            errors["valid_until"] = "Validity end must be later than validity start."
+        if self.status == self.Status.CONFIRMED and self.confirmed_at is None:
+            errors["confirmed_at"] = "Confirmed memories require a confirmation timestamp."
+        if self.superseded_by_id:
+            if self.superseded_by_id == self.pk:
+                errors["superseded_by"] = "A memory cannot supersede itself."
+            elif self.user_id and self.superseded_by.user_id != self.user_id:
+                errors["superseded_by"] = "Superseding memory must belong to the same user."
+            elif self._supersession_chain_has_cycle():
+                errors["superseded_by"] = "Memory supersession cannot contain a cycle."
+        if errors:
+            raise ValidationError(errors)
+
+    def _supersession_chain_has_cycle(self) -> bool:
+        current_id = self.superseded_by_id
+        seen = {self.pk}
+        while current_id is not None:
+            if current_id in seen:
+                return True
+            seen.add(current_id)
+            current_id = type(self).objects.filter(pk=current_id).values_list("superseded_by_id", flat=True).first()
+        return False
 
     @property
     def is_usable(self) -> bool:
         now = timezone.now()
         return (
             self.status == self.Status.CONFIRMED
+            and self.confirmed_at is not None
             and self.deleted_at is None
             and self.valid_from <= now
             and (self.valid_until is None or self.valid_until > now)
         )
 
 
-class NoteExportJob(models.Model):
+class NoteExportJob(ValidatedModel):
     class Status(models.TextChoices):
         QUEUED = "queued", "Queued"
         PROCESSING = "processing", "Processing"
@@ -365,7 +467,7 @@ class NoteExportJob(models.Model):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
     format = models.CharField(max_length=16, choices=Format.choices)
     selection_snapshot = models.JSONField(default=dict, blank=True)
-    relative_path = models.CharField(max_length=500, blank=True)
+    relative_path = models.CharField(max_length=500, blank=True, validators=[validate_relative_path])
     expires_at = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
     error_message = models.TextField(blank=True)
@@ -378,13 +480,13 @@ class NoteExportJob(models.Model):
         indexes = [models.Index(fields=["user", "status", "-created_at"], name="idx_note_export_user_state")]
 
 
-class NoteAuditEvent(models.Model):
+class NoteAuditEvent(ValidatedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="note_audit_events")
     action = models.CharField(max_length=64)
     object_type = models.CharField(max_length=64)
     object_id = models.UUIDField()
-    metadata = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True, validators=[validate_audit_metadata])
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -394,3 +496,12 @@ class NoteAuditEvent(models.Model):
             models.Index(fields=["user", "-created_at"], name="idx_note_audit_user_time"),
             models.Index(fields=["object_type", "object_id"], name="idx_note_audit_object"),
         ]
+
+
+@receiver(m2m_changed, sender=Note.tags.through)
+def validate_note_tag_ownership(sender, instance, action, reverse, model, pk_set, **kwargs) -> None:
+    if action != "pre_add" or not pk_set:
+        return
+    has_mismatch = model.objects.filter(pk__in=pk_set).exclude(user_id=instance.user_id).exists()
+    if has_mismatch:
+        raise ValidationError("Notes and tags must belong to the same user.")
