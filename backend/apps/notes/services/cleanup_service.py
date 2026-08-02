@@ -10,7 +10,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from backend.apps.notes.models import Note, NoteAttachment, NoteExportJob
+from backend.apps.notes.models import Note, NoteAttachment, NoteExportJob, NotePhysicalCleanup
 from backend.apps.notes.services.attachment_service import (
     AttachmentNotFound,
     resolve_relative_path,
@@ -47,58 +47,95 @@ def _delete_export_file(relative_path: str, user_id, job_id) -> None:
         parent = parent.parent
 
 
-def _attachment_directory(snapshot: tuple[str, str, str, str, str]) -> Path | None:
-    kind, relative_path, user_id, note_id, attachment_id = snapshot
-    if kind not in {NoteAttachment.Kind.FILE, NoteAttachment.Kind.IMAGE}:
-        return None
+def _attachment_directory(
+    relative_path: str, owner_ref: str, note_ref: str, reference_id: str
+) -> Path | None:
     pure = PurePosixPath(relative_path)
-    expected_user = str(uuid.uuid5(uuid.NAMESPACE_URL, f"urn:a3:personal-notes:user:{user_id}"))
-    if len(pure.parts) != 4 or pure.parts[:3] != (
+    expected_user = str(uuid.uuid5(uuid.NAMESPACE_URL, f"urn:a3:personal-notes:user:{owner_ref}"))
+    if len(pure.parts) != 3 or pure.parts != (
         expected_user,
-        note_id,
-        attachment_id,
+        note_ref,
+        reference_id,
     ):
         return None
-    path = _contained_path(PurePosixPath(*pure.parts[:3]).as_posix())
+    path = _contained_path(pure.as_posix())
     if path is None or path.is_symlink():
         return None
     return path
 
 
-def _delete_attachment_directory(snapshot: tuple[str, str, str, str, str]) -> None:
-    directory = _attachment_directory(snapshot)
+def _delete_cleanup_target(cleanup: NotePhysicalCleanup) -> None:
+    if cleanup.kind != NotePhysicalCleanup.Kind.ATTACHMENT_DIRECTORY:
+        raise UnsafeCleanupPath("unsupported cleanup kind")
+    directory = _attachment_directory(
+        cleanup.relative_path,
+        cleanup.owner_ref,
+        str(cleanup.note_ref),
+        str(cleanup.reference_id),
+    )
     if directory is None:
-        return
+        raise UnsafeCleanupPath("unsafe attachment cleanup path")
     if not directory.exists() or not directory.is_dir():
         return
-    try:
-        for child in directory.iterdir():
-            if bool(getattr(child, "is_junction", lambda: False)()):
-                os.rmdir(child)
-            elif child.is_symlink() or child.is_file():
-                child.unlink()
-            else:
-                return
-        directory.rmdir()
-    except OSError:
-        return
+    for child in directory.iterdir():
+        if bool(getattr(child, "is_junction", lambda: False)()):
+            os.rmdir(child)
+        elif child.is_symlink() or child.is_file():
+            child.unlink()
+        else:
+            raise UnsafeCleanupPath("nested cleanup directory")
+    directory.rmdir()
+
+
+def process_physical_cleanup(cleanup_id) -> bool:
+    with transaction.atomic():
+        cleanup = NotePhysicalCleanup.objects.select_for_update().filter(pk=cleanup_id).first()
+        if cleanup is None:
+            return True
+        try:
+            _delete_cleanup_target(cleanup)
+        except OSError:
+            cleanup.status = NotePhysicalCleanup.Status.FAILED
+            cleanup.attempts = min(65535, cleanup.attempts + 1)
+            cleanup.last_attempt_at = timezone.now()
+            cleanup.error_code = "physical_cleanup_failed"
+            cleanup.error_message = "物理文件清理失败，将自动重试"
+            cleanup.save(update_fields={
+                "status", "attempts", "last_attempt_at", "error_code", "error_message", "updated_at",
+            })
+            return False
+        cleanup.delete()
+        return True
+
+
+def cleanup_pending_physical(*, limit: int | None = None) -> int:
+    limit = limit or int(settings.A3_NOTES_CLEANUP_BATCH_SIZE)
+    cleanup_ids = list(
+        NotePhysicalCleanup.objects.filter(
+            status__in=[NotePhysicalCleanup.Status.PENDING, NotePhysicalCleanup.Status.FAILED]
+        ).order_by("updated_at").values_list("id", flat=True)[:limit]
+    )
+    for cleanup_id in cleanup_ids:
+        process_physical_cleanup(cleanup_id)
+    return len(cleanup_ids)
 
 
 def register_attachment_cleanup(attachments: list[NoteAttachment]) -> None:
-    snapshots = [
-        (
-            item.kind,
-            item.relative_path,
-            str(item.user_id),
-            str(item.note_id),
-            str(item.id),
-        )
+    cleanup_ids = [
+        NotePhysicalCleanup.objects.create(
+            kind=NotePhysicalCleanup.Kind.ATTACHMENT_DIRECTORY,
+            owner_ref=str(item.user_id),
+            reference_id=item.id,
+            note_ref=item.note_id,
+            relative_path=PurePosixPath(item.relative_path).parent.as_posix(),
+        ).id
         for item in attachments
+        if item.kind in {NoteAttachment.Kind.FILE, NoteAttachment.Kind.IMAGE}
     ]
 
     def cleanup() -> None:
-        for item in snapshots:
-            _delete_attachment_directory(item)
+        for cleanup_id in cleanup_ids:
+            process_physical_cleanup(cleanup_id)
 
     transaction.on_commit(cleanup)
 
@@ -180,6 +217,7 @@ def _delete_and_finalize_export(job_id, user_id, relative_path: str, cutoff) -> 
 def cleanup_trashed_notes(*, now=None, limit: int | None = None) -> dict[str, int]:
     now = now or timezone.now()
     limit = limit or int(settings.A3_NOTES_CLEANUP_BATCH_SIZE)
+    physical_retried = cleanup_pending_physical(limit=limit)
     note_cutoff = now - timedelta(days=int(settings.A3_NOTES_TRASH_RETENTION_DAYS))
     attachment_cutoff = now - timedelta(hours=int(settings.A3_NOTES_DELETED_ATTACHMENT_RETENTION_HOURS))
     note_ids = list(
@@ -213,4 +251,8 @@ def cleanup_trashed_notes(*, now=None, limit: int | None = None) -> dict[str, in
             register_attachment_cleanup([attachment])
             attachment.delete()
             attachments_purged += 1
-    return {"notesPurged": notes_purged, "attachmentsPurged": attachments_purged}
+    return {
+        "notesPurged": notes_purged,
+        "attachmentsPurged": attachments_purged,
+        "physicalRetried": physical_retried,
+    }

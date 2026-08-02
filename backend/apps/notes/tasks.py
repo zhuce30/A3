@@ -8,6 +8,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import close_old_connections, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from backend.apps.notes.models import NoteAttachment, NoteExportJob
@@ -194,25 +195,53 @@ def _persist_parse_failure(
 
 
 @shared_task(name="notes.build_export", acks_late=True, reject_on_worker_lost=True)
-def build_export_task(job_id: str) -> dict:
+def build_export_task(job_id: str, expected_generation: int, expected_lease_token: str) -> dict:
     from backend.apps.notes.services.export_service import build_note_export
 
     close_old_connections()
     try:
-        return build_note_export(job_id)
+        return build_note_export(job_id, expected_generation, expected_lease_token)
     finally:
         close_old_connections()
 
 
 def enqueue_export(job: NoteExportJob) -> NoteExportJob:
+    with transaction.atomic():
+        queued = NoteExportJob.objects.select_for_update().filter(
+            pk=job.pk, status=NoteExportJob.Status.QUEUED
+        ).first()
+        if queued is None:
+            job.refresh_from_db()
+            return job
+        queued.run_generation += 1
+        queued.run_lease_token = uuid.uuid4()
+        queued.run_started_at = None
+        queued.enqueue_attempts = min(65535, queued.enqueue_attempts + 1)
+        queued.save(update_fields={
+            "run_generation", "run_lease_token", "run_started_at",
+            "enqueue_attempts", "updated_at",
+        })
+        generation = queued.run_generation
+        lease_token = queued.run_lease_token
     try:
-        build_export_task.delay(str(job.id))
-        NoteExportJob.objects.filter(pk=job.pk, status=NoteExportJob.Status.QUEUED).update(
-            updated_at=timezone.now()
+        build_export_task.delay(str(job.id), generation, str(lease_token))
+        NoteExportJob.objects.filter(
+            pk=job.pk,
+            status=NoteExportJob.Status.QUEUED,
+            run_generation=generation,
+            run_lease_token=lease_token,
+        ).update(
+            error_code="",
+            error_message="",
+            updated_at=timezone.now(),
         )
     except Exception:
-        NoteExportJob.objects.filter(pk=job.pk, status=NoteExportJob.Status.QUEUED).update(
-            status=NoteExportJob.Status.FAILED,
+        NoteExportJob.objects.filter(
+            pk=job.pk,
+            status=NoteExportJob.Status.QUEUED,
+            run_generation=generation,
+            run_lease_token=lease_token,
+        ).update(
             error_code="export_enqueue_failed",
             error_message="导出任务暂时无法提交，请稍后重试",
             updated_at=timezone.now(),
@@ -295,19 +324,51 @@ def _recover_stale_parse_jobs(cutoff, limit: int) -> tuple[int, int]:
     return recovered, failed
 
 
-def _recover_stale_export_jobs(cutoff, limit: int) -> tuple[int, int]:
-    stale_processing_ids = list(NoteExportJob.objects.filter(
-        status=NoteExportJob.Status.PROCESSING, updated_at__lt=cutoff
-    ).order_by("updated_at").values_list("id", flat=True)[:limit])
-    failed = NoteExportJob.objects.filter(id__in=stale_processing_ids).update(
+def _fail_stale_export_job(job_id, observed_started_at, observed_generation, observed_lease) -> bool:
+    updated = NoteExportJob.objects.filter(
+        pk=job_id,
+        status=NoteExportJob.Status.PROCESSING,
+        run_started_at=observed_started_at,
+        run_generation=observed_generation,
+        run_lease_token=observed_lease,
+    ).update(
         status=NoteExportJob.Status.FAILED,
+        run_lease_token=None,
+        run_started_at=None,
+        relative_path="",
+        output_size_bytes=0,
+        output_sha256="",
         error_code="export_stale",
         error_message="导出任务处理超时，请重新创建导出",
         updated_at=timezone.now(),
     )
-    remaining = max(0, limit - failed)
+    return bool(updated)
+
+
+def _recover_stale_export_jobs(
+    cutoff, limit: int, *, enqueue_failure_cutoff=None
+) -> tuple[int, int]:
+    stale_processing = list(
+        NoteExportJob.objects.filter(
+            status=NoteExportJob.Status.PROCESSING,
+            run_started_at__lt=cutoff,
+        ).order_by("run_started_at").values_list(
+            "id", "run_started_at", "run_generation", "run_lease_token"
+        )[:limit]
+    )
+    failed = sum(
+        _fail_stale_export_job(job_id, started_at, generation, lease)
+        for job_id, started_at, generation, lease in stale_processing
+    )
+    remaining = max(0, limit - len(stale_processing))
+    enqueue_failure_cutoff = enqueue_failure_cutoff or cutoff
+    queued_due = (
+        Q(error_code="export_enqueue_failed", updated_at__lt=enqueue_failure_cutoff)
+        | (~Q(error_code="export_enqueue_failed") & Q(updated_at__lt=cutoff))
+    )
     queued_ids = list(
-        NoteExportJob.objects.filter(status=NoteExportJob.Status.QUEUED, updated_at__lt=cutoff)
+        NoteExportJob.objects.filter(status=NoteExportJob.Status.QUEUED)
+        .filter(queued_due)
         .order_by("updated_at").values_list("id", flat=True)[:remaining]
     )
     recovered = 0
@@ -316,7 +377,7 @@ def _recover_stale_export_jobs(cutoff, limit: int) -> tuple[int, int]:
         if job is None:
             continue
         enqueue_export(job)
-        if job.status == NoteExportJob.Status.QUEUED:
+        if job.status == NoteExportJob.Status.QUEUED and not job.error_code:
             recovered += 1
         else:
             failed += 1
@@ -333,7 +394,11 @@ def cleanup_stale_jobs_task() -> dict:
     parse_cutoff = now - timedelta(minutes=parse_stale_minutes)
     export_cutoff = now - timedelta(minutes=int(settings.A3_NOTES_EXPORT_STALE_MINUTES))
     parse_recovered, parse_failed = _recover_stale_parse_jobs(parse_cutoff, limit)
-    export_recovered, export_failed = _recover_stale_export_jobs(export_cutoff, limit)
+    export_recovered, export_failed = _recover_stale_export_jobs(
+        export_cutoff,
+        limit,
+        enqueue_failure_cutoff=now - timedelta(minutes=15),
+    )
     return {
         "parseRecovered": parse_recovered,
         "parseFailed": parse_failed,

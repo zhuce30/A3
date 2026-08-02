@@ -503,6 +503,10 @@ class NoteExportJob(ValidatedModel):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
     format = models.CharField(max_length=16, choices=Format.choices)
     selection_snapshot = models.JSONField(default=dict, blank=True)
+    run_generation = models.PositiveIntegerField(default=0)
+    run_lease_token = models.UUIDField(null=True, blank=True, editable=False)
+    run_started_at = models.DateTimeField(null=True, blank=True)
+    enqueue_attempts = models.PositiveSmallIntegerField(default=0)
     relative_path = models.CharField(max_length=500, blank=True, validators=[validate_relative_path])
     output_size_bytes = models.PositiveBigIntegerField(default=0)
     output_sha256 = models.CharField(max_length=64, blank=True)
@@ -516,6 +520,34 @@ class NoteExportJob(ValidatedModel):
         db_table = "a3_note_export_jobs"
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["user", "status", "-created_at"], name="idx_note_export_user_state")]
+
+
+class NotePhysicalCleanup(ValidatedModel):
+    class Kind(models.TextChoices):
+        ATTACHMENT_DIRECTORY = "attachment_dir", "Attachment directory"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        FAILED = "failed", "Failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    kind = models.CharField(max_length=24, choices=Kind.choices)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    owner_ref = models.CharField(max_length=64)
+    reference_id = models.UUIDField()
+    note_ref = models.UUIDField()
+    relative_path = models.CharField(max_length=500, validators=[validate_relative_path])
+    attempts = models.PositiveSmallIntegerField(default=0)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_note_physical_cleanups"
+        ordering = ["created_at"]
+        indexes = [models.Index(fields=["status", "updated_at"], name="idx_note_cleanup_state")]
 
 
 class NoteAuditEvent(ValidatedModel):

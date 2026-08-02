@@ -8,9 +8,10 @@ import tempfile
 import unicodedata
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 from django.conf import settings
 from django.db import transaction
@@ -41,6 +42,12 @@ class ExportBuildError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass
+class ExportDownload:
+    file: BinaryIO
+    filename: str
 
 
 def _normalize_note_ids(note_ids: Any) -> list[uuid.UUID]:
@@ -130,6 +137,8 @@ def serialize_export(job: NoteExportJob) -> dict[str, Any]:
         "status": job.status,
         "format": job.format,
         "selection": {"noteCount": len(notes)},
+        "deferred": job.status == NoteExportJob.Status.QUEUED and bool(job.error_code),
+        "enqueueAttempts": int(job.enqueue_attempts),
         "sizeBytes": int(job.output_size_bytes),
         "sha256": job.output_sha256,
         "errorCode": job.error_code,
@@ -199,7 +208,11 @@ def _safe_export_destination(relative: PurePosixPath) -> Path:
         raise ExportBuildError("export_unsafe_path", "导出路径不安全") from exc
 
 
-def _claim_job(job_id: str) -> NoteExportJob | None:
+def _claim_job(
+    job_id: str,
+    expected_generation: int | None = None,
+    expected_lease_token: str | None = None,
+) -> NoteExportJob | None:
     with transaction.atomic():
         try:
             job = NoteExportJob.objects.select_for_update().get(pk=job_id)
@@ -209,16 +222,37 @@ def _claim_job(job_id: str) -> NoteExportJob | None:
             return job
         if job.status != NoteExportJob.Status.QUEUED:
             return None
+        if expected_generation is not None or expected_lease_token is not None:
+            try:
+                lease_token = uuid.UUID(str(expected_lease_token))
+                generation = int(expected_generation)
+            except (TypeError, ValueError, AttributeError):
+                return None
+            if job.run_generation != generation or job.run_lease_token != lease_token:
+                return None
+        else:
+            if job.run_lease_token is None:
+                job.run_generation += 1
+                job.run_lease_token = uuid.uuid4()
         if job.expires_at and job.expires_at <= timezone.now():
             job.status = NoteExportJob.Status.EXPIRED
+            job.run_lease_token = None
+            job.run_started_at = None
             job.error_code = "export_expired"
             job.error_message = "导出文件已过期"
-            job.save(update_fields={"status", "error_code", "error_message", "updated_at"})
+            job.save(update_fields={
+                "status", "run_lease_token", "run_started_at",
+                "error_code", "error_message", "updated_at",
+            })
             return None
         job.status = NoteExportJob.Status.PROCESSING
+        job.run_started_at = timezone.now()
         job.error_code = ""
         job.error_message = ""
-        job.save(update_fields={"status", "error_code", "error_message", "updated_at"})
+        job.save(update_fields={
+            "status", "run_generation", "run_lease_token", "run_started_at",
+            "error_code", "error_message", "updated_at",
+        })
         return job
 
 
@@ -243,127 +277,130 @@ def _validate_snapshot(job: NoteExportJob) -> list[dict[str, Any]]:
     return notes
 
 
-def _planned_entries(job: NoteExportJob, notes: list[dict[str, Any]]) -> tuple[list[dict], dict]:
-    used: set[str] = {"manifest.json"}
-    entries: list[dict[str, Any]] = []
-    manifest_notes: list[dict[str, Any]] = []
-    extension = ".md" if job.format == NoteExportJob.Format.MARKDOWN_ZIP else ".json"
-    for note in notes:
-        note_name = _safe_name(note.get("title"), f"note-{note['id']}")
-        note_path = _dedupe_path(PurePosixPath("notes", note_name + extension), used)
-        if job.format == NoteExportJob.Format.MARKDOWN_ZIP:
-            body = f"# {note.get('title') or '未命名笔记'}\n\n{note.get('contentText') or ''}\n".encode("utf-8")
-        else:
-            body = _json_bytes({
-                "schemaVersion": EXPORT_SCHEMA_VERSION,
-                "id": note["id"],
-                "version": int(note["version"]),
-                "title": note.get("title", ""),
-                "content": note.get("content", {}),
-                "contentText": note.get("contentText", ""),
-            })
-        entries.append({"kind": "bytes", "path": note_path.as_posix(), "body": body})
-        manifest_attachments: list[dict[str, Any]] = []
-        attachments = note.get("attachments", [])
-        if not isinstance(attachments, list):
-            raise ExportBuildError("export_snapshot_invalid", "附件快照无效")
-        for attachment in attachments:
-            try:
-                attachment_id = uuid.UUID(str(attachment["id"]))
-                expected_size = int(attachment["sizeBytes"])
-            except (KeyError, TypeError, ValueError, AttributeError) as exc:
-                raise ExportBuildError("export_snapshot_invalid", "附件快照无效") from exc
-            current = NoteAttachment.objects.filter(
-                id=attachment_id,
-                user_id=job.user_id,
-                note_id=note["id"],
-                deleted_at__isnull=True,
-                note__deleted_at__isnull=True,
-                kind__in=[NoteAttachment.Kind.FILE, NoteAttachment.Kind.IMAGE],
-            ).first()
-            if current is None or current.relative_path != attachment.get("relativePath"):
-                raise ExportBuildError("export_snapshot_unavailable", "附件已删除或发生变化")
-            try:
-                source = resolve_relative_path(current.relative_path, require_file=True)
-            except AttachmentNotFound as exc:
-                raise ExportBuildError("export_attachment_unsafe", "附件路径无效") from exc
-            attachment_name = _safe_name(attachment.get("displayName"), f"attachment-{attachment_id}")
-            attachment_path = _dedupe_path(
-                PurePosixPath("attachments", note_path.stem, attachment_name), used
-            )
-            entries.append({
-                "kind": "file",
-                "path": attachment_path.as_posix(),
-                "source": source,
-                "size": expected_size,
-                "sha256": str(attachment.get("sha256") or ""),
-            })
-            manifest_attachments.append({
-                "id": str(attachment_id),
-                "name": attachment.get("displayName", ""),
-                "mimeType": attachment.get("mimeType", ""),
-                "sizeBytes": expected_size,
-                "sha256": str(attachment.get("sha256") or ""),
-                "file": attachment_path.as_posix(),
-            })
-        manifest_notes.append({
-            "id": note["id"],
-            "version": int(note["version"]),
-            "title": note.get("title", ""),
-            "file": note_path.as_posix(),
-            "attachments": manifest_attachments,
-        })
-    manifest = {
-        "schemaVersion": EXPORT_SCHEMA_VERSION,
-        "jobId": str(job.id),
-        "createdAt": job.created_at.isoformat(),
-        "format": job.format,
-        "notes": manifest_notes,
-    }
-    return entries, manifest
-
-
-def _write_archive(job: NoteExportJob, entries: list[dict], manifest: dict) -> tuple[str, int, str]:
+def _write_archive(job: NoteExportJob, notes: list[dict[str, Any]]) -> tuple[str, int, str]:
     maximum_files = int(settings.A3_NOTES_EXPORT_MAX_FILES)
     maximum_bytes = int(settings.A3_NOTES_EXPORT_MAX_BYTES)
-    if len(entries) + 1 > maximum_files:
-        raise ExportBuildError("export_file_limit", "导出文件数量超过限制")
-    estimated = len(_json_bytes(manifest)) + sum(
-        len(entry["body"]) if entry["kind"] == "bytes" else int(entry["size"])
-        for entry in entries
-    )
-    if estimated > maximum_bytes:
-        raise ExportBuildError("export_size_limit", "导出内容超过大小限制")
     relative = PurePosixPath("exports", str(job.user_id), str(job.id), f"notes-{job.id}.zip")
     final_path = _safe_export_destination(relative)
     temporary_path: Path | None = None
+    used: set[str] = {"manifest.json"}
+    manifest_notes: list[dict[str, Any]] = []
+    logical_bytes = 0
+    file_count = 1
+
+    def account(size: int) -> None:
+        nonlocal logical_bytes
+        logical_bytes += size
+        if logical_bytes > maximum_bytes:
+            raise ExportBuildError("export_size_limit", "导出内容超过大小限制")
+
+    def reserve_file() -> None:
+        nonlocal file_count
+        file_count += 1
+        if file_count > maximum_files:
+            raise ExportBuildError("export_file_limit", "导出文件数量超过限制")
+
     try:
         with tempfile.NamedTemporaryFile(dir=final_path.parent, prefix=".export-", suffix=".zip", delete=False) as temp:
             temporary_path = Path(temp.name)
         with zipfile.ZipFile(
             temporary_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=False
         ) as archive:
-            archive.writestr(_zip_info("manifest.json"), _json_bytes(manifest))
-            for entry in entries:
-                if entry["kind"] == "bytes":
-                    archive.writestr(_zip_info(entry["path"]), entry["body"])
-                    continue
-                digest = hashlib.sha256()
-                copied = 0
-                with entry["source"].open("rb") as source, archive.open(
-                    _zip_info(entry["path"]), "w", force_zip64=False
-                ) as target:
-                    while True:
-                        chunk = source.read(COPY_CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        copied += len(chunk)
-                        if copied > maximum_bytes:
-                            raise ExportBuildError("export_size_limit", "导出内容超过大小限制")
-                        digest.update(chunk)
-                        target.write(chunk)
-                if copied != entry["size"] or (entry["sha256"] and digest.hexdigest() != entry["sha256"]):
-                    raise ExportBuildError("export_snapshot_unavailable", "附件内容发生变化")
+            extension = ".md" if job.format == NoteExportJob.Format.MARKDOWN_ZIP else ".json"
+            for note in notes:
+                note_name = _safe_name(note.get("title"), f"note-{note['id']}")
+                note_path = _dedupe_path(PurePosixPath("notes", note_name + extension), used)
+                if job.format == NoteExportJob.Format.MARKDOWN_ZIP:
+                    note_bytes = (
+                        f"# {note.get('title') or '未命名笔记'}\n\n"
+                        f"{note.get('contentText') or ''}\n"
+                    ).encode("utf-8")
+                else:
+                    note_bytes = _json_bytes({
+                        "schemaVersion": EXPORT_SCHEMA_VERSION,
+                        "id": note["id"],
+                        "version": int(note["version"]),
+                        "title": note.get("title", ""),
+                        "content": note.get("content", {}),
+                        "contentText": note.get("contentText", ""),
+                    })
+                reserve_file()
+                account(len(note_bytes))
+                archive.writestr(_zip_info(note_path.as_posix()), note_bytes)
+                del note_bytes
+
+                manifest_attachments: list[dict[str, Any]] = []
+                attachments = note.get("attachments", [])
+                if not isinstance(attachments, list):
+                    raise ExportBuildError("export_snapshot_invalid", "附件快照无效")
+                for attachment in attachments:
+                    try:
+                        attachment_id = uuid.UUID(str(attachment["id"]))
+                        expected_size = int(attachment["sizeBytes"])
+                    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                        raise ExportBuildError("export_snapshot_invalid", "附件快照无效") from exc
+                    current = NoteAttachment.objects.filter(
+                        id=attachment_id,
+                        user_id=job.user_id,
+                        note_id=note["id"],
+                        deleted_at__isnull=True,
+                        note__deleted_at__isnull=True,
+                        kind__in=[NoteAttachment.Kind.FILE, NoteAttachment.Kind.IMAGE],
+                    ).first()
+                    if current is None or current.relative_path != attachment.get("relativePath"):
+                        raise ExportBuildError("export_snapshot_unavailable", "附件已删除或发生变化")
+                    try:
+                        source_path = resolve_relative_path(current.relative_path, require_file=True)
+                    except AttachmentNotFound as exc:
+                        raise ExportBuildError("export_attachment_unsafe", "附件路径无效") from exc
+                    attachment_name = _safe_name(
+                        attachment.get("displayName"), f"attachment-{attachment_id}"
+                    )
+                    attachment_path = _dedupe_path(
+                        PurePosixPath("attachments", note_path.stem, attachment_name), used
+                    )
+                    reserve_file()
+                    digest = hashlib.sha256()
+                    copied = 0
+                    with source_path.open("rb") as source, archive.open(
+                        _zip_info(attachment_path.as_posix()), "w", force_zip64=False
+                    ) as target:
+                        while True:
+                            chunk = source.read(COPY_CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            copied += len(chunk)
+                            account(len(chunk))
+                            digest.update(chunk)
+                            target.write(chunk)
+                    expected_sha = str(attachment.get("sha256") or "")
+                    if copied != expected_size or (expected_sha and digest.hexdigest() != expected_sha):
+                        raise ExportBuildError("export_snapshot_unavailable", "附件内容发生变化")
+                    manifest_attachments.append({
+                        "id": str(attachment_id),
+                        "name": attachment.get("displayName", ""),
+                        "mimeType": attachment.get("mimeType", ""),
+                        "sizeBytes": expected_size,
+                        "sha256": expected_sha,
+                        "file": attachment_path.as_posix(),
+                    })
+                manifest_notes.append({
+                    "id": note["id"],
+                    "version": int(note["version"]),
+                    "title": note.get("title", ""),
+                    "file": note_path.as_posix(),
+                    "attachments": manifest_attachments,
+                })
+
+            manifest_bytes = _json_bytes({
+                "schemaVersion": EXPORT_SCHEMA_VERSION,
+                "jobId": str(job.id),
+                "createdAt": job.created_at.isoformat(),
+                "format": job.format,
+                "notes": manifest_notes,
+            })
+            account(len(manifest_bytes))
+            archive.writestr(_zip_info("manifest.json"), manifest_bytes)
         size = temporary_path.stat().st_size
         if size > maximum_bytes:
             raise ExportBuildError("export_size_limit", "导出文件超过大小限制")
@@ -385,19 +422,31 @@ def _result(job: NoteExportJob) -> dict[str, Any]:
     return {"status": job.status, "jobId": str(job.id)}
 
 
-def build_note_export(job_id: str) -> dict[str, Any]:
-    job = _claim_job(job_id)
+def build_note_export(
+    job_id: str,
+    expected_generation: int | None = None,
+    expected_lease_token: str | None = None,
+) -> dict[str, Any]:
+    job = _claim_job(job_id, expected_generation, expected_lease_token)
     if job is None:
         return {"skipped": True, "jobId": str(job_id)}
     if job.status == NoteExportJob.Status.SUCCEEDED:
         return _result(job)
+    generation = job.run_generation
+    lease_token = job.run_lease_token
     try:
         notes = _validate_snapshot(job)
-        entries, manifest = _planned_entries(job, notes)
-        relative_path, size, digest = _write_archive(job, entries, manifest)
+        relative_path, size, digest = _write_archive(job, notes)
     except ExportBuildError as exc:
-        NoteExportJob.objects.filter(pk=job.pk, status=NoteExportJob.Status.PROCESSING).update(
+        NoteExportJob.objects.filter(
+            pk=job.pk,
+            status=NoteExportJob.Status.PROCESSING,
+            run_generation=generation,
+            run_lease_token=lease_token,
+        ).update(
             status=NoteExportJob.Status.FAILED,
+            run_lease_token=None,
+            run_started_at=None,
             relative_path="",
             output_size_bytes=0,
             output_sha256="",
@@ -406,8 +455,15 @@ def build_note_export(job_id: str) -> dict[str, Any]:
             updated_at=timezone.now(),
         )
     except Exception:
-        NoteExportJob.objects.filter(pk=job.pk, status=NoteExportJob.Status.PROCESSING).update(
+        NoteExportJob.objects.filter(
+            pk=job.pk,
+            status=NoteExportJob.Status.PROCESSING,
+            run_generation=generation,
+            run_lease_token=lease_token,
+        ).update(
             status=NoteExportJob.Status.FAILED,
+            run_lease_token=None,
+            run_started_at=None,
             relative_path="",
             output_size_bytes=0,
             output_sha256="",
@@ -416,8 +472,15 @@ def build_note_export(job_id: str) -> dict[str, Any]:
             updated_at=timezone.now(),
         )
     else:
-        updated = NoteExportJob.objects.filter(pk=job.pk, status=NoteExportJob.Status.PROCESSING).update(
+        updated = NoteExportJob.objects.filter(
+            pk=job.pk,
+            status=NoteExportJob.Status.PROCESSING,
+            run_generation=generation,
+            run_lease_token=lease_token,
+        ).update(
             status=NoteExportJob.Status.SUCCEEDED,
+            run_lease_token=None,
+            run_started_at=None,
             relative_path=relative_path,
             output_size_bytes=size,
             output_sha256=digest,
@@ -432,7 +495,7 @@ def build_note_export(job_id: str) -> dict[str, Any]:
     return _result(job)
 
 
-def resolve_export_download(job: NoteExportJob) -> Path:
+def open_export_download(job: NoteExportJob) -> ExportDownload:
     if job.expires_at and job.expires_at <= timezone.now():
         raise ExportServiceError("导出文件已过期", code="export_expired", status=410)
     if job.status != NoteExportJob.Status.SUCCEEDED:
@@ -443,6 +506,12 @@ def resolve_export_download(job: NoteExportJob) -> Path:
         raise ExportNotFound()
     try:
         path = resolve_relative_path(job.relative_path, require_file=True)
-    except AttachmentNotFound as exc:
+        file_handle = path.open("rb")
+    except (AttachmentNotFound, FileNotFoundError, OSError) as exc:
+        job.refresh_from_db(fields={"status", "expires_at"})
+        if job.expires_at and job.expires_at <= timezone.now():
+            raise ExportServiceError("导出文件已过期", code="export_expired", status=410) from exc
+        if job.status != NoteExportJob.Status.SUCCEEDED:
+            raise ExportServiceError("导出任务尚未完成", code="export_not_ready", status=409) from exc
         raise ExportNotFound() from exc
-    return path
+    return ExportDownload(file=file_handle, filename=f"personal-notes-{job.id}.zip")

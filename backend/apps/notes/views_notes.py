@@ -231,11 +231,11 @@ def export_detail(request, export_id):
 def export_download(request, export_id):
     try:
         job = export_service.get_owned_export(request.user, export_id)
-        path = export_service.resolve_export_download(job)
+        download = export_service.open_export_download(job)
         return FileResponse(
-            path.open("rb"),
+            download.file,
             as_attachment=True,
-            filename=f"personal-notes-{job.id}.zip",
+            filename=download.filename,
             content_type="application/zip",
         )
     except export_service.ExportServiceError as exc:

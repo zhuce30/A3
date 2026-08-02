@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -100,6 +101,28 @@ class ExportTestCase(TestCase):
 
 
 class ExportBuildTests(ExportTestCase):
+    def test_archive_writer_streams_notes_without_an_encoded_entries_list(self) -> None:
+        from backend.apps.notes.services import export_service
+
+        self.assertFalse(hasattr(export_service, "_planned_entries"))
+        self.assertEqual(
+            list(inspect.signature(export_service._write_archive).parameters),
+            ["job", "notes"],
+        )
+
+    @override_settings(A3_NOTES_EXPORT_MAX_BYTES=350)
+    def test_export_byte_limit_counts_actual_utf8_note_bytes(self) -> None:
+        self.note.content_text = "学" * 200
+        self.note.content_json = text_doc(self.note.content_text)
+        self.note.save(update_fields={"content_text", "content_json", "updated_at"})
+        job = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
+
+        result = build_note_export(str(job.id))
+
+        job.refresh_from_db()
+        self.assertEqual(result["status"], NoteExportJob.Status.FAILED)
+        self.assertEqual(job.error_code, "export_size_limit")
+
     def test_export_contains_only_requested_owned_notes(self) -> None:
         job = create_export_job(
             user=self.user,
@@ -314,7 +337,10 @@ class ExportApiTests(ExportTestCase):
         )
         self.assertEqual(response.status_code, 202)
         job = NoteExportJob.objects.get()
-        delay.assert_called_once_with(str(job.id))
+        self.assertEqual(delay.call_count, 1)
+        self.assertEqual(delay.call_args.args[0], str(job.id))
+        self.assertEqual(delay.call_args.args[1], job.run_generation)
+        self.assertEqual(uuid.UUID(delay.call_args.args[2]), job.run_lease_token)
         self.assertEqual(response.json()["export"]["selection"]["noteCount"], 1)
 
         build_note_export(str(job.id))
@@ -329,7 +355,7 @@ class ExportApiTests(ExportTestCase):
         self.assertEqual(self.client.get(reverse("notes:export-detail", args=[job.id])).status_code, 401)
 
     @patch("backend.apps.notes.tasks.build_export_task.delay", side_effect=RuntimeError("broker secret"))
-    def test_broker_failure_is_visible_after_durable_creation(self, _delay) -> None:
+    def test_broker_failure_is_visible_deferred_and_retryable(self, _delay) -> None:
         response = self.client.post(
             reverse("notes:export-list"),
             data=json.dumps({"noteIds": [str(self.note.id)], "format": "json_zip"}),
@@ -338,9 +364,21 @@ class ExportApiTests(ExportTestCase):
 
         self.assertEqual(response.status_code, 202)
         job = NoteExportJob.objects.get()
-        self.assertEqual(job.status, NoteExportJob.Status.FAILED)
+        self.assertEqual(job.status, NoteExportJob.Status.QUEUED)
         self.assertEqual(job.error_code, "export_enqueue_failed")
+        self.assertEqual(job.enqueue_attempts, 1)
+        self.assertTrue(response.json()["export"]["deferred"])
         self.assertNotIn("broker", response.content.decode("utf-8"))
+
+    def test_download_open_race_maps_missing_file_to_404_not_500(self) -> None:
+        job = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
+        build_note_export(str(job.id))
+
+        with patch.object(Path, "open", side_effect=FileNotFoundError("cleaned concurrently")):
+            response = self.client.get(reverse("notes:export-download", args=[job.id]))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "export_not_found")
 
     def test_expired_foreign_missing_and_incomplete_download_responses(self) -> None:
         queued = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
@@ -394,6 +432,146 @@ class ExportApiTests(ExportTestCase):
 
 
 class ExportCleanupAndScheduleTests(ExportTestCase):
+    def test_stale_export_race_does_not_overwrite_concurrent_success(self) -> None:
+        from backend.apps.notes.tasks import _fail_stale_export_job
+
+        job = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
+        lease = uuid.uuid4()
+        started = timezone.now() - timedelta(hours=2)
+        NoteExportJob.objects.filter(pk=job.pk).update(
+            status=NoteExportJob.Status.PROCESSING,
+            run_generation=3,
+            run_lease_token=lease,
+            run_started_at=started,
+        )
+        observed = NoteExportJob.objects.get(pk=job.pk)
+        NoteExportJob.objects.filter(pk=job.pk).update(
+            status=NoteExportJob.Status.SUCCEEDED,
+            relative_path="exports/completed.zip",
+            output_size_bytes=9,
+            output_sha256="a" * 64,
+        )
+
+        updated = _fail_stale_export_job(
+            observed.id,
+            observed.run_started_at,
+            observed.run_generation,
+            observed.run_lease_token,
+        )
+
+        job.refresh_from_db()
+        self.assertFalse(updated)
+        self.assertEqual(job.status, NoteExportJob.Status.SUCCEEDED)
+        self.assertEqual(job.relative_path, "exports/completed.zip")
+        self.assertEqual(job.output_sha256, "a" * 64)
+
+    def test_stale_export_failure_matches_lease_and_resets_run_and_output_fields(self) -> None:
+        from backend.apps.notes.tasks import _fail_stale_export_job
+
+        job = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
+        lease = uuid.uuid4()
+        started = timezone.now() - timedelta(hours=2)
+        NoteExportJob.objects.filter(pk=job.pk).update(
+            status=NoteExportJob.Status.PROCESSING,
+            run_generation=4,
+            run_lease_token=lease,
+            run_started_at=started,
+            relative_path="exports/partial.zip",
+            output_size_bytes=10,
+            output_sha256="b" * 64,
+        )
+
+        updated = _fail_stale_export_job(job.id, started, 4, lease)
+
+        job.refresh_from_db()
+        self.assertTrue(updated)
+        self.assertEqual(job.status, NoteExportJob.Status.FAILED)
+        self.assertIsNone(job.run_lease_token)
+        self.assertIsNone(job.run_started_at)
+        self.assertEqual(job.relative_path, "")
+        self.assertEqual(job.output_size_bytes, 0)
+        self.assertEqual(job.output_sha256, "")
+
+    def test_repeated_broker_failures_remain_bounded_per_recovery_and_eventual_enqueue_clears_error(self) -> None:
+        from backend.apps.notes.tasks import cleanup_stale_jobs_task, enqueue_export
+
+        job = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
+        with patch("backend.apps.notes.tasks.build_export_task.delay", side_effect=RuntimeError("down")):
+            enqueue_export(job)
+        for expected_attempts in (2, 3):
+            NoteExportJob.objects.filter(pk=job.pk).update(
+                updated_at=timezone.now() - timedelta(minutes=16)
+            )
+            with patch("backend.apps.notes.tasks.build_export_task.delay", side_effect=RuntimeError("down")) as delay:
+                result = cleanup_stale_jobs_task()
+            job.refresh_from_db()
+            self.assertEqual(delay.call_count, 1)
+            self.assertEqual(result["exportRecovered"], 0)
+            self.assertEqual(result["exportFailed"], 1)
+            self.assertEqual(job.status, NoteExportJob.Status.QUEUED)
+            self.assertEqual(job.enqueue_attempts, expected_attempts)
+            self.assertEqual(job.error_code, "export_enqueue_failed")
+
+        NoteExportJob.objects.filter(pk=job.pk).update(
+            updated_at=timezone.now() - timedelta(minutes=16)
+        )
+        with patch("backend.apps.notes.tasks.build_export_task.delay") as delay:
+            cleanup_stale_jobs_task()
+        job.refresh_from_db()
+        self.assertEqual(delay.call_count, 1)
+        self.assertEqual(job.status, NoteExportJob.Status.QUEUED)
+        self.assertEqual(job.error_code, "")
+        self.assertEqual(job.error_message, "")
+
+    def test_note_purge_failure_leaves_durable_cleanup_for_scheduled_retry(self) -> None:
+        from backend.apps.notes.models import NotePhysicalCleanup
+        from backend.apps.notes.services import note_service
+        from backend.apps.notes.services.cleanup_service import cleanup_trashed_notes
+
+        attachment = self.create_attachment()
+        path = Path(self.storage.name) / attachment.relative_path
+        Note.objects.filter(pk=self.note.pk).update(deleted_at=timezone.now() - timedelta(days=1))
+
+        with patch(
+            "backend.apps.notes.services.cleanup_service._delete_cleanup_target",
+            side_effect=OSError("locked"),
+        ):
+            with self.captureOnCommitCallbacks(execute=True):
+                note_service.purge_note(self.user, self.note.id)
+
+        self.assertFalse(Note.objects.filter(pk=self.note.pk).exists())
+        cleanup = NotePhysicalCleanup.objects.get()
+        self.assertEqual(cleanup.status, NotePhysicalCleanup.Status.FAILED)
+        self.assertFalse(Path(cleanup.relative_path).is_absolute())
+        self.assertTrue(path.exists())
+
+        cleanup_trashed_notes()
+
+        self.assertFalse(path.exists())
+        self.assertFalse(NotePhysicalCleanup.objects.exists())
+
+    def test_soft_deleted_attachment_failure_leaves_durable_cleanup_for_scheduled_retry(self) -> None:
+        from backend.apps.notes.models import NotePhysicalCleanup
+        from backend.apps.notes.services.cleanup_service import cleanup_trashed_notes
+
+        attachment = self.create_attachment(deleted_at=timezone.now() - timedelta(days=2))
+        path = Path(self.storage.name) / attachment.relative_path
+        with patch(
+            "backend.apps.notes.services.cleanup_service._delete_cleanup_target",
+            side_effect=OSError("locked"),
+        ):
+            with self.captureOnCommitCallbacks(execute=True):
+                cleanup_trashed_notes()
+
+        self.assertFalse(NoteAttachment.objects.filter(pk=attachment.pk).exists())
+        self.assertEqual(NotePhysicalCleanup.objects.get().status, NotePhysicalCleanup.Status.FAILED)
+        self.assertTrue(path.exists())
+
+        cleanup_trashed_notes()
+
+        self.assertFalse(path.exists())
+        self.assertFalse(NotePhysicalCleanup.objects.exists())
+
     def test_completed_expired_rows_do_not_starve_newer_cleanup_batches(self) -> None:
         from backend.apps.notes.services.cleanup_service import cleanup_expired_exports
 
@@ -524,6 +702,9 @@ class ExportCleanupAndScheduleTests(ExportTestCase):
         stale_export = create_export_job(user=self.user, note_ids=[self.note.id], format="markdown_zip")
         NoteExportJob.objects.filter(pk=stale_export.pk).update(
             status=NoteExportJob.Status.PROCESSING,
+            run_generation=1,
+            run_lease_token=uuid.uuid4(),
+            run_started_at=timezone.now() - timedelta(hours=2),
             updated_at=timezone.now() - timedelta(hours=2),
         )
         stale_parse = self.create_attachment()
