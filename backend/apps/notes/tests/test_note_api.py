@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from datetime import timedelta
 
@@ -339,6 +340,22 @@ class NoteLifecycleApiTests(NoteApiTestCase):
         self.assertEqual(note.title, "后续版本")
         self.assertEqual(NoteMutation.objects.filter(note=note).count(), 2)
 
+    def test_same_mutation_id_cannot_be_reused_for_another_note(self) -> None:
+        first_note = self.create_note(title="第一条")
+        second_note = self.create_note(title="第二条")
+        mutation_id = uuid.uuid4()
+        first = self.patch_note(first_note, mutation_id=mutation_id, title="第一条已更新")
+
+        reused = self.patch_note(second_note, mutation_id=mutation_id, title="不应写入第二条")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(reused.status_code, 409)
+        self.assertEqual(reused.json()["code"], "mutation_id_reused")
+        second_note.refresh_from_db()
+        self.assertEqual(second_note.version, 1)
+        self.assertEqual(second_note.title, "第二条")
+        self.assertEqual(NoteMutation.objects.filter(user=self.user, mutation_id=mutation_id).count(), 1)
+
     def test_soft_delete_trash_restore_and_confirmed_purge(self) -> None:
         note = self.create_note()
         deleted = self.delete_json(reverse("notes:note-detail", args=[note.id]))
@@ -560,6 +577,21 @@ class SearchAndValidationTests(NoteApiTestCase):
         self.assertEqual(invalid.status_code, 400)
         self.assertEqual(invalid.json()["code"], "invalid_view")
 
+    def test_recent_view_orders_by_last_edit_not_pinned_model_order(self) -> None:
+        now = timezone.now()
+        old_pinned = self.create_note(title="旧置顶", is_pinned=True)
+        new_unpinned = self.create_note(title="最近编辑", is_pinned=False)
+        Note.objects.filter(pk=old_pinned.pk).update(last_edited_at=now - timedelta(days=2))
+        Note.objects.filter(pk=new_unpinned.pk).update(last_edited_at=now)
+
+        response = self.client.get(reverse("notes:search"), {"view": "recent"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["id"] for item in response.json()["notes"][:2]],
+            [str(new_unpinned.id), str(old_pinned.id)],
+        )
+
     def test_invalid_json_and_fields_return_readable_stable_errors(self) -> None:
         note = self.create_note()
         url = reverse("notes:note-detail", args=[note.id])
@@ -593,6 +625,166 @@ class SearchAndValidationTests(NoteApiTestCase):
                 payload = response.json()
                 self.assertEqual(payload["code"], expected_code)
                 self.assertTrue(payload["error"])
+
+    def test_non_standard_json_numbers_are_rejected_before_persistence(self) -> None:
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                response = self.client.post(
+                    reverse("notes:note-list"),
+                    data=f'{{"title": {constant}, "content": {{"type": "doc", "content": []}}}}',
+                    content_type="application/json",
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["code"], "invalid_json")
+        self.assertFalse(Note.objects.filter(user=self.user).exists())
+
+    def test_non_finite_numeric_attrs_are_rejected_without_database_write(self) -> None:
+        from backend.apps.notes.services.note_service import NoteServiceError, validate_content
+
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(value=value):
+                with self.assertRaises(NoteServiceError) as raised:
+                    validate_content(
+                        {
+                            "type": "doc",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [
+                                        {
+                                            "type": "image",
+                                            "attrs": {
+                                                "src": "https://example.com/image.png",
+                                                "width": value,
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    )
+                self.assertEqual(raised.exception.code, "invalid_note_content")
+
+    def test_document_resource_limits_return_stable_errors(self) -> None:
+        nested = {"type": "paragraph", "content": [{"type": "text", "text": "deep"}]}
+        for _ in range(65):
+            nested = {"type": "blockquote", "content": [nested]}
+        oversized_documents = (
+            {"type": "doc", "content": [nested]},
+            {"type": "doc", "content": [{"type": "horizontal_rule"} for _ in range(10_001)]},
+            {
+                "type": "doc",
+                "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": "x" * 1_000_001}]}
+                ],
+            },
+            {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "image",
+                                "attrs": {"src": "https://example.com/" + "a" * 2_100},
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "type": "doc",
+                "content": [{"type": "equation", "attrs": {"latex": "x" * 8_193}}],
+            },
+        )
+
+        for index, content in enumerate(oversized_documents):
+            with self.subTest(index=index):
+                response = self.post_json(
+                    reverse("notes:note-list"),
+                    {"title": f"超限文档 {index}", "content": content},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["code"], "note_document_too_large")
+                self.assertTrue(response.json()["error"])
+        self.assertFalse(Note.objects.filter(user=self.user, title__startswith="超限文档").exists())
+
+    def test_unsafe_link_and_image_schemes_are_rejected(self) -> None:
+        unsafe_nodes = (
+            {
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "危险链接",
+                        "marks": [{"type": "link", "attrs": {"href": "javascript:alert(1)"}}],
+                    }
+                ],
+            },
+            {
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "本地链接",
+                        "marks": [{"type": "link", "attrs": {"href": "file:///etc/passwd"}}],
+                    }
+                ],
+            },
+            {
+                "type": "paragraph",
+                "content": [{"type": "image", "attrs": {"src": "data:image/png;base64,AAAA"}}],
+            },
+            {
+                "type": "paragraph",
+                "content": [{"type": "image", "attrs": {"src": "javascript:alert(1)"}}],
+            },
+            {
+                "type": "paragraph",
+                "content": [{"type": "image", "attrs": {"src": "https://["}}],
+            },
+        )
+        for index, node in enumerate(unsafe_nodes):
+            with self.subTest(index=index):
+                response = self.post_json(
+                    reverse("notes:note-list"),
+                    {"title": f"危险地址 {index}", "content": {"type": "doc", "content": [node]}},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["code"], "invalid_note_content")
+        self.assertFalse(Note.objects.filter(user=self.user, title__startswith="危险地址").exists())
+
+    def test_safe_link_and_image_schemes_are_accepted(self) -> None:
+        content = {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "站外",
+                            "marks": [{"type": "link", "attrs": {"href": "https://example.com/path"}}],
+                        },
+                        {
+                            "type": "text",
+                            "text": "邮件",
+                            "marks": [{"type": "link", "attrs": {"href": "mailto:student@example.com"}}],
+                        },
+                        {
+                            "type": "text",
+                            "text": "站内",
+                            "marks": [{"type": "link", "attrs": {"href": "/a3/notes#today"}}],
+                        },
+                        {"type": "image", "attrs": {"src": "https://example.com/image.png"}},
+                    ],
+                }
+            ],
+        }
+
+        response = self.post_json(reverse("notes:note-list"), {"title": "安全地址", "content": content})
+
+        self.assertEqual(response.status_code, 201)
 
     def test_unknown_nested_node_is_rejected_without_persisting(self) -> None:
         response = self.post_json(

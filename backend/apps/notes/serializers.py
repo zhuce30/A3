@@ -12,10 +12,17 @@ class JsonBodyError(ValueError):
         self.code = code
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"不支持的 JSON 数值: {value}")
+
+
 def parse_json_body(request) -> dict[str, Any]:
     try:
-        value = json.loads(request.body.decode("utf-8") or "{}")
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        value = json.loads(
+            request.body.decode("utf-8") or "{}",
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise JsonBodyError("请求 JSON 格式不正确", "invalid_json") from exc
     if not isinstance(value, dict):
         raise JsonBodyError("请求内容必须是 JSON 对象", "json_object_required")
