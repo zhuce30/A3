@@ -12,14 +12,37 @@ from unittest.mock import Mock, patch
 import requests
 from celery.exceptions import SoftTimeLimitExceeded
 from django.contrib.auth import get_user_model
+from django.conf import settings as django_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 
 from backend.apps.notes.models import Note, NoteAttachment
 
 
 EMPTY_DOC = {"type": "doc", "content": []}
+
+
+class NotesStorageSettingsTests(SimpleTestCase):
+    def test_unset_and_blank_storage_root_use_backend_default(self) -> None:
+        from backend.config.settings import resolve_path_setting
+
+        expected = (django_settings.BASE_DIR / "tmp" / "a3-notes").resolve()
+        with patch.dict("os.environ", {}, clear=False):
+            with patch("os.getenv", return_value=None):
+                self.assertEqual(resolve_path_setting("A3_NOTES_STORAGE_ROOT", expected), expected)
+            with patch("os.getenv", return_value="   "):
+                self.assertEqual(resolve_path_setting("A3_NOTES_STORAGE_ROOT", expected), expected)
+
+    def test_relative_storage_root_is_resolved_from_backend_base_dir(self) -> None:
+        from backend.config.settings import resolve_path_setting
+
+        with patch("os.getenv", return_value="tmp/a3-notes"):
+            resolved = resolve_path_setting("A3_NOTES_STORAGE_ROOT", django_settings.BASE_DIR / "unused")
+
+        self.assertEqual(resolved, (django_settings.BASE_DIR / "tmp" / "a3-notes").resolve())
+        env_example = (django_settings.BASE_DIR / ".env.example").read_text(encoding="utf-8")
+        self.assertIn("A3_NOTES_STORAGE_ROOT=tmp/a3-notes", env_example)
 
 
 def docx_bytes(text: str = "attachment text", *, extra_entries: dict[str, bytes] | None = None) -> bytes:
@@ -228,6 +251,20 @@ class AttachmentRouteTests(AttachmentTestCase):
 
 
 class ParserTaskTests(AttachmentTestCase):
+    @staticmethod
+    def parsed_result(text: str):
+        from backend.domains.knowledge_base.multimodal_parser import (
+            MultimodalParseResult,
+            ParsedBlock,
+            ParsedPage,
+        )
+
+        return MultimodalParseResult(
+            parser="native",
+            status="completed",
+            pages=[ParsedPage(blocks=[ParsedBlock(modality="text", text=text)])],
+        )
+
     def test_parser_success_persists_bounded_text_without_kb_records(self) -> None:
         from backend.apps.knowledge_base.models import KnowledgeResource
         from backend.apps.notes.tasks import parse_attachment_task
@@ -242,6 +279,39 @@ class ParserTaskTests(AttachmentTestCase):
         self.assertEqual(attachment.extracted_text, "abcde")
         self.assertEqual(attachment.parse_status, NoteAttachment.ParseStatus.SUCCEEDED)
         self.assertEqual(KnowledgeResource.objects.count(), before)
+
+    @patch("backend.domains.knowledge_base.multimodal_parser._parse_pdf")
+    def test_persisted_mime_selects_parser_even_when_extension_changes(self, parse_pdf) -> None:
+        from backend.apps.notes.services.attachment_service import extract_attachment_text
+
+        parse_pdf.return_value = self.parsed_result("parsed as PDF")
+        attachment = self.create_attachment(display_name="misleading.txt", mime_type="application/pdf")
+
+        text, metadata = extract_attachment_text(attachment)
+
+        self.assertEqual(text, "parsed as PDF")
+        self.assertEqual(metadata["parser"], "knowledge_base_multimodal")
+        parse_pdf.assert_called_once()
+
+    @patch("backend.domains.knowledge_base.multimodal_parser._parse_xlsx")
+    def test_xlsx_reuses_knowledge_base_pure_parser(self, parse_xlsx) -> None:
+        from backend.apps.notes.services.attachment_service import extract_attachment_text
+
+        attachment_id = uuid.uuid4()
+        relative_path = f"{self.user.id}/{self.note.id}/{attachment_id}/sheet.xlsx"
+        parse_xlsx.return_value = self.parsed_result("sheet cells")
+        attachment = self.create_attachment(
+            id=attachment_id,
+            display_name="sheet.xlsx",
+            relative_path=relative_path,
+            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        text, metadata = extract_attachment_text(attachment)
+
+        self.assertEqual(text, "sheet cells")
+        self.assertEqual(metadata["parser"], "knowledge_base_multimodal")
+        parse_xlsx.assert_called_once()
 
     @patch("backend.apps.notes.services.attachment_service.extract_attachment_text", side_effect=ValueError("secret C:\\private\\file"))
     def test_parser_failure_is_readable_and_does_not_leak_paths(self, _extract) -> None:

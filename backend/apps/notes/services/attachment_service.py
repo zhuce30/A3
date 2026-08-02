@@ -53,6 +53,16 @@ ALLOWED_TYPES = {
     ".webp": {"image/webp"},
 }
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+TEXT_MIMES = {"text/plain", "text/markdown", "text/x-markdown"}
+KNOWLEDGE_BASE_PARSERS = {
+    "application/pdf": "_parse_pdf",
+    OFFICE_MIMES[".docx"]: "_parse_docx",
+    OFFICE_MIMES[".pptx"]: "_parse_pptx",
+    OFFICE_MIMES[".xlsx"]: "_parse_xlsx",
+    "image/png": "_parse_image",
+    "image/jpeg": "_parse_image",
+    "image/webp": "_parse_image",
+}
 OFFICE_ROOTS = {".docx": "word/document.xml", ".pptx": "ppt/presentation.xml", ".xlsx": "xl/workbook.xml"}
 ACTIVE_OFFICE_PARTS = ("vbaproject", "activex/", "embeddings/", "oleobject")
 EXECUTABLE_SIGNATURES = (b"MZ", b"\x7fELF", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe")
@@ -479,53 +489,23 @@ def extract_attachment_text(attachment: NoteAttachment) -> tuple[str, dict[str, 
         text = _decode_web_body(body, mime_type)
         return text[:maximum], {"truncated": len(text) > maximum, "parser": "safe_link"}
     path = resolve_relative_path(attachment.relative_path, require_file=True)
-    suffix = path.suffix.lower()
-    if suffix in {".txt", ".md", ".markdown"}:
+    mime_type = str(attachment.mime_type or "").split(";", 1)[0].strip().lower()
+    if mime_type in TEXT_MIMES:
         text = path.read_text(encoding="utf-8")
         parser_name = "utf8_text"
-    elif suffix == ".docx":
-        from backend.domains.knowledge_base.docx_parser import parse_docx_blocks
+    elif mime_type in KNOWLEDGE_BASE_PARSERS:
+        from backend.domains.knowledge_base import multimodal_parser
 
-        text = "\n\n".join(block.markdown for block in parse_docx_blocks(path))
-        parser_name = "knowledge_base_docx"
-    elif suffix in {".pdf", ".pptx"}:
-        from backend.domains.knowledge_base.document_loader import load_documents
-
-        documents, skipped = load_documents([path])
-        if skipped and not documents:
+        parser = getattr(multimodal_parser, KNOWLEDGE_BASE_PARSERS[mime_type])
+        result = parser(path)
+        if result.status == "failed":
             raise ValueError("document parser failed")
-        text = "\n\n".join(document.get_content() for document in documents)
-        parser_name = "knowledge_base_document_loader"
-    elif suffix == ".xlsx":
-        from openpyxl import load_workbook
-
-        workbook = load_workbook(path, read_only=True, data_only=True, keep_links=False)
-        rows: list[str] = []
-        try:
-            for sheet in workbook.worksheets:
-                rows.append(sheet.title)
-                for row in sheet.iter_rows():
-                    line = "\t".join(str(cell.value) for cell in row if cell.value is not None).strip()
-                    if line:
-                        rows.append(line)
-                    if sum(len(item) + 1 for item in rows) > maximum:
-                        break
-                if sum(len(item) + 1 for item in rows) > maximum:
-                    break
-        finally:
-            workbook.close()
-        text = "\n".join(rows)
-        parser_name = "openpyxl"
-    elif suffix in IMAGE_EXTENSIONS:
-        from backend.domains.knowledge_base.multimodal_parser import parse_resource
-
-        result = parse_resource(path)
         text = "\n\n".join(
             block.text for page in result.pages for block in page.blocks if block.text.strip()
         )
-        parser_name = result.parser
+        parser_name = "knowledge_base_multimodal"
     else:
-        raise ValueError("unsupported attachment parser")
+        raise ValueError("unsupported persisted attachment MIME type")
     return text[:maximum], {"truncated": len(text) > maximum, "parser": parser_name}
 
 

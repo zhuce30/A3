@@ -14,6 +14,15 @@ load_dotenv(BACKEND_ROOT / ".env", override=True)
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
+
+def resolve_path_setting(name: str, default: Path) -> Path:
+    raw_value = os.getenv(name)
+    configured = Path(raw_value.strip()) if raw_value and raw_value.strip() else Path(default)
+    if not configured.is_absolute():
+        configured = BASE_DIR / configured
+    return configured.resolve()
+
+
 def env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -162,7 +171,7 @@ VERIFICATION_CODE_DEV_VALUE = os.getenv("VERIFICATION_CODE_DEV_VALUE", "123456")
 
 KNOWLEDGE_UPLOAD_ROOT = os.getenv("KNOWLEDGE_UPLOAD_ROOT", str(BASE_DIR.parent / "data" / "uploads"))
 KNOWLEDGE_UPLOAD_MAX_BYTES = int(os.getenv("KNOWLEDGE_UPLOAD_MAX_BYTES", str(200 * 1024 * 1024)))
-A3_NOTES_STORAGE_ROOT = Path(os.getenv("A3_NOTES_STORAGE_ROOT", str(BASE_DIR / "tmp" / "a3-notes")))
+A3_NOTES_STORAGE_ROOT = resolve_path_setting("A3_NOTES_STORAGE_ROOT", BASE_DIR / "tmp" / "a3-notes")
 A3_NOTES_ATTACHMENT_MAX_BYTES = int(os.getenv("A3_NOTES_ATTACHMENT_MAX_BYTES", str(50 * 1024 * 1024)))
 A3_NOTES_USER_QUOTA_BYTES = int(os.getenv("A3_NOTES_USER_QUOTA_BYTES", str(512 * 1024 * 1024)))
 A3_NOTES_PARSE_TIMEOUT_SECONDS = int(os.getenv("A3_NOTES_PARSE_TIMEOUT_SECONDS", "90"))
