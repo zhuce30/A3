@@ -224,6 +224,50 @@ describe('personal notes autosave', () => {
     vi.useRealTimers();
   });
 
+  it('retries a failed store activation while deduplicating concurrent initialization', async () => {
+    const persistence = new MemoryPersistence();
+    const initializationFailure = new Error('IndexedDB unavailable');
+    const allDrafts = vi.spyOn(persistence, 'allDrafts')
+      .mockRejectedValueOnce(initializationFailure)
+      .mockResolvedValue([]);
+    const allMutations = vi.spyOn(persistence, 'allMutations').mockResolvedValue([]);
+    const store = new NotesDraftStore(persistence);
+    const controller = new NotesAutosaveController({
+      store,
+      client: { saveNote: vi.fn<AutosaveNotesClient['saveNote']>() },
+      userId: 'opaque-user-a',
+    });
+
+    const failedAttempts = await Promise.allSettled([
+      controller.initialize(),
+      controller.initialize(),
+    ]);
+
+    expect(failedAttempts).toEqual([
+      { status: 'rejected', reason: initializationFailure },
+      { status: 'rejected', reason: initializationFailure },
+    ]);
+    expect(allDrafts).toHaveBeenCalledTimes(1);
+    expect(allMutations).toHaveBeenCalledTimes(1);
+
+    const retriedAttempts = await Promise.all([
+      controller.initialize(),
+      controller.initialize(),
+    ]);
+
+    expect(retriedAttempts).toEqual([
+      { account: { kind: 'ready', warningRequired: false }, replay: [] },
+      { account: { kind: 'ready', warningRequired: false }, replay: [] },
+    ]);
+    expect(allDrafts).toHaveBeenCalledTimes(2);
+    expect(allMutations).toHaveBeenCalledTimes(3);
+
+    await controller.initialize();
+    expect(allDrafts).toHaveBeenCalledTimes(2);
+    expect(allMutations).toHaveBeenCalledTimes(4);
+    controller.dispose();
+  });
+
   it('persists the draft and mutation before starting the network request', async () => {
     const { persistence, controller, saveNote } = setup();
     saveNote.mockImplementation(async () => {

@@ -184,7 +184,11 @@ export class NotesAutosaveController {
 
   private async ensureInitialized() {
     if (!this.initialization) {
-      this.initialization = this.store.activateUser(this.userId);
+      const initialization = this.store.activateUser(this.userId).catch((error: unknown) => {
+        if (this.initialization === initialization) this.initialization = undefined;
+        throw error;
+      });
+      this.initialization = initialization;
     }
     return this.initialization;
   }
