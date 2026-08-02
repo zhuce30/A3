@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "backend.apps.learning",
     "backend.apps.assessments",
     "backend.apps.engagement",
+    "backend.apps.notes",
     "backend.apps.system",
     "backend.apps.compat",
 ]
