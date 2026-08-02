@@ -279,6 +279,7 @@ describe('personal notes autosave', () => {
 
   it('publishes the server note on 409 and removes every subscriber on dispose', async () => {
     const serverNote = saved(8).note;
+    const conflictingDraft = localDraft({ content: doc('触发冲突的本地正文') });
     const conflictClient = vi.fn<AutosaveNotesClient['saveNote']>().mockResolvedValue({
       success: false,
       status: 409,
@@ -291,9 +292,15 @@ describe('personal notes autosave', () => {
     const events: unknown[] = [];
     controller.subscribe('note-1', (event) => events.push(event));
 
-    await controller.flush(localDraft());
+    await controller.flush(conflictingDraft);
     expect(events).toContainEqual({ type: 'saving', noteId: 'note-1', clientMutationId: 'mutation-1' });
-    expect(events).toContainEqual({ type: 'conflict', noteId: 'note-1', serverVersion: 8, serverNote });
+    expect(events).toContainEqual({
+      type: 'conflict',
+      noteId: 'note-1',
+      serverVersion: 8,
+      serverNote,
+      draft: conflictingDraft,
+    });
 
     controller.dispose();
     await controller.schedule(localDraft({ clientMutationId: 'after-dispose' }));

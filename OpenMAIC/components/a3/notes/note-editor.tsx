@@ -53,6 +53,7 @@ export function NoteEditor({
   const mountRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const draftRef = useRef<EditableNoteDraft | null>(null);
+  const localContentRef = useRef<NoteContent>(note?.content ?? {});
   const baseVersionRef = useRef(note?.version ?? 0);
   const noteRef = useRef(note);
   const autosaveRef = useRef(autosave);
@@ -71,7 +72,7 @@ export function NoteEditor({
   }
   const [historyOpen, setHistoryOpen] = useState(false);
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
-  const [runtimeConflict, setRuntimeConflict] = useState<{ noteId: string; serverNote: NoteDetail } | null>(null);
+  const [runtimeConflict, setRuntimeConflict] = useState<{ noteId: string; serverNote: NoteDetail; localContent: NoteContent } | null>(null);
   const effectiveConflict = conflictServerNote ?? (runtimeConflict && runtimeConflict.noteId === note?.id ? runtimeConflict.serverNote : undefined);
   const conflictKey = effectiveConflict ? `${effectiveConflict.id}:${effectiveConflict.version}` : '';
   const [conflictVisibility, setConflictVisibility] = useState({ key: conflictKey, open: Boolean(conflictKey) });
@@ -91,6 +92,7 @@ export function NoteEditor({
     if (!mountRef.current || !selectedNote || loadState !== 'ready') return;
     baseVersionRef.current = selectedNote.version;
     draftRef.current = null;
+    localContentRef.current = selectedNote.content;
     const editorView = new EditorView(mountRef.current, {
       state: EditorState.create({
         schema: noteEditorSchema,
@@ -118,7 +120,8 @@ export function NoteEditor({
           updatedAt: new Date().toISOString(),
         };
         draftRef.current = draft;
-        setContentSnapshot({ selectedVersion: `${selectedNote.id}:${baseVersionRef.current}`, content: draft.content });
+        localContentRef.current = draft.content;
+        setContentSnapshot({ selectedVersion, content: draft.content });
         void autosaveRef.current.schedule(draft);
       },
       transformPastedHTML(html) {
@@ -150,7 +153,7 @@ export function NoteEditor({
         setSaveSnapshot({ selectedVersion, state: 'offline' });
       } else if (event.type === 'conflict') {
         setSaveSnapshot({ selectedVersion, state: 'conflict' });
-        setRuntimeConflict({ noteId: event.noteId, serverNote: event.serverNote });
+        setRuntimeConflict({ noteId: event.noteId, serverNote: event.serverNote, localContent: event.draft.content });
       } else {
         setSaveSnapshot({ selectedVersion, state: 'error' });
       }
@@ -240,7 +243,7 @@ export function NoteEditor({
           open={conflictVisibility.open}
           onOpenChange={(open) => setConflictVisibility({ key: conflictKey, open })}
           note={note}
-          localContent={contentSnapshot.content}
+          localContent={runtimeConflict?.noteId === note.id ? runtimeConflict.localContent : contentSnapshot.content}
           serverNote={effectiveConflict}
           client={client}
           draftStore={draftStore}

@@ -24,7 +24,7 @@ export interface OnlineEventSource {
 export type AutosaveResult =
   | { kind: 'saved'; noteId: string; resultingVersion: number; idempotent: boolean }
   | { kind: 'queued'; noteId: string; reason: 'offline' | 'server' | 'conflict-blocked' | 'version-mismatch' | 'account-switch-required' }
-  | { kind: 'conflict'; noteId: string; serverVersion: number; serverNote: NoteConflict['serverNote'] }
+  | { kind: 'conflict'; noteId: string; serverVersion: number; serverNote: NoteConflict['serverNote']; draft: EditableNoteDraft }
   | { kind: 'permanent-error'; noteId: string; status: number; code?: string; error: string }
   | { kind: 'disposed'; noteId: string };
 
@@ -33,7 +33,7 @@ export type AutosaveEvent =
   | { type: 'saving'; noteId: string; clientMutationId: string }
   | { type: 'saved'; noteId: string; resultingVersion: number; idempotent: boolean }
   | { type: 'offline'; noteId: string; reason: Extract<AutosaveResult, { kind: 'queued' }>['reason'] }
-  | { type: 'conflict'; noteId: string; serverVersion: number; serverNote: NoteConflict['serverNote'] }
+  | { type: 'conflict'; noteId: string; serverVersion: number; serverNote: NoteConflict['serverNote']; draft: EditableNoteDraft }
   | { type: 'rejected'; noteId: string; status: number; code?: string; error: string };
 
 export type AutosaveEventListener = (event: AutosaveEvent) => void;
@@ -247,6 +247,7 @@ export class NotesAutosaveController {
           noteId,
           serverVersion: response.serverVersion,
           serverNote: response.serverNote,
+          draft: editableDraftFromMutation(mutation),
         };
       }
       if (isPermanentClientFailure(response.status)) {
@@ -329,7 +330,13 @@ export class NotesAutosaveController {
     } else if (result.kind === 'queued') {
       this.emit({ type: 'offline', noteId: result.noteId, reason: result.reason });
     } else if (result.kind === 'conflict') {
-      this.emit({ type: 'conflict', noteId: result.noteId, serverVersion: result.serverVersion, serverNote: result.serverNote });
+      this.emit({
+        type: 'conflict',
+        noteId: result.noteId,
+        serverVersion: result.serverVersion,
+        serverNote: result.serverNote,
+        draft: result.draft,
+      });
     } else if (result.kind === 'permanent-error') {
       this.emit({ type: 'rejected', noteId: result.noteId, status: result.status, code: result.code, error: result.error });
     }
@@ -341,6 +348,16 @@ function requestFromMutation(mutation: PendingNoteMutation): SaveNoteInput {
     content: mutation.content,
     baseVersion: mutation.baseVersion,
     clientMutationId: mutation.clientMutationId,
+  };
+}
+
+function editableDraftFromMutation(mutation: PendingNoteMutation): EditableNoteDraft {
+  return {
+    noteId: mutation.noteId,
+    content: mutation.content,
+    baseVersion: mutation.baseVersion,
+    clientMutationId: mutation.clientMutationId,
+    updatedAt: mutation.updatedAt,
   };
 }
 

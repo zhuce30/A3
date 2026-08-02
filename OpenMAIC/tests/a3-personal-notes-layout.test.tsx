@@ -82,14 +82,15 @@ function realAutosave(response: unknown) {
   const database = new NotesDraftDatabase(`note-editor-${crypto.randomUUID()}`, { indexedDB: new IDBFactory(), IDBKeyRange });
   draftDatabases.push(database);
   const store = new NotesDraftStore(new DexieNotesDraftPersistence(database));
+  const saveNote = vi.fn().mockResolvedValue(response);
   const controller = new RealNotesAutosaveController({
     store,
-    client: { saveNote: vi.fn().mockResolvedValue(response) },
+    client: { saveNote },
     userId: 'student-1',
     debounceMs: 1,
     onlineEvents: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
   });
-  return { controller, store };
+  return { controller, store, saveNote };
 }
 
 describe('personal note ProseMirror document contract', () => {
@@ -296,6 +297,59 @@ describe('document-first note editor lifecycle and save state', () => {
     await vi.waitFor(() => expect(conflictContainer.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('存在冲突'));
     await vi.waitFor(() => expect(document.body.textContent).toContain('笔记版本冲突'));
     conflictSetup.controller.dispose();
+  });
+
+  it('keeps the latest local document through ACK, equivalent rerender, and a later 409', async () => {
+    const serverV5 = { ...note('note-1', 5), content: doc('服务器 v5') };
+    const setup = realAutosave(null);
+    setup.saveNote
+      .mockReset()
+      .mockResolvedValueOnce({ success: true, note: note('note-1', 4), resultingVersion: 4, idempotent: false })
+      .mockResolvedValueOnce({
+        success: false,
+        status: 409,
+        code: 'note_version_conflict',
+        error: '版本冲突',
+        serverVersion: 5,
+        serverNote: serverV5,
+      });
+    const createNote = vi.fn().mockResolvedValue({ success: true, note: note('copy-1', 1) });
+    const client = { createNote } as unknown as NotesClient;
+    const views: EditorView[] = [];
+    const container = mount(
+      <NoteEditor note={note()} client={client} autosave={setup.controller} draftStore={setup.store} attachments={[]} onEditorReady={(view) => views.push(view)} />,
+    );
+    const view = views[0]!;
+    const replaceDocument = (text: string) => {
+      const replacement = noteEditorSchema.nodeFromJSON(doc(text));
+      act(() => view.dispatch(view.state.tr.replaceWith(0, view.state.doc.content.size, replacement.content)));
+    };
+
+    replaceDocument('编辑 A');
+    await vi.waitFor(() => expect(container.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('已保存'));
+    expect(setup.saveNote.mock.calls[0]?.[1]).toMatchObject({ baseVersion: 3, content: doc('编辑 A') });
+
+    act(() => root!.render(
+      <NoteEditor note={{ ...note() }} client={client} autosave={setup.controller} draftStore={setup.store} attachments={[]} onEditorReady={(next) => views.push(next)} />,
+    ));
+    expect(views).toEqual([view]);
+    expect(view.state.doc.textContent).toBe('编辑 A');
+
+    replaceDocument('编辑 B');
+    await vi.waitFor(() => expect(setup.saveNote).toHaveBeenCalledTimes(2));
+    expect(setup.saveNote.mock.calls[1]?.[1]).toMatchObject({ baseVersion: 4, content: doc('编辑 B') });
+    await vi.waitFor(() => expect(document.body.textContent).toContain('笔记版本冲突'));
+    clickByName('查看差异');
+    const localDiff = document.querySelector('[aria-label="版本差异"] section');
+    expect(localDiff?.textContent).toContain('编辑 B');
+    expect(localDiff?.textContent).not.toContain('编辑 A');
+
+    clickByName('保留为副本');
+    await vi.waitFor(() => expect(createNote).toHaveBeenCalled());
+    expect(createNote.mock.calls[0]?.[0].content).toMatchObject({ type: 'doc' });
+    expect(JSON.stringify(createNote.mock.calls[0]?.[0].content)).toContain('编辑 B');
+    expect(JSON.stringify(createNote.mock.calls[0]?.[0].content)).not.toContain('编辑 A');
+    setup.controller.dispose();
   });
 });
 
