@@ -253,6 +253,76 @@ describe('personal notes autosave', () => {
     controller.dispose();
   });
 
+  it('serializes concurrent schedules and leaves only the newest mutation replayable', async () => {
+    vi.useFakeTimers();
+    const persistence = new MemoryPersistence();
+    const originalPut = persistence.putDraftAndMutation.bind(persistence);
+    let releaseFirstPut: (() => void) | undefined;
+    const firstPutBlocked = new Promise<void>((resolve) => { releaseFirstPut = resolve; });
+    const put = vi.spyOn(persistence, 'putDraftAndMutation').mockImplementation(async (draft, mutation) => {
+      if (mutation.clientMutationId === 'concurrent-old') await firstPutBlocked;
+      await originalPut(draft, mutation);
+    });
+    const store = new NotesDraftStore(persistence);
+    const firstSave = vi.fn<AutosaveNotesClient['saveNote']>().mockRejectedValue(new TypeError('offline'));
+    const controller = new NotesAutosaveController({
+      store,
+      client: { saveNote: firstSave },
+      userId: 'opaque-user-a',
+    });
+
+    const oldSchedule = controller.schedule(localDraft({
+      clientMutationId: 'concurrent-old',
+      content: doc('old concurrent content'),
+    }));
+    const newSchedule = controller.schedule(localDraft({
+      clientMutationId: 'concurrent-new',
+      content: doc('new concurrent content'),
+    }));
+    await vi.waitFor(() => expect(put).toHaveBeenCalledTimes(1));
+    releaseFirstPut?.();
+    await Promise.all([oldSchedule, newSchedule]);
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(firstSave).toHaveBeenCalledTimes(1);
+    expect([...persistence.mutations.keys()]).toEqual(['concurrent-new']);
+    controller.dispose();
+
+    const replaySave = vi.fn<AutosaveNotesClient['saveNote']>().mockResolvedValue(saved(8));
+    const reloaded = new NotesAutosaveController({
+      store: new NotesDraftStore(persistence),
+      client: { saveNote: replaySave },
+      userId: 'opaque-user-a',
+    });
+    await reloaded.initialize();
+
+    expect(replaySave).toHaveBeenCalledTimes(1);
+    expect(replaySave.mock.calls[0]?.[1]).toMatchObject({ clientMutationId: 'concurrent-new' });
+    reloaded.dispose();
+  });
+
+  it('persists a scheduled edit while the previous network request is in flight', async () => {
+    let releaseRequest: ((result: ApiResult<SaveNoteSuccess>) => void) | undefined;
+    const saveNote = vi.fn<AutosaveNotesClient['saveNote']>().mockImplementation(
+      () => new Promise((resolve) => { releaseRequest = resolve; }),
+    );
+    const { controller, persistence } = setup(saveNote);
+    const inFlight = controller.flush(localDraft({ clientMutationId: 'in-flight' }));
+    await vi.waitFor(() => expect(saveNote).toHaveBeenCalledTimes(1));
+
+    const scheduling = controller.schedule(localDraft({
+      clientMutationId: 'edit-during-flight',
+      content: doc('content persisted during request'),
+    }));
+    await vi.waitFor(() => expect(persistence.mutations.has('edit-during-flight')).toBe(true));
+    await scheduling;
+
+    expect(persistence.drafts.get('note-1')?.clientMutationId).toBe('edit-during-flight');
+    releaseRequest?.(saved(8));
+    await inFlight;
+    controller.dispose();
+  });
+
   it('cancels a scheduled ghost save when a newer explicit flush supersedes it', async () => {
     vi.useFakeTimers();
     const { controller, persistence, saveNote } = setup();

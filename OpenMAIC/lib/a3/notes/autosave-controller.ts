@@ -49,7 +49,7 @@ export class NotesAutosaveController {
   private readonly onlineEvents?: OnlineEventSource;
   private readonly scheduled = new Map<string, ScheduledSave>();
   private readonly chains = new Map<string, Promise<AutosaveResult>>();
-  private readonly persistenceChains = new Map<string, Promise<boolean>>();
+  private readonly localOperationChains = new Map<string, Promise<void>>();
   private readonly activeRequests = new Set<AbortController>();
   private readonly acknowledgedMutationIds = new Set<string>();
   private initialization?: Promise<AccountActivation>;
@@ -78,40 +78,47 @@ export class NotesAutosaveController {
     return { account, replay };
   }
 
-  async schedule(draft: EditableNoteDraft) {
-    if (this.disposed) return;
-    const previous = this.cancelScheduled(draft.noteId);
-    if (this.acknowledgedMutationIds.has(draft.clientMutationId)) {
+  schedule(draft: EditableNoteDraft) {
+    return this.runLocalOperation(draft.noteId, async () => {
+      if (this.disposed) return;
+      const previous = this.cancelScheduled(draft.noteId);
+      if (this.acknowledgedMutationIds.has(draft.clientMutationId)) {
+        await this.discardSuperseded(previous, draft.clientMutationId);
+        return;
+      }
+      if (!await this.persistDraft(draft)) return;
       await this.discardSuperseded(previous, draft.clientMutationId);
-      return;
-    }
-    if (!await this.persistDraft(draft)) return;
-    await this.discardSuperseded(previous, draft.clientMutationId);
-    const handle = setTimeout(() => {
-      const scheduled = this.scheduled.get(draft.noteId);
-      if (scheduled?.mutationId !== draft.clientMutationId) return;
-      this.scheduled.delete(draft.noteId);
-      void this.enqueue(draft.noteId, draft.clientMutationId);
-    }, this.debounceMs);
-    this.scheduled.set(draft.noteId, { handle, mutationId: draft.clientMutationId });
+      if (this.disposed) return;
+      const handle = setTimeout(() => {
+        const scheduled = this.scheduled.get(draft.noteId);
+        if (scheduled?.mutationId !== draft.clientMutationId) return;
+        this.scheduled.delete(draft.noteId);
+        void this.enqueue(draft.noteId, draft.clientMutationId);
+      }, this.debounceMs);
+      this.scheduled.set(draft.noteId, { handle, mutationId: draft.clientMutationId });
+    });
   }
 
   flush(draft: EditableNoteDraft): Promise<AutosaveResult> {
     if (this.disposed) return Promise.resolve({ kind: 'disposed', noteId: draft.noteId });
-    const previous = this.cancelScheduled(draft.noteId);
-    if (this.acknowledgedMutationIds.has(draft.clientMutationId)) {
-      return this.discardSuperseded(previous, draft.clientMutationId).then(() => ({
-        kind: 'saved',
-        noteId: draft.noteId,
-        resultingVersion: draft.baseVersion + 1,
-        idempotent: true,
-      }));
-    }
-    return this.persistDraft(draft).then(async (persisted) => {
-      if (!persisted) return { kind: 'queued', noteId: draft.noteId, reason: 'account-switch-required' };
+    return this.runLocalOperation<AutosaveResult | undefined>(draft.noteId, async () => {
+      if (this.disposed) return { kind: 'disposed', noteId: draft.noteId };
+      const previous = this.cancelScheduled(draft.noteId);
+      if (this.acknowledgedMutationIds.has(draft.clientMutationId)) {
+        await this.discardSuperseded(previous, draft.clientMutationId);
+        return {
+          kind: 'saved',
+          noteId: draft.noteId,
+          resultingVersion: draft.baseVersion + 1,
+          idempotent: true,
+        };
+      }
+      if (!await this.persistDraft(draft)) {
+        return { kind: 'queued', noteId: draft.noteId, reason: 'account-switch-required' };
+      }
       await this.discardSuperseded(previous, draft.clientMutationId);
-      return this.enqueue(draft.noteId, draft.clientMutationId);
-    });
+      return undefined;
+    }).then((result) => result ?? this.enqueue(draft.noteId, draft.clientMutationId));
   }
 
   async resume(): Promise<AutosaveResult[]> {
@@ -200,8 +207,7 @@ export class NotesAutosaveController {
     }
     if (!response.success) {
       if (isConflict(response)) {
-        await this.persistenceChains.get(noteId);
-        await this.store.markNoteConflict(noteId, response.serverVersion);
+        await this.runLocalOperation(noteId, () => this.store.markNoteConflict(noteId, response.serverVersion));
         return {
           kind: 'conflict',
           noteId,
@@ -210,11 +216,15 @@ export class NotesAutosaveController {
         };
       }
       if (isPermanentClientFailure(response.status)) {
-        await this.store.markRejected(mutation.clientMutationId, response.status, response.code);
+        const status = response.status;
+        await this.runLocalOperation(
+          noteId,
+          () => this.store.markRejected(mutation.clientMutationId, status, response.code),
+        );
         return {
           kind: 'permanent-error',
           noteId,
-          status: response.status,
+          status,
           code: response.code,
           error: response.error,
         };
@@ -228,8 +238,10 @@ export class NotesAutosaveController {
     if (response.resultingVersion !== mutation.baseVersion + 1) {
       return { kind: 'queued', noteId, reason: 'version-mismatch' };
     }
-    await this.persistenceChains.get(noteId);
-    const acknowledged = await this.store.acknowledge(mutation, response.resultingVersion);
+    const acknowledged = await this.runLocalOperation(
+      noteId,
+      () => this.store.acknowledge(mutation, response.resultingVersion),
+    );
     if (!acknowledged) return { kind: 'queued', noteId, reason: 'version-mismatch' };
     this.acknowledgedMutationIds.add(mutation.clientMutationId);
     return {
@@ -240,21 +252,20 @@ export class NotesAutosaveController {
     };
   }
 
-  private persistDraft(draft: EditableNoteDraft) {
-    const previous = this.persistenceChains.get(draft.noteId) ?? Promise.resolve();
-    const current = previous
-      .catch(() => undefined)
-      .then(async () => {
-        const account = await this.ensureInitialized();
-        if (!this.disposed && !account.warningRequired) {
-          await this.store.persist(draft);
-          return true;
-        }
-        return false;
-      });
-    this.persistenceChains.set(draft.noteId, current);
-    void current.finally(() => {
-      if (this.persistenceChains.get(draft.noteId) === current) this.persistenceChains.delete(draft.noteId);
+  private async persistDraft(draft: EditableNoteDraft) {
+    const account = await this.ensureInitialized();
+    if (this.disposed || account.warningRequired) return false;
+    await this.store.persist(draft);
+    return true;
+  }
+
+  private runLocalOperation<T>(noteId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.localOperationChains.get(noteId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    const tail = current.then(() => undefined, () => undefined);
+    this.localOperationChains.set(noteId, tail);
+    void tail.finally(() => {
+      if (this.localOperationChains.get(noteId) === tail) this.localOperationChains.delete(noteId);
     });
     return current;
   }
