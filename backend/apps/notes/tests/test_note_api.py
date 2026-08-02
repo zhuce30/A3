@@ -665,6 +665,144 @@ class SearchAndValidationTests(NoteApiTestCase):
                     )
                 self.assertEqual(raised.exception.code, "invalid_note_content")
 
+    def test_integer_attrs_are_limited_to_js_safe_integer_range(self) -> None:
+        max_safe_integer = (1 << 53) - 1
+        valid_content = {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {"type": "image", "attrs": {"src": "https://example.com/a.png", "width": max_safe_integer}},
+                        {
+                            "type": "text",
+                            "text": "边界",
+                            "marks": [{"type": "mark", "attrs": {"index": -max_safe_integer}}],
+                        },
+                    ],
+                }
+            ],
+        }
+
+        valid = self.post_json(reverse("notes:note-list"), {"title": "安全整数边界", "content": valid_content})
+
+        self.assertEqual(valid.status_code, 201)
+        invalid_documents = (
+            {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "image",
+                                "attrs": {"src": "https://example.com/a.png", "width": max_safe_integer + 1},
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "越界",
+                                "marks": [{"type": "mark", "attrs": {"index": -max_safe_integer - 1}}],
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "table",
+                        "content": [
+                            {
+                                "type": "table_row",
+                                "content": [
+                                    {
+                                        "type": "table_cell",
+                                        "attrs": {"colwidth": [max_safe_integer + 1]},
+                                        "content": [{"type": "paragraph"}],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        for index, content in enumerate(invalid_documents):
+            with self.subTest(index=index):
+                response = self.post_json(
+                    reverse("notes:note-list"),
+                    {"title": f"越界整数 {index}", "content": content},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["code"], "invalid_note_content")
+        self.assertFalse(Note.objects.filter(user=self.user, title__startswith="越界整数").exists())
+
+    def test_marks_and_colwidth_have_per_node_item_limits(self) -> None:
+        def table_with_colwidth(count: int) -> dict:
+            return {
+                "type": "table",
+                "content": [
+                    {
+                        "type": "table_row",
+                        "content": [
+                            {
+                                "type": "table_cell",
+                                "attrs": {"colwidth": [120] * count},
+                                "content": [{"type": "paragraph"}],
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        valid_content = {
+            "type": "doc",
+            "content": [
+                table_with_colwidth(100),
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": "边界", "marks": [{"type": "strong"}] * 100}],
+                },
+            ],
+        }
+        valid = self.post_json(reverse("notes:note-list"), {"title": "列表边界", "content": valid_content})
+
+        self.assertEqual(valid.status_code, 201)
+        oversized_documents = (
+            {"type": "doc", "content": [table_with_colwidth(101)]},
+            {
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {"type": "text", "text": "过多标记", "marks": [{"type": "strong"}] * 101}
+                        ],
+                    }
+                ],
+            },
+        )
+        for index, content in enumerate(oversized_documents):
+            with self.subTest(index=index):
+                response = self.post_json(
+                    reverse("notes:note-list"),
+                    {"title": f"列表超限 {index}", "content": content},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["code"], "note_document_too_large")
+        self.assertFalse(Note.objects.filter(user=self.user, title__startswith="列表超限").exists())
+
     def test_document_resource_limits_return_stable_errors(self) -> None:
         nested = {"type": "paragraph", "content": [{"type": "text", "text": "deep"}]}
         for _ in range(65):

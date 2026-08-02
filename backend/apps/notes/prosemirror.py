@@ -12,6 +12,8 @@ MAX_DOCUMENT_TEXT = 1_000_000
 MAX_ATTRIBUTE_STRING = 8_192
 MAX_URL_LENGTH = 2_048
 MAX_ATTACHMENT_LABEL = 255
+MAX_SAFE_INTEGER = (1 << 53) - 1
+MAX_ATTRIBUTE_LIST_ITEMS = 100
 
 
 class DocumentValidationError(ValueError):
@@ -133,13 +135,25 @@ def _validate_attrs(owner_type: str, attrs: Any, allowed: set[str]) -> None:
         _invalid(f"{owner_type} 包含不支持的属性")
     for key, attr_value in attrs.items():
         if key == "colwidth":
-            if not isinstance(attr_value, list) or any(
+            if not isinstance(attr_value, list):
+                _invalid("colwidth 必须是正整数数组")
+            if len(attr_value) > MAX_ATTRIBUTE_LIST_ITEMS:
+                _too_large(f"colwidth 不能超过 {MAX_ATTRIBUTE_LIST_ITEMS} 项")
+            if any(
                 value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0)
                 for value in attr_value
             ):
                 _invalid("colwidth 必须是正整数数组")
+            if any(value is not None and value > MAX_SAFE_INTEGER for value in attr_value):
+                _invalid("colwidth 数值超出 JavaScript 安全整数范围")
         elif not isinstance(attr_value, (str, int, float, bool, type(None))):
             _invalid(f"{owner_type} 的属性值格式不正确")
+        if (
+            isinstance(attr_value, int)
+            and not isinstance(attr_value, bool)
+            and abs(attr_value) > MAX_SAFE_INTEGER
+        ):
+            _invalid(f"{owner_type}.{key} 数值超出 JavaScript 安全整数范围")
         if isinstance(attr_value, float) and not math.isfinite(attr_value):
             _invalid(f"{owner_type}.{key} 必须是有限数值")
         if isinstance(attr_value, str):
@@ -214,6 +228,8 @@ def _validate_marks(node_type: str, marks: Any) -> None:
         _invalid("块级节点不能包含 marks")
     if not isinstance(marks, list):
         _invalid("marks 必须是数组")
+    if len(marks) > MAX_ATTRIBUTE_LIST_ITEMS:
+        _too_large(f"marks 不能超过 {MAX_ATTRIBUTE_LIST_ITEMS} 项")
     for mark in marks:
         if not isinstance(mark, dict) or set(mark) - {"type", "attrs"}:
             _invalid("mark 格式不正确")
