@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import uuid
 from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -391,6 +396,62 @@ class MemoryEndpointTests(PersonalNoteMemoryTestCase):
         )
         self.client.logout()
         self.assertEqual(self.client.get(reverse("notes:memory-list")).status_code, 401)
+
+
+class MemoryEvaluationCommandTests(TestCase):
+    def test_offline_evaluation_is_deterministic_private_and_has_at_least_fifty_cases(self) -> None:
+        with TemporaryDirectory() as directory:
+            first_path = Path(directory) / "first.json"
+            second_path = Path(directory) / "second.json"
+
+            call_command("evaluate_notes_memory", "--offline", "--output", str(first_path), stdout=StringIO())
+            call_command("evaluate_notes_memory", "--offline", "--output", str(second_path), stdout=StringIO())
+
+            first = json.loads(first_path.read_text(encoding="utf-8"))
+            second = json.loads(second_path.read_text(encoding="utf-8"))
+            self.assertEqual(first, second)
+            self.assertEqual(first["schemaVersion"], 1)
+            self.assertEqual(first["mode"], "offline")
+            self.assertGreaterEqual(first["dataset"]["caseCount"], 50)
+            self.assertEqual(first["metrics"]["crossUserLeakage"], 0)
+            self.assertEqual(first["metrics"]["deletionConsistency"], 1.0)
+            self.assertTrue(first["passed"])
+            artifact = first_path.read_text(encoding="utf-8")
+            self.assertNotIn("PRIVATE_NOTE_CONTENT", artifact)
+            self.assertNotIn("query", artifact)
+            self.assertNotIn("content", artifact)
+
+    def test_strict_mode_writes_metrics_then_fails_when_a_required_threshold_misses(self) -> None:
+        failing_case = {
+            "id": "strict-failure",
+            "category": "deletion",
+            "query": "PRIVATE_NOTE_CONTENT",
+            "scopeNoteIds": ["note-1"],
+            "memories": [],
+            "expectedSelectedIds": ["missing-memory"],
+            "expectedAbstention": False,
+        }
+        with TemporaryDirectory() as directory:
+            dataset_path = Path(directory) / "cases.jsonl"
+            output_path = Path(directory) / "metrics.json"
+            dataset_path.write_text(json.dumps(failing_case, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            with self.assertRaises(CommandError):
+                call_command(
+                    "evaluate_notes_memory",
+                    "--offline",
+                    "--strict",
+                    "--dataset",
+                    str(dataset_path),
+                    "--output",
+                    str(output_path),
+                    stdout=StringIO(),
+                )
+
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["metrics"]["deletionConsistency"], 0.0)
+            self.assertNotIn("PRIVATE_NOTE_CONTENT", output_path.read_text(encoding="utf-8"))
 
 
 class MemoryAssistantIntegrationTests(PersonalNoteMemoryTestCase):
