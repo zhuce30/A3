@@ -9,6 +9,7 @@ interface NoteWritebackPreviewProps {
   preview: NoteWritebackPreview;
   busy: boolean;
   stale: boolean;
+  confirmDisabled?: boolean;
   error: string;
   onConfirm: () => void;
   onAbandon: () => void;
@@ -19,6 +20,7 @@ export function NoteWritebackPreviewPanel({
   preview,
   busy,
   stale,
+  confirmDisabled = false,
   error,
   onConfirm,
   onAbandon,
@@ -68,7 +70,7 @@ export function NoteWritebackPreviewPanel({
             <Button type="button" size="sm" variant="outline" className="flex-1 rounded-md" disabled={busy} aria-label="放弃写回建议" onClick={onAbandon}>
               <X className="size-3.5" />放弃
             </Button>
-            <Button type="button" size="sm" className="flex-1 rounded-md" disabled={busy} aria-label="确认写入笔记正文" onClick={onConfirm}>
+            <Button type="button" size="sm" className="flex-1 rounded-md" disabled={busy || confirmDisabled} aria-label="确认写入笔记正文" onClick={onConfirm}>
               <Check className="size-3.5" />确认写入
             </Button>
           </>

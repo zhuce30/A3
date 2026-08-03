@@ -7,12 +7,14 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { NotesClient } from '@/lib/a3/notes/client';
 import type { NoteAiCitation, NoteAiMessage, NoteAiScopeInput, NoteAiSession, NoteDetail, NoteSummary, NoteWritebackPreview } from '@/lib/a3/notes/types';
+import type { NoteEditorSnapshotValidity } from './note-editor';
 import { NoteWritebackPreviewPanel } from './note-writeback-preview';
 
 interface NoteAiDrawerProps {
   client: NotesClient;
   currentNote: NoteDetail | null;
   notes: NoteSummary[];
+  editorSnapshot?: NoteEditorSnapshotValidity;
   isMobile: boolean;
   onCitationNavigate: (citation: NoteAiCitation) => void;
   onWritebackApplied?: (note: NoteDetail) => void;
@@ -26,9 +28,10 @@ interface WritebackOperation {
   scopeKey: string;
   targetNoteId: string;
   previewId?: string;
+  targetVersion?: number;
 }
 
-export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationNavigate, onWritebackApplied }: NoteAiDrawerProps) {
+export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMobile, onCitationNavigate, onWritebackApplied }: NoteAiDrawerProps) {
   const [open, setOpen] = useState(false);
   const [scopeMode, setScopeMode] = useState<ScopeMode>('note');
   const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>([]);
@@ -80,6 +83,46 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
   const writebackSource = [...scopedMessages].reverse().find((message) => (
     message.role === 'assistant' && message.status === 'succeeded' && Boolean(message.content.trim())
   ));
+  const effectiveEditorSnapshot = editorSnapshot ?? {
+    noteId: currentNote?.id ?? null,
+    baseVersion: currentNote?.version ?? null,
+    dirty: false,
+    pending: false,
+    conflicted: false,
+  };
+  const getWritebackEditorIssue = (targetNoteId: string, targetVersion: number) => {
+    const currentVersion = currentNote?.version;
+    if (effectiveEditorSnapshot.conflicted) {
+      return { blocked: true, stale: false, message: '请先解决笔记冲突，再生成/确认写回建议' };
+    }
+    if (
+      effectiveEditorSnapshot.dirty
+      || effectiveEditorSnapshot.pending
+      || effectiveEditorSnapshot.noteId !== targetNoteId
+      || currentNote?.id !== targetNoteId
+      || currentVersion === undefined
+      || effectiveEditorSnapshot.baseVersion !== currentVersion
+    ) {
+      return { blocked: true, stale: false, message: '请先等待笔记保存完成，再生成/确认写回建议' };
+    }
+    if (currentVersion !== targetVersion) {
+      return { blocked: true, stale: true, message: '正文已保存为新版本，请重新生成写回建议' };
+    }
+    return { blocked: false, stale: false, message: '' };
+  };
+  const previewEditorIssue = writebackPreview
+    ? getWritebackEditorIssue(writebackPreview.targetNote.id, writebackPreview.targetVersion)
+    : { blocked: false, stale: false, message: '' };
+  const writebackEditorContext = useRef({
+    currentNoteId: currentNote?.id ?? '',
+    currentNoteVersion: currentNote?.version ?? null,
+    snapshot: effectiveEditorSnapshot,
+  });
+  writebackEditorContext.current = {
+    currentNoteId: currentNote?.id ?? '',
+    currentNoteVersion: currentNote?.version ?? null,
+    snapshot: effectiveEditorSnapshot,
+  };
 
   const invalidateAsync = useCallback(() => {
     requestGeneration.current += 1;
@@ -295,13 +338,14 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     setOpen(false);
   };
 
-  const beginWritebackOperation = (targetNoteId: string, previewId?: string) => {
+  const beginWritebackOperation = (targetNoteId: string, previewId?: string, targetVersion?: number) => {
     const operation: WritebackOperation = {
       id: writebackOperationCounter.current + 1,
       generation: requestGeneration.current,
       scopeKey,
       targetNoteId,
       previewId,
+      targetVersion,
     };
     writebackOperationCounter.current = operation.id;
     writebackOperation.current = operation;
@@ -316,11 +360,22 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
       setWritebackBusyOwner((current) => current?.id === operation.id ? null : current);
     }
     const context = writebackContext.current;
+    const editorContext = writebackEditorContext.current;
+    const snapshot = editorContext.snapshot;
     return (
       mounted.current
       && operation.generation === requestGeneration.current
       && operation.scopeKey === context.scopeKey
       && operation.targetNoteId === context.targetNoteId
+      && (operation.targetVersion === undefined || (
+        editorContext.currentNoteId === operation.targetNoteId
+        && editorContext.currentNoteVersion === operation.targetVersion
+        && snapshot.noteId === operation.targetNoteId
+        && snapshot.baseVersion === operation.targetVersion
+        && !snapshot.dirty
+        && !snapshot.pending
+        && !snapshot.conflicted
+      ))
       && (!operation.previewId || (
         writebackPreviewRef.current?.id === operation.previewId
         && writebackPreviewRef.current.targetNote.id === operation.targetNoteId
@@ -330,7 +385,12 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
 
   const generateWritebackPreview = async () => {
     if (!currentNote || !writebackSource || writebackBusy) return;
-    const operation = beginWritebackOperation(currentNote.id);
+    const editorIssue = getWritebackEditorIssue(currentNote.id, currentNote.version);
+    if (editorIssue.blocked) {
+      setWritebackError(editorIssue.message);
+      return;
+    }
+    const operation = beginWritebackOperation(currentNote.id, undefined, currentNote.version);
     setWritebackError('');
     setWritebackStale(false);
     setWritebackNeedsReask(false);
@@ -352,7 +412,17 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
 
   const confirmWriteback = async () => {
     if (!writebackPreview || writebackBusy) return;
-    const operation = beginWritebackOperation(writebackPreview.targetNote.id, writebackPreview.id);
+    const editorIssue = getWritebackEditorIssue(writebackPreview.targetNote.id, writebackPreview.targetVersion);
+    if (editorIssue.blocked) {
+      setWritebackError(editorIssue.message);
+      setWritebackStale(editorIssue.stale);
+      return;
+    }
+    const operation = beginWritebackOperation(
+      writebackPreview.targetNote.id,
+      writebackPreview.id,
+      writebackPreview.targetVersion,
+    );
     setWritebackError('');
     setWritebackNeedsReask(false);
     const result = await client.confirmWritebackPreview(writebackPreview.id);
@@ -543,8 +613,9 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
           <NoteWritebackPreviewPanel
             preview={writebackPreview}
             busy={writebackBusy}
-            stale={writebackStale}
-            error={writebackError}
+            stale={writebackStale || previewEditorIssue.stale}
+            confirmDisabled={previewEditorIssue.blocked}
+            error={previewEditorIssue.message || writebackError}
             onConfirm={() => void confirmWriteback()}
             onAbandon={() => void abandonWriteback()}
             onRegenerate={reaskWriteback}

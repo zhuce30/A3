@@ -217,6 +217,16 @@ export function NoteEditor({
         reportSnapshotValidity({ noteId, baseVersion: baseVersionRef.current, dirty: pending, pending, conflicted: false });
         setSaveSnapshot({ selectedVersion, state: event.pendingMutationId ? 'scheduled' : 'saved' });
         setRuntimeConflict(null);
+        if (!pending && noteRef.current) {
+          const updatedNote: NoteDetail = {
+            ...noteRef.current,
+            version: baseVersionRef.current,
+            content: localContentRef.current,
+            contentText: viewRef.current?.state.doc.textContent ?? noteRef.current.contentText,
+          };
+          noteRef.current = updatedNote;
+          onNoteChangeRef.current?.(updatedNote);
+        }
       } else if (event.type === 'offline') {
         reportSnapshotValidity({
           noteId,

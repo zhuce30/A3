@@ -365,6 +365,40 @@ describe('document-first note editor lifecycle and save state', () => {
     expect(snapshotStates.at(-1)).toEqual({ noteId: 'note-1', baseVersion: 4, dirty: true, pending: true, conflicted: false });
   });
 
+  it('publishes the current editor document and version only after autosave fully settles', () => {
+    let listener: ((event: AutosaveEvent) => void) | undefined;
+    const onNoteChange = vi.fn();
+    const views: EditorView[] = [];
+    const autosave = {
+      schedule: vi.fn(), flush: vi.fn(),
+      subscribe: vi.fn((_noteId: string, next: typeof listener) => { listener = next; return () => undefined; }),
+    } as unknown as NotesAutosaveController;
+    mount(
+      <NoteEditor
+        note={note()}
+        client={{} as NotesClient}
+        autosave={autosave}
+        attachments={[]}
+        onEditorReady={(view) => views.push(view)}
+        onNoteChange={onNoteChange}
+      />,
+    );
+    act(() => views[0]!.dispatch(views[0]!.state.tr.insertText('已保存内容')));
+    act(() => listener?.({
+      type: 'saved', noteId: 'note-1', resultingVersion: 4, idempotent: false, pendingMutationId: 'new',
+    }));
+    expect(onNoteChange).not.toHaveBeenCalled();
+
+    act(() => listener?.({ type: 'saved', noteId: 'note-1', resultingVersion: 5, idempotent: false }));
+
+    expect(onNoteChange).toHaveBeenCalledTimes(1);
+    expect(onNoteChange).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'note-1',
+      version: 5,
+      content: views[0]!.state.doc.toJSON(),
+    }));
+  });
+
   it('derives saved and conflict states from real autosave outcomes', async () => {
     const savedSetup = realAutosave({ success: true, note: note('note-1', 4), resultingVersion: 4, idempotent: false });
     const savedViews: EditorView[] = [];

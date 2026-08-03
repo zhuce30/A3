@@ -98,6 +98,12 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const citationNavigationGeneration = useRef(0);
   const editorNoteIdRef = useRef<string | null>(null);
   const editorSnapshotRef = useRef<NoteEditorSnapshotValidity>(EMPTY_EDITOR_SNAPSHOT);
+  const [editorSnapshot, setEditorSnapshot] = useState<NoteEditorSnapshotValidity>(EMPTY_EDITOR_SNAPSHOT);
+
+  const updateEditorSnapshot = useCallback((state: NoteEditorSnapshotValidity) => {
+    editorSnapshotRef.current = state;
+    setEditorSnapshot(state);
+  }, []);
 
   useEffect(() => {
     selectedNoteIdRef.current = selectedNote?.id ?? null;
@@ -172,7 +178,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     noteAbortController.current?.abort();
     const controller = new AbortController();
     noteAbortController.current = controller;
-    editorSnapshotRef.current = EMPTY_EDITOR_SNAPSHOT;
+    updateEditorSnapshot(EMPTY_EDITOR_SNAPSHOT);
     setEditorState('loading');
     setEditorError('');
     setFailedNoteId(null);
@@ -218,7 +224,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
       setFailedNoteId(noteId);
       return null;
     }
-  }, [client, draftStore]);
+  }, [client, draftStore, updateEditorSnapshot]);
 
   const loadNotes = useCallback(async () => {
     if (!initialized) return;
@@ -260,7 +266,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
         noteAbortController.current?.abort();
         setSelectedNote(null);
         editorNoteIdRef.current = null;
-        editorSnapshotRef.current = EMPTY_EDITOR_SNAPSHOT;
+        updateEditorSnapshot(EMPTY_EDITOR_SNAPSHOT);
         setAttachments([]);
         setRecoverableDraft(undefined);
       }
@@ -270,7 +276,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
       setListState('error');
       setError('笔记列表加载失败，请重试');
     }
-  }, [client, initialized, isMobile, loadNote, selectedNotebookId, selectedTagId, view]);
+  }, [client, initialized, isMobile, loadNote, selectedNotebookId, selectedTagId, updateEditorSnapshot, view]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => void loadNotes(), 0);
@@ -312,7 +318,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     setSelectedTagId(next.tagId ?? null);
     setSelectedNote(null);
     editorNoteIdRef.current = null;
-    editorSnapshotRef.current = EMPTY_EDITOR_SNAPSHOT;
+    updateEditorSnapshot(EMPTY_EDITOR_SNAPSHOT);
     setRecoverableDraft(undefined);
   };
 
@@ -550,7 +556,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
           onNoteChange={updateSelectedNote}
           onAttachmentsChange={setAttachments}
           onEditorReady={editorReady}
-          onSnapshotValidityChange={(state) => { editorSnapshotRef.current = state; }}
+          onSnapshotValidityChange={updateEditorSnapshot}
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
@@ -612,14 +618,14 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
       <div className="hidden min-h-0 border-r border-border/70 min-[1028px]:block">{navigation}</div>
       <div className="hidden min-h-0 min-w-0 min-[1028px]:flex">
         <div className="min-h-0 min-w-0 flex-1">{editor}</div>
-        <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} isMobile={false} onCitationNavigate={(citation) => void navigateCitation(citation)} onWritebackApplied={(note) => {
+        <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} editorSnapshot={editorSnapshot} isMobile={false} onCitationNavigate={(citation) => void navigateCitation(citation)} onWritebackApplied={(note) => {
           setSelectedNote(note);
           setNotes((current) => current.map((item) => item.id === note.id ? note : item));
         }} />
       </div>
       {isMobile && mobileView === 'list' && <div data-notes-mobile-view="list" className="min-h-0 min-[1028px]:hidden">{navigation}</div>}
       {isMobile && mobileView === 'editor' && <div data-notes-mobile-view="editor" className="min-h-0 min-[1028px]:hidden">{editor}</div>}
-      {isMobile && <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} isMobile onCitationNavigate={(citation) => void navigateCitation(citation)} onWritebackApplied={(note) => {
+      {isMobile && <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} editorSnapshot={editorSnapshot} isMobile onCitationNavigate={(citation) => void navigateCitation(citation)} onWritebackApplied={(note) => {
         setSelectedNote(note);
         setNotes((current) => current.map((item) => item.id === note.id ? note : item));
       }} />}
