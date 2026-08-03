@@ -1,6 +1,9 @@
 import type {
   ApiResult,
   NoteAttachment,
+  NoteAiMessage,
+  NoteAiScopeInput,
+  NoteAiSession,
   NoteContent,
   NoteDetail,
   NoteExportJob,
@@ -24,6 +27,12 @@ export interface CreateNoteInput {
   notebookId?: string | null;
   tagIds?: string[];
   isPinned?: boolean;
+}
+
+export interface AiMessageWatchHandlers {
+  onMessage: (message: NoteAiMessage) => void;
+  onDisconnect?: () => void;
+  onError?: (error: string) => void;
 }
 
 export class NotesClient {
@@ -150,6 +159,57 @@ export class NotesClient {
 
   downloadExport(exportId: string, options: { signal?: AbortSignal } = {}) {
     return this.download(`exports/${encodeURIComponent(exportId)}/download/`, options);
+  }
+
+  listAiSessions() {
+    return this.json<{ sessions: NoteAiSession[] }>('GET', 'assistant/sessions/');
+  }
+
+  createAiSession(input: { title: string; scope: NoteAiScopeInput }) {
+    return this.json<{ session: NoteAiSession }>('POST', 'assistant/sessions/', input);
+  }
+
+  listAiMessages(sessionId: string, options: { signal?: AbortSignal } = {}) {
+    return this.json<{ messages: NoteAiMessage[] }>(
+      'GET',
+      `assistant/sessions/${encodeURIComponent(sessionId)}/messages/`,
+      undefined,
+      options,
+    );
+  }
+
+  submitAiChat(input: { sessionId: string; clientRequestId: string; message: string; includeCourseEvidence?: boolean }) {
+    return this.json<{ message: NoteAiMessage; idempotent: boolean }>('POST', 'assistant/chat/', input);
+  }
+
+  watchAiMessage(messageId: string, handlers: AiMessageWatchHandlers) {
+    const source = new EventSource(`${this.endpoint(`assistant/stream/${encodeURIComponent(messageId)}`)}/`, {
+      withCredentials: true,
+    });
+    let settled = false;
+    const receive = (event: Event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent<string>).data) as { message?: NoteAiMessage; error?: string };
+        if (payload.message) handlers.onMessage(payload.message);
+        if (event.type === 'final') {
+          settled = true;
+          source.close();
+        }
+        if (payload.error) handlers.onError?.(payload.error);
+      } catch {
+        handlers.onError?.('AI 回答状态无法解析');
+      }
+    };
+    source.addEventListener('status', receive);
+    source.addEventListener('final', receive);
+    source.addEventListener('stream-error', receive);
+    source.onerror = () => {
+      if (!settled) handlers.onDisconnect?.();
+    };
+    return () => {
+      settled = true;
+      source.close();
+    };
   }
 
   private async json<T>(

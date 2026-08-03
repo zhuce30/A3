@@ -2,13 +2,16 @@
 
 import { ArrowLeft, FilePlus2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { TextSelection } from 'prosemirror-state';
+import type { EditorView } from 'prosemirror-view';
 
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { Button } from '@/components/ui/button';
 import { NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
 import { NotesClient } from '@/lib/a3/notes/client';
 import { NotesDraftStore, type PersistableNoteDraft } from '@/lib/a3/notes/draft-store';
-import type { NoteAttachment, NoteDetail, NoteNotebook, NoteSummary, NoteTag } from '@/lib/a3/notes/types';
+import type { NoteAiCitation, NoteAttachment, NoteDetail, NoteNotebook, NoteSummary, NoteTag } from '@/lib/a3/notes/types';
+import { NoteAiDrawer } from './note-ai-drawer';
 import { NoteEditor } from './note-editor';
 import { NotesNavigation, type NotesSmartView } from './notes-navigation';
 
@@ -17,12 +20,13 @@ interface NotesWorkspaceProps {
   userId?: string;
   draftStore?: NotesDraftStore;
   autosave?: NotesAutosaveController;
+  onEditorReady?: (view: EditorView) => void;
 }
 
 type WorkspaceLoadState = 'loading' | 'ready' | 'error';
 type PersistenceState = 'loading' | 'ready' | 'error';
 
-export function NotesWorkspace({ client: providedClient, userId: providedUserId, draftStore: providedDraftStore, autosave: providedAutosave }: NotesWorkspaceProps = {}) {
+export function NotesWorkspace({ client: providedClient, userId: providedUserId, draftStore: providedDraftStore, autosave: providedAutosave, onEditorReady }: NotesWorkspaceProps = {}) {
   const user = useA3CurrentUser();
   const userId = providedUserId ?? user?.id ?? '';
   const [client] = useState(() => providedClient ?? new NotesClient());
@@ -58,6 +62,8 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const listLoadGeneration = useRef(0);
   const noteAbortController = useRef<AbortController | null>(null);
   const listAbortController = useRef<AbortController | null>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
+  const pendingCitation = useRef<NoteAiCitation | null>(null);
 
   useEffect(() => {
     selectedNoteIdRef.current = selectedNote?.id ?? null;
@@ -343,6 +349,51 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     setNotes((current) => current.map((item) => item.id === updated.id ? updated : item));
   };
 
+  const revealCitation = useCallback((citation: NoteAiCitation) => {
+    const view = editorViewRef.current;
+    if (!view) return;
+    const paragraphIndex = Math.max(0, citation.paragraphIndex ?? 0);
+    let paragraphStart: number | null = null;
+    let paragraphSize = 0;
+    let precedingCharacters = 0;
+    view.state.doc.forEach((node, offset, index) => {
+      if (index === paragraphIndex && paragraphStart === null) {
+        paragraphStart = offset + 1;
+        paragraphSize = node.content.size;
+      } else if (index < paragraphIndex) {
+        precedingCharacters += node.textContent.length + 1;
+      }
+    });
+    if (paragraphStart === null) return;
+    const startOffset = Math.max(0, Math.min(paragraphSize, (citation.charStart ?? precedingCharacters) - precedingCharacters));
+    const endOffset = Math.max(startOffset, Math.min(paragraphSize, (citation.charEnd ?? citation.charStart ?? precedingCharacters) - precedingCharacters));
+    const from = Math.min(view.state.doc.content.size, paragraphStart + startOffset);
+    const to = Math.min(view.state.doc.content.size, paragraphStart + endOffset);
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, from, to)).scrollIntoView());
+    view.focus();
+  }, []);
+
+  const editorReady = useCallback((view: EditorView) => {
+    editorViewRef.current = view;
+    onEditorReady?.(view);
+    const citation = pendingCitation.current;
+    if (citation) {
+      pendingCitation.current = null;
+      window.requestAnimationFrame(() => revealCitation(citation));
+    }
+  }, [onEditorReady, revealCitation]);
+
+  const navigateCitation = useCallback(async (citation: NoteAiCitation) => {
+    if (!citation.noteId) return;
+    if (citation.noteId === selectedNoteIdRef.current) {
+      revealCitation(citation);
+      return;
+    }
+    pendingCitation.current = citation;
+    await loadNote(citation.noteId);
+    if (isMobile) setMobileView('editor');
+  }, [isMobile, loadNote, revealCitation]);
+
   const registerNoteButton = (noteId: string, element: HTMLButtonElement | null) => {
     if (element) noteButtons.current.set(noteId, element);
     else noteButtons.current.delete(noteId);
@@ -394,6 +445,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
           onRetryLoad={() => failedNoteId && void loadNote(failedNoteId)}
           onNoteChange={updateSelectedNote}
           onAttachmentsChange={setAttachments}
+          onEditorReady={editorReady}
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
@@ -453,9 +505,13 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
       className="grid h-full min-h-0 min-w-0 bg-background min-[1028px]:grid-cols-[220px_minmax(560px,1fr)]"
     >
       <div className="hidden min-h-0 border-r border-border/70 min-[1028px]:block">{navigation}</div>
-      <div className="hidden min-h-0 min-[1028px]:block">{editor}</div>
+      <div className="hidden min-h-0 min-w-0 min-[1028px]:flex">
+        <div className="min-h-0 min-w-0 flex-1">{editor}</div>
+        <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} isMobile={false} onCitationNavigate={(citation) => void navigateCitation(citation)} />
+      </div>
       {isMobile && mobileView === 'list' && <div data-notes-mobile-view="list" className="min-h-0 min-[1028px]:hidden">{navigation}</div>}
       {isMobile && mobileView === 'editor' && <div data-notes-mobile-view="editor" className="min-h-0 min-[1028px]:hidden">{editor}</div>}
+      {isMobile && <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} isMobile onCitationNavigate={(citation) => void navigateCitation(citation)} />}
       <p className="sr-only" aria-live="polite">{feedback}</p>
     </div>
   );

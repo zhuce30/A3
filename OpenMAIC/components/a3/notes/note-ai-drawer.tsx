@@ -1,0 +1,371 @@
+'use client';
+
+import { Bot, CheckCircle2, ChevronRight, FilePenLine, RefreshCw, Send, ShieldAlert, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import type { NotesClient } from '@/lib/a3/notes/client';
+import type { NoteAiCitation, NoteAiMessage, NoteAiScopeInput, NoteAiSession, NoteDetail, NoteSummary } from '@/lib/a3/notes/types';
+
+interface NoteAiDrawerProps {
+  client: NotesClient;
+  currentNote: NoteDetail | null;
+  notes: NoteSummary[];
+  isMobile: boolean;
+  onCitationNavigate: (citation: NoteAiCitation) => void;
+}
+
+type ScopeMode = 'note' | 'selection';
+
+export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationNavigate }: NoteAiDrawerProps) {
+  const [open, setOpen] = useState(false);
+  const [scopeMode, setScopeMode] = useState<ScopeMode>('note');
+  const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>([]);
+  const [sessions, setSessions] = useState<NoteAiSession[]>([]);
+  const [activeSession, setActiveSession] = useState<NoteAiSession | null>(null);
+  const [activeScopeKey, setActiveScopeKey] = useState('');
+  const [messages, setMessages] = useState<NoteAiMessage[]>([]);
+  const [prompt, setPrompt] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+  const [disconnectedMessageId, setDisconnectedMessageId] = useState('');
+  const streamCleanup = useRef<(() => void) | null>(null);
+  const requestGeneration = useRef(0);
+
+  const scope = useMemo<NoteAiScopeInput | null>(() => {
+    if (scopeMode === 'note') return currentNote ? { type: 'note', noteIds: [currentNote.id] } : null;
+    return selectedNoteIds.length ? { type: 'selection', noteIds: selectedNoteIds } : null;
+  }, [currentNote, scopeMode, selectedNoteIds]);
+  const scopeKey = scope ? JSON.stringify(scope) : '';
+
+  useEffect(() => () => {
+    requestGeneration.current += 1;
+    streamCleanup.current?.();
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const generation = requestGeneration.current + 1;
+    requestGeneration.current = generation;
+    void client.listAiSessions().then(async (result) => {
+      if (generation !== requestGeneration.current) return;
+      if (!result.success) {
+        setError(result.error);
+        setLoading(false);
+        return;
+      }
+      setSessions(result.sessions);
+      const session = result.sessions[0] ?? null;
+      setActiveSession(session);
+      if (!session) {
+        setMessages([]);
+        setLoading(false);
+        return;
+      }
+      const messageResult = await client.listAiMessages(session.id);
+      if (generation !== requestGeneration.current) return;
+      if (!messageResult.success) setError(messageResult.error);
+      else setMessages(messageResult.messages);
+      setLoading(false);
+    });
+  }, [client, open]);
+
+  const updateMessage = useCallback((message: NoteAiMessage) => {
+    setMessages((current) => {
+      const exists = current.some((item) => item.id === message.id);
+      return exists ? current.map((item) => item.id === message.id ? message : item) : [...current, message];
+    });
+    if (message.status === 'succeeded' || message.status === 'failed') {
+      setDisconnectedMessageId('');
+      setSending(false);
+    }
+  }, []);
+
+  const watchMessage = useCallback((messageId: string) => {
+    streamCleanup.current?.();
+    streamCleanup.current = client.watchAiMessage(messageId, {
+      onMessage: updateMessage,
+      onDisconnect: () => setDisconnectedMessageId(messageId),
+      onError: (message) => {
+        setError(message);
+        setSending(false);
+      },
+    });
+  }, [client, updateMessage]);
+
+  const submit = useCallback(async (rawPrompt: string) => {
+    const messageText = rawPrompt.trim();
+    if (!messageText || !scope || sending) return;
+    setSending(true);
+    setError('');
+    setDisconnectedMessageId('');
+    let session = activeSession;
+    if (!session || activeScopeKey !== scopeKey) {
+      const sessionResult = await client.createAiSession({ title: messageText.slice(0, 80), scope });
+      if (!sessionResult.success) {
+        setError(sessionResult.error);
+        setSending(false);
+        return;
+      }
+      session = sessionResult.session;
+      setSessions((current) => [session!, ...current.filter((item) => item.id !== session!.id)]);
+      setActiveSession(session);
+      setActiveScopeKey(scopeKey);
+      setMessages([]);
+    }
+    const clientRequestId = crypto.randomUUID();
+    const userMessage: NoteAiMessage = {
+      id: `local-${clientRequestId}`,
+      sessionId: session.id,
+      role: 'user',
+      content: messageText,
+      status: 'queued',
+      clientRequestId,
+      citations: [],
+      verified: false,
+      claims: [],
+      safety: {},
+      degraded: false,
+      errorCode: '',
+      errorMessage: '',
+      metadata: {},
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((current) => [...current, userMessage]);
+    setPrompt('');
+    const result = await client.submitAiChat({ sessionId: session.id, clientRequestId, message: messageText });
+    if (!result.success) {
+      setError(result.error);
+      setSending(false);
+      return;
+    }
+    updateMessage(result.message);
+    if (result.message.status === 'queued' || result.message.status === 'streaming') watchMessage(result.message.id);
+  }, [activeScopeKey, activeSession, client, scope, scopeKey, sending, updateMessage, watchMessage]);
+
+  const chooseSession = async (sessionId: string) => {
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!session) return;
+    const generation = requestGeneration.current + 1;
+    requestGeneration.current = generation;
+    streamCleanup.current?.();
+    setActiveSession(session);
+    setActiveScopeKey(scopeKeyForSnapshot(session));
+    setLoading(true);
+    setError('');
+    const result = await client.listAiMessages(session.id);
+    if (generation !== requestGeneration.current) return;
+    if (!result.success) setError(result.error);
+    else setMessages(result.messages);
+    setLoading(false);
+  };
+
+  const retryMessage = (failed: NoteAiMessage) => {
+    const index = messages.findIndex((item) => item.id === failed.id);
+    const question = messages.slice(0, index).reverse().find((item) => item.role === 'user')?.content;
+    if (question) void submit(question);
+  };
+
+  const openDrawer = () => {
+    setLoading(true);
+    setError('');
+    setOpen(true);
+  };
+
+  if (!open) {
+    return (
+      <aside
+        data-testid="notes-ai-drawer"
+        data-state="collapsed"
+        className={isMobile ? 'fixed bottom-4 right-4 z-40 flex size-12' : 'flex h-full w-12 shrink-0 border-l border-border/70 bg-background'}
+        aria-label="笔记 AI 已收起"
+      >
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button type="button" variant="ghost" size="icon" className="m-auto size-10 rounded-md" aria-label="打开笔记 AI" onClick={openDrawer}>
+              <Bot className="size-5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="left">打开笔记 AI</TooltipContent>
+        </Tooltip>
+      </aside>
+    );
+  }
+
+  return (
+    <aside
+      data-testid="notes-ai-drawer"
+      data-state="expanded"
+      className={isMobile
+        ? 'fixed inset-0 z-50 flex h-dvh w-screen flex-col bg-background'
+        : 'flex h-full w-[clamp(320px,28vw,420px)] shrink-0 flex-col border-l border-border/70 bg-background'}
+      aria-label="笔记 AI"
+    >
+      <header className="flex h-11 shrink-0 items-center justify-between border-b border-border/70 px-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Bot className="size-4 shrink-0" aria-hidden="true" />
+          <h2 className="truncate text-sm font-semibold">笔记 AI</h2>
+        </div>
+        <Button type="button" variant="ghost" size="icon-sm" className="size-8 rounded-md" aria-label="收起笔记 AI" onClick={() => setOpen(false)}>
+          {isMobile ? <X className="size-4" /> : <ChevronRight className="size-4" />}
+        </Button>
+      </header>
+
+      <div className="shrink-0 space-y-2 border-b border-border/70 p-3">
+        <label className="block text-xs font-medium text-muted-foreground" htmlFor="note-ai-scope">作用范围</label>
+        <select
+          id="note-ai-scope"
+          aria-label="AI 作用范围"
+          value={scopeMode}
+          onChange={(event) => {
+            requestGeneration.current += 1;
+            streamCleanup.current?.();
+            streamCleanup.current = null;
+            setScopeMode(event.target.value as ScopeMode);
+            setActiveSession(null);
+            setActiveScopeKey('');
+            setMessages([]);
+            setSending(false);
+            setDisconnectedMessageId('');
+          }}
+          className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <option value="note">当前笔记</option>
+          <option value="selection">选择多篇笔记</option>
+        </select>
+        {scopeMode === 'selection' && (
+          <fieldset className="max-h-28 overflow-y-auto border-y border-border/70 py-2">
+            <legend className="px-1 text-xs text-muted-foreground">明确选择笔记</legend>
+            {notes.map((item) => (
+              <label key={item.id} className="flex min-h-8 items-center gap-2 px-1 text-sm">
+                <input
+                  type="checkbox"
+                  aria-label={`选择${item.title || '无标题笔记'}`}
+                  checked={selectedNoteIds.includes(item.id)}
+                  onChange={(event) => setSelectedNoteIds((current) => event.target.checked
+                    ? [...current, item.id]
+                    : current.filter((id) => id !== item.id))}
+                />
+                <span className="truncate">{item.title || '无标题笔记'}</span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+        {sessions.length > 0 && (
+          <select
+            aria-label="AI 会话"
+            value={activeSession?.id ?? ''}
+            onChange={(event) => void chooseSession(event.target.value)}
+            className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+          >
+            <option value="">新会话</option>
+            {sessions.map((session) => <option key={session.id} value={session.id}>{session.title || '未命名会话'}</option>)}
+          </select>
+        )}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4" aria-live="polite">
+        {loading && <p className="text-sm text-muted-foreground">正在加载会话...</p>}
+        {!loading && messages.length === 0 && <p className="text-sm text-muted-foreground">从当前笔记开始提问。</p>}
+        <div className="space-y-5">
+          {messages.map((message) => (
+            <article key={message.id} className={message.role === 'user' ? 'border-l-2 border-foreground/30 pl-3' : ''}>
+              <div className="mb-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span>{message.role === 'user' ? '你' : '笔记 AI'}</span>
+                {message.role === 'assistant' && <MessageState message={message} />}
+              </div>
+              {message.content && <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>}
+              {message.role === 'assistant' && (message.status === 'queued' || message.status === 'streaming') && (
+                <p className="text-sm text-muted-foreground">正在生成回答...</p>
+              )}
+              {message.status === 'failed' && (
+                <div className="space-y-2">
+                  <p className="text-sm text-destructive">{message.errorMessage || '回答生成失败'}</p>
+                  <Button type="button" variant="outline" size="sm" onClick={() => retryMessage(message)}>
+                    <RefreshCw className="size-3.5" />重试
+                  </Button>
+                </div>
+              )}
+              {message.citations.length > 0 && (
+                <div className="mt-3 border-t border-border/70 pt-2">
+                  <p className="mb-1 text-xs font-medium text-muted-foreground">引用</p>
+                  {message.citations.map((citation, index) => (
+                    citation.noteId ? (
+                      <button
+                        key={`${citation.noteId}-${citation.paragraphIndex ?? index}`}
+                        type="button"
+                        aria-label={`跳转到${citation.title}${citation.location}`}
+                        onClick={() => onCitationNavigate(citation)}
+                        className="block w-full py-1 text-left text-xs text-foreground underline decoration-amber-500/70 underline-offset-4"
+                      >
+                        {citation.title} · {citation.location}
+                      </button>
+                    ) : (
+                      <p key={`${citation.sourceId ?? 'source'}-${index}`} className="py-1 text-xs text-muted-foreground">{citation.title} · {citation.location}</p>
+                    )
+                  ))}
+                </div>
+              )}
+            </article>
+          ))}
+        </div>
+        {disconnectedMessageId && <p className="mt-3 text-xs text-amber-700" role="status">连接已中断，正在恢复回答...</p>}
+        {error && <p className="mt-3 text-sm text-destructive" role="alert">{error}</p>}
+      </div>
+
+      <div className="shrink-0 border-t border-border/70 p-3">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mb-2 w-full justify-start rounded-md"
+          disabled={!scope || sending}
+          onClick={() => void submit('请基于当前作用范围生成可写回笔记的修改建议。只提供建议，不要直接修改笔记。')}
+        >
+          <FilePenLine className="size-4" />生成写回建议
+        </Button>
+        <label className="sr-only" htmlFor="note-ai-prompt">向笔记 AI 提问</label>
+        <textarea
+          id="note-ai-prompt"
+          aria-label="向笔记 AI 提问"
+          value={prompt}
+          maxLength={4000}
+          rows={3}
+          onChange={(event) => setPrompt(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              void submit(prompt);
+            }
+          }}
+          placeholder={scope ? '输入问题' : '请先选择至少一篇笔记'}
+          className="w-full resize-none rounded-md border border-input bg-background p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        />
+        <div className="mt-2 flex justify-end">
+          <Button type="button" size="sm" className="rounded-md" disabled={!prompt.trim() || !scope || sending} onClick={() => void submit(prompt)}>
+            <Send className="size-4" />发送
+          </Button>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function MessageState({ message }: { message: NoteAiMessage }) {
+  if (message.status === 'failed') return <span className="inline-flex items-center gap-1 text-destructive"><ShieldAlert className="size-3" />失败</span>;
+  if (message.degraded) return <span className="inline-flex items-center gap-1 text-amber-700"><ShieldAlert className="size-3" />证据不足</span>;
+  if (message.verified) return <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="size-3" />已验证</span>;
+  if (message.status === 'succeeded') return <span>未验证</span>;
+  return <span>处理中</span>;
+}
+
+function scopeKeyForSnapshot(session: NoteAiSession) {
+  const snapshot = session.scopeSnapshot;
+  const noteIds = Array.isArray(snapshot.notes)
+    ? snapshot.notes.flatMap((item) => typeof item === 'object' && item && 'id' in item ? [String(item.id)] : [])
+    : [];
+  if (session.scopeType === 'notebook') return JSON.stringify({ type: 'notebook', notebookId: snapshot.notebookId });
+  return JSON.stringify({ type: session.scopeType, noteIds });
+}

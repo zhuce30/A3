@@ -75,6 +75,21 @@ export interface NoteAiSession {
   updatedAt: string;
 }
 
+export interface NoteAiCitation {
+  sourceKind?: 'personal_note' | 'course_knowledge' | string;
+  sourceId?: string;
+  noteId?: string;
+  noteVersion?: number;
+  attachmentId?: string;
+  title: string;
+  location: string;
+  paragraphIndex?: number;
+  charStart?: number;
+  charEnd?: number;
+  snippet: string;
+  score?: number;
+}
+
 export interface NoteAiMessage {
   id: string;
   sessionId: string;
@@ -82,7 +97,7 @@ export interface NoteAiMessage {
   content: string;
   status: 'queued' | 'streaming' | 'succeeded' | 'failed';
   clientRequestId: string;
-  citations: unknown[];
+  citations: NoteAiCitation[];
   verified: boolean;
   claims: unknown[];
   safety: NoteMetadata;
@@ -92,6 +107,11 @@ export interface NoteAiMessage {
   metadata: NoteMetadata;
   createdAt: string;
 }
+
+export type NoteAiScopeInput =
+  | { type: 'note'; noteIds: [string] }
+  | { type: 'selection'; noteIds: string[] }
+  | { type: 'notebook'; notebookId: string };
 
 export interface NoteDigest {
   id: string;
