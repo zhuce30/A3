@@ -11,7 +11,9 @@ import { GET as streamAssistantMessage } from '@/app/api/a3/notes/assistant/stre
 import { NoteAiDrawer } from '@/components/a3/notes/note-ai-drawer';
 import { NotesWorkspace } from '@/components/a3/notes/notes-workspace';
 import type { NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
+import { mapNoteCitationToSelection } from '@/lib/a3/notes/citation-position';
 import { NotesClient } from '@/lib/a3/notes/client';
+import { parseNoteDocument } from '@/lib/a3/notes/editor-schema';
 import type { NoteAiMessage, NoteDetail } from '@/lib/a3/notes/types';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -118,6 +120,118 @@ function change(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElem
     element.dispatchEvent(new Event('change', { bubbles: true }));
   });
 }
+
+describe('personal note citation position mapping', () => {
+  it.each(['bullet_list', 'ordered_list'])('maps a nested paragraph inside a %s', (listType) => {
+    const nestedType = listType === 'bullet_list' ? 'ordered_list' : 'bullet_list';
+    const documentNode = parseNoteDocument({
+      type: 'doc',
+      content: [
+        { type: 'paragraph', content: [{ type: 'text', text: '前言' }] },
+        {
+          type: listType,
+          content: [{
+            type: 'list_item',
+            content: [
+              { type: 'paragraph', content: [{ type: 'text', text: '父项' }] },
+              {
+                type: nestedType,
+                content: [{
+                  type: 'list_item',
+                  content: [{ type: 'paragraph', content: [{ type: 'text', text: '嵌套目标' }] }],
+                }],
+              },
+            ],
+          }],
+        },
+      ],
+    });
+
+    const selection = mapNoteCitationToSelection(documentNode, { paragraphIndex: 2, charStart: 6, charEnd: 10 });
+
+    expect(selection).not.toBeNull();
+    expect(documentNode.textBetween(selection!.from, selection!.to)).toBe('嵌套目标');
+  });
+
+  it('maps a paragraph nested in a blockquote', () => {
+    const documentNode = parseNoteDocument({
+      type: 'doc',
+      content: [
+        { type: 'paragraph', content: [{ type: 'text', text: '开头' }] },
+        { type: 'blockquote', content: [{ type: 'paragraph', content: [{ type: 'text', text: '引用目标' }] }] },
+      ],
+    });
+
+    const selection = mapNoteCitationToSelection(documentNode, { paragraphIndex: 1, charStart: 3, charEnd: 7 });
+
+    expect(selection).not.toBeNull();
+    expect(documentNode.textBetween(selection!.from, selection!.to)).toBe('引用目标');
+  });
+
+  it('maps text after a hard break using the flattened global offset', () => {
+    const documentNode = parseNoteDocument({
+      type: 'doc',
+      content: [{
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: '甲' },
+          { type: 'hard_break' },
+          { type: 'text', text: '乙' },
+        ],
+      }],
+    });
+
+    const selection = mapNoteCitationToSelection(documentNode, { paragraphIndex: 1, charStart: 2, charEnd: 3 });
+
+    expect(selection).not.toBeNull();
+    expect(documentNode.textBetween(selection!.from, selection!.to)).toBe('乙');
+  });
+
+  it('maps a citation into the correct table cell across backend tab separators', () => {
+    const documentNode = parseNoteDocument({
+      type: 'doc',
+      content: [{
+        type: 'table',
+        content: [{
+          type: 'table_row',
+          content: [
+            { type: 'table_cell', content: [{ type: 'paragraph', content: [{ type: 'text', text: '甲' }] }] },
+            { type: 'table_cell', content: [{ type: 'paragraph', content: [{ type: 'text', text: '目标单元' }] }] },
+          ],
+        }],
+      }],
+    });
+
+    const selection = mapNoteCitationToSelection(documentNode, { paragraphIndex: 0, charStart: 2, charEnd: 6 });
+
+    expect(selection).not.toBeNull();
+    expect(documentNode.textBetween(selection!.from, selection!.to)).toBe('目标单元');
+  });
+
+  it.each([
+    ['attachment_reference', { attachmentId: 'attachment-1', label: '附件' }],
+    ['image', { src: 'https://example.com/image.png', alt: '图片' }],
+    ['math_inline', { latex: 'x+y' }],
+  ])('fails safely when a citation covers only a non-editor %s label', (type, attrs) => {
+    const leafText = type === 'math_inline' ? 'x+y' : type === 'image' ? '图片' : '附件';
+    const documentNode = parseNoteDocument({
+      type: 'doc',
+      content: [{
+        type: 'paragraph',
+        content: [
+          { type, attrs },
+          { type: 'text', text: '正文' },
+        ],
+      }],
+    });
+
+    expect(mapNoteCitationToSelection(documentNode, {
+      paragraphIndex: 0,
+      charStart: 0,
+      charEnd: Array.from(leafText).length,
+    })).toBeNull();
+  });
+});
 
 beforeEach(() => {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });

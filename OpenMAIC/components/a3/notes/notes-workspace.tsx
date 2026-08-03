@@ -8,6 +8,7 @@ import type { EditorView } from 'prosemirror-view';
 import { useA3CurrentUser } from '@/components/a3/auth/a3-auth-gate';
 import { Button } from '@/components/ui/button';
 import { NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
+import { mapNoteCitationToSelection } from '@/lib/a3/notes/citation-position';
 import { NotesClient } from '@/lib/a3/notes/client';
 import { NotesDraftStore, type PersistableNoteDraft } from '@/lib/a3/notes/draft-store';
 import type { NoteAiCitation, NoteAttachment, NoteDetail, NoteNotebook, NoteSummary, NoteTag } from '@/lib/a3/notes/types';
@@ -362,24 +363,9 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const revealCitation = useCallback((citation: NoteAiCitation, targetView = editorViewRef.current) => {
     const view = targetView;
     if (!view || view.isDestroyed || editorViewRef.current !== view) return;
-    const paragraphIndex = Math.max(0, citation.paragraphIndex ?? 0);
-    let paragraphStart: number | null = null;
-    let paragraphSize = 0;
-    let precedingCharacters = 0;
-    view.state.doc.forEach((node, offset, index) => {
-      if (index === paragraphIndex && paragraphStart === null) {
-        paragraphStart = offset + 1;
-        paragraphSize = node.content.size;
-      } else if (index < paragraphIndex) {
-        precedingCharacters += node.textContent.length + 1;
-      }
-    });
-    if (paragraphStart === null) return;
-    const startOffset = Math.max(0, Math.min(paragraphSize, (citation.charStart ?? precedingCharacters) - precedingCharacters));
-    const endOffset = Math.max(startOffset, Math.min(paragraphSize, (citation.charEnd ?? citation.charStart ?? precedingCharacters) - precedingCharacters));
-    const from = Math.min(view.state.doc.content.size, paragraphStart + startOffset);
-    const to = Math.min(view.state.doc.content.size, paragraphStart + endOffset);
-    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, from, to)).scrollIntoView());
+    const selection = mapNoteCitationToSelection(view.state.doc, citation);
+    if (!selection) return;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, selection.from, selection.to)).scrollIntoView());
     view.focus();
   }, []);
 
