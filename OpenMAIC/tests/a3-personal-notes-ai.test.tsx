@@ -5,11 +5,13 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TextSelection } from 'prosemirror-state';
 import type { EditorView } from 'prosemirror-view';
+import type { NextRequest } from 'next/server';
 
+import { GET as streamAssistantMessage } from '@/app/api/a3/notes/assistant/stream/[messageId]/route';
 import { NoteAiDrawer } from '@/components/a3/notes/note-ai-drawer';
 import { NotesWorkspace } from '@/components/a3/notes/notes-workspace';
 import type { NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
-import type { NotesClient } from '@/lib/a3/notes/client';
+import { NotesClient } from '@/lib/a3/notes/client';
 import type { NoteAiMessage, NoteDetail } from '@/lib/a3/notes/types';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -119,6 +121,8 @@ function change(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElem
 
 beforeEach(() => {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
+  FakeEventSource.instances = [];
+  FakeEventSource.reconnectUrls = [];
 });
 
 afterEach(() => {
@@ -126,6 +130,8 @@ afterEach(() => {
   root = null;
   document.body.replaceChildren();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe('personal note AI drawer', () => {
@@ -137,6 +143,24 @@ describe('personal note AI drawer', () => {
     expect(drawer.getAttribute('data-state')).toBe('collapsed');
     expect(drawer.className).toContain('w-12');
     expect(container.querySelector('[data-testid="notes-workspace"]')?.className).toContain('minmax(560px,1fr)');
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="打开笔记 AI"]')!;
+    expect(trigger.title).toBe('打开笔记 AI');
+  });
+
+  it('uses the clamped desktop width and a full-screen mobile expanded view', () => {
+    const desktop = mount(<NoteAiDrawer client={clientStub()} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+    expect(desktop.querySelector('[data-testid="notes-ai-drawer"]')?.className).toContain('w-[clamp(320px,28vw,420px)]');
+
+    act(() => root!.unmount());
+    root = null;
+    document.body.replaceChildren();
+    const mobile = mount(<NoteAiDrawer client={clientStub()} currentNote={note()} notes={[note()]} isMobile onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+    const drawer = mobile.querySelector('[data-testid="notes-ai-drawer"]')!;
+    expect(drawer.className).toContain('fixed inset-0');
+    expect(drawer.className).toContain('h-dvh');
+    expect(drawer.className).toContain('w-screen');
   });
 
   it('opens without changing editor scroll or selection', async () => {
@@ -214,6 +238,39 @@ describe('personal note AI drawer', () => {
     });
   });
 
+  it('shows verified and degraded states and offers Retry only for failed assistant messages', async () => {
+    const failedUser = assistantMessage({ id: 'failed-user', role: 'user', status: 'failed', content: '失败的问题', errorMessage: '用户消息失败' });
+    const failedAssistant = assistantMessage({ id: 'failed-assistant', status: 'failed', errorMessage: '回答失败' });
+    const verified = assistantMessage({ id: 'verified', status: 'succeeded', content: '已核验回答', verified: true });
+    const degraded = assistantMessage({ id: 'degraded', status: 'succeeded', content: '证据较少', degraded: true });
+    const client = clientStub({
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '状态', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [failedUser, failedAssistant, verified, degraded] }),
+    });
+    const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+
+    await vi.waitFor(() => expect(container.textContent).toContain('已核验回答'));
+    expect(container.textContent).toContain('已验证');
+    expect(container.textContent).toContain('证据不足');
+    expect([...container.querySelectorAll('button')].filter((item) => item.textContent?.includes('重试'))).toHaveLength(1);
+    expect(container.querySelector('article')?.textContent).not.toContain('重试');
+  });
+
+  it('requests a writeback suggestion without directly saving the note', async () => {
+    const saveNote = vi.fn();
+    const submitAiChat = vi.fn().mockResolvedValue({ success: true, message: assistantMessage({ status: 'succeeded', content: '建议补充例题。' }), idempotent: false });
+    const client = clientStub({ saveNote, submitAiChat });
+    mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+    click('生成写回建议');
+
+    await vi.waitFor(() => expect(submitAiChat).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('只提供建议，不要直接修改笔记'),
+    })));
+    expect(saveNote).not.toHaveBeenCalled();
+  });
+
   it('maps document-wide citation offsets into the cited editor paragraph', async () => {
     let editorView: EditorView | undefined;
     const citation = { noteId: 'note-1', title: '操作系统复习', location: '第 2 段', paragraphIndex: 1, charStart: 6, charEnd: 8, snippet: '死锁' };
@@ -238,29 +295,187 @@ describe('personal note AI drawer', () => {
     expect(editorView!.state.doc.textBetween(editorView!.state.selection.from, editorView!.state.selection.to)).toBe('死锁');
   });
 
-  it('continues a dropped stream by persisted messageId without a second chat submission', async () => {
-    let update: ((message: NoteAiMessage) => void) | undefined;
-    let dropped: (() => void) | undefined;
-    const submitAiChat = vi.fn().mockResolvedValue({ success: true, message: assistantMessage(), idempotent: false });
-    const watchAiMessage = vi.fn((_messageId, handlers) => {
-      update = handlers.onMessage;
-      dropped = handlers.onDisconnect;
-      return vi.fn();
+  it('reconnects the actual EventSource with the persisted messageId without a second create or chat POST', async () => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const requests: Array<{ url: string; method: string }> = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      requests.push({ url, method });
+      if (url.endsWith('/assistant/sessions/') && method === 'GET') return jsonResponse({ success: true, sessions: [] });
+      if (url.endsWith('/assistant/sessions/') && method === 'POST') {
+        return jsonResponse({ success: true, session: { id: 'session-1', title: '解释进程状态', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now } }, 201);
+      }
+      if (url.endsWith('/assistant/chat/') && method === 'POST') return jsonResponse({ success: true, message: assistantMessage(), idempotent: false }, 202);
+      throw new Error(`unexpected request ${method} ${url}`);
     });
-    const client = clientStub({ submitAiChat, watchAiMessage });
+    const client = new NotesClient({ fetch: fetcher });
     const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} />);
     click('打开笔记 AI');
     change(container.querySelector<HTMLTextAreaElement>('[aria-label="向笔记 AI 提问"]')!, '解释进程状态');
     click('发送');
 
-    await vi.waitFor(() => expect(watchAiMessage).toHaveBeenCalledWith('assistant-message-1', expect.anything()));
-    act(() => dropped?.());
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(FakeEventSource.instances[0]!.url).toContain('/assistant/stream/assistant-message-1/');
+    act(() => FakeEventSource.instances[0]!.disconnect());
     expect(container.textContent).toContain('正在恢复回答');
-    act(() => update?.(assistantMessage({ status: 'succeeded', content: '进程具有就绪、运行和阻塞状态。', verified: true })));
+    expect(FakeEventSource.reconnectUrls).toEqual([FakeEventSource.instances[0]!.url]);
+    act(() => FakeEventSource.instances[0]!.emit('final', { success: true, message: assistantMessage({ status: 'succeeded', content: '进程具有就绪、运行和阻塞状态。', verified: true }) }));
 
     await vi.waitFor(() => expect(container.textContent).toContain('进程具有就绪、运行和阻塞状态。'));
-    expect(submitAiChat).toHaveBeenCalledTimes(1);
-    expect(watchAiMessage).toHaveBeenCalledTimes(1);
+    expect(requests.filter((item) => item.method === 'POST' && item.url.endsWith('/assistant/sessions/'))).toHaveLength(1);
+    expect(requests.filter((item) => item.method === 'POST' && item.url.endsWith('/assistant/chat/'))).toHaveLength(1);
+    expect(FakeEventSource.instances).toHaveLength(1);
     expect(container.textContent).not.toContain('正在恢复回答');
   });
 });
+
+const persistedMessageId = '123e4567-e89b-42d3-a456-426614174000';
+
+describe('personal note assistant SSE polling route', () => {
+  it('requires an authenticated session before opening a stream', async () => {
+    const { request } = routeRequest();
+    const response = await streamAssistantMessage(request, { params: Promise.resolve({ messageId: persistedMessageId }) });
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toMatchObject({ success: false, code: 'authentication_required' });
+  });
+
+  it('forwards the session, polls at 700ms, emits changed snapshots only, and finishes on success', async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(messageStatus('queued', ''))
+      .mockResolvedValueOnce(messageStatus('queued', ''))
+      .mockResolvedValueOnce(messageStatus('streaming', '草稿'))
+      .mockResolvedValueOnce(messageStatus('succeeded', '最终回答'));
+    vi.stubGlobal('fetch', fetcher);
+    const { request } = routeRequest('sessionid=session-1; csrftoken=csrf-1');
+    const response = await streamAssistantMessage(request, { params: Promise.resolve({ messageId: persistedMessageId }) });
+    const reader = response.body!.getReader();
+    const chunks = [await readChunk(reader)];
+
+    expect(response.headers.get('content-type')).toContain('text/event-stream');
+    expect(fetcher.mock.calls[0]?.[0]).toContain(`/api/notes/assistant/messages/${persistedMessageId}/`);
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get('cookie')).toBe('sessionid=session-1; csrftoken=csrf-1');
+    await vi.advanceTimersByTimeAsync(699);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(700);
+    chunks.push(await readChunk(reader));
+    await vi.advanceTimersByTimeAsync(700);
+    chunks.push(await readChunk(reader));
+
+    const output = chunks.join('');
+    expect(output.match(/event: status/g)).toHaveLength(2);
+    expect(output).toContain('event: final');
+    expect(output).toContain('最终回答');
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['succeeded', 'failed'] as const)('emits a final event for %s', async (status) => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(messageStatus(status, status === 'succeeded' ? '完成' : '')));
+    const { request } = routeRequest('sessionid=session-1');
+    const response = await streamAssistantMessage(request, { params: Promise.resolve({ messageId: persistedMessageId }) });
+    const output = await readChunk(response.body!.getReader());
+    expect(output).toContain('event: final');
+    expect(output).toContain(`\"status\":\"${status}\"`);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('sends keepalives, closes at the maximum duration, and aborts the in-flight poll', async () => {
+    vi.useFakeTimers();
+    let upstreamSignal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    }));
+    const { request } = routeRequest('sessionid=session-1');
+    const response = await streamAssistantMessage(request, { params: Promise.resolve({ messageId: persistedMessageId }) });
+    const reader = response.body!.getReader();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await readChunk(reader)).toContain(': keepalive');
+    await vi.advanceTimersByTimeAsync(285_000);
+    const remainder = await readToEnd(reader);
+    expect(remainder).toContain('stream_timeout');
+    expect(upstreamSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cleans up polling, keepalive, and upstream fetch when the browser aborts', async () => {
+    vi.useFakeTimers();
+    let upstreamSignal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    }));
+    const { request, controller } = routeRequest('sessionid=session-1');
+    const response = await streamAssistantMessage(request, { params: Promise.resolve({ messageId: persistedMessageId }) });
+    const reader = response.body!.getReader();
+    controller.abort();
+    expect((await reader.read()).done).toBe(true);
+    expect(upstreamSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+  static reconnectUrls: string[] = [];
+  readonly url: string;
+  onerror: ((event: Event) => void) | null = null;
+  private listeners = new Map<string, Set<(event: Event) => void>>();
+
+  constructor(url: string | URL) {
+    this.url = String(url);
+    FakeEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+    const callback = typeof listener === 'function' ? listener : (event: Event) => listener.handleEvent(event);
+    const listeners = this.listeners.get(type) ?? new Set();
+    listeners.add(callback);
+    this.listeners.set(type, listeners);
+  }
+
+  disconnect() {
+    this.onerror?.(new Event('error'));
+    FakeEventSource.reconnectUrls.push(this.url);
+  }
+
+  emit(type: string, payload: unknown) {
+    const event = new MessageEvent(type, { data: JSON.stringify(payload) });
+    this.listeners.get(type)?.forEach((listener) => listener(event));
+  }
+
+  close() {}
+}
+
+function jsonResponse(payload: unknown, status = 200) {
+  return Response.json(payload, { status });
+}
+
+function routeRequest(cookie = '') {
+  const controller = new AbortController();
+  const request = { headers: new Headers(cookie ? { cookie } : {}), signal: controller.signal } as NextRequest;
+  return { request, controller };
+}
+
+function messageStatus(status: NoteAiMessage['status'], content: string) {
+  return jsonResponse({ success: true, message: assistantMessage({ id: persistedMessageId, status, content }) });
+}
+
+async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  const result = await reader.read();
+  return result.value ? new TextDecoder().decode(result.value) : '';
+}
+
+async function readToEnd(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  let output = '';
+  for (;;) {
+    const result = await reader.read();
+    if (result.done) return output;
+    output += new TextDecoder().decode(result.value);
+  }
+}

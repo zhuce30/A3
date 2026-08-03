@@ -184,7 +184,7 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
       >
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button type="button" variant="ghost" size="icon" className="m-auto size-10 rounded-md" aria-label="打开笔记 AI" onClick={openDrawer}>
+            <Button type="button" variant="ghost" size="icon" className="m-auto size-10 rounded-md" aria-label="打开笔记 AI" title="打开笔记 AI" onClick={openDrawer}>
               <Bot className="size-5" />
             </Button>
           </TooltipTrigger>
@@ -280,7 +280,7 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
               {message.role === 'assistant' && (message.status === 'queued' || message.status === 'streaming') && (
                 <p className="text-sm text-muted-foreground">正在生成回答...</p>
               )}
-              {message.status === 'failed' && (
+              {message.role === 'assistant' && message.status === 'failed' && (
                 <div className="space-y-2">
                   <p className="text-sm text-destructive">{message.errorMessage || '回答生成失败'}</p>
                   <Button type="button" variant="outline" size="sm" onClick={() => retryMessage(message)}>
