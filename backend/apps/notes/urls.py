@@ -14,6 +14,9 @@ urlpatterns = [
         name="assistant-session-messages",
     ),
     path("assistant/chat/", views_assistant.chat, name="assistant-chat"),
+    path("assistant/writeback-previews/", views_assistant.writeback_previews, name="writeback-preview-create"),
+    path("assistant/writeback-previews/<uuid:preview_id>/confirm/", views_assistant.writeback_confirm, name="writeback-preview-confirm"),
+    path("assistant/writeback-previews/<uuid:preview_id>/abandon/", views_assistant.writeback_abandon, name="writeback-preview-abandon"),
     path(
         "assistant/messages/<uuid:message_id>/",
         views_assistant.message_detail,

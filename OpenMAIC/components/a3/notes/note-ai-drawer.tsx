@@ -6,7 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { NotesClient } from '@/lib/a3/notes/client';
-import type { NoteAiCitation, NoteAiMessage, NoteAiScopeInput, NoteAiSession, NoteDetail, NoteSummary } from '@/lib/a3/notes/types';
+import type { NoteAiCitation, NoteAiMessage, NoteAiScopeInput, NoteAiSession, NoteDetail, NoteSummary, NoteWritebackPreview } from '@/lib/a3/notes/types';
+import { NoteWritebackPreviewPanel } from './note-writeback-preview';
 
 interface NoteAiDrawerProps {
   client: NotesClient;
@@ -14,11 +15,12 @@ interface NoteAiDrawerProps {
   notes: NoteSummary[];
   isMobile: boolean;
   onCitationNavigate: (citation: NoteAiCitation) => void;
+  onWritebackApplied?: (note: NoteDetail) => void;
 }
 
 type ScopeMode = 'note' | 'selection';
 
-export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationNavigate }: NoteAiDrawerProps) {
+export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationNavigate, onWritebackApplied }: NoteAiDrawerProps) {
   const [open, setOpen] = useState(false);
   const [scopeMode, setScopeMode] = useState<ScopeMode>('note');
   const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>([]);
@@ -31,6 +33,10 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
   const [sendState, setSendState] = useState({ scopeKey: '', busy: false });
   const [error, setError] = useState('');
   const [disconnectedMessageId, setDisconnectedMessageId] = useState('');
+  const [writebackPreview, setWritebackPreview] = useState<NoteWritebackPreview | null>(null);
+  const [writebackBusy, setWritebackBusy] = useState(false);
+  const [writebackError, setWritebackError] = useState('');
+  const [writebackStale, setWritebackStale] = useState(false);
   const streamCleanup = useRef<(() => void) | null>(null);
   const watchedMessageId = useRef('');
   const operationAbort = useRef<AbortController | null>(null);
@@ -48,6 +54,9 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     const sessionScopeKey = scopeKeyForSnapshot(session);
     return !sessionScopeKey || sessionScopeKey === scopeKey;
   });
+  const writebackSource = [...scopedMessages].reverse().find((message) => (
+    message.role === 'assistant' && message.status === 'succeeded' && Boolean(message.content.trim())
+  ));
 
   const invalidateAsync = useCallback(() => {
     requestGeneration.current += 1;
@@ -259,6 +268,54 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     setOpen(false);
   };
 
+  const generateWritebackPreview = async () => {
+    if (!currentNote || !writebackSource || writebackBusy) return;
+    const generation = requestGeneration.current;
+    setWritebackBusy(true);
+    setWritebackError('');
+    setWritebackStale(false);
+    const result = await client.createWritebackPreview({
+      targetNoteId: currentNote.id,
+      messageId: writebackSource.id,
+    });
+    if (generation !== requestGeneration.current) return;
+    setWritebackBusy(false);
+    if (!result.success) {
+      setWritebackError(result.error);
+      return;
+    }
+    setWritebackPreview(result.preview);
+  };
+
+  const confirmWriteback = async () => {
+    if (!writebackPreview || writebackBusy) return;
+    setWritebackBusy(true);
+    setWritebackError('');
+    const result = await client.confirmWritebackPreview(writebackPreview.id);
+    setWritebackBusy(false);
+    if (!result.success) {
+      setWritebackError(result.status === 409 ? '正文已更新，请重新生成建议' : result.error);
+      if (result.status === 409) setWritebackStale(true);
+      return;
+    }
+    setWritebackPreview(null);
+    setWritebackStale(false);
+    onWritebackApplied?.(result.note);
+  };
+
+  const abandonWriteback = async () => {
+    if (!writebackPreview || writebackBusy) return;
+    setWritebackBusy(true);
+    const result = await client.abandonWritebackPreview(writebackPreview.id);
+    setWritebackBusy(false);
+    if (!result.success) {
+      setWritebackError(result.error);
+      return;
+    }
+    setWritebackPreview(null);
+    setWritebackError('');
+  };
+
   if (!open) {
     return (
       <aside
@@ -405,6 +462,17 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
         </div>
         {disconnectedMessageId && <p className="mt-3 text-xs text-amber-700" role="status">连接已中断，正在恢复回答...</p>}
         {error && <p className="mt-3 text-sm text-destructive" role="alert">{error}</p>}
+        {writebackPreview && writebackPreview.targetNote.id === currentNote?.id && (
+          <NoteWritebackPreviewPanel
+            preview={writebackPreview}
+            busy={writebackBusy}
+            stale={writebackStale}
+            error={writebackError}
+            onConfirm={() => void confirmWriteback()}
+            onAbandon={() => void abandonWriteback()}
+            onRegenerate={() => void generateWritebackPreview()}
+          />
+        )}
       </div>
 
       <div className="shrink-0 border-t border-border/70 p-3">
@@ -413,8 +481,8 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
           variant="outline"
           size="sm"
           className="mb-2 w-full justify-start rounded-md"
-          disabled={!scope || sending}
-          onClick={() => void submit('请基于当前作用范围生成可写回笔记的修改建议。只提供建议，不要直接修改笔记。')}
+          disabled={!currentNote || !writebackSource || sending || writebackBusy}
+          onClick={() => void generateWritebackPreview()}
         >
           <FilePenLine className="size-4" />生成写回建议
         </Button>

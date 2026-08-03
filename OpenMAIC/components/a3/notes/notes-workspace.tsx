@@ -612,11 +612,17 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
       <div className="hidden min-h-0 border-r border-border/70 min-[1028px]:block">{navigation}</div>
       <div className="hidden min-h-0 min-w-0 min-[1028px]:flex">
         <div className="min-h-0 min-w-0 flex-1">{editor}</div>
-        <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} isMobile={false} onCitationNavigate={(citation) => void navigateCitation(citation)} />
+        <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} isMobile={false} onCitationNavigate={(citation) => void navigateCitation(citation)} onWritebackApplied={(note) => {
+          setSelectedNote(note);
+          setNotes((current) => current.map((item) => item.id === note.id ? note : item));
+        }} />
       </div>
       {isMobile && mobileView === 'list' && <div data-notes-mobile-view="list" className="min-h-0 min-[1028px]:hidden">{navigation}</div>}
       {isMobile && mobileView === 'editor' && <div data-notes-mobile-view="editor" className="min-h-0 min-[1028px]:hidden">{editor}</div>}
-      {isMobile && <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} isMobile onCitationNavigate={(citation) => void navigateCitation(citation)} />}
+      {isMobile && <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} isMobile onCitationNavigate={(citation) => void navigateCitation(citation)} onWritebackApplied={(note) => {
+        setSelectedNote(note);
+        setNotes((current) => current.map((item) => item.id === note.id ? note : item));
+      }} />}
       <p className="sr-only" aria-live="polite">{feedback}</p>
     </div>
   );

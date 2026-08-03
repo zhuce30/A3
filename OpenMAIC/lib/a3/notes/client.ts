@@ -11,6 +11,7 @@ import type {
   NoteRevision,
   NoteSummary,
   NoteTag,
+  NoteWritebackPreview,
   SaveNoteInput,
   SaveNoteSuccess,
 } from './types';
@@ -183,6 +184,26 @@ export class NotesClient {
     options: { signal?: AbortSignal } = {},
   ) {
     return this.json<{ message: NoteAiMessage; idempotent: boolean }>('POST', 'assistant/chat/', input, options);
+  }
+
+  createWritebackPreview(input: { targetNoteId: string; messageId: string }) {
+    return this.json<{ preview: NoteWritebackPreview }>('POST', 'assistant/writeback-previews/', input);
+  }
+
+  confirmWritebackPreview(previewId: string) {
+    return this.json<{ preview: NoteWritebackPreview; note: NoteDetail; idempotent: boolean }>(
+      'POST',
+      `assistant/writeback-previews/${encodeURIComponent(previewId)}/confirm/`,
+      {},
+    );
+  }
+
+  abandonWritebackPreview(previewId: string) {
+    return this.json<{ preview: NoteWritebackPreview; idempotent: boolean }>(
+      'POST',
+      `assistant/writeback-previews/${encodeURIComponent(previewId)}/abandon/`,
+      {},
+    );
   }
 
   watchAiMessage(messageId: string, handlers: AiMessageWatchHandlers) {

@@ -108,6 +108,33 @@ export interface NoteAiMessage {
   createdAt: string;
 }
 
+export interface NoteWritebackDiffItem {
+  index: number;
+  text: string;
+}
+
+export interface NoteWritebackChangedBlock {
+  index: number;
+  before: string;
+  after: string;
+}
+
+export interface NoteWritebackPreview {
+  id: string;
+  sourceMessageId: string;
+  targetNote: { id: string; title: string };
+  targetVersion: number;
+  proposedContent: NoteContent;
+  diff: {
+    additions: NoteWritebackDiffItem[];
+    removals: NoteWritebackDiffItem[];
+    changedBlocks: NoteWritebackChangedBlock[];
+  };
+  status: 'pending' | 'applied' | 'expired' | 'abandoned' | 'rejected';
+  expiresAt: string;
+  createdAt: string;
+}
+
 export type NoteAiScopeInput =
   | { type: 'note'; noteIds: [string] }
   | { type: 'selection'; noteIds: string[] }

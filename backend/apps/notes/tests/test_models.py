@@ -126,22 +126,34 @@ class TenantOwnershipTests(TestCase):
             user=self.other_user,
             scope_type=NoteAiSession.ScopeType.NOTE,
         )
+        own_message = NoteAiMessage.objects.create(
+            session=own_session, role=NoteAiMessage.Role.ASSISTANT
+        )
+        other_message = NoteAiMessage.objects.create(
+            session=other_session, role=NoteAiMessage.Role.ASSISTANT
+        )
         expires_at = timezone.now() + timedelta(minutes=10)
 
         preview = NoteWritebackPreview.objects.create(
             user=self.user,
             session=own_session,
+            source_message=own_message,
             target_note=self.note,
             target_version=1,
             proposed_content_json={"type": "doc", "content": []},
             expires_at=expires_at,
         )
         self.assertEqual(preview.user, self.user)
-        for session, target_note in ((other_session, self.note), (own_session, self.other_note)):
+        for session, source_message, target_note in (
+            (other_session, other_message, self.note),
+            (own_session, own_message, self.other_note),
+            (own_session, other_message, self.note),
+        ):
             with self.subTest(session=session.pk, target_note=target_note.pk), self.assertRaises(ValidationError):
                 NoteWritebackPreview.objects.create(
                     user=self.user,
                     session=session,
+                    source_message=source_message,
                     target_note=target_note,
                     target_version=1,
                     proposed_content_json={"type": "doc", "content": []},

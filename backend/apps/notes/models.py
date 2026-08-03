@@ -297,11 +297,15 @@ class NoteWritebackPreview(ValidatedModel):
         PENDING = "pending", "Pending"
         APPLIED = "applied", "Applied"
         EXPIRED = "expired", "Expired"
+        ABANDONED = "abandoned", "Abandoned"
         REJECTED = "rejected", "Rejected"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="note_writeback_previews")
     session = models.ForeignKey(NoteAiSession, on_delete=models.CASCADE, related_name="writeback_previews")
+    source_message = models.ForeignKey(
+        NoteAiMessage, on_delete=models.CASCADE, related_name="writeback_previews"
+    )
     target_note = models.ForeignKey(Note, on_delete=models.CASCADE, related_name="writeback_previews")
     target_version = models.PositiveIntegerField()
     proposed_content_json = models.JSONField(default=dict)
@@ -322,6 +326,8 @@ class NoteWritebackPreview(ValidatedModel):
             errors["session"] = "Session must belong to the preview owner."
         if self.target_note_id and self.user_id and self.target_note.user_id != self.user_id:
             errors["target_note"] = "Target note must belong to the preview owner."
+        if self.source_message_id and self.session_id and self.source_message.session_id != self.session_id:
+            errors["source_message"] = "Source message must belong to the preview session."
         if errors:
             raise ValidationError(errors)
 
