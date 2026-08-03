@@ -689,6 +689,66 @@ describe('personal note AI drawer', () => {
     expect(notice?.textContent).toContain('笔记内容已更新，该引用对应旧版本，请在历史版本中查看');
   });
 
+  it.each([
+    ['missing', undefined],
+    ['NaN', Number.NaN],
+    ['infinite', Number.POSITIVE_INFINITY],
+    ['non-positive', 0],
+    ['fractional', 1.5],
+  ])('rejects an unloaded target with a %s version before any note lookup', async (_label, noteVersion) => {
+    const current = note('note-1', '当前笔记');
+    const target = { ...note('note-2', '目标笔记'), version: 4 };
+    const citation = { noteId: 'note-2', noteVersion, title: '目标笔记', location: '第 1 段', paragraphIndex: 0, charStart: 0, charEnd: 2, snippet: '进程' };
+    const views: EditorView[] = [];
+    const getNote = vi.fn(async (noteId: string) => ({ success: true as const, note: noteId === 'note-2' ? target : current }));
+    const client = clientStub({
+      searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [current] }),
+      getNote,
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '无效目标引用', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ content: '查看目标引用', status: 'succeeded', citations: [citation] })] }),
+    });
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} onEditorReady={(view) => views.push(view)} />);
+    await vi.waitFor(() => expect(views).toHaveLength(1));
+    getNote.mockClear();
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.querySelector('button[aria-label="跳转到目标笔记第 1 段"]')).toBeTruthy());
+    click('跳转到目标笔记第 1 段');
+
+    expect(getNote).not.toHaveBeenCalled();
+    expect(views).toHaveLength(1);
+    expect(views[0]!.isDestroyed).toBe(false);
+    expect(container.querySelector('[aria-label="笔记编辑器"]')?.textContent).toContain('当前笔记');
+    expect(container.querySelector('[data-testid="stale-citation-notice"]')?.textContent).toContain('笔记内容已更新，该引用对应旧版本，请在历史版本中查看');
+  });
+
+  it('loads and selects a valid-version citation whose target is not in the current note list', async () => {
+    const current = note('note-1', '当前笔记');
+    const target = { ...note('note-2', '目标笔记'), version: 4 };
+    const citation = { noteId: 'note-2', noteVersion: 4, title: '目标笔记', location: '第 1 段', paragraphIndex: 0, charStart: 0, charEnd: 2, snippet: '进程' };
+    const views: EditorView[] = [];
+    const getNote = vi.fn(async (noteId: string) => ({ success: true as const, note: noteId === 'note-2' ? target : current }));
+    const client = clientStub({
+      searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [current] }),
+      getNote,
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '有效目标引用', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ content: '查看目标引用', status: 'succeeded', citations: [citation] })] }),
+    });
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} onEditorReady={(view) => views.push(view)} />);
+    await vi.waitFor(() => expect(views).toHaveLength(1));
+    getNote.mockClear();
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.querySelector('button[aria-label="跳转到目标笔记第 1 段"]')).toBeTruthy());
+    click('跳转到目标笔记第 1 段');
+    await vi.waitFor(() => expect(views).toHaveLength(2));
+    await vi.waitFor(() => {
+      const targetView = views[1]!;
+      expect(targetView.state.doc.textBetween(targetView.state.selection.from, targetView.state.selection.to)).toBe('进程');
+    });
+
+    expect(getNote).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[aria-label="笔记编辑器"]')?.textContent).toContain('目标笔记');
+  });
+
   it('rechecks citation version after an asynchronous target-note load', async () => {
     const current = note('note-1', '当前笔记');
     const listedTarget = { ...note('note-2', '目标笔记'), version: 4 };

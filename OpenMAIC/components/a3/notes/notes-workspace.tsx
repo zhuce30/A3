@@ -26,14 +26,14 @@ interface NotesWorkspaceProps {
 
 const STALE_CITATION_MESSAGE = '笔记内容已更新，该引用对应旧版本，请在历史版本中查看';
 
+function isValidNoteVersion(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
 function citationMatchesVersion(citation: NoteAiCitation, version: number | null | undefined) {
   const citationVersion = citation.noteVersion;
-  return typeof citationVersion === 'number'
-    && typeof version === 'number'
-    && Number.isSafeInteger(citationVersion)
-    && Number.isSafeInteger(version)
-    && citationVersion > 0
-    && version > 0
+  return isValidNoteVersion(citationVersion)
+    && isValidNoteVersion(version)
     && citationVersion === version;
 }
 
@@ -431,6 +431,10 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
 
   const navigateCitation = useCallback(async (citation: NoteAiCitation) => {
     if (!citation.noteId || citation.attachmentId) return;
+    if (!isValidNoteVersion(citation.noteVersion)) {
+      setCitationNotice(STALE_CITATION_MESSAGE);
+      return;
+    }
     const token = citationNavigationGeneration.current + 1;
     citationNavigationGeneration.current = token;
     pendingCitation.current = null;
