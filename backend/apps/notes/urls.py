@@ -2,11 +2,23 @@ from __future__ import annotations
 
 from django.urls import path
 
-from backend.apps.notes import views_assistant, views_attachments, views_digests, views_notes
+from backend.apps.notes import (
+    views_assistant,
+    views_attachments,
+    views_digests,
+    views_memories,
+    views_notes,
+)
 
 
 app_name = "notes"
 urlpatterns = [
+    path("memories/", views_memories.memories, name="memory-list"),
+    path("memories/<uuid:memory_id>/confirm/", views_memories.memory_confirm, name="memory-confirm"),
+    path("memories/<uuid:memory_id>/pause/", views_memories.memory_pause, name="memory-pause"),
+    path("memories/<uuid:memory_id>/resume/", views_memories.memory_resume, name="memory-resume"),
+    path("memories/<uuid:memory_id>/supersede/", views_memories.memory_supersede, name="memory-supersede"),
+    path("memories/<uuid:memory_id>/delete/", views_memories.memory_delete, name="memory-delete"),
     path("digests/", views_digests.digests, name="digest-list"),
     path("digests/manual/", views_digests.digest_manual, name="digest-manual"),
     path("digests/<uuid:digest_id>/retry/", views_digests.digest_retry, name="digest-retry"),

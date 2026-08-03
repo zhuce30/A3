@@ -97,6 +97,33 @@ def _digest_lease_filter(digest_id, generation: int, lease_token: uuid.UUID):
     )
 
 
+@shared_task(name="notes.extract_memory_candidates", acks_late=True, reject_on_worker_lost=True)
+def extract_memory_candidates_task(source_kind: str, source_id: str) -> dict:
+    from backend.apps.notes.services import memory_service
+
+    close_old_connections()
+    try:
+        if source_kind == "assistant_message":
+            memories = memory_service.extract_candidates_for_assistant_message(source_id)
+        elif source_kind == "daily_digest":
+            memories = memory_service.extract_candidates_for_digest(source_id)
+        else:
+            return {"skipped": True}
+        return {
+            "status": "succeeded",
+            "candidateIds": [str(item.id) for item in memories],
+        }
+    finally:
+        close_old_connections()
+
+
+def enqueue_memory_candidate_extraction(source_kind: str, source_id) -> None:
+    try:
+        extract_memory_candidates_task.delay(source_kind, str(source_id))
+    except Exception:
+        return
+
+
 @shared_task(name="notes.generate_daily_digest", acks_late=True, reject_on_worker_lost=True)
 def generate_daily_digest_task(digest_id: str, expected_generation: int, expected_lease_token: str) -> dict:
     from backend.apps.notes.services import digest_service
@@ -147,6 +174,7 @@ def generate_daily_digest_task(digest_id: str, expected_generation: int, expecte
         )
         if not updated:
             return {"skipped": True}
+        enqueue_memory_candidate_extraction("daily_digest", digest.id)
         return {"status": "succeeded", "digestId": str(digest.id)}
     except Exception as exc:
         if isinstance(exc, digest_service.DigestServiceError):
@@ -497,6 +525,7 @@ def generate_assistant_message_task(
                 "traceId": trace_id,
                 "contextCharacters": context.character_count,
                 "contextTokens": context.token_count,
+                "memoryIds": list(getattr(context, "memory_ids", [])),
             },
         )
         if not updated:
@@ -554,6 +583,7 @@ def generate_assistant_message_task(
             "model": str(generated.get("model") or ""),
             "contextCharacters": context.character_count,
             "contextTokens": context.token_count,
+            "memoryIds": list(getattr(context, "memory_ids", [])),
         }
         if isinstance(refusal_reason, str):
             final_metadata["refusalReason"] = refusal_reason
@@ -571,6 +601,8 @@ def generate_assistant_message_task(
             run_lease_token=None,
             run_heartbeat_at=timezone.now(),
         )
+        if updated:
+            enqueue_memory_candidate_extraction("assistant_message", message.id)
         return {
             "status": "succeeded" if updated else "skipped",
             "messageId": str(message.id),

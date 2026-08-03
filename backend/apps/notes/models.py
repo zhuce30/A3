@@ -464,7 +464,9 @@ class NoteMemory(ValidatedModel):
         blank=True,
         related_name="memories",
     )
+    source_message_ids = models.JSONField(default=list, blank=True)
     source_note_refs = models.JSONField(default=list, blank=True)
+    reason = models.TextField(blank=True)
     valid_from = models.DateTimeField(default=timezone.now)
     valid_until = models.DateTimeField(null=True, blank=True)
     superseded_by = models.ForeignKey(

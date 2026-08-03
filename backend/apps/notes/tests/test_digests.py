@@ -498,8 +498,9 @@ class DigestRevisionAndTaskTests(DigestFixtureMixin, TestCase):
             1,
         )
 
+    @patch("backend.apps.notes.tasks.enqueue_memory_candidate_extraction")
     @patch("backend.apps.notes.services.digest_service.generate_digest_markdown", return_value="# 8 月 2 日笔记总结\n\n- 命题逻辑")
-    def test_generation_is_fenced_and_never_overwrites_a_newer_lease(self, generate) -> None:
+    def test_generation_is_fenced_and_never_overwrites_a_newer_lease(self, generate, enqueue_memory) -> None:
         with patch("backend.apps.notes.services.digest_service.enqueue_digest"):
             digest = digest_service.create_manual_digest(self.user, self.target_date)
         digest = digest_service.prepare_digest_dispatch(digest)
@@ -514,6 +515,7 @@ class DigestRevisionAndTaskTests(DigestFixtureMixin, TestCase):
         self.assertEqual(stale, {"skipped": True})
         self.assertEqual(fresh["status"], "succeeded")
         self.assertEqual(digest.content_md, "# 8 月 2 日笔记总结\n\n- 命题逻辑")
+        enqueue_memory.assert_called_once_with("daily_digest", digest.id)
 
     @patch("backend.apps.notes.services.digest_service.generate_digest_markdown", return_value="")
     def test_empty_generation_becomes_readable_failure_not_blank_success(self, generate) -> None:

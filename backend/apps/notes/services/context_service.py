@@ -35,6 +35,8 @@ class NoteContext:
     sources: list[dict[str, Any]]
     character_count: int
     token_count: int
+    memory_ids: list[str]
+    memory_sources: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -375,11 +377,21 @@ def build_note_context(
     character_budget: int = DEFAULT_CONTEXT_CHARACTER_BUDGET,
     token_budget: int = DEFAULT_CONTEXT_TOKEN_BUDGET,
 ) -> NoteContext:
+    from backend.apps.notes.services.memory_service import build_memory_context
+
     budget = max(1, min(int(character_budget), DEFAULT_CONTEXT_CHARACTER_BUDGET))
     tokens = max(1, min(int(token_budget), DEFAULT_CONTEXT_TOKEN_BUDGET))
     personal_budget = budget if not include_course_evidence else max(1, budget * 3 // 4)
     personal_token_budget = tokens if not include_course_evidence else max(1, tokens * 3 // 4)
     scope_type, snapshots = _validate_snapshot(user, scope)
+    memory_context = build_memory_context(
+        user=user,
+        query=query,
+        scope_note_ids=[snapshot.note.id for snapshot in snapshots],
+    )
+    memory_separator = 2 if memory_context.text else 0
+    personal_budget = max(1, personal_budget - len(memory_context.text) - memory_separator)
+    personal_token_budget = max(1, personal_token_budget - _token_count(memory_context.text))
     query_terms = _terms(query)
     candidates: list[_Paragraph] = []
     for snapshot in snapshots:
@@ -484,6 +496,8 @@ def build_note_context(
         consume(candidates, remaining, remaining_tokens)
 
     text = "\n\n".join(parts)
+    if memory_context.text:
+        text = f"{text}\n\n{memory_context.text}" if text else memory_context.text
     if include_course_evidence:
         course_text, course_citations = normalize_course_citations(
             retrieve_course_evidence(user, query),
@@ -496,7 +510,9 @@ def build_note_context(
     return NoteContext(
         text=text[:budget],
         citations=citations,
-        sources=citations,
+        sources=[*citations, *memory_context.sources],
         character_count=min(len(text), budget),
         token_count=min(_token_count(text), tokens),
+        memory_ids=memory_context.memory_ids,
+        memory_sources=memory_context.sources,
     )

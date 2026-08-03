@@ -263,6 +263,12 @@ def run_safety(user, question: str) -> dict[str, Any]:
 
 
 def generate_note_answer(question: str, *, context_text: str, sources: list[dict[str, Any]]) -> dict[str, Any]:
+    memory_sources = [item for item in sources if item.get("sourceKind") == "personal_memory"]
+    memory_instruction = (
+        "只可使用本次上下文中明确列出的已确认个人记忆；候选、暂停、过期、已替换或已删除记忆一律不可使用。"
+        if memory_sources
+        else "当前没有可用的已确认个人记忆。涉及用户偏好、长期目标或历史习惯时必须明确不知道，不得自行推断。"
+    )
     return generate_tutoring_answer(
         question,
         target={"title": "个人笔记"},
@@ -276,6 +282,7 @@ def generate_note_answer(question: str, *, context_text: str, sources: list[dict
             }
             for item in sources
         ] or [{"title": "个人笔记", "location": "", "snippet": context_text, "type": "personal_note", "score": 1.0}],
+        tutor_persona={"instruction": memory_instruction},
     )
 
 
@@ -319,9 +326,11 @@ def build_context_for_message(message: NoteAiMessage, question: str):
     return context_service.NoteContext(
         text=text,
         citations=citations,
-        sources=citations,
+        sources=[*citations, *context.memory_sources],
         character_count=len(text),
         token_count=context.token_count + sum(
             len(context_service._TERM_RE.findall(item["snippet"])) for item in course_citations
         ),
+        memory_ids=context.memory_ids,
+        memory_sources=context.memory_sources,
     )
