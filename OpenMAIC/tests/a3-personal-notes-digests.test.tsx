@@ -37,6 +37,22 @@ function clientStub(overrides: Partial<NotesClient> = {}) {
   } as unknown as NotesClient;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}
+
+function changeDate(host: HTMLElement, value: string) {
+  const input = host.querySelector<HTMLInputElement>('input[type="date"]')!;
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  act(() => {
+    setter?.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+}
+
 describe('personal note daily digest view', () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -86,11 +102,11 @@ describe('personal note daily digest view', () => {
 
     const retry = [...host.querySelectorAll('button')].find((button) => button.textContent?.includes('重试'))!;
     await act(async () => retry.click());
-    expect(client.retryDigest).toHaveBeenCalledWith('digest-2');
+    expect(client.retryDigest).toHaveBeenCalledWith('digest-2', { signal: expect.any(AbortSignal) });
 
     const refresh = [...host.querySelectorAll('button')].find((button) => button.textContent?.includes('生成新修订'))!;
     await act(async () => refresh.click());
-    expect(client.createManualDigest).toHaveBeenCalledWith('2026-08-02');
+    expect(client.createManualDigest).toHaveBeenCalledWith('2026-08-02', { signal: expect.any(AbortSignal) });
   });
 
   it('shows a readable manual generation failure without replacing the loaded artifact', async () => {
@@ -131,5 +147,83 @@ describe('personal note daily digest view', () => {
     await vi.waitFor(() => expect(client.listDigests).toHaveBeenCalled());
     expect(host.querySelector('[contenteditable="true"]')).toBeNull();
     expect(host.querySelector('[aria-label="打开笔记 AI"]')).toBeNull();
+  });
+
+  it('ignores a late manual response after the selected date changes', async () => {
+    const manual = deferred<{ success: true; digest: NoteDigest }>();
+    const client = clientStub({
+      createManualDigest: vi.fn().mockReturnValue(manual.promise),
+      listDigests: vi.fn(async (date?: string) => ({
+        success: true as const,
+        digests: date === '2026-08-03' ? [{ ...digests[1], id: 'new-date', digestDate: '2026-08-03' }] : digests,
+      })),
+    });
+    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
+    await vi.waitFor(() => expect(host.textContent).toContain('修订 2'));
+    const create = [...host.querySelectorAll('button')].find((button) => button.textContent?.includes('生成新修订'))!;
+    act(() => create.click());
+    changeDate(host, '2026-08-03');
+    await vi.waitFor(() => expect(host.textContent).toContain('2026-08-03'));
+
+    await act(async () => manual.resolve({ success: true, digest: { ...digests[0], id: 'late-old-date' } }));
+
+    expect(host.textContent).not.toContain('摘要模型暂时不可用');
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('new-date');
+  });
+
+  it('an old operation cannot clear busy state owned by a newer operation', async () => {
+    const oldManual = deferred<{ success: true; digest: NoteDigest }>();
+    const newManual = deferred<{ success: true; digest: NoteDigest }>();
+    const createManualDigest = vi.fn()
+      .mockReturnValueOnce(oldManual.promise)
+      .mockReturnValueOnce(newManual.promise);
+    const client = clientStub({ createManualDigest });
+    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
+    await vi.waitFor(() => expect(host.textContent).toContain('修订 2'));
+    const create = [...host.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.includes('生成新修订'))!;
+    act(() => create.click());
+    changeDate(host, '2026-08-03');
+    await vi.waitFor(() => expect(create.disabled).toBe(false));
+    act(() => create.click());
+    expect(create.disabled).toBe(true);
+
+    await act(async () => oldManual.resolve({ success: true, digest: { ...digests[0], id: 'old-operation' } }));
+    expect(create.disabled).toBe(true);
+
+    await act(async () => newManual.resolve({ success: true, digest: { ...digests[1], id: 'new-operation', digestDate: '2026-08-03' } }));
+    expect(create.disabled).toBe(false);
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('new-operation');
+  });
+
+  it('ignores late retry and list responses from an older date', async () => {
+    const oldRetry = deferred<{ success: true; digest: NoteDigest }>();
+    const oldList = deferred<{ success: true; digests: NoteDigest[] }>();
+    const listDigests = vi.fn((date?: string) => {
+      if (date === '2026-08-01') return oldList.promise;
+      if (date === '2026-08-03') {
+        return Promise.resolve({ success: true as const, digests: [{ ...digests[1], id: 'latest-date', digestDate: '2026-08-03' }] });
+      }
+      return Promise.resolve({ success: true as const, digests });
+    });
+    const client = clientStub({
+      listDigests,
+      retryDigest: vi.fn().mockReturnValue(oldRetry.promise),
+    });
+    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
+    await vi.waitFor(() => expect(host.textContent).toContain('摘要模型暂时不可用'));
+    const retry = [...host.querySelectorAll('button')].find((button) => button.textContent?.includes('重试失败修订'))!;
+    act(() => retry.click());
+    changeDate(host, '2026-08-01');
+    changeDate(host, '2026-08-03');
+    await vi.waitFor(() => expect((host.querySelector('select') as HTMLSelectElement).value).toBe('latest-date'));
+
+    await act(async () => {
+      oldRetry.resolve({ success: true, digest: { ...digests[0], id: 'late-retry' } });
+      oldList.resolve({ success: true, digests: [{ ...digests[0], id: 'late-list', digestDate: '2026-08-01' }] });
+    });
+
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('latest-date');
+    expect(host.textContent).toContain('2026-08-03');
+    expect(host.textContent).not.toContain('摘要模型暂时不可用');
   });
 });

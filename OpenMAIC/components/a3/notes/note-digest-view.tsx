@@ -21,12 +21,16 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
   const [selectedDate, setSelectedDate] = useState('');
   const [state, setState] = useState<LoadState>('loading');
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [busyOperationId, setBusyOperationId] = useState<number | null>(null);
   const loadGeneration = useRef(0);
   const abortController = useRef<AbortController | null>(null);
+  const operationGeneration = useRef(0);
+  const operationAbortController = useRef<AbortController | null>(null);
+  const selectedDateRef = useRef('');
 
   const load = useCallback(async (date?: string) => {
     const generation = ++loadGeneration.current;
+    const requestedDate = date ?? '';
     abortController.current?.abort();
     const controller = new AbortController();
     abortController.current = controller;
@@ -34,7 +38,11 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
     setError('');
     try {
       const result = await client.listDigests(date, { signal: controller.signal });
-      if (generation !== loadGeneration.current || controller.signal.aborted) return;
+      if (
+        generation !== loadGeneration.current
+        || controller.signal.aborted
+        || (requestedDate && selectedDateRef.current !== requestedDate)
+      ) return;
       if (!result.success) {
         setDigests([]);
         setState('error');
@@ -43,7 +51,10 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
       }
       setDigests(result.digests);
       setSelectedId((current) => result.digests.some((item) => item.id === current) ? current : result.digests[0]?.id ?? '');
-      if (!date && result.digests[0]) setSelectedDate(result.digests[0].digestDate);
+      if (!date && result.digests[0]) {
+        selectedDateRef.current = result.digests[0].digestDate;
+        setSelectedDate(result.digests[0].digestDate);
+      }
       setState('ready');
     } catch (loadError) {
       if (loadError instanceof DOMException && loadError.name === 'AbortError') return;
@@ -59,34 +70,83 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
       window.clearTimeout(handle);
       loadGeneration.current += 1;
       abortController.current?.abort();
+      operationGeneration.current += 1;
+      operationAbortController.current?.abort();
     };
   }, [load]);
 
   const selected = digests.find((item) => item.id === selectedId) ?? digests[0];
+  const busy = busyOperationId !== null;
+
+  const changeSelectedDate = (value: string) => {
+    selectedDateRef.current = value;
+    setSelectedDate(value);
+    operationGeneration.current += 1;
+    operationAbortController.current?.abort();
+    operationAbortController.current = null;
+    setBusyOperationId(null);
+    void load(value);
+  };
 
   const createRevision = async () => {
     if (!selectedDate || busy) return;
-    setBusy(true);
-    const result = await client.createManualDigest(selectedDate);
-    setBusy(false);
-    if (!result.success) {
-      setError(result.error);
-      return;
+    const operationDate = selectedDateRef.current || selectedDate;
+    const operationId = ++operationGeneration.current;
+    operationAbortController.current?.abort();
+    const controller = new AbortController();
+    operationAbortController.current = controller;
+    setBusyOperationId(operationId);
+    try {
+      const result = await client.createManualDigest(operationDate, { signal: controller.signal });
+      if (
+        controller.signal.aborted
+        || operationId !== operationGeneration.current
+        || selectedDateRef.current !== operationDate
+      ) return;
+      if (!result.success) {
+        setError(result.error);
+        return;
+      }
+      if (result.digest.digestDate !== operationDate) return;
+      setDigests((current) => [result.digest, ...current]);
+      setSelectedId(result.digest.id);
+    } catch (operationError) {
+      if (!(operationError instanceof DOMException && operationError.name === 'AbortError')) {
+        if (operationId === operationGeneration.current) setError('每日总结创建失败，请重试');
+      }
+    } finally {
+      setBusyOperationId((current) => current === operationId ? null : current);
     }
-    setDigests((current) => [result.digest, ...current]);
-    setSelectedId(result.digest.id);
   };
 
   const retry = async () => {
     if (!selected || selected.status !== 'failed' || busy) return;
-    setBusy(true);
-    const result = await client.retryDigest(selected.id);
-    setBusy(false);
-    if (!result.success) {
-      setError(result.error);
-      return;
+    const operationDate = selectedDateRef.current || selected.digestDate;
+    const operationId = ++operationGeneration.current;
+    operationAbortController.current?.abort();
+    const controller = new AbortController();
+    operationAbortController.current = controller;
+    setBusyOperationId(operationId);
+    try {
+      const result = await client.retryDigest(selected.id, { signal: controller.signal });
+      if (
+        controller.signal.aborted
+        || operationId !== operationGeneration.current
+        || selectedDateRef.current !== operationDate
+      ) return;
+      if (!result.success) {
+        setError(result.error);
+        return;
+      }
+      if (result.digest.digestDate !== operationDate) return;
+      setDigests((current) => current.map((item) => item.id === result.digest.id ? result.digest : item));
+    } catch (operationError) {
+      if (!(operationError instanceof DOMException && operationError.name === 'AbortError')) {
+        if (operationId === operationGeneration.current) setError('每日总结重试失败，请稍后再试');
+      }
+    } finally {
+      setBusyOperationId((current) => current === operationId ? null : current);
     }
-    setDigests((current) => current.map((item) => item.id === result.digest.id ? result.digest : item));
   };
 
   return (
@@ -100,11 +160,7 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
           <input
             type="date"
             value={selectedDate}
-            onChange={(event) => {
-              const value = event.target.value;
-              setSelectedDate(value);
-              void load(value);
-            }}
+            onChange={(event) => changeSelectedDate(event.target.value)}
             className="h-8 rounded-md border border-input bg-background px-2 text-sm text-foreground"
           />
         </label>

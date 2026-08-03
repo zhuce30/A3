@@ -207,6 +207,22 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.CreateModel(
+            name='NoteAttachmentParseSnapshot',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('parse_generation', models.PositiveIntegerField()),
+                ('display_name_snapshot', models.CharField(max_length=255)),
+                ('extracted_text_snapshot', models.TextField(blank=True)),
+                ('succeeded_at', models.DateTimeField(default=django.utils.timezone.now)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('attachment', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='parse_snapshots', to='notes.noteattachment')),
+            ],
+            options={
+                'db_table': 'a3_note_attachment_parse_snapshots',
+                'ordering': ['succeeded_at', 'parse_generation'],
+            },
+        ),
+        migrations.CreateModel(
             name='NotePhysicalCleanup',
             fields=[
                 ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
@@ -354,6 +370,14 @@ class Migration(migrations.Migration):
         migrations.AddIndex(
             model_name='noteattachment',
             index=models.Index(fields=['user', 'note', 'deleted_at'], name='idx_note_att_user_note'),
+        ),
+        migrations.AddIndex(
+            model_name='noteattachmentparsesnapshot',
+            index=models.Index(fields=['attachment', 'succeeded_at'], name='idx_note_parse_att_time'),
+        ),
+        migrations.AddConstraint(
+            model_name='noteattachmentparsesnapshot',
+            constraint=models.UniqueConstraint(fields=('attachment', 'parse_generation'), name='uniq_note_attachment_parse_gen'),
         ),
         migrations.AddIndex(
             model_name='noteattachment',

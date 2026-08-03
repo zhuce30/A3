@@ -221,6 +221,33 @@ class NoteAttachment(ValidatedModel):
             raise ValidationError(errors)
 
 
+class NoteAttachmentParseSnapshot(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    attachment = models.ForeignKey(
+        NoteAttachment,
+        on_delete=models.CASCADE,
+        related_name="parse_snapshots",
+    )
+    parse_generation = models.PositiveIntegerField()
+    display_name_snapshot = models.CharField(max_length=255)
+    extracted_text_snapshot = models.TextField(blank=True)
+    succeeded_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "a3_note_attachment_parse_snapshots"
+        ordering = ["succeeded_at", "parse_generation"]
+        indexes = [
+            models.Index(fields=["attachment", "succeeded_at"], name="idx_note_parse_att_time"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["attachment", "parse_generation"],
+                name="uniq_note_attachment_parse_gen",
+            ),
+        ]
+
+
 class NoteAiSession(models.Model):
     class ScopeType(models.TextChoices):
         NOTE = "note", "Note"

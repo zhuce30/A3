@@ -130,12 +130,12 @@ export class NotesClient {
     return this.json<{ digest: NoteDigest }>('GET', `digests/${encodeURIComponent(digestId)}/`, undefined, options);
   }
 
-  createManualDigest(date: string) {
-    return this.json<{ digest: NoteDigest }>('POST', 'digests/manual/', { date });
+  createManualDigest(date: string, options: { signal?: AbortSignal } = {}) {
+    return this.json<{ digest: NoteDigest }>('POST', 'digests/manual/', { date }, options);
   }
 
-  retryDigest(digestId: string) {
-    return this.json<{ digest: NoteDigest }>('POST', `digests/${encodeURIComponent(digestId)}/retry/`, {});
+  retryDigest(digestId: string, options: { signal?: AbortSignal } = {}) {
+    return this.json<{ digest: NoteDigest }>('POST', `digests/${encodeURIComponent(digestId)}/retry/`, {}, options);
   }
 
   uploadAttachment(noteId: string, file: File) {

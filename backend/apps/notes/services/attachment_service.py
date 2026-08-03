@@ -20,7 +20,7 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
-from backend.apps.notes.models import Note, NoteAttachment
+from backend.apps.notes.models import Note, NoteAttachment, NoteAttachmentParseSnapshot
 from backend.apps.notes.services.link_fetcher import SafeLinkError, fetch_safe_link
 
 
@@ -333,7 +333,7 @@ def create_link_attachment(user, note_id, data: dict[str, Any]) -> NoteAttachmen
         _check_capacity(user, note, 0)
         if not Note.objects.filter(user=user, pk=note.pk, deleted_at__isnull=True).exists():
             raise AttachmentNotFound("笔记不存在")
-        return NoteAttachment.objects.create(
+        attachment = NoteAttachment.objects.create(
             user=user,
             note=note,
             kind=NoteAttachment.Kind.LINK,
@@ -346,6 +346,14 @@ def create_link_attachment(user, note_id, data: dict[str, Any]) -> NoteAttachmen
             extracted_text=extracted_text,
             preview_metadata={"parser": "safe_link", "truncated": len(extracted_text) >= int(settings.A3_NOTES_EXTRACTED_TEXT_MAX_CHARS)},
         )
+        NoteAttachmentParseSnapshot.objects.create(
+            attachment=attachment,
+            parse_generation=attachment.parse_generation,
+            display_name_snapshot=attachment.display_name,
+            extracted_text_snapshot=attachment.extracted_text,
+            succeeded_at=attachment.updated_at,
+        )
+        return attachment
 
 
 def soft_delete_attachment(user, attachment_id) -> NoteAttachment:
@@ -434,21 +442,32 @@ def parse_and_persist_attachment(
     expected_lease_token,
 ) -> dict[str, Any]:
     text, metadata = extract_attachment_text(attachment)
-    updated = NoteAttachment.objects.filter(
-        pk=attachment.pk,
-        deleted_at__isnull=True,
-        parse_generation=expected_generation,
-        parse_lease_token=expected_lease_token,
-        parse_status=NoteAttachment.ParseStatus.PROCESSING,
-    ).update(
-        parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
-        parse_started_at=None,
-        extracted_text=text,
-        preview_metadata=metadata,
-        error_code="",
-        error_message="",
-        updated_at=timezone.now(),
-    )
-    if not updated:
-        return {"skipped": True, "attachmentId": str(attachment.pk)}
+    succeeded_at = timezone.now()
+    with transaction.atomic():
+        current = NoteAttachment.objects.select_for_update().filter(
+            pk=attachment.pk,
+            deleted_at__isnull=True,
+            parse_generation=expected_generation,
+            parse_lease_token=expected_lease_token,
+            parse_status=NoteAttachment.ParseStatus.PROCESSING,
+        ).first()
+        if current is None:
+            return {"skipped": True, "attachmentId": str(attachment.pk)}
+        current.parse_status = NoteAttachment.ParseStatus.SUCCEEDED
+        current.parse_started_at = None
+        current.extracted_text = text
+        current.preview_metadata = metadata
+        current.error_code = ""
+        current.error_message = ""
+        current.save(update_fields={
+            "parse_status", "parse_started_at", "extracted_text", "preview_metadata",
+            "error_code", "error_message", "updated_at",
+        })
+        NoteAttachmentParseSnapshot.objects.create(
+            attachment=current,
+            parse_generation=expected_generation,
+            display_name_snapshot=current.display_name,
+            extracted_text_snapshot=text,
+            succeeded_at=succeeded_at,
+        )
     return {"status": "succeeded", "attachmentId": str(attachment.pk)}

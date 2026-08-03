@@ -1,21 +1,32 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone as datetime_timezone
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
-from backend.apps.notes.models import Note, NoteAttachment, NoteDailyDigest, NoteMemory
+from backend.apps.notes.models import (
+    Note,
+    NoteAttachment,
+    NoteAttachmentParseSnapshot,
+    NoteDailyDigest,
+    NoteMemory,
+    NoteRevision,
+)
 from backend.apps.notes.services import digest_service
+from backend.apps.notes.services.attachment_service import parse_and_persist_attachment
 from backend.apps.notes.tasks import (
     create_previous_day_digests_task,
     generate_daily_digest_task,
     recover_stale_digest_jobs,
+    DigestHeartbeat,
+    _heartbeat_digest_once,
 )
 
 
@@ -42,6 +53,39 @@ class DigestFixtureMixin:
 
 
 class DigestSnapshotTests(DigestFixtureMixin, TestCase):
+    def revision_at(self, note: Note, version: int, instant: datetime, *, title: str, body: str) -> NoteRevision:
+        revision = NoteRevision.objects.create(
+            note=note,
+            version=version,
+            source=NoteRevision.Source.MANUAL,
+            title_snapshot=title,
+            content_json_snapshot={"type": "doc", "content": []},
+            content_text_snapshot=body,
+        )
+        NoteRevision.objects.filter(pk=revision.pk).update(created_at=instant)
+        revision.refresh_from_db()
+        return revision
+
+    def parse_snapshot_at(
+        self,
+        attachment: NoteAttachment,
+        generation: int,
+        instant: datetime,
+        *,
+        text: str,
+    ) -> NoteAttachmentParseSnapshot:
+        if attachment.created_at >= instant:
+            NoteAttachment.objects.filter(pk=attachment.pk).update(created_at=instant - timedelta(seconds=1))
+            attachment.refresh_from_db()
+        parsed = NoteAttachmentParseSnapshot.objects.create(
+            attachment=attachment,
+            parse_generation=generation,
+            display_name_snapshot=attachment.display_name,
+            extracted_text_snapshot=text,
+            succeeded_at=instant,
+        )
+        return parsed
+
     def test_snapshot_uses_only_target_date_notes_and_successful_direct_attachments(self) -> None:
         included = self.note_at(datetime(2026, 8, 2, 3, 30, tzinfo=UTC))
         outside = self.note_at(datetime(2026, 8, 3, 3, 30, tzinfo=UTC), title="次日笔记")
@@ -55,6 +99,12 @@ class DigestSnapshotTests(DigestFixtureMixin, TestCase):
             parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
             parse_generation=4,
             extracted_text="反证法附件证据",
+        )
+        self.parse_snapshot_at(
+            succeeded,
+            4,
+            datetime(2026, 8, 2, 4, 0, tzinfo=UTC),
+            text="反证法附件证据",
         )
         NoteAttachment.objects.create(
             user=self.user,
@@ -97,6 +147,93 @@ class DigestSnapshotTests(DigestFixtureMixin, TestCase):
             "displayName": "证明补充",
             "extractedText": "反证法附件证据",
         }])
+
+    def test_cross_midnight_reedit_uses_the_last_revision_from_target_day(self) -> None:
+        note = self.note_at(
+            datetime(2026, 8, 2, 18, 0, tzinfo=UTC),
+            title="次日标题",
+            body="次日内容",
+        )
+        Note.objects.filter(pk=note.pk).update(version=3)
+        self.revision_at(
+            note,
+            2,
+            datetime(2026, 8, 2, 14, 0, tzinfo=UTC),
+            title="目标日标题",
+            body="目标日最终内容",
+        )
+
+        snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+
+        self.assertEqual(snapshot["notes"], [self._expected_note(note, 2, "目标日标题", "目标日最终内容")])
+
+    def test_after_midnight_delete_does_not_remove_target_day_revision(self) -> None:
+        note = self.note_at(datetime(2026, 8, 2, 14, 0, tzinfo=UTC), title="删除前", body="仍应总结")
+        self.revision_at(note, 1, datetime(2026, 8, 2, 14, 0, tzinfo=UTC), title="删除前", body="仍应总结")
+        Note.objects.filter(pk=note.pk).update(deleted_at=datetime(2026, 8, 2, 18, 0, tzinfo=UTC))
+
+        snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+
+        self.assertEqual(snapshot["notes"][0]["id"], str(note.id))
+        self.assertEqual(snapshot["notes"][0]["contentText"], "仍应总结")
+
+    def test_same_day_multiple_revisions_select_the_latest_persisted_version(self) -> None:
+        note = self.note_at(datetime(2026, 8, 3, 3, 0, tzinfo=UTC), title="次日", body="次日")
+        Note.objects.filter(pk=note.pk).update(version=4)
+        self.revision_at(note, 2, datetime(2026, 8, 2, 2, 0, tzinfo=UTC), title="上午", body="上午版本")
+        self.revision_at(note, 3, datetime(2026, 8, 2, 13, 0, tzinfo=UTC), title="晚上", body="最终版本")
+
+        snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+
+        self.assertEqual(snapshot["notes"][0]["version"], 3)
+        self.assertEqual(snapshot["notes"][0]["title"], "晚上")
+        self.assertEqual(snapshot["notes"][0]["contentText"], "最终版本")
+
+    def test_later_attachment_parse_does_not_leak_into_historical_digest(self) -> None:
+        note = self.note_at(datetime(2026, 8, 3, 2, 0, tzinfo=UTC), title="次日", body="次日")
+        Note.objects.filter(pk=note.pk).update(version=2)
+        self.revision_at(note, 1, datetime(2026, 8, 2, 8, 0, tzinfo=UTC), title="目标日", body="目标日内容")
+        attachment = NoteAttachment.objects.create(
+            user=self.user,
+            note=note,
+            kind=NoteAttachment.Kind.LINK,
+            display_name="演算过程",
+            source_url="https://example.com/calculation",
+            parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+            parse_generation=2,
+            extracted_text="次日重解析内容",
+            deleted_at=datetime(2026, 8, 3, 3, 0, tzinfo=UTC),
+        )
+        NoteAttachment.objects.filter(pk=attachment.pk).update(created_at=datetime(2026, 8, 2, 7, 0, tzinfo=UTC))
+        self.parse_snapshot_at(attachment, 1, datetime(2026, 8, 2, 9, 0, tzinfo=UTC), text="目标日解析内容")
+        self.parse_snapshot_at(attachment, 2, datetime(2026, 8, 3, 3, 0, tzinfo=UTC), text="次日重解析内容")
+
+        snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+
+        self.assertEqual(snapshot["notes"][0]["attachments"][0]["parseVersion"], 1)
+        self.assertEqual(snapshot["notes"][0]["attachments"][0]["extractedText"], "目标日解析内容")
+        self.assertNotIn("次日重解析内容", json.dumps(snapshot, ensure_ascii=False))
+
+    def test_current_note_is_used_when_it_is_the_target_day_latest_version(self) -> None:
+        note = self.note_at(datetime(2026, 8, 2, 15, 0, tzinfo=UTC), title="当前最终标题", body="当前最终内容")
+        Note.objects.filter(pk=note.pk).update(version=4)
+        self.revision_at(note, 3, datetime(2026, 8, 2, 10, 0, tzinfo=UTC), title="较早版本", body="较早内容")
+
+        snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+
+        self.assertEqual(snapshot["notes"][0]["version"], 4)
+        self.assertEqual(snapshot["notes"][0]["contentText"], "当前最终内容")
+
+    @staticmethod
+    def _expected_note(note: Note, version: int, title: str, body: str) -> dict:
+        return {
+            "id": str(note.id),
+            "version": version,
+            "title": title,
+            "contentText": body,
+            "lastEditedAt": datetime(2026, 8, 2, 14, 0, tzinfo=UTC).isoformat(),
+            "attachments": [],
+        }
 
     def test_beijing_day_boundaries_are_converted_to_utc_without_dst(self) -> None:
         before = self.note_at(datetime(2026, 8, 1, 15, 59, 59, tzinfo=UTC), title="前一秒")
@@ -290,6 +427,117 @@ class DigestRevisionAndTaskTests(DigestFixtureMixin, TestCase):
 
         self.assertEqual(result, {"recovered": 2, "failed": 0})
         self.assertEqual(enqueue.call_count, 2)
+
+    @patch("backend.apps.notes.services.digest_service.enqueue_digest")
+    def test_recovery_does_not_requeue_a_live_heartbeating_digest(self, enqueue) -> None:
+        digest = digest_service.create_manual_digest(self.user, self.target_date)
+        now = timezone.now()
+        NoteDailyDigest.objects.filter(pk=digest.pk).update(
+            status=NoteDailyDigest.Status.PROCESSING,
+            run_started_at=now - timedelta(minutes=60),
+            run_heartbeat_at=now,
+            run_lease_token=uuid.uuid4(),
+        )
+        enqueue.reset_mock()
+
+        result = recover_stale_digest_jobs(now=now, stale_minutes=30)
+
+        self.assertEqual(result, {"recovered": 0, "failed": 0})
+        enqueue.assert_not_called()
+
+    def test_old_lease_heartbeat_cannot_touch_a_newer_generation(self) -> None:
+        digest = NoteDailyDigest.objects.create(
+            user=self.user,
+            digest_date=self.target_date,
+            revision=1,
+            idempotency_key=f"manual:{uuid.uuid4()}",
+            status=NoteDailyDigest.Status.PROCESSING,
+            run_generation=2,
+            run_lease_token=uuid.uuid4(),
+            run_heartbeat_at=timezone.now(),
+        )
+        newer_heartbeat = digest.run_heartbeat_at
+
+        updated = _heartbeat_digest_once(digest.id, 1, uuid.uuid4())
+
+        digest.refresh_from_db()
+        self.assertFalse(updated)
+        self.assertEqual(digest.run_generation, 2)
+        self.assertEqual(digest.run_heartbeat_at, newer_heartbeat)
+
+    @override_settings(A3_NOTES_DIGEST_HEARTBEAT_SECONDS=0.01)
+    def test_generation_heartbeats_while_the_model_call_is_blocked(self) -> None:
+        with patch("backend.apps.notes.services.digest_service.enqueue_digest"):
+            digest = digest_service.create_manual_digest(self.user, self.target_date)
+        digest = digest_service.prepare_digest_dispatch(digest)
+        ticked = threading.Event()
+
+        def heartbeat(*args):
+            ticked.set()
+            return _heartbeat_digest_once(*args)
+
+        def generate(_snapshot):
+            self.assertTrue(ticked.wait(timeout=1))
+            return "# 已生成"
+
+        with patch("backend.apps.notes.tasks._heartbeat_digest_once", side_effect=heartbeat), patch(
+            "backend.apps.notes.services.digest_service.generate_digest_markdown",
+            side_effect=generate,
+        ):
+            result = generate_daily_digest_task(
+                str(digest.id), digest.run_generation, str(digest.run_lease_token)
+            )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertTrue(ticked.is_set())
+
+    @patch("backend.apps.notes.services.attachment_service.extract_attachment_text")
+    def test_successful_attachment_parse_persists_an_immutable_parse_snapshot(self, extract) -> None:
+        extract.return_value = ("解析正文", {"parser": "test"})
+        note = Note.objects.filter(user=self.user).first()
+        lease = uuid.uuid4()
+        attachment = NoteAttachment.objects.create(
+            user=self.user,
+            note=note,
+            kind=NoteAttachment.Kind.LINK,
+            display_name="证明材料",
+            source_url="https://example.com/evidence",
+            parse_status=NoteAttachment.ParseStatus.PROCESSING,
+            parse_generation=3,
+            parse_lease_token=lease,
+        )
+
+        result = parse_and_persist_attachment(attachment, 3, lease)
+
+        parsed = NoteAttachmentParseSnapshot.objects.get(attachment=attachment, parse_generation=3)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(parsed.display_name_snapshot, "证明材料")
+        self.assertEqual(parsed.extracted_text_snapshot, "解析正文")
+
+
+class DigestHeartbeatThreadTests(TransactionTestCase):
+    reset_sequences = True
+
+    def test_heartbeat_thread_is_bounded_and_stops_on_success_and_failure(self) -> None:
+        ticked = threading.Event()
+
+        def heartbeat(*_args):
+            ticked.set()
+            return True
+
+        with patch("backend.apps.notes.tasks._heartbeat_digest_once", side_effect=heartbeat):
+            monitor = DigestHeartbeat(uuid.uuid4(), 1, uuid.uuid4(), interval_seconds=0.01)
+            with monitor:
+                self.assertTrue(ticked.wait(timeout=1))
+            self.assertFalse(monitor.is_alive)
+
+            ticked.clear()
+            monitor = DigestHeartbeat(uuid.uuid4(), 1, uuid.uuid4(), interval_seconds=0.01)
+            with self.assertRaises(RuntimeError):
+                with monitor:
+                    self.assertTrue(ticked.wait(timeout=1))
+                    raise RuntimeError("model failed")
+            self.assertFalse(monitor.is_alive)
 
 
 class DigestApiTests(DigestFixtureMixin, TestCase):

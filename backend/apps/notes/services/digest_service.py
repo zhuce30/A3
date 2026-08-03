@@ -7,11 +7,16 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from django.db import IntegrityError, OperationalError, transaction
-from django.db.models import Max
+from django.db.models import Max, Q
 from django.utils import timezone
 
 from backend.apps.compat.llm import chat_completion
-from backend.apps.notes.models import Note, NoteAttachment, NoteDailyDigest
+from backend.apps.notes.models import (
+    Note,
+    NoteAttachmentParseSnapshot,
+    NoteDailyDigest,
+    NoteRevision,
+)
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -41,40 +46,83 @@ def beijing_day_bounds(target_date: date) -> tuple[datetime, datetime]:
 def build_digest_snapshot(user, target_date: date) -> dict[str, Any]:
     start, end = beijing_day_bounds(target_date)
     with transaction.atomic():
-        notes = list(
+        available_at_day_end = Q(deleted_at__isnull=True) | Q(deleted_at__gte=end)
+        revisions = list(
+            NoteRevision.objects.select_for_update()
+            .filter(
+                note__user=user,
+                created_at__gte=start,
+                created_at__lt=end,
+            )
+            .filter(Q(note__deleted_at__isnull=True) | Q(note__deleted_at__gte=end))
+            .order_by("note_id", "created_at", "version", "id")
+            .values(
+                "note_id", "version", "title_snapshot", "content_text_snapshot", "created_at"
+            )
+        )
+        current_notes = list(
             Note.objects.select_for_update()
             .filter(
                 user=user,
-                deleted_at__isnull=True,
                 last_edited_at__gte=start,
                 last_edited_at__lt=end,
             )
+            .filter(available_at_day_end)
             .order_by("last_edited_at", "id")
             .values("id", "version", "title", "content_text", "last_edited_at")
         )
-        note_ids = [item["id"] for item in notes]
-        attachments = list(
-            NoteAttachment.objects.select_for_update()
+        selected: dict[Any, dict[str, Any]] = {}
+        for revision in revisions:
+            selected[revision["note_id"]] = {
+                "id": revision["note_id"],
+                "version": revision["version"],
+                "title": revision["title_snapshot"],
+                "contentText": revision["content_text_snapshot"],
+                "lastEditedAt": revision["created_at"],
+            }
+        for note in current_notes:
+            candidate = selected.get(note["id"])
+            if candidate is None or (note["last_edited_at"], note["version"]) >= (
+                candidate["lastEditedAt"], candidate["version"]
+            ):
+                selected[note["id"]] = {
+                    "id": note["id"],
+                    "version": note["version"],
+                    "title": note["title"],
+                    "contentText": note["content_text"],
+                    "lastEditedAt": note["last_edited_at"],
+                }
+        note_ids = list(selected)
+        parse_snapshots = list(
+            NoteAttachmentParseSnapshot.objects.select_for_update()
             .filter(
-                user=user,
-                note_id__in=note_ids,
-                deleted_at__isnull=True,
-                parse_status=NoteAttachment.ParseStatus.SUCCEEDED,
+                attachment__user=user,
+                attachment__note_id__in=note_ids,
+                attachment__created_at__lt=end,
+                succeeded_at__lt=end,
             )
-            .order_by("created_at", "id")
-            .values("id", "note_id", "parse_generation", "display_name", "extracted_text")
+            .filter(Q(attachment__deleted_at__isnull=True) | Q(attachment__deleted_at__gte=end))
+            .order_by("attachment_id", "succeeded_at", "parse_generation", "id")
+            .values(
+                "attachment_id", "attachment__note_id", "parse_generation",
+                "display_name_snapshot", "extracted_text_snapshot", "succeeded_at",
+            )
         )
 
     attachments_by_note: dict[Any, list[dict[str, Any]]] = {note_id: [] for note_id in note_ids}
-    for attachment in attachments:
-        attachments_by_note[attachment["note_id"]].append(
+    latest_parse_by_attachment: dict[Any, dict[str, Any]] = {}
+    for parsed in parse_snapshots:
+        latest_parse_by_attachment[parsed["attachment_id"]] = parsed
+    for parsed in latest_parse_by_attachment.values():
+        attachments_by_note[parsed["attachment__note_id"]].append(
             {
-                "id": str(attachment["id"]),
-                "parseVersion": attachment["parse_generation"],
-                "displayName": attachment["display_name"],
-                "extractedText": attachment["extracted_text"],
+                "id": str(parsed["attachment_id"]),
+                "parseVersion": parsed["parse_generation"],
+                "displayName": parsed["display_name_snapshot"],
+                "extractedText": parsed["extracted_text_snapshot"],
             }
         )
+    notes = sorted(selected.values(), key=lambda item: (item["lastEditedAt"], item["id"]))
     return {
         "schemaVersion": 1,
         "date": target_date.isoformat(),
@@ -84,8 +132,8 @@ def build_digest_snapshot(user, target_date: date) -> dict[str, Any]:
                 "id": str(item["id"]),
                 "version": item["version"],
                 "title": item["title"],
-                "contentText": item["content_text"],
-                "lastEditedAt": item["last_edited_at"].isoformat(),
+                "contentText": item["contentText"],
+                "lastEditedAt": item["lastEditedAt"].isoformat(),
                 "attachments": attachments_by_note[item["id"]],
             }
             for item in notes

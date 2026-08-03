@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
+from threading import Event, Thread
 
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
@@ -11,7 +12,7 @@ from django.db import close_old_connections, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from backend.apps.notes.models import Note, NoteAiMessage, NoteAttachment, NoteDailyDigest, NoteExportJob
+from backend.apps.notes.models import Note, NoteAiMessage, NoteAttachment, NoteDailyDigest, NoteExportJob, NoteRevision
 
 
 PARSE_HARD_LIMIT = max(11, int(settings.A3_NOTES_PARSE_TIMEOUT_SECONDS))
@@ -20,6 +21,63 @@ MAX_PARSE_ATTEMPTS = 3
 STALE_JOB_MINUTES = 30
 ASSISTANT_STALE_MINUTES = 10
 DIGEST_STALE_MINUTES = 30
+
+
+def _heartbeat_digest_once(digest_id, generation: int, lease_token: uuid.UUID) -> bool:
+    return bool(
+        _digest_lease_filter(digest_id, generation, lease_token).update(
+            run_heartbeat_at=timezone.now()
+        )
+    )
+
+
+class DigestHeartbeat:
+    def __init__(
+        self,
+        digest_id,
+        generation: int,
+        lease_token: uuid.UUID,
+        *,
+        interval_seconds: float,
+    ) -> None:
+        self.digest_id = digest_id
+        self.generation = generation
+        self.lease_token = lease_token
+        self.interval_seconds = max(0.01, float(interval_seconds))
+        self._stop = Event()
+        self._thread = Thread(
+            target=self._run,
+            name=f"note-digest-heartbeat-{digest_id}",
+            daemon=True,
+        )
+
+    @property
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        close_old_connections()
+        try:
+            while not self._stop.wait(self.interval_seconds):
+                try:
+                    if not _heartbeat_digest_once(
+                        self.digest_id,
+                        self.generation,
+                        self.lease_token,
+                    ):
+                        return
+                except Exception:
+                    return
+        finally:
+            close_old_connections()
 
 
 def _digest_lease_filter(digest_id, generation: int, lease_token: uuid.UUID):
@@ -60,7 +118,13 @@ def generate_daily_digest_task(digest_id: str, expected_generation: int, expecte
     if digest is None:
         return {"skipped": True}
     try:
-        content = digest_service.generate_digest_markdown(digest.source_snapshot).strip()
+        with DigestHeartbeat(
+            digest.id,
+            generation,
+            lease_token,
+            interval_seconds=float(settings.A3_NOTES_DIGEST_HEARTBEAT_SECONDS),
+        ):
+            content = digest_service.generate_digest_markdown(digest.source_snapshot).strip()
         if not content:
             raise ValueError("empty digest")
         title = f"{digest.digest_date.month} 月 {digest.digest_date.day} 日笔记总结"
@@ -98,6 +162,8 @@ def generate_daily_digest_task(digest_id: str, expected_generation: int, expecte
         if not updated:
             return {"skipped": True}
         return {"status": "failed", "digestId": str(digest.id)}
+    finally:
+        close_old_connections()
 
 
 def recover_stale_digest_jobs(*, now=None, stale_minutes: int = DIGEST_STALE_MINUTES) -> dict:
@@ -165,13 +231,23 @@ def create_previous_day_digests_task(*, now_iso: str | None = None) -> dict:
         current = timezone.localtime(timezone.now(), digest_service.BEIJING)
     target_date = current.date() - timedelta(days=1)
     start, end = digest_service.beijing_day_bounds(target_date)
-    user_ids = list(
+    current_user_ids = set(
         Note.objects.filter(
-            deleted_at__isnull=True,
             last_edited_at__gte=start,
             last_edited_at__lt=end,
-        ).order_by().values_list("user_id", flat=True).distinct()
+        )
+        .filter(Q(deleted_at__isnull=True) | Q(deleted_at__gte=end))
+        .order_by().values_list("user_id", flat=True).distinct()
     )
+    revision_user_ids = set(
+        NoteRevision.objects.filter(
+            created_at__gte=start,
+            created_at__lt=end,
+        )
+        .filter(Q(note__deleted_at__isnull=True) | Q(note__deleted_at__gte=end))
+        .order_by().values_list("note__user_id", flat=True).distinct()
+    )
+    user_ids = current_user_ids | revision_user_ids
     created = 0
     user_model = Note._meta.get_field("user").remote_field.model
     for user in user_model.objects.filter(pk__in=user_ids).iterator():
