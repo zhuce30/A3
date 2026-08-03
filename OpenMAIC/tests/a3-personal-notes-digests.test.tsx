@@ -31,7 +31,10 @@ const digests: NoteDigest[] = [
 function clientStub(overrides: Partial<NotesClient> = {}) {
   return {
     listDigests: vi.fn().mockResolvedValue({ success: true, digests }),
-    createManualDigest: vi.fn().mockResolvedValue({ success: true, digest: digests[0] }),
+    createManualDigest: vi.fn().mockResolvedValue({
+      success: true,
+      digest: { ...digests[0], id: 'digest-created', revision: 3 },
+    }),
     retryDigest: vi.fn().mockResolvedValue({ success: true, digest: { ...digests[0], status: 'queued' } }),
     ...overrides,
   } as unknown as NotesClient;
@@ -225,5 +228,86 @@ describe('personal note daily digest view', () => {
     expect((host.querySelector('select') as HTMLSelectElement).value).toBe('latest-date');
     expect(host.textContent).toContain('2026-08-03');
     expect(host.textContent).not.toContain('摘要模型暂时不可用');
+  });
+
+  it('ignores a stale refresh that resolves after a completed manual revision', async () => {
+    const staleRefresh = deferred<{ success: true; digests: NoteDigest[] }>();
+    const created = { ...digests[1], id: 'digest-3', revision: 3, generatedBy: 'manual' as const };
+    const listDigests = vi.fn()
+      .mockResolvedValueOnce({ success: true, digests })
+      .mockReturnValueOnce(staleRefresh.promise);
+    const client = clientStub({
+      listDigests,
+      createManualDigest: vi.fn().mockResolvedValue({ success: true, digest: created }),
+    });
+    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
+    await vi.waitFor(() => expect(host.textContent).toContain('修订 2'));
+
+    const refresh = host.querySelector<HTMLButtonElement>('button[title="刷新总结状态"]')!;
+    const create = [...host.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('生成新修订'))!;
+    act(() => refresh.click());
+    await act(async () => create.click());
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('digest-3');
+
+    await act(async () => staleRefresh.resolve({ success: true, digests }));
+
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('digest-3');
+    expect(host.textContent).toContain('修订 3');
+    expect(create.disabled).toBe(false);
+  });
+
+  it('ignores a stale refresh that resolves after a completed retry', async () => {
+    const staleRefresh = deferred<{ success: true; digests: NoteDigest[] }>();
+    const retried = { ...digests[0], status: 'queued' as const };
+    const client = clientStub({
+      listDigests: vi.fn()
+        .mockResolvedValueOnce({ success: true, digests })
+        .mockReturnValueOnce(staleRefresh.promise),
+      retryDigest: vi.fn().mockResolvedValue({ success: true, digest: retried }),
+    });
+    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
+    await vi.waitFor(() => expect(host.textContent).toContain('摘要模型暂时不可用'));
+
+    const refresh = host.querySelector<HTMLButtonElement>('button[title="刷新总结状态"]')!;
+    const retry = [...host.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('重试失败修订'))!;
+    await act(async () => {
+      refresh.click();
+      retry.click();
+    });
+    expect(host.textContent).toContain('总结已排队');
+
+    await act(async () => staleRefresh.resolve({ success: true, digests }));
+
+    expect(host.textContent).toContain('总结已排队');
+    expect(host.textContent).not.toContain('摘要模型暂时不可用');
+  });
+
+  it('only applies the latest of two overlapping refreshes', async () => {
+    const firstRefresh = deferred<{ success: true; digests: NoteDigest[] }>();
+    const secondRefresh = deferred<{ success: true; digests: NoteDigest[] }>();
+    const latest = [{ ...digests[1], id: 'latest-refresh', revision: 4 }];
+    const client = clientStub({
+      listDigests: vi.fn()
+        .mockResolvedValueOnce({ success: true, digests })
+        .mockReturnValueOnce(firstRefresh.promise)
+        .mockReturnValueOnce(secondRefresh.promise),
+    });
+    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
+    await vi.waitFor(() => expect(host.textContent).toContain('修订 2'));
+
+    const refresh = host.querySelector<HTMLButtonElement>('button[title="刷新总结状态"]')!;
+    act(() => {
+      refresh.click();
+      refresh.click();
+    });
+    await act(async () => secondRefresh.resolve({ success: true, digests: latest }));
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('latest-refresh');
+
+    await act(async () => firstRefresh.resolve({ success: true, digests }));
+
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('latest-refresh');
+    expect(host.textContent).toContain('修订 4');
   });
 });

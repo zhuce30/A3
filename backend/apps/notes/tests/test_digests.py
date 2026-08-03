@@ -15,12 +15,20 @@ from backend.apps.notes.models import (
     Note,
     NoteAttachment,
     NoteAttachmentParseSnapshot,
+    NoteDailyState,
     NoteDailyDigest,
     NoteMemory,
     NoteRevision,
 )
 from backend.apps.notes.services import digest_service
 from backend.apps.notes.services.attachment_service import parse_and_persist_attachment
+from backend.apps.notes.services.note_service import (
+    create_note,
+    restore_deleted_note,
+    restore_revision,
+    save_note,
+    soft_delete_note,
+)
 from backend.apps.notes.tasks import (
     create_previous_day_digests_task,
     generate_daily_digest_task,
@@ -39,17 +47,55 @@ class DigestFixtureMixin:
         self.other_user = get_user_model().objects.create_user(phone="13800003002", password="test-password")
         self.target_date = date(2026, 8, 2)
 
-    def note_at(self, instant: datetime, *, title: str = "离散数学", body: str = "命题逻辑复习") -> Note:
+    def note_at(
+        self,
+        instant: datetime,
+        *,
+        title: str = "离散数学",
+        body: str = "命题逻辑复习",
+        version: int = 3,
+    ) -> Note:
         note = Note.objects.create(
             user=self.user,
             title=title,
             content_json={"type": "doc", "content": [{"type": "paragraph", "text": body}]},
             content_text=body,
-            version=3,
+            version=version,
         )
         Note.objects.filter(pk=note.pk).update(last_edited_at=instant)
         note.refresh_from_db()
+        self.record_daily_state(note, version, instant, title=title, body=body)
         return note
+
+    def record_daily_state(
+        self,
+        note: Note,
+        version: int,
+        instant: datetime,
+        *,
+        title: str,
+        body: str,
+    ) -> NoteDailyState:
+        local_date = timezone.localtime(instant, digest_service.BEIJING).date()
+        state = NoteDailyState.objects.filter(note=note, local_date=local_date).first()
+        if state is not None and state.last_event_at > instant:
+            return state
+        values = {
+            "title_snapshot": title,
+            "content_json_snapshot": {"type": "doc", "content": []},
+            "content_text_snapshot": body,
+            "version": version,
+            "last_edited_at_snapshot": instant,
+            "was_edited": True,
+            "deleted_at_day_end": False,
+            "last_event_at": instant,
+        }
+        if state is None:
+            return NoteDailyState.objects.create(note=note, local_date=local_date, **values)
+        for field, value in values.items():
+            setattr(state, field, value)
+        state.save()
+        return state
 
 
 class DigestSnapshotTests(DigestFixtureMixin, TestCase):
@@ -64,6 +110,7 @@ class DigestSnapshotTests(DigestFixtureMixin, TestCase):
         )
         NoteRevision.objects.filter(pk=revision.pk).update(created_at=instant)
         revision.refresh_from_db()
+        self.record_daily_state(note, version, instant, title=title, body=body)
         return revision
 
     def parse_snapshot_at(
@@ -178,8 +225,7 @@ class DigestSnapshotTests(DigestFixtureMixin, TestCase):
         self.assertEqual(snapshot["notes"][0]["contentText"], "仍应总结")
 
     def test_same_day_multiple_revisions_select_the_latest_persisted_version(self) -> None:
-        note = self.note_at(datetime(2026, 8, 3, 3, 0, tzinfo=UTC), title="次日", body="次日")
-        Note.objects.filter(pk=note.pk).update(version=4)
+        note = self.note_at(datetime(2026, 8, 3, 3, 0, tzinfo=UTC), title="次日", body="次日", version=4)
         self.revision_at(note, 2, datetime(2026, 8, 2, 2, 0, tzinfo=UTC), title="上午", body="上午版本")
         self.revision_at(note, 3, datetime(2026, 8, 2, 13, 0, tzinfo=UTC), title="晚上", body="最终版本")
 
@@ -190,8 +236,7 @@ class DigestSnapshotTests(DigestFixtureMixin, TestCase):
         self.assertEqual(snapshot["notes"][0]["contentText"], "最终版本")
 
     def test_later_attachment_parse_does_not_leak_into_historical_digest(self) -> None:
-        note = self.note_at(datetime(2026, 8, 3, 2, 0, tzinfo=UTC), title="次日", body="次日")
-        Note.objects.filter(pk=note.pk).update(version=2)
+        note = self.note_at(datetime(2026, 8, 3, 2, 0, tzinfo=UTC), title="次日", body="次日", version=2)
         self.revision_at(note, 1, datetime(2026, 8, 2, 8, 0, tzinfo=UTC), title="目标日", body="目标日内容")
         attachment = NoteAttachment.objects.create(
             user=self.user,
@@ -215,8 +260,12 @@ class DigestSnapshotTests(DigestFixtureMixin, TestCase):
         self.assertNotIn("次日重解析内容", json.dumps(snapshot, ensure_ascii=False))
 
     def test_current_note_is_used_when_it_is_the_target_day_latest_version(self) -> None:
-        note = self.note_at(datetime(2026, 8, 2, 15, 0, tzinfo=UTC), title="当前最终标题", body="当前最终内容")
-        Note.objects.filter(pk=note.pk).update(version=4)
+        note = self.note_at(
+            datetime(2026, 8, 2, 15, 0, tzinfo=UTC),
+            title="当前最终标题",
+            body="当前最终内容",
+            version=4,
+        )
         self.revision_at(note, 3, datetime(2026, 8, 2, 10, 0, tzinfo=UTC), title="较早版本", body="较早内容")
 
         snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
@@ -263,6 +312,134 @@ class DigestSnapshotTests(DigestFixtureMixin, TestCase):
         self.assertEqual(set(snapshot), {"schemaVersion", "date", "timezone", "notes"})
         for forbidden in ("确认记忆", "classroom", "task", "profile", "course", "favorite", "memory"):
             self.assertNotIn(forbidden, encoded.lower())
+
+
+class DigestDailyStateTests(DigestFixtureMixin, TestCase):
+    @staticmethod
+    def content(body: str) -> dict:
+        return {
+            "type": "doc",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": body}]}],
+        }
+
+    def create_at(self, instant: datetime, *, title: str = "日终标题", body: str = "初始内容") -> Note:
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=instant):
+            return create_note(self.user, {"title": title, "content": self.content(body)})
+
+    def save_at(self, note: Note, instant: datetime, body: str) -> Note:
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=instant):
+            result = save_note(self.user, note.id, {
+                "baseVersion": note.version,
+                "clientMutationId": str(uuid.uuid4()),
+                "source": "autosave",
+                "content": self.content(body),
+            })
+        result.note.refresh_from_db()
+        return result.note
+
+    def test_sparse_autosave_daily_state_preserves_prior_day_final_version(self) -> None:
+        note = self.create_at(datetime(2026, 8, 2, 2, 0, tzinfo=UTC))
+        note = self.save_at(note, datetime(2026, 8, 2, 2, 1, tzinfo=UTC), "第一次自动保存")
+        note = self.save_at(note, datetime(2026, 8, 2, 2, 2, tzinfo=UTC), "目标日最终内容")
+        self.assertFalse(NoteRevision.objects.filter(note=note, version=3).exists())
+        state = NoteDailyState.objects.get(note=note, local_date=self.target_date)
+        self.assertEqual(state.title_snapshot, "日终标题")
+        self.assertEqual(state.content_json_snapshot, self.content("目标日最终内容"))
+        self.assertEqual(state.content_text_snapshot, "目标日最终内容")
+        self.assertEqual(state.version, 3)
+        self.save_at(note, datetime(2026, 8, 3, 2, 0, tzinfo=UTC), "次日内容")
+
+        snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+
+        self.assertEqual(snapshot["notes"][0]["version"], 3)
+        self.assertEqual(snapshot["notes"][0]["title"], "日终标题")
+        self.assertEqual(snapshot["notes"][0]["contentText"], "目标日最终内容")
+        self.assertNotIn("次日内容", json.dumps(snapshot, ensure_ascii=False))
+
+    def test_next_day_delete_and_restore_do_not_change_prior_day_state(self) -> None:
+        note = self.create_at(datetime(2026, 8, 2, 3, 0, tzinfo=UTC), body="应保留的内容")
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 3, 3, 0, tzinfo=UTC)):
+            soft_delete_note(self.user, note.id)
+        deleted_snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 3, 4, 0, tzinfo=UTC)):
+            restore_deleted_note(self.user, note.id)
+        restored_snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+
+        self.assertEqual(deleted_snapshot["notes"][0]["contentText"], "应保留的内容")
+        self.assertEqual(restored_snapshot, deleted_snapshot)
+
+    def test_next_day_edit_and_delete_do_not_remove_prior_day_edit(self) -> None:
+        note = self.create_at(datetime(2026, 8, 1, 3, 0, tzinfo=UTC), body="创建日内容")
+        note = self.save_at(note, datetime(2026, 8, 2, 3, 0, tzinfo=UTC), "八月二日内容")
+        note = self.save_at(note, datetime(2026, 8, 3, 3, 0, tzinfo=UTC), "八月三日内容")
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 3, 4, 0, tzinfo=UTC)):
+            soft_delete_note(self.user, note.id)
+
+        snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+
+        self.assertEqual(snapshot["notes"][0]["contentText"], "八月二日内容")
+
+    def test_delete_on_target_day_then_next_day_restore_stays_excluded(self) -> None:
+        note = self.create_at(datetime(2026, 8, 1, 4, 0, tzinfo=UTC), body="创建日内容")
+        note = self.save_at(note, datetime(2026, 8, 2, 4, 0, tzinfo=UTC), "删除前内容")
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 2, 5, 0, tzinfo=UTC)):
+            soft_delete_note(self.user, note.id)
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 3, 5, 0, tzinfo=UTC)):
+            restore_deleted_note(self.user, note.id)
+
+        target_state = NoteDailyState.objects.get(note=note, local_date=self.target_date)
+        restore_state = NoteDailyState.objects.get(note=note, local_date=date(2026, 8, 3))
+        self.assertTrue(target_state.was_edited)
+        self.assertTrue(target_state.deleted_at_day_end)
+        self.assertFalse(restore_state.was_edited)
+        self.assertFalse(restore_state.deleted_at_day_end)
+        self.assertEqual(digest_service.build_digest_snapshot(self.user, self.target_date)["notes"], [])
+        self.assertEqual(digest_service.build_digest_snapshot(self.user, date(2026, 8, 3))["notes"], [])
+
+    def test_same_day_delete_and_restore_control_day_end_inclusion(self) -> None:
+        note = self.create_at(datetime(2026, 8, 2, 4, 0, tzinfo=UTC), body="恢复后可见")
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 2, 5, 0, tzinfo=UTC)):
+            soft_delete_note(self.user, note.id)
+        self.assertEqual(digest_service.build_digest_snapshot(self.user, self.target_date)["notes"], [])
+
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 2, 6, 0, tzinfo=UTC)):
+            restore_deleted_note(self.user, note.id)
+
+        snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+        state = NoteDailyState.objects.get(note=note, local_date=self.target_date)
+        self.assertEqual(snapshot["notes"][0]["contentText"], "恢复后可见")
+        self.assertTrue(state.was_edited)
+        self.assertFalse(state.deleted_at_day_end)
+
+    def test_revision_restore_updates_the_daily_final_snapshot(self) -> None:
+        note = self.create_at(datetime(2026, 8, 2, 7, 0, tzinfo=UTC), body="原始版本")
+        original = NoteRevision.objects.get(note=note, version=1)
+        note = self.save_at(note, datetime(2026, 8, 2, 7, 1, tzinfo=UTC), "修改版本")
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 2, 7, 2, tzinfo=UTC)):
+            restore_revision(self.user, note.id, original.id, {
+                "baseVersion": note.version,
+                "clientMutationId": str(uuid.uuid4()),
+            })
+
+        snapshot = digest_service.build_digest_snapshot(self.user, self.target_date)
+        self.assertEqual(snapshot["notes"][0]["version"], 3)
+        self.assertEqual(snapshot["notes"][0]["contentText"], "原始版本")
+
+    def test_daily_state_is_unique_per_note_and_beijing_date(self) -> None:
+        note = self.create_at(datetime(2026, 8, 2, 8, 0, tzinfo=UTC))
+        state = NoteDailyState.objects.get(note=note, local_date=self.target_date)
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            NoteDailyState.objects.create(
+                note=note,
+                local_date=self.target_date,
+                title_snapshot=state.title_snapshot,
+                content_json_snapshot=state.content_json_snapshot,
+                content_text_snapshot=state.content_text_snapshot,
+                version=state.version,
+                last_edited_at_snapshot=state.last_edited_at_snapshot,
+                was_edited=True,
+            )
 
 
 class DigestRevisionAndTaskTests(DigestFixtureMixin, TestCase):
@@ -600,6 +777,27 @@ class DigestBeatTests(DigestFixtureMixin, TestCase):
         digest = NoteDailyDigest.objects.get()
         self.assertEqual(digest.user_id, target_user_note.user_id)
         self.assertEqual(digest.idempotency_key, f"auto:{self.user.pk}:2026-08-02")
+
+    @patch("backend.apps.notes.services.digest_service.enqueue_digest")
+    def test_beat_excludes_target_day_delete_even_after_next_day_restore(self, enqueue) -> None:
+        note = self.note_at(datetime(2026, 8, 1, 3, 0, tzinfo=UTC))
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 2, 3, 0, tzinfo=UTC)):
+            note = save_note(self.user, note.id, {
+                "baseVersion": note.version,
+                "clientMutationId": str(uuid.uuid4()),
+                "source": "autosave",
+                "content": {"type": "doc", "content": []},
+            }).note
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 2, 4, 0, tzinfo=UTC)):
+            soft_delete_note(self.user, note.id)
+        with patch("backend.apps.notes.services.note_service.timezone.now", return_value=datetime(2026, 8, 3, 3, 0, tzinfo=UTC)):
+            restore_deleted_note(self.user, note.id)
+
+        result = create_previous_day_digests_task(now_iso="2026-08-03T10:10:00+08:00")
+
+        self.assertEqual(result, {"date": "2026-08-02", "created": 0})
+        self.assertFalse(NoteDailyDigest.objects.exists())
+        enqueue.assert_not_called()
 
     def test_settings_preserve_existing_beat_entries_and_add_digest_at_0210(self) -> None:
         from django.conf import settings

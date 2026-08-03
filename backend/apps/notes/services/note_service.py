@@ -4,13 +4,22 @@ import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.utils import timezone
 
-from backend.apps.notes.models import Note, NoteMutation, Notebook, NoteRevision, NoteTag, normalize_tag_name
+from backend.apps.notes.models import (
+    Note,
+    NoteDailyState,
+    NoteMutation,
+    Notebook,
+    NoteRevision,
+    NoteTag,
+    normalize_tag_name,
+)
 from backend.apps.notes.prosemirror import (
     DocumentValidationError,
     extract_note_text,
@@ -272,6 +281,43 @@ def _create_revision(note: Note, source: str, user, from_version: int) -> NoteRe
     )
 
 
+BEIJING = ZoneInfo("Asia/Shanghai")
+
+
+def _record_daily_state(note: Note, event_at, *, edited: bool) -> NoteDailyState:
+    local_date = timezone.localtime(event_at, BEIJING).date()
+    state = NoteDailyState.objects.select_for_update().filter(
+        note=note,
+        local_date=local_date,
+    ).first()
+    if state is None:
+        return NoteDailyState.objects.create(
+            note=note,
+            local_date=local_date,
+            title_snapshot=note.title,
+            content_json_snapshot=note.content_json,
+            content_text_snapshot=note.content_text,
+            version=note.version,
+            last_edited_at_snapshot=note.last_edited_at,
+            was_edited=edited,
+            deleted_at_day_end=note.deleted_at is not None,
+            last_event_at=event_at,
+        )
+    state.title_snapshot = note.title
+    state.content_json_snapshot = note.content_json
+    state.content_text_snapshot = note.content_text
+    state.version = note.version
+    state.last_edited_at_snapshot = note.last_edited_at
+    state.was_edited = state.was_edited or edited
+    state.deleted_at_day_end = note.deleted_at is not None
+    state.last_event_at = event_at
+    state.save(update_fields={
+        "title_snapshot", "content_json_snapshot", "content_text_snapshot", "version",
+        "last_edited_at_snapshot", "was_edited", "deleted_at_day_end", "last_event_at", "updated_at",
+    })
+    return state
+
+
 def _document_structure(content: dict[str, Any]) -> tuple[str, ...]:
     nodes = content.get("content", []) if isinstance(content, dict) else []
     return tuple(node.get("type", "") for node in nodes if isinstance(node, dict))
@@ -329,6 +375,7 @@ def create_note(user, data: dict[str, Any]) -> Note:
     is_pinned = data.get("isPinned", False)
     if not isinstance(is_pinned, bool):
         raise NoteServiceError("isPinned 必须是布尔值", code="invalid_is_pinned")
+    now = timezone.now()
     note = Note.objects.create(
         user=user,
         notebook=notebook,
@@ -336,9 +383,11 @@ def create_note(user, data: dict[str, Any]) -> Note:
         content_json=content,
         content_text=extract_note_text(content),
         is_pinned=is_pinned,
+        last_edited_at=now,
     )
     note.tags.set(tags)
     _create_revision(note, NoteRevision.Source.MANUAL, user, 0)
+    _record_daily_state(note, now, edited=True)
     return note
 
 
@@ -385,6 +434,7 @@ def save_note(user, note_id, data: dict[str, Any]) -> SaveResult:
     note.save()
     if tags is not None:
         note.tags.set(tags)
+    _record_daily_state(note, now, edited=True)
     revision_source = _checkpoint_due(note, source, now, meaningful_boundary=meaningful_boundary)
     if revision_source:
         _create_revision(note, revision_source, user, previous_version)
@@ -418,10 +468,12 @@ def restore_revision(user, note_id, revision_id, data: dict[str, Any]) -> SaveRe
     note.content_json = revision.content_json_snapshot
     note.content_text = extract_note_text(note.content_json)
     note.version += 1
-    note.last_edited_at = timezone.now()
+    now = timezone.now()
+    note.last_edited_at = now
     note.save()
+    _record_daily_state(note, now, edited=True)
     _create_revision(note, NoteRevision.Source.RESTORE, user, previous_version)
-    _prune_checkpoints(note, timezone.now())
+    _prune_checkpoints(note, now)
     receipt, created = _create_receipt(user, note, mutation_id)
     return SaveResult(note=note, resulting_version=receipt.resulting_version, idempotent=not created)
 
@@ -432,8 +484,10 @@ def soft_delete_note(user, note_id) -> Note:
         note = Note.objects.select_for_update().get(user=user, pk=note_id, deleted_at__isnull=True)
     except (Note.DoesNotExist, ValueError) as exc:
         raise NoteNotFound("笔记不存在") from exc
-    note.deleted_at = timezone.now()
+    now = timezone.now()
+    note.deleted_at = now
     note.save(update_fields={"deleted_at", "updated_at"})
+    _record_daily_state(note, now, edited=False)
     return note
 
 
@@ -443,8 +497,10 @@ def restore_deleted_note(user, note_id) -> Note:
         note = Note.objects.select_for_update().get(user=user, pk=note_id, deleted_at__isnull=False)
     except (Note.DoesNotExist, ValueError) as exc:
         raise NoteNotFound("回收站中没有该笔记") from exc
+    now = timezone.now()
     note.deleted_at = None
     note.save(update_fields={"deleted_at", "updated_at"})
+    _record_daily_state(note, now, edited=False)
     return note
 
 

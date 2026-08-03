@@ -22,24 +22,23 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
   const [state, setState] = useState<LoadState>('loading');
   const [error, setError] = useState('');
   const [busyOperationId, setBusyOperationId] = useState<number | null>(null);
-  const loadGeneration = useRef(0);
-  const abortController = useRef<AbortController | null>(null);
-  const operationGeneration = useRef(0);
-  const operationAbortController = useRef<AbortController | null>(null);
+  const operationEpoch = useRef(0);
+  const activeController = useRef<AbortController | null>(null);
   const selectedDateRef = useRef('');
 
   const load = useCallback(async (date?: string) => {
-    const generation = ++loadGeneration.current;
+    const operationId = ++operationEpoch.current;
     const requestedDate = date ?? '';
-    abortController.current?.abort();
+    activeController.current?.abort();
     const controller = new AbortController();
-    abortController.current = controller;
+    activeController.current = controller;
+    setBusyOperationId(null);
     setState('loading');
     setError('');
     try {
       const result = await client.listDigests(date, { signal: controller.signal });
       if (
-        generation !== loadGeneration.current
+        operationId !== operationEpoch.current
         || controller.signal.aborted
         || (requestedDate && selectedDateRef.current !== requestedDate)
       ) return;
@@ -57,10 +56,16 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
       }
       setState('ready');
     } catch (loadError) {
-      if (loadError instanceof DOMException && loadError.name === 'AbortError') return;
+      if (
+        controller.signal.aborted
+        || operationId !== operationEpoch.current
+        || (loadError instanceof DOMException && loadError.name === 'AbortError')
+      ) return;
       setDigests([]);
       setState('error');
       setError('每日总结加载失败，请重试');
+    } finally {
+      if (operationId === operationEpoch.current) activeController.current = null;
     }
   }, [client]);
 
@@ -68,10 +73,8 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
     const handle = window.setTimeout(() => void load(), 0);
     return () => {
       window.clearTimeout(handle);
-      loadGeneration.current += 1;
-      abortController.current?.abort();
-      operationGeneration.current += 1;
-      operationAbortController.current?.abort();
+      operationEpoch.current += 1;
+      activeController.current?.abort();
     };
   }, [load]);
 
@@ -81,26 +84,23 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
   const changeSelectedDate = (value: string) => {
     selectedDateRef.current = value;
     setSelectedDate(value);
-    operationGeneration.current += 1;
-    operationAbortController.current?.abort();
-    operationAbortController.current = null;
-    setBusyOperationId(null);
     void load(value);
   };
 
   const createRevision = async () => {
     if (!selectedDate || busy) return;
     const operationDate = selectedDateRef.current || selectedDate;
-    const operationId = ++operationGeneration.current;
-    operationAbortController.current?.abort();
+    const operationId = ++operationEpoch.current;
+    activeController.current?.abort();
     const controller = new AbortController();
-    operationAbortController.current = controller;
+    activeController.current = controller;
     setBusyOperationId(operationId);
+    setError('');
     try {
       const result = await client.createManualDigest(operationDate, { signal: controller.signal });
       if (
         controller.signal.aborted
-        || operationId !== operationGeneration.current
+        || operationId !== operationEpoch.current
         || selectedDateRef.current !== operationDate
       ) return;
       if (!result.success) {
@@ -110,11 +110,13 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
       if (result.digest.digestDate !== operationDate) return;
       setDigests((current) => [result.digest, ...current]);
       setSelectedId(result.digest.id);
+      setState('ready');
     } catch (operationError) {
       if (!(operationError instanceof DOMException && operationError.name === 'AbortError')) {
-        if (operationId === operationGeneration.current) setError('每日总结创建失败，请重试');
+        if (operationId === operationEpoch.current) setError('每日总结创建失败，请重试');
       }
     } finally {
+      if (operationId === operationEpoch.current) activeController.current = null;
       setBusyOperationId((current) => current === operationId ? null : current);
     }
   };
@@ -122,16 +124,17 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
   const retry = async () => {
     if (!selected || selected.status !== 'failed' || busy) return;
     const operationDate = selectedDateRef.current || selected.digestDate;
-    const operationId = ++operationGeneration.current;
-    operationAbortController.current?.abort();
+    const operationId = ++operationEpoch.current;
+    activeController.current?.abort();
     const controller = new AbortController();
-    operationAbortController.current = controller;
+    activeController.current = controller;
     setBusyOperationId(operationId);
+    setError('');
     try {
       const result = await client.retryDigest(selected.id, { signal: controller.signal });
       if (
         controller.signal.aborted
-        || operationId !== operationGeneration.current
+        || operationId !== operationEpoch.current
         || selectedDateRef.current !== operationDate
       ) return;
       if (!result.success) {
@@ -140,11 +143,13 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
       }
       if (result.digest.digestDate !== operationDate) return;
       setDigests((current) => current.map((item) => item.id === result.digest.id ? result.digest : item));
+      setState('ready');
     } catch (operationError) {
       if (!(operationError instanceof DOMException && operationError.name === 'AbortError')) {
-        if (operationId === operationGeneration.current) setError('每日总结重试失败，请稍后再试');
+        if (operationId === operationEpoch.current) setError('每日总结重试失败，请稍后再试');
       }
     } finally {
+      if (operationId === operationEpoch.current) activeController.current = null;
       setBusyOperationId((current) => current === operationId ? null : current);
     }
   };

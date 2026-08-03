@@ -305,6 +305,28 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.CreateModel(
+            name='NoteDailyState',
+            fields=[
+                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                ('local_date', models.DateField()),
+                ('title_snapshot', models.CharField(blank=True, max_length=240)),
+                ('content_json_snapshot', models.JSONField(blank=True, default=dict)),
+                ('content_text_snapshot', models.TextField(blank=True)),
+                ('version', models.PositiveIntegerField()),
+                ('last_edited_at_snapshot', models.DateTimeField()),
+                ('was_edited', models.BooleanField(default=False)),
+                ('deleted_at_day_end', models.BooleanField(default=False)),
+                ('last_event_at', models.DateTimeField(default=django.utils.timezone.now)),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('note', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='daily_states', to='notes.note')),
+            ],
+            options={
+                'db_table': 'a3_note_daily_states',
+                'ordering': ['local_date', 'last_edited_at_snapshot', 'note_id'],
+            },
+        ),
+        migrations.CreateModel(
             name='NoteTag',
             fields=[
                 ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
@@ -386,6 +408,14 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name='noteattachment',
             constraint=models.CheckConstraint(condition=models.Q(models.Q(('kind', 'link'), ('relative_path', ''), models.Q(('source_url', ''), _negated=True)), models.Q(('kind__in', ['file', 'image']), ('source_url', ''), models.Q(('relative_path', ''), _negated=True)), _connector='OR'), name='chk_note_att_kind_location'),
+        ),
+        migrations.AddIndex(
+            model_name='notedailystate',
+            index=models.Index(fields=['local_date', 'was_edited', 'deleted_at_day_end'], name='idx_note_day_source'),
+        ),
+        migrations.AddConstraint(
+            model_name='notedailystate',
+            constraint=models.UniqueConstraint(fields=('note', 'local_date'), name='uniq_note_daily_state'),
         ),
         migrations.AddIndex(
             model_name='noteauditevent',

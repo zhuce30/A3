@@ -12,10 +12,9 @@ from django.utils import timezone
 
 from backend.apps.compat.llm import chat_completion
 from backend.apps.notes.models import (
-    Note,
     NoteAttachmentParseSnapshot,
+    NoteDailyState,
     NoteDailyDigest,
-    NoteRevision,
 )
 
 
@@ -44,54 +43,32 @@ def beijing_day_bounds(target_date: date) -> tuple[datetime, datetime]:
 
 
 def build_digest_snapshot(user, target_date: date) -> dict[str, Any]:
-    start, end = beijing_day_bounds(target_date)
+    _, end = beijing_day_bounds(target_date)
     with transaction.atomic():
-        available_at_day_end = Q(deleted_at__isnull=True) | Q(deleted_at__gte=end)
-        revisions = list(
-            NoteRevision.objects.select_for_update()
+        daily_states = list(
+            NoteDailyState.objects.select_for_update()
             .filter(
                 note__user=user,
-                created_at__gte=start,
-                created_at__lt=end,
+                local_date=target_date,
+                was_edited=True,
+                deleted_at_day_end=False,
             )
-            .filter(Q(note__deleted_at__isnull=True) | Q(note__deleted_at__gte=end))
-            .order_by("note_id", "created_at", "version", "id")
+            .order_by("last_edited_at_snapshot", "note_id")
             .values(
-                "note_id", "version", "title_snapshot", "content_text_snapshot", "created_at"
+                "note_id", "version", "title_snapshot", "content_text_snapshot",
+                "last_edited_at_snapshot",
             )
         )
-        current_notes = list(
-            Note.objects.select_for_update()
-            .filter(
-                user=user,
-                last_edited_at__gte=start,
-                last_edited_at__lt=end,
-            )
-            .filter(available_at_day_end)
-            .order_by("last_edited_at", "id")
-            .values("id", "version", "title", "content_text", "last_edited_at")
-        )
-        selected: dict[Any, dict[str, Any]] = {}
-        for revision in revisions:
-            selected[revision["note_id"]] = {
-                "id": revision["note_id"],
-                "version": revision["version"],
-                "title": revision["title_snapshot"],
-                "contentText": revision["content_text_snapshot"],
-                "lastEditedAt": revision["created_at"],
+        selected = {
+            state["note_id"]: {
+                "id": state["note_id"],
+                "version": state["version"],
+                "title": state["title_snapshot"],
+                "contentText": state["content_text_snapshot"],
+                "lastEditedAt": state["last_edited_at_snapshot"],
             }
-        for note in current_notes:
-            candidate = selected.get(note["id"])
-            if candidate is None or (note["last_edited_at"], note["version"]) >= (
-                candidate["lastEditedAt"], candidate["version"]
-            ):
-                selected[note["id"]] = {
-                    "id": note["id"],
-                    "version": note["version"],
-                    "title": note["title"],
-                    "contentText": note["content_text"],
-                    "lastEditedAt": note["last_edited_at"],
-                }
+            for state in daily_states
+        }
         note_ids = list(selected)
         parse_snapshots = list(
             NoteAttachmentParseSnapshot.objects.select_for_update()

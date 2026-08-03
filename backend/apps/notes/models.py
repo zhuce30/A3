@@ -132,6 +132,32 @@ class NoteRevision(ValidatedModel):
         constraints = [models.UniqueConstraint(fields=["note", "version"], name="uniq_note_revision_version")]
 
 
+class NoteDailyState(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    note = models.ForeignKey(Note, on_delete=models.CASCADE, related_name="daily_states")
+    local_date = models.DateField()
+    title_snapshot = models.CharField(max_length=240, blank=True)
+    content_json_snapshot = models.JSONField(default=dict, blank=True)
+    content_text_snapshot = models.TextField(blank=True)
+    version = models.PositiveIntegerField()
+    last_edited_at_snapshot = models.DateTimeField()
+    was_edited = models.BooleanField(default=False)
+    deleted_at_day_end = models.BooleanField(default=False)
+    last_event_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "a3_note_daily_states"
+        ordering = ["local_date", "last_edited_at_snapshot", "note_id"]
+        indexes = [
+            models.Index(fields=["local_date", "was_edited", "deleted_at_day_end"], name="idx_note_day_source"),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["note", "local_date"], name="uniq_note_daily_state"),
+        ]
+
+
 class NoteMutation(ValidatedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="note_mutations")

@@ -12,7 +12,15 @@ from django.db import close_old_connections, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from backend.apps.notes.models import Note, NoteAiMessage, NoteAttachment, NoteDailyDigest, NoteExportJob, NoteRevision
+from backend.apps.notes.models import (
+    Note,
+    NoteAiMessage,
+    NoteAttachment,
+    NoteDailyDigest,
+    NoteDailyState,
+    NoteExportJob,
+    NoteRevision,
+)
 
 
 PARSE_HARD_LIMIT = max(11, int(settings.A3_NOTES_PARSE_TIMEOUT_SECONDS))
@@ -230,24 +238,11 @@ def create_previous_day_digests_task(*, now_iso: str | None = None) -> dict:
     else:
         current = timezone.localtime(timezone.now(), digest_service.BEIJING)
     target_date = current.date() - timedelta(days=1)
-    start, end = digest_service.beijing_day_bounds(target_date)
-    current_user_ids = set(
-        Note.objects.filter(
-            last_edited_at__gte=start,
-            last_edited_at__lt=end,
-        )
-        .filter(Q(deleted_at__isnull=True) | Q(deleted_at__gte=end))
-        .order_by().values_list("user_id", flat=True).distinct()
-    )
-    revision_user_ids = set(
-        NoteRevision.objects.filter(
-            created_at__gte=start,
-            created_at__lt=end,
-        )
-        .filter(Q(note__deleted_at__isnull=True) | Q(note__deleted_at__gte=end))
-        .order_by().values_list("note__user_id", flat=True).distinct()
-    )
-    user_ids = current_user_ids | revision_user_ids
+    user_ids = NoteDailyState.objects.filter(
+        local_date=target_date,
+        was_edited=True,
+        deleted_at_day_end=False,
+    ).order_by().values_list("note__user_id", flat=True).distinct()
     created = 0
     user_model = Note._meta.get_field("user").remote_field.model
     for user in user_model.objects.filter(pk__in=user_ids).iterator():
