@@ -130,7 +130,7 @@ export function NoteEditor({
       baseVersion: selectedNote.version,
       dirty: false,
       pending: false,
-      conflicted: Boolean(conflictServerNote && conflictServerNote.id === selectedNote.id),
+      conflicted: false,
     });
     const editorView = new EditorView(mountRef.current, {
       state: EditorState.create({

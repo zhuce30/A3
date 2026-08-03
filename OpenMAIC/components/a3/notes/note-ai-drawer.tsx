@@ -1,7 +1,7 @@
 'use client';
 
 import { Bot, CheckCircle2, ChevronRight, FilePenLine, RefreshCw, Send, ShieldAlert, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -64,15 +64,17 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
   }, [currentNote, scopeMode, selectedNoteIds]);
   const scopeKey = scope ? JSON.stringify(scope) : '';
   const writebackContext = useRef({ scopeKey, targetNoteId: currentNote?.id ?? '' });
-  writebackContext.current = { scopeKey, targetNoteId: currentNote?.id ?? '' };
   const writebackPreviewRef = useRef(writebackPreview);
-  writebackPreviewRef.current = writebackPreview;
   const scopedActiveSession = activeScopeKey === scopeKey ? activeSession : null;
   const scopedMessages = activeScopeKey === scopeKey ? messages : [];
-  const sending = sendState.scopeKey === scopeKey && sendState.busy;
+  const sending = (
+    sendState.scopeKey === scopeKey
+    && sendState.busy
+  ) || scopedMessages.some((message) => (
+    message.role === 'assistant' && (message.status === 'queued' || message.status === 'streaming')
+  ));
   const writebackBusy = Boolean(
     writebackBusyOwner
-    && writebackBusyOwner.generation === requestGeneration.current
     && writebackBusyOwner.scopeKey === scopeKey
     && writebackBusyOwner.targetNoteId === currentNote?.id,
   );
@@ -83,13 +85,13 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
   const writebackSource = [...scopedMessages].reverse().find((message) => (
     message.role === 'assistant' && message.status === 'succeeded' && Boolean(message.content.trim())
   ));
-  const effectiveEditorSnapshot = editorSnapshot ?? {
+  const effectiveEditorSnapshot = useMemo<NoteEditorSnapshotValidity>(() => editorSnapshot ?? ({
     noteId: currentNote?.id ?? null,
     baseVersion: currentNote?.version ?? null,
     dirty: false,
     pending: false,
     conflicted: false,
-  };
+  }), [currentNote?.id, currentNote?.version, editorSnapshot]);
   const getWritebackEditorIssue = (targetNoteId: string, targetVersion: number) => {
     const currentVersion = currentNote?.version;
     if (effectiveEditorSnapshot.conflicted) {
@@ -118,11 +120,22 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
     currentNoteVersion: currentNote?.version ?? null,
     snapshot: effectiveEditorSnapshot,
   });
-  writebackEditorContext.current = {
-    currentNoteId: currentNote?.id ?? '',
-    currentNoteVersion: currentNote?.version ?? null,
-    snapshot: effectiveEditorSnapshot,
-  };
+
+  useLayoutEffect(() => {
+    writebackContext.current = { scopeKey, targetNoteId: currentNote?.id ?? '' };
+    writebackPreviewRef.current = writebackPreview;
+    writebackEditorContext.current = {
+      currentNoteId: currentNote?.id ?? '',
+      currentNoteVersion: currentNote?.version ?? null,
+      snapshot: effectiveEditorSnapshot,
+    };
+  }, [
+    currentNote?.id,
+    currentNote?.version,
+    effectiveEditorSnapshot,
+    scopeKey,
+    writebackPreview,
+  ]);
 
   const invalidateAsync = useCallback(() => {
     requestGeneration.current += 1;
@@ -187,7 +200,6 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
     const generation = requestGeneration.current;
     streamCleanup.current?.();
     watchedMessageId.current = messageId;
-    setSendState({ scopeKey, busy: true });
     streamCleanup.current = client.watchAiMessage(messageId, {
       onMessage: (message) => {
         if (generation !== requestGeneration.current) return;
@@ -218,7 +230,7 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
     if (pending) watchMessage(pending.id);
   }, [activeScopeKey, messages, open, scopeKey, watchMessage]);
 
-  const submit = useCallback(async (rawPrompt: string, options: { forceNewSession?: boolean } = {}) => {
+  const submit = async (rawPrompt: string, options: { forceNewSession?: boolean } = {}) => {
     const messageText = rawPrompt.trim();
     if (!messageText || !scope || sending) return;
     const generation = requestGeneration.current + 1;
@@ -290,7 +302,7 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
       setError('AI 请求失败，请重试');
       setSendState({ scopeKey, busy: false });
     }
-  }, [client, scope, scopeKey, scopedActiveSession, sending, updateMessage, watchMessage]);
+  };
 
   const chooseSession = async (sessionId: string) => {
     if (!sessionId) {

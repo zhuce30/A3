@@ -67,7 +67,8 @@ describe('A3 OpenMAIC video job polling contract', () => {
         resourcePackId: 'pack-1',
       },
     });
-    const { PATCH, buildSegmentedVideoRequests } = await import('@/app/api/a3/resources/openmaic-video/route');
+    const { PATCH } = await import('@/app/api/a3/resources/openmaic-video/route');
+    const { buildSegmentedVideoRequests } = await import('@/lib/server/a3-video-prompt');
     const response = await PATCH(new NextRequest('https://a3.zhuce.work/api/a3/resources/openmaic-video', {
       method: 'PATCH',
       headers: { 'content-type': 'application/json', cookie: 'sessionid=test' },

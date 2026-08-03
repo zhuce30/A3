@@ -9,6 +9,7 @@ const ALLOWED_ROOTS = new Set([
   'attachments',
   'exports',
   'search',
+  'assistant',
   'ai-sessions',
   'digests',
   'memories',
@@ -59,8 +60,12 @@ async function proxy(request: NextRequest, context: RouteContext, method: ProxyM
     signal: request.signal,
   };
   if (method !== 'GET' && request.body) {
-    init.body = request.body;
-    init.duplex = 'half';
+    if ((request.headers.get('content-type') ?? '').toLowerCase().includes('application/json')) {
+      init.body = await request.arrayBuffer();
+    } else {
+      init.body = request.body;
+      init.duplex = 'half';
+    }
   }
   const query = request.nextUrl.search;
   const upstream = await fetch(resolveA3DjangoEndpoint(`/api/notes/${safePath}/${query}`), init);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSegmentedVideoRequests, hardenVideoPromptForProvider } from '@/app/api/a3/resources/openmaic-video/route';
+import { buildSegmentedVideoRequests, hardenVideoPromptForProvider } from '@/lib/server/a3-video-prompt';
 import { buildA3OpenMAICVideoPayload } from '@/lib/a3/openmaic-classroom-bridge';
 
 describe('A3 OpenMAIC video prompt safety', () => {

@@ -226,6 +226,32 @@ describe('secure personal notes proxy', () => {
     expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual([7, 8, 9]);
   });
 
+  it('forwards the persisted note assistant API through the notes-only allowlist', async () => {
+    process.env.A3_API_BASE_URL = 'http://backend:8000';
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ success: true }, { status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const request = new NextRequest('http://frontend/api/a3/notes/assistant/chat/', {
+      method: 'POST',
+      headers: { cookie: 'sessionid=secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'session-1', message: 'hello' }),
+    });
+
+    const response = await POST(request, {
+      params: Promise.resolve({ path: ['assistant', 'chat'] }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://backend:8000/api/notes/assistant/chat/',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe(JSON.stringify({
+      sessionId: 'session-1',
+      message: 'hello',
+    }));
+    expect(response.status).toBe(202);
+  });
+
   it('streams multipart request bodies without parsing them', async () => {
     process.env.A3_API_BASE_URL = 'http://backend:8000';
     const fetchMock = vi.fn().mockResolvedValue(Response.json({ success: true }, { status: 201 }));
