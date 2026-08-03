@@ -24,6 +24,12 @@ interface NotesWorkspaceProps {
   onEditorReady?: (view: EditorView) => void;
 }
 
+const STALE_CITATION_MESSAGE = '笔记内容已更新，该引用对应旧版本，请在历史版本中查看';
+
+function citationMatchesVersion(citation: NoteAiCitation, version: number | null | undefined) {
+  return citation.noteVersion === undefined || citation.noteVersion === version;
+}
+
 type WorkspaceLoadState = 'loading' | 'ready' | 'error';
 type PersistenceState = 'loading' | 'ready' | 'error';
 
@@ -53,6 +59,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const [editorError, setEditorError] = useState('');
   const [failedNoteId, setFailedNoteId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState('');
+  const [citationNotice, setCitationNotice] = useState('');
   const [busyNoteId, setBusyNoteId] = useState<string | null>(null);
   const [isMobile, setIsMobile] = useState(false);
   const [mobileView, setMobileView] = useState<'list' | 'editor'>('list');
@@ -67,6 +74,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const pendingCitation = useRef<{ token: number; noteId: string; citation: NoteAiCitation } | null>(null);
   const citationNavigationGeneration = useRef(0);
   const editorNoteIdRef = useRef<string | null>(null);
+  const editorNoteVersionRef = useRef<number | null>(null);
 
   useEffect(() => {
     selectedNoteIdRef.current = selectedNote?.id ?? null;
@@ -149,42 +157,43 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
         client.getNote(noteId, { signal: controller.signal }),
         client.listAttachments(noteId, { signal: controller.signal }),
       ]);
-      if (generation !== noteLoadGeneration.current || controller.signal.aborted) return false;
+      if (generation !== noteLoadGeneration.current || controller.signal.aborted) return null;
       if (!result.success) {
         setEditorState('error');
         setEditorError(result.error);
         setFailedNoteId(noteId);
-        return false;
+        return null;
       }
       if (!attachmentResult.success) {
         setEditorState('error');
         setEditorError(attachmentResult.error);
         setFailedNoteId(noteId);
-        return false;
+        return null;
       }
       let draft: PersistableNoteDraft | undefined;
       try {
         draft = await draftStore.getDraft(noteId);
       } catch {
-        if (generation !== noteLoadGeneration.current || controller.signal.aborted) return false;
+        if (generation !== noteLoadGeneration.current || controller.signal.aborted) return null;
         setEditorState('error');
         setEditorError('本地草稿读取失败，请重试');
         setFailedNoteId(noteId);
-        return false;
+        return null;
       }
-      if (generation !== noteLoadGeneration.current || controller.signal.aborted) return false;
+      if (generation !== noteLoadGeneration.current || controller.signal.aborted) return null;
       editorNoteIdRef.current = result.note.id;
+      editorNoteVersionRef.current = result.note.version;
       setSelectedNote(result.note);
       setAttachments(attachmentResult.attachments);
       setRecoverableDraft(draft);
       setEditorState('ready');
-      return true;
+      return result.note;
     } catch (loadError) {
-      if (generation !== noteLoadGeneration.current || isAbortError(loadError)) return false;
+      if (generation !== noteLoadGeneration.current || isAbortError(loadError)) return null;
       setEditorState('error');
       setEditorError('笔记加载失败，请重试');
       setFailedNoteId(noteId);
-      return false;
+      return null;
     }
   }, [client, draftStore]);
 
@@ -227,6 +236,8 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
         noteLoadGeneration.current += 1;
         noteAbortController.current?.abort();
         setSelectedNote(null);
+        editorNoteIdRef.current = null;
+        editorNoteVersionRef.current = null;
         setAttachments([]);
         setRecoverableDraft(undefined);
       }
@@ -268,6 +279,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const selectScope = (next: { view?: NotesSmartView; notebookId?: string; tagId?: string }) => {
     citationNavigationGeneration.current += 1;
     pendingCitation.current = null;
+    setCitationNotice('');
     listLoadGeneration.current += 1;
     listAbortController.current?.abort();
     noteLoadGeneration.current += 1;
@@ -276,12 +288,15 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     setSelectedNotebookId(next.notebookId ?? null);
     setSelectedTagId(next.tagId ?? null);
     setSelectedNote(null);
+    editorNoteIdRef.current = null;
+    editorNoteVersionRef.current = null;
     setRecoverableDraft(undefined);
   };
 
   const openNote = async (item: NoteSummary) => {
     citationNavigationGeneration.current += 1;
     pendingCitation.current = null;
+    setCitationNotice('');
     setFocusNoteId(item.id);
     if (view !== 'trash') await loadNote(item.id);
     if (isMobile && view !== 'trash') {
@@ -318,6 +333,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     setNotes((current) => [result.note, ...current.filter((item) => item.id !== result.note.id)]);
     setSelectedNote(result.note);
     editorNoteIdRef.current = result.note.id;
+    editorNoteVersionRef.current = result.note.version;
     setRecoverableDraft(undefined);
     setAttachments([]);
     setEditorState('ready');
@@ -356,6 +372,8 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   };
 
   const updateSelectedNote = (updated: NoteDetail) => {
+    editorNoteIdRef.current = updated.id;
+    editorNoteVersionRef.current = updated.version;
     setSelectedNote(updated);
     setNotes((current) => current.map((item) => item.id === updated.id ? updated : item));
   };
@@ -363,6 +381,10 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const revealCitation = useCallback((citation: NoteAiCitation, targetView = editorViewRef.current) => {
     const view = targetView;
     if (!view || view.isDestroyed || editorViewRef.current !== view) return;
+    if (!citationMatchesVersion(citation, editorNoteVersionRef.current)) {
+      setCitationNotice(STALE_CITATION_MESSAGE);
+      return;
+    }
     const selection = mapNoteCitationToSelection(view.state.doc, citation);
     if (!selection) return;
     view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, selection.from, selection.to)).scrollIntoView());
@@ -391,6 +413,16 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     const token = citationNavigationGeneration.current + 1;
     citationNavigationGeneration.current = token;
     pendingCitation.current = null;
+    setCitationNotice('');
+    const knownTarget = citation.noteId === selectedNote?.id
+      ? selectedNote
+      : notes.find((note) => note.id === citation.noteId);
+    if (knownTarget && !citationMatchesVersion(citation, knownTarget.version)) {
+      noteLoadGeneration.current += 1;
+      noteAbortController.current?.abort();
+      setCitationNotice(STALE_CITATION_MESSAGE);
+      return;
+    }
     if (citation.noteId === selectedNoteIdRef.current) {
       noteLoadGeneration.current += 1;
       noteAbortController.current?.abort();
@@ -401,6 +433,10 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
         const loaded = await loadNote(citation.noteId);
         if (token !== citationNavigationGeneration.current) return;
         if (!loaded) pendingCitation.current = null;
+        else if (!citationMatchesVersion(citation, loaded.version)) {
+          pendingCitation.current = null;
+          setCitationNotice(STALE_CITATION_MESSAGE);
+        }
       }
       return;
     }
@@ -411,8 +447,13 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
       pendingCitation.current = null;
       return;
     }
+    if (!citationMatchesVersion(citation, loaded.version)) {
+      pendingCitation.current = null;
+      setCitationNotice(STALE_CITATION_MESSAGE);
+      return;
+    }
     if (isMobile) setMobileView('editor');
-  }, [editorState, isMobile, loadNote, revealCitation]);
+  }, [editorState, isMobile, loadNote, notes, revealCitation, selectedNote]);
 
   const registerNoteButton = (noteId: string, element: HTMLButtonElement | null) => {
     if (element) noteButtons.current.set(noteId, element);
@@ -451,6 +492,15 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
             <ArrowLeft className="size-4" />返回
           </Button>
         </div>
+      )}
+      {citationNotice && (
+        <p
+          data-testid="stale-citation-notice"
+          role="status"
+          className="shrink-0 border-b border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100"
+        >
+          {citationNotice}
+        </p>
       )}
       {selectedNote || editorState !== 'ready' ? (
         <NoteEditor

@@ -27,6 +27,7 @@ const MATH_TYPES = new Set([
   'inline_equation',
   'block_equation',
 ]);
+const PYTHON_LINE_BOUNDARIES = new Set(['\n', '\r', '\v', '\f', '\u001c', '\u001d', '\u001e', '\u0085', '\u2028', '\u2029']);
 
 const unboundCharacters = (value: string): MappedCharacter[] => (
   Array.from(value, (character) => ({ value: character, from: null, to: null }))
@@ -97,9 +98,14 @@ function renderNode(node: ProseMirrorNode, position: number): MappedCharacter[] 
 
 function normalizeBackendText(characters: MappedCharacter[]) {
   const lines: MappedCharacter[][] = [[]];
-  for (const character of characters) {
-    if (character.value === '\n') lines.push([]);
-    else lines[lines.length - 1]!.push(character);
+  for (let index = 0; index < characters.length; index += 1) {
+    const character = characters[index]!;
+    if (PYTHON_LINE_BOUNDARIES.has(character.value)) {
+      if (character.value === '\r' && characters[index + 1]?.value === '\n') index += 1;
+      lines.push([]);
+    } else {
+      lines[lines.length - 1]!.push(character);
+    }
   }
   const normalized: MappedCharacter[] = [];
   for (const line of lines.map(trimEnd).filter((item) => item.length > 0)) {

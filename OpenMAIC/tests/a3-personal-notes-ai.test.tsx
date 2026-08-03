@@ -187,6 +187,30 @@ describe('personal note citation position mapping', () => {
     expect(documentNode.textBetween(selection!.from, selection!.to)).toBe('乙');
   });
 
+  it.each([
+    ['LF', '\n'],
+    ['CRLF', '\r\n'],
+    ['CR', '\r'],
+    ['VT', '\v'],
+    ['FF', '\f'],
+    ['FS', '\u001c'],
+    ['GS', '\u001d'],
+    ['RS', '\u001e'],
+    ['NEL', '\u0085'],
+    ['LINE SEPARATOR', '\u2028'],
+    ['PARAGRAPH SEPARATOR', '\u2029'],
+  ])('matches Python splitlines for %s', (_label, separator) => {
+    const documentNode = parseNoteDocument({
+      type: 'doc',
+      content: [{ type: 'code_block', content: [{ type: 'text', text: `甲${separator}乙` }] }],
+    });
+
+    const selection = mapNoteCitationToSelection(documentNode, { paragraphIndex: 1, charStart: 2, charEnd: 3 });
+
+    expect(selection).toEqual({ from: 2 + separator.length, to: 3 + separator.length });
+    expect(documentNode.textBetween(selection!.from, selection!.to)).toBe('乙');
+  });
+
   it('maps a citation into the correct table cell across backend tab separators', () => {
     const documentNode = parseNoteDocument({
       type: 'doc',
@@ -530,7 +554,7 @@ describe('personal note AI drawer', () => {
 
   it('maps document-wide citation offsets into the cited editor paragraph', async () => {
     let editorView: EditorView | undefined;
-    const citation = { noteId: 'note-1', title: '操作系统复习', location: '第 2 段', paragraphIndex: 1, charStart: 6, charEnd: 8, snippet: '死锁' };
+    const citation = { noteId: 'note-1', noteVersion: 3, title: '操作系统复习', location: '第 2 段', paragraphIndex: 1, charStart: 6, charEnd: 8, snippet: '死锁' };
     const message = assistantMessage({ content: '请查看原文。', status: 'succeeded', citations: [citation] });
     const client = clientStub({
       listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '定位原文', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
@@ -550,6 +574,55 @@ describe('personal note AI drawer', () => {
     click('跳转到操作系统复习第 2 段');
 
     expect(editorView!.state.doc.textBetween(editorView!.state.selection.from, editorView!.state.selection.to)).toBe('死锁');
+  });
+
+  it('does not apply a stale citation to a newer current note and shows visible feedback', async () => {
+    let editorView: EditorView | undefined;
+    const citation = { noteId: 'note-1', noteVersion: 2, title: '操作系统复习', location: '第 2 段', paragraphIndex: 1, charStart: 6, charEnd: 8, snippet: '死锁' };
+    const client = clientStub({
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '旧引用', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ content: '查看旧引用', status: 'succeeded', citations: [citation] })] }),
+    });
+    const container = mount(
+      <NotesWorkspace
+        client={client}
+        userId="student-1"
+        autosave={autosaveStub()}
+        onEditorReady={(view) => { editorView = view; }}
+      />,
+    );
+    await vi.waitFor(() => expect(editorView).toBeTruthy());
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.querySelector('button[aria-label="跳转到操作系统复习第 2 段"]')).toBeTruthy());
+    click('跳转到操作系统复习第 2 段');
+
+    expect(editorView!.state.selection.empty).toBe(true);
+    const notice = container.querySelector('[data-testid="stale-citation-notice"]');
+    expect(notice).toBeTruthy();
+    expect(notice?.textContent).toContain('笔记内容已更新，该引用对应旧版本，请在历史版本中查看');
+  });
+
+  it('rechecks citation version after an asynchronous target-note load', async () => {
+    const current = note('note-1', '当前笔记');
+    const listedTarget = { ...note('note-2', '目标笔记'), version: 4 };
+    const loadedTarget = { ...listedTarget, version: 5 };
+    const citation = { noteId: 'note-2', noteVersion: 4, title: '目标笔记', location: '第 1 段', paragraphIndex: 0, charStart: 0, charEnd: 2, snippet: '进程' };
+    const views: EditorView[] = [];
+    const client = clientStub({
+      searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [current, listedTarget] }),
+      getNote: vi.fn(async (noteId: string) => ({ success: true as const, note: noteId === 'note-2' ? loadedTarget : current })),
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '异步旧引用', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ content: '查看目标引用', status: 'succeeded', citations: [citation] })] }),
+    });
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} onEditorReady={(view) => views.push(view)} />);
+    await vi.waitFor(() => expect(views).toHaveLength(1));
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.querySelector('button[aria-label="跳转到目标笔记第 1 段"]')).toBeTruthy());
+    click('跳转到目标笔记第 1 段');
+    await vi.waitFor(() => expect(views).toHaveLength(2));
+
+    expect(views[1]!.state.selection.empty).toBe(true);
+    expect(container.querySelector('[data-testid="stale-citation-notice"]')?.textContent).toContain('笔记内容已更新，该引用对应旧版本，请在历史版本中查看');
   });
 
   it('clears a pending citation when its note load fails', async () => {
@@ -598,6 +671,10 @@ describe('personal note AI drawer', () => {
     click('跳转到当前笔记第 1 段');
     await act(async () => slowNote.resolve({ success: true, note: note('note-2', '较慢笔记') }));
     await vi.waitFor(() => expect(views.at(-1)?.state.doc.textContent).toBe('当前正文'));
+    await vi.waitFor(() => {
+      const currentView = views.at(-1)!;
+      expect(currentView.state.doc.textBetween(currentView.state.selection.from, currentView.state.selection.to)).toBe('正文');
+    });
 
     const activeView = views.at(-1)!;
     expect(activeView.state.doc.textBetween(activeView.state.selection.from, activeView.state.selection.to)).toBe('正文');
