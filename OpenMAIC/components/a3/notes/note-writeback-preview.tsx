@@ -61,7 +61,7 @@ export function NoteWritebackPreviewPanel({
       <div className="mt-3 flex gap-2">
         {stale ? (
           <Button type="button" size="sm" variant="outline" className="w-full rounded-md" disabled={busy} onClick={onRegenerate}>
-            <RotateCw className="size-3.5" />重新生成建议
+            <RotateCw className="size-3.5" />重新提问并生成建议
           </Button>
         ) : (
           <>

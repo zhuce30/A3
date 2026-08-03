@@ -493,11 +493,17 @@ describe('personal note AI drawer', () => {
     expect(onWritebackApplied).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the diff visible on stale 409 and offers regeneration', async () => {
-    const createWritebackPreview = vi.fn().mockResolvedValue({ success: true, preview: writebackPreview() });
+  it('keeps the diff visible on confirm 409 and re-asks in a fresh current-note session', async () => {
+    const createAiSession = vi.fn().mockResolvedValue({
+      success: true,
+      session: { id: 'session-fresh', title: '重新提问', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now },
+    });
+    const submitAiChat = vi.fn().mockResolvedValue({ success: true, message: assistantMessage({ id: 'fresh-answer', sessionId: 'session-fresh', status: 'queued' }), idempotent: false });
     const client = clientStub({
-      createWritebackPreview,
+      createWritebackPreview: vi.fn().mockResolvedValue({ success: true, preview: writebackPreview() }),
       confirmWritebackPreview: vi.fn().mockResolvedValue({ success: false, status: 409, code: 'writeback_version_conflict', error: '正文已更新，请重新生成建议' }),
+      createAiSession,
+      submitAiChat,
       listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '建议', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
       listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ status: 'succeeded', content: '建议正文' })] }),
     });
@@ -508,10 +514,43 @@ describe('personal note AI drawer', () => {
     await vi.waitFor(() => expect(document.body.textContent).toContain('确认写入'));
     click('确认写入笔记正文');
 
-    await vi.waitFor(() => expect(document.body.textContent).toContain('正文已更新，请重新生成建议'));
+    await vi.waitFor(() => expect(document.body.textContent).toContain('正文已更新，请重新提问并生成建议'));
     expect(document.body.textContent).toContain('修改块');
-    click('重新生成建议');
-    await vi.waitFor(() => expect(createWritebackPreview).toHaveBeenCalledTimes(2));
+    click('重新提问并生成建议');
+    await vi.waitFor(() => expect(createAiSession).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: { type: 'note', noteIds: ['note-1'] } }),
+      { signal: expect.any(AbortSignal) },
+    ));
+    expect(submitAiChat).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-fresh' }), { signal: expect.any(AbortSignal) });
+  });
+
+  it('surfaces stale provenance on preview creation and offers a fresh re-ask without changing the note', async () => {
+    const createAiSession = vi.fn().mockResolvedValue({
+      success: true,
+      session: { id: 'session-fresh', title: '重新提问', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now },
+    });
+    const submitAiChat = vi.fn().mockResolvedValue({ success: true, message: assistantMessage({ id: 'fresh-answer', sessionId: 'session-fresh', status: 'queued' }), idempotent: false });
+    const onWritebackApplied = vi.fn();
+    const client = clientStub({
+      createWritebackPreview: vi.fn().mockResolvedValue({ success: false, status: 409, code: 'writeback_source_stale', error: '正文已更新，请重新提问并生成建议' }),
+      createAiSession,
+      submitAiChat,
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '旧建议', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ status: 'succeeded', content: '旧建议正文' })] }),
+    });
+    mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} onWritebackApplied={onWritebackApplied} />);
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(document.body.textContent).toContain('旧建议正文'));
+    click('生成写回建议');
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain('正文已更新，请重新提问并生成建议'));
+    expect(onWritebackApplied).not.toHaveBeenCalled();
+    click('重新提问并生成建议');
+    await vi.waitFor(() => expect(createAiSession).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: { type: 'note', noteIds: ['note-1'] } }),
+      { signal: expect.any(AbortSignal) },
+    ));
+    expect(submitAiChat).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-fresh' }), { signal: expect.any(AbortSignal) });
   });
 
   it('discards a delayed writeback preview after the current note changes', async () => {

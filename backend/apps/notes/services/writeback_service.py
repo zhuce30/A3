@@ -109,55 +109,69 @@ def _validate_diff(diff: Any) -> dict[str, Any]:
     return diff
 
 
-def _scope_allows_message(message: NoteAiMessage, note: Note) -> bool:
+def _snapshot_target_version(message: NoteAiMessage, note: Note) -> int:
     snapshot = message.session.scope_snapshot
-    if not isinstance(snapshot, dict):
-        return False
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("type") not in {"note", "notebook", "selection"}
+        or snapshot.get("type") != message.session.scope_type
+    ):
+        raise WritebackServiceError(
+            "该消息不属于目标笔记的上下文", code="writeback_source_not_permitted", status=403
+        )
     notes = snapshot.get("notes")
     if not isinstance(notes, list):
-        return False
-    return any(
-        isinstance(item, dict)
-        and str(item.get("id")) == str(note.id)
-        for item in notes
-    )
+        raise WritebackServiceError(
+            "该消息不属于目标笔记的上下文", code="writeback_source_not_permitted", status=403
+        )
+    matches = [item for item in notes if isinstance(item, dict) and str(item.get("id")) == str(note.id)]
+    if not matches:
+        raise WritebackServiceError(
+            "该消息不属于目标笔记的上下文", code="writeback_source_not_permitted", status=403
+        )
+    version = matches[0].get("version") if len(matches) == 1 else None
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1 or version != note.version:
+        raise WritebackServiceError(
+            "正文已更新，请重新提问并生成建议", code="writeback_source_stale", status=409
+        )
+    return version
 
 
 def create_writeback_preview(user, payload: dict[str, Any]) -> NoteWritebackPreview:
     note_id = _uuid(payload.get("targetNoteId"), "target_note_id")
     message_id = _uuid(payload.get("messageId"), "message_id")
-    note = Note.objects.filter(user=user, id=note_id, deleted_at__isnull=True).first()
-    message = NoteAiMessage.objects.select_related("session").filter(
-        session__user=user, id=message_id
-    ).first()
-    if note is None or message is None:
-        raise WritebackServiceError("笔记或消息不存在", code="not_found", status=404)
-    if (
-        message.role != NoteAiMessage.Role.ASSISTANT
-        or message.status != NoteAiMessage.Status.SUCCEEDED
-        or not message.content.strip()
-    ):
-        raise WritebackServiceError("该消息不能用于写回", code="writeback_message_ineligible", status=403)
-    if not _scope_allows_message(message, note):
-        raise WritebackServiceError(
-            "该消息不属于目标笔记的当前上下文", code="writeback_source_not_permitted", status=403
+    with transaction.atomic():
+        note = Note.objects.select_for_update().filter(
+            user=user, id=note_id, deleted_at__isnull=True
+        ).first()
+        message = NoteAiMessage.objects.select_for_update().select_related("session").filter(
+            session__user=user, id=message_id
+        ).first()
+        if note is None or message is None:
+            raise WritebackServiceError("笔记或消息不存在", code="not_found", status=404)
+        if (
+            message.role != NoteAiMessage.Role.ASSISTANT
+            or message.status != NoteAiMessage.Status.SUCCEEDED
+            or not message.content.strip()
+        ):
+            raise WritebackServiceError("该消息不能用于写回", code="writeback_message_ineligible", status=403)
+        target_version = _snapshot_target_version(message, note)
+        proposed = _generate_proposed_document(message)
+        try:
+            proposed = validate_content(proposed)
+        except DocumentValidationError as exc:
+            raise WritebackServiceError("生成的笔记正文格式不正确", code="invalid_writeback_document") from exc
+        diff = _validate_diff(_build_structural_diff(note.content_json, proposed))
+        return NoteWritebackPreview.objects.create(
+            user=user,
+            session=message.session,
+            source_message=message,
+            target_note=note,
+            target_version=target_version,
+            proposed_content_json=proposed,
+            diff_summary=diff,
+            expires_at=timezone.now() + PREVIEW_TTL,
         )
-    proposed = _generate_proposed_document(message)
-    try:
-        proposed = validate_content(proposed)
-    except DocumentValidationError as exc:
-        raise WritebackServiceError("生成的笔记正文格式不正确", code="invalid_writeback_document") from exc
-    diff = _validate_diff(_build_structural_diff(note.content_json, proposed))
-    return NoteWritebackPreview.objects.create(
-        user=user,
-        session=message.session,
-        source_message=message,
-        target_note=note,
-        target_version=note.version,
-        proposed_content_json=proposed,
-        diff_summary=diff,
-        expires_at=timezone.now() + PREVIEW_TTL,
-    )
 
 
 def _owned_locked_preview(user, preview_id) -> NoteWritebackPreview:

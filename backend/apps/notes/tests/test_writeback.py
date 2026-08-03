@@ -109,15 +109,65 @@ class WritebackApiTests(TestCase):
         self.assertEqual(out_of_scope.json()["code"], "writeback_source_not_permitted")
         self.assertFalse(NoteWritebackPreview.objects.exists())
 
-    def test_create_can_regenerate_diff_for_a_newer_owned_target_version(self):
+    def test_create_rejects_older_snapshot_version_without_any_mutation(self):
         Note.objects.filter(pk=self.note.id).update(
             content_json=self.document("用户更新后的正文"), content_text="用户更新后的正文", version=4
         )
+        original_revision_count = NoteRevision.objects.filter(note=self.note).count()
 
-        response = self.create_preview()
+        with patch("backend.apps.notes.services.writeback_service._generate_proposed_document") as generate:
+            response = self.create_preview()
 
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()["preview"]["targetVersion"], 4)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "writeback_source_stale")
+        self.assertIn("正文已更新，请重新提问并生成建议", response.json()["error"])
+        generate.assert_not_called()
+        self.note.refresh_from_db()
+        self.assertEqual(self.note.version, 4)
+        self.assertEqual(self.note.content_text, "用户更新后的正文")
+        self.assertFalse(NoteWritebackPreview.objects.exists())
+        self.assertEqual(NoteRevision.objects.filter(note=self.note).count(), original_revision_count)
+        self.assertFalse(NoteAuditEvent.objects.exists())
+
+    def test_create_rejects_missing_or_malformed_snapshot_version_before_proposal(self):
+        invalid_versions = (None, "3", True, 0)
+        original_content = self.note.content_json
+        original_revision_count = NoteRevision.objects.filter(note=self.note).count()
+        for invalid_version in invalid_versions:
+            with self.subTest(version=invalid_version):
+                item = {"id": str(self.note.id)}
+                if invalid_version is not None:
+                    item["version"] = invalid_version
+                self.session.scope_snapshot = {"type": "note", "notes": [item]}
+                self.session.save(update_fields={"scope_snapshot"})
+                with patch("backend.apps.notes.services.writeback_service._generate_proposed_document") as generate:
+                    response = self.create_preview()
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["code"], "writeback_source_stale")
+                generate.assert_not_called()
+                self.note.refresh_from_db()
+                self.assertEqual(self.note.version, 3)
+                self.assertEqual(self.note.content_json, original_content)
+                self.assertFalse(NoteWritebackPreview.objects.exists())
+                self.assertEqual(NoteRevision.objects.filter(note=self.note).count(), original_revision_count)
+                self.assertFalse(NoteAuditEvent.objects.exists())
+
+    def test_multi_note_and_notebook_scopes_use_the_exact_target_entry(self):
+        for scope_type in ("selection", "notebook"):
+            with self.subTest(scope_type=scope_type):
+                self.session.scope_type = scope_type
+                self.session.scope_snapshot = {
+                    "type": scope_type,
+                    "notes": [
+                        {"id": str(uuid.uuid4()), "version": 99},
+                        {"id": str(self.note.id), "version": 3},
+                    ],
+                }
+                self.session.save(update_fields={"scope_type", "scope_snapshot"})
+                response = self.create_preview()
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(response.json()["preview"]["targetVersion"], 3)
+                NoteWritebackPreview.objects.all().delete()
 
     def test_create_rejects_malformed_generated_document_and_diff_without_writing(self):
         with patch(

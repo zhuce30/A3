@@ -46,6 +46,7 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
   const [writebackBusyOwner, setWritebackBusyOwner] = useState<WritebackOperation | null>(null);
   const [writebackError, setWritebackError] = useState('');
   const [writebackStale, setWritebackStale] = useState(false);
+  const [writebackNeedsReask, setWritebackNeedsReask] = useState(false);
   const streamCleanup = useRef<(() => void) | null>(null);
   const watchedMessageId = useRef('');
   const operationAbort = useRef<AbortController | null>(null);
@@ -174,7 +175,7 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     if (pending) watchMessage(pending.id);
   }, [activeScopeKey, messages, open, scopeKey, watchMessage]);
 
-  const submit = useCallback(async (rawPrompt: string) => {
+  const submit = useCallback(async (rawPrompt: string, options: { forceNewSession?: boolean } = {}) => {
     const messageText = rawPrompt.trim();
     if (!messageText || !scope || sending) return;
     const generation = requestGeneration.current + 1;
@@ -188,7 +189,7 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     setSendState({ scopeKey, busy: true });
     setError('');
     setDisconnectedMessageId('');
-    let session = scopedActiveSession;
+    let session = options.forceNewSession ? null : scopedActiveSession;
     try {
       if (!session) {
         const sessionResult = await client.createAiSession(
@@ -332,13 +333,17 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     const operation = beginWritebackOperation(currentNote.id);
     setWritebackError('');
     setWritebackStale(false);
+    setWritebackNeedsReask(false);
     const result = await client.createWritebackPreview({
       targetNoteId: currentNote.id,
       messageId: writebackSource.id,
     });
     if (!settleWritebackOperation(operation)) return;
     if (!result.success) {
-      setWritebackError(result.error);
+      const stale = result.status === 409;
+      setWritebackError(stale ? '正文已更新，请重新提问并生成建议' : result.error);
+      setWritebackStale(stale);
+      setWritebackNeedsReask(stale);
       return;
     }
     setWritebackPreview(result.preview);
@@ -349,16 +354,20 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     if (!writebackPreview || writebackBusy) return;
     const operation = beginWritebackOperation(writebackPreview.targetNote.id, writebackPreview.id);
     setWritebackError('');
+    setWritebackNeedsReask(false);
     const result = await client.confirmWritebackPreview(writebackPreview.id);
     if (!settleWritebackOperation(operation)) return;
     if (!result.success) {
-      setWritebackError(result.status === 409 ? '正文已更新，请重新生成建议' : result.error);
-      if (result.status === 409) setWritebackStale(true);
+      const stale = result.status === 409;
+      setWritebackError(stale ? '正文已更新，请重新提问并生成建议' : result.error);
+      setWritebackStale(stale);
+      setWritebackNeedsReask(stale);
       return;
     }
     setWritebackPreview(null);
     setWritebackPreviewScopeKey('');
     setWritebackStale(false);
+    setWritebackNeedsReask(false);
     onWritebackApplied?.(result.note);
   };
 
@@ -374,6 +383,14 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     setWritebackPreview(null);
     setWritebackPreviewScopeKey('');
     setWritebackError('');
+    setWritebackNeedsReask(false);
+  };
+
+  const reaskWriteback = () => {
+    if (!scope || sending) return;
+    setWritebackError('');
+    setWritebackNeedsReask(false);
+    void submit('请基于当前笔记最新正文重新生成可写回的修改建议。只提供建议，不要直接修改笔记。', { forceNewSession: true });
   };
 
   if (!open) {
@@ -530,8 +547,18 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
             error={writebackError}
             onConfirm={() => void confirmWriteback()}
             onAbandon={() => void abandonWriteback()}
-            onRegenerate={() => void generateWritebackPreview()}
+            onRegenerate={reaskWriteback}
           />
+        )}
+        {!writebackPreview && writebackError && (
+          <div className="mt-3 border-y border-border/70 py-3" role="alert">
+            <p className="text-sm text-destructive">{writebackError}</p>
+            {writebackNeedsReask && (
+              <Button type="button" variant="outline" size="sm" className="mt-2 w-full rounded-md" onClick={reaskWriteback}>
+                <RefreshCw className="size-3.5" />重新提问并生成建议
+              </Button>
+            )}
+          </div>
         )}
       </div>
 
