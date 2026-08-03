@@ -13,7 +13,7 @@ import { NotesClient } from '@/lib/a3/notes/client';
 import { NotesDraftStore, type PersistableNoteDraft } from '@/lib/a3/notes/draft-store';
 import type { NoteAiCitation, NoteAttachment, NoteDetail, NoteNotebook, NoteSummary, NoteTag } from '@/lib/a3/notes/types';
 import { NoteAiDrawer } from './note-ai-drawer';
-import { NoteEditor } from './note-editor';
+import { NoteEditor, type NoteEditorSnapshotValidity } from './note-editor';
 import { NotesNavigation, type NotesSmartView } from './notes-navigation';
 
 interface NotesWorkspaceProps {
@@ -28,6 +28,22 @@ const STALE_CITATION_MESSAGE = '笔记内容已更新，该引用对应旧版本
 
 function citationMatchesVersion(citation: NoteAiCitation, version: number | null | undefined) {
   return citation.noteVersion === undefined || citation.noteVersion === version;
+}
+
+const EMPTY_EDITOR_SNAPSHOT: NoteEditorSnapshotValidity = {
+  noteId: null,
+  baseVersion: null,
+  dirty: false,
+  pending: false,
+  conflicted: false,
+};
+
+function citationMatchesEditorSnapshot(citation: NoteAiCitation, snapshot: NoteEditorSnapshotValidity) {
+  return snapshot.noteId === citation.noteId
+    && !snapshot.dirty
+    && !snapshot.pending
+    && !snapshot.conflicted
+    && citationMatchesVersion(citation, snapshot.baseVersion);
 }
 
 type WorkspaceLoadState = 'loading' | 'ready' | 'error';
@@ -74,7 +90,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const pendingCitation = useRef<{ token: number; noteId: string; citation: NoteAiCitation } | null>(null);
   const citationNavigationGeneration = useRef(0);
   const editorNoteIdRef = useRef<string | null>(null);
-  const editorNoteVersionRef = useRef<number | null>(null);
+  const editorSnapshotRef = useRef<NoteEditorSnapshotValidity>(EMPTY_EDITOR_SNAPSHOT);
 
   useEffect(() => {
     selectedNoteIdRef.current = selectedNote?.id ?? null;
@@ -149,6 +165,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     noteAbortController.current?.abort();
     const controller = new AbortController();
     noteAbortController.current = controller;
+    editorSnapshotRef.current = EMPTY_EDITOR_SNAPSHOT;
     setEditorState('loading');
     setEditorError('');
     setFailedNoteId(null);
@@ -182,7 +199,6 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
       }
       if (generation !== noteLoadGeneration.current || controller.signal.aborted) return null;
       editorNoteIdRef.current = result.note.id;
-      editorNoteVersionRef.current = result.note.version;
       setSelectedNote(result.note);
       setAttachments(attachmentResult.attachments);
       setRecoverableDraft(draft);
@@ -237,7 +253,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
         noteAbortController.current?.abort();
         setSelectedNote(null);
         editorNoteIdRef.current = null;
-        editorNoteVersionRef.current = null;
+        editorSnapshotRef.current = EMPTY_EDITOR_SNAPSHOT;
         setAttachments([]);
         setRecoverableDraft(undefined);
       }
@@ -289,7 +305,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     setSelectedTagId(next.tagId ?? null);
     setSelectedNote(null);
     editorNoteIdRef.current = null;
-    editorNoteVersionRef.current = null;
+    editorSnapshotRef.current = EMPTY_EDITOR_SNAPSHOT;
     setRecoverableDraft(undefined);
   };
 
@@ -333,7 +349,6 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     setNotes((current) => [result.note, ...current.filter((item) => item.id !== result.note.id)]);
     setSelectedNote(result.note);
     editorNoteIdRef.current = result.note.id;
-    editorNoteVersionRef.current = result.note.version;
     setRecoverableDraft(undefined);
     setAttachments([]);
     setEditorState('ready');
@@ -373,7 +388,6 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
 
   const updateSelectedNote = (updated: NoteDetail) => {
     editorNoteIdRef.current = updated.id;
-    editorNoteVersionRef.current = updated.version;
     setSelectedNote(updated);
     setNotes((current) => current.map((item) => item.id === updated.id ? updated : item));
   };
@@ -381,7 +395,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const revealCitation = useCallback((citation: NoteAiCitation, targetView = editorViewRef.current) => {
     const view = targetView;
     if (!view || view.isDestroyed || editorViewRef.current !== view) return;
-    if (!citationMatchesVersion(citation, editorNoteVersionRef.current)) {
+    if (!citationMatchesEditorSnapshot(citation, editorSnapshotRef.current)) {
       setCitationNotice(STALE_CITATION_MESSAGE);
       return;
     }
@@ -414,8 +428,17 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     citationNavigationGeneration.current = token;
     pendingCitation.current = null;
     setCitationNotice('');
-    const knownTarget = citation.noteId === selectedNote?.id
-      ? selectedNote
+    const currentSnapshot = editorSnapshotRef.current;
+    if (citation.noteId === selectedNoteIdRef.current && currentSnapshot.noteId === citation.noteId) {
+      if (!citationMatchesEditorSnapshot(citation, currentSnapshot)) {
+        noteLoadGeneration.current += 1;
+        noteAbortController.current?.abort();
+        setCitationNotice(STALE_CITATION_MESSAGE);
+        return;
+      }
+    }
+    const knownTarget = citation.noteId === selectedNoteIdRef.current
+      ? (currentSnapshot.noteId === citation.noteId ? null : selectedNote)
       : notes.find((note) => note.id === citation.noteId);
     if (knownTarget && !citationMatchesVersion(citation, knownTarget.version)) {
       noteLoadGeneration.current += 1;
@@ -516,6 +539,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
           onNoteChange={updateSelectedNote}
           onAttachmentsChange={setAttachments}
           onEditorReady={editorReady}
+          onSnapshotValidityChange={(state) => { editorSnapshotRef.current = state; }}
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">

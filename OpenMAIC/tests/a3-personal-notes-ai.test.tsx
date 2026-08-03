@@ -10,7 +10,7 @@ import type { NextRequest } from 'next/server';
 import { GET as streamAssistantMessage } from '@/app/api/a3/notes/assistant/stream/[messageId]/route';
 import { NoteAiDrawer } from '@/components/a3/notes/note-ai-drawer';
 import { NotesWorkspace } from '@/components/a3/notes/notes-workspace';
-import type { NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
+import type { AutosaveEvent, NotesAutosaveController } from '@/lib/a3/notes/autosave-controller';
 import { mapNoteCitationToSelection } from '@/lib/a3/notes/citation-position';
 import { NotesClient } from '@/lib/a3/notes/client';
 import { parseNoteDocument } from '@/lib/a3/notes/editor-schema';
@@ -87,6 +87,27 @@ function autosaveStub() {
     confirmAccountSwitch: vi.fn(),
     dispose: vi.fn(),
   } as unknown as NotesAutosaveController;
+}
+
+function controlledAutosave() {
+  let listener: ((event: AutosaveEvent) => void) | undefined;
+  const controller = {
+    schedule: vi.fn().mockResolvedValue(undefined),
+    flush: vi.fn(),
+    subscribe: vi.fn((_noteId: string, next: typeof listener) => {
+      listener = next;
+      return () => { listener = undefined; };
+    }),
+    initialize: vi.fn().mockResolvedValue({ account: { kind: 'ready', warningRequired: false }, replay: [] }),
+    confirmAccountSwitch: vi.fn(),
+    dispose: vi.fn(),
+  } as unknown as NotesAutosaveController;
+  return {
+    controller,
+    emit(event: AutosaveEvent) {
+      act(() => listener?.(event));
+    },
+  };
 }
 
 let root: Root | null = null;
@@ -574,6 +595,47 @@ describe('personal note AI drawer', () => {
     click('跳转到操作系统复习第 2 段');
 
     expect(editorView!.state.doc.textBetween(editorView!.state.selection.from, editorView!.state.selection.to)).toBe('死锁');
+  });
+
+  it('rejects a same-version citation immediately after the displayed document is edited', async () => {
+    let editorView: EditorView | undefined;
+    const citation = { noteId: 'note-1', noteVersion: 3, title: '操作系统复习', location: '第 2 段', paragraphIndex: 1, charStart: 6, charEnd: 8, snippet: '死锁' };
+    const client = clientStub({
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '编辑前引用', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ content: '查看编辑前引用', status: 'succeeded', citations: [citation] })] }),
+    });
+    const autosave = controlledAutosave();
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosave.controller} onEditorReady={(view) => { editorView = view; }} />);
+    await vi.waitFor(() => expect(editorView).toBeTruthy());
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.querySelector('button[aria-label="跳转到操作系统复习第 2 段"]')).toBeTruthy());
+    act(() => editorView!.dispatch(editorView!.state.tr.insertText('已编辑')));
+    const selectionBeforeCitation = { from: editorView!.state.selection.from, to: editorView!.state.selection.to };
+    click('跳转到操作系统复习第 2 段');
+
+    expect({ from: editorView!.state.selection.from, to: editorView!.state.selection.to }).toEqual(selectionBeforeCitation);
+    expect(container.querySelector('[data-testid="stale-citation-notice"]')?.textContent).toContain('笔记内容已更新，该引用对应旧版本，请在历史版本中查看');
+  });
+
+  it('rejects an old citation after autosave advances the displayed document version', async () => {
+    let editorView: EditorView | undefined;
+    const citation = { noteId: 'note-1', noteVersion: 3, title: '操作系统复习', location: '第 2 段', paragraphIndex: 1, charStart: 6, charEnd: 8, snippet: '死锁' };
+    const client = clientStub({
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '保存前引用', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ content: '查看保存前引用', status: 'succeeded', citations: [citation] })] }),
+    });
+    const autosave = controlledAutosave();
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosave.controller} onEditorReady={(view) => { editorView = view; }} />);
+    await vi.waitFor(() => expect(editorView).toBeTruthy());
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.querySelector('button[aria-label="跳转到操作系统复习第 2 段"]')).toBeTruthy());
+    act(() => editorView!.dispatch(editorView!.state.tr.insertText('已保存')));
+    autosave.emit({ type: 'saved', noteId: 'note-1', resultingVersion: 4, idempotent: false });
+    const selectionBeforeCitation = { from: editorView!.state.selection.from, to: editorView!.state.selection.to };
+    click('跳转到操作系统复习第 2 段');
+
+    expect({ from: editorView!.state.selection.from, to: editorView!.state.selection.to }).toEqual(selectionBeforeCitation);
+    expect(container.querySelector('[data-testid="stale-citation-notice"]')?.textContent).toContain('笔记内容已更新，该引用对应旧版本，请在历史版本中查看');
   });
 
   it('does not apply a stale citation to a newer current note and shows visible feedback', async () => {

@@ -17,6 +17,14 @@ import { NoteConflictDialog } from './note-conflict-dialog';
 import { NoteEditorToolbar, type NoteSaveState } from './note-editor-toolbar';
 import { NoteHistoryDialog } from './note-history-dialog';
 
+export interface NoteEditorSnapshotValidity {
+  noteId: string | null;
+  baseVersion: number | null;
+  dirty: boolean;
+  pending: boolean;
+  conflicted: boolean;
+}
+
 interface NoteEditorProps {
   note: NoteDetail | null;
   client: NotesClient;
@@ -29,6 +37,7 @@ interface NoteEditorProps {
   recoverableDraft?: EditableNoteDraft;
   conflictServerNote?: NoteDetail;
   onEditorReady?: (view: EditorView) => void;
+  onSnapshotValidityChange?: (state: NoteEditorSnapshotValidity) => void;
   onNoteChange?: (note: NoteDetail) => void;
   onAttachmentsChange?: (attachments: NoteAttachment[]) => void;
   onRetryLoad?: () => void;
@@ -46,6 +55,7 @@ export function NoteEditor({
   recoverableDraft,
   conflictServerNote,
   onEditorReady,
+  onSnapshotValidityChange,
   onNoteChange,
   onAttachmentsChange,
   onRetryLoad,
@@ -58,7 +68,15 @@ export function NoteEditor({
   const noteRef = useRef(note);
   const autosaveRef = useRef(autosave);
   const onEditorReadyRef = useRef(onEditorReady);
+  const onSnapshotValidityChangeRef = useRef(onSnapshotValidityChange);
   const onNoteChangeRef = useRef(onNoteChange);
+  const snapshotValidityRef = useRef<NoteEditorSnapshotValidity>({
+    noteId: null,
+    baseVersion: null,
+    dirty: false,
+    pending: false,
+    conflicted: false,
+  });
   const [view, setView] = useState<EditorView | null>(null);
   const selectedVersion = note ? `${note.id}:${note.version}` : '';
   const noteId = note?.id;
@@ -80,10 +98,24 @@ export function NoteEditor({
     setConflictVisibility({ key: conflictKey, open: Boolean(conflictKey) });
   }
 
+  const reportSnapshotValidity = useCallback((next: NoteEditorSnapshotValidity) => {
+    const current = snapshotValidityRef.current;
+    if (
+      current.noteId === next.noteId
+      && current.baseVersion === next.baseVersion
+      && current.dirty === next.dirty
+      && current.pending === next.pending
+      && current.conflicted === next.conflicted
+    ) return;
+    snapshotValidityRef.current = next;
+    onSnapshotValidityChangeRef.current?.(next);
+  }, []);
+
   useLayoutEffect(() => {
     noteRef.current = note;
     autosaveRef.current = autosave;
     onEditorReadyRef.current = onEditorReady;
+    onSnapshotValidityChangeRef.current = onSnapshotValidityChange;
     onNoteChangeRef.current = onNoteChange;
   });
 
@@ -93,6 +125,13 @@ export function NoteEditor({
     baseVersionRef.current = selectedNote.version;
     draftRef.current = null;
     localContentRef.current = selectedNote.content;
+    reportSnapshotValidity({
+      noteId: selectedNote.id,
+      baseVersion: selectedNote.version,
+      dirty: false,
+      pending: false,
+      conflicted: Boolean(conflictServerNote && conflictServerNote.id === selectedNote.id),
+    });
     const editorView = new EditorView(mountRef.current, {
       state: EditorState.create({
         schema: noteEditorSchema,
@@ -121,6 +160,13 @@ export function NoteEditor({
         };
         draftRef.current = draft;
         localContentRef.current = draft.content;
+        reportSnapshotValidity({
+          noteId: selectedNote.id,
+          baseVersion: baseVersionRef.current,
+          dirty: true,
+          pending: true,
+          conflicted: snapshotValidityRef.current.conflicted,
+        });
         setContentSnapshot({ selectedVersion, content: draft.content });
         void autosaveRef.current.schedule(draft);
       },
@@ -135,33 +181,61 @@ export function NoteEditor({
       if (viewRef.current === editorView) viewRef.current = null;
       setView((current) => current === editorView ? null : current);
       editorView.destroy();
+      if (snapshotValidityRef.current.noteId === selectedNote.id) {
+        reportSnapshotValidity({ noteId: null, baseVersion: null, dirty: false, pending: false, conflicted: false });
+      }
     };
-  }, [loadState, selectedVersion]);
+  }, [loadState, reportSnapshotValidity, selectedVersion]);
+
+  useEffect(() => {
+    if (!noteId || !effectiveConflict) return;
+    reportSnapshotValidity({
+      noteId,
+      baseVersion: baseVersionRef.current,
+      dirty: true,
+      pending: snapshotValidityRef.current.pending,
+      conflicted: true,
+    });
+  }, [conflictKey, effectiveConflict, noteId, reportSnapshotValidity]);
 
   useEffect(() => {
     if (!noteId) return;
     return autosave.subscribe(noteId, (event: AutosaveEvent) => {
+      if (event.noteId !== noteRef.current?.id) return;
       if (event.type === 'scheduled') {
+        reportSnapshotValidity({ noteId, baseVersion: baseVersionRef.current, dirty: true, pending: true, conflicted: false });
         setSaveSnapshot({ selectedVersion, state: 'scheduled' });
       } else if (event.type === 'saving') {
+        reportSnapshotValidity({ noteId, baseVersion: baseVersionRef.current, dirty: true, pending: true, conflicted: false });
         setSaveSnapshot({ selectedVersion, state: 'saving' });
       } else if (event.type === 'saved') {
         baseVersionRef.current = Math.max(baseVersionRef.current, event.resultingVersion);
         if (draftRef.current && draftRef.current.baseVersion < event.resultingVersion) {
           draftRef.current = { ...draftRef.current, baseVersion: event.resultingVersion };
         }
+        const pending = Boolean(event.pendingMutationId);
+        reportSnapshotValidity({ noteId, baseVersion: baseVersionRef.current, dirty: pending, pending, conflicted: false });
         setSaveSnapshot({ selectedVersion, state: event.pendingMutationId ? 'scheduled' : 'saved' });
         setRuntimeConflict(null);
       } else if (event.type === 'offline') {
+        reportSnapshotValidity({
+          noteId,
+          baseVersion: baseVersionRef.current,
+          dirty: true,
+          pending: true,
+          conflicted: event.reason === 'conflict-blocked' || snapshotValidityRef.current.conflicted,
+        });
         setSaveSnapshot({ selectedVersion, state: event.reason === 'conflict-blocked' ? 'conflict' : 'offline' });
       } else if (event.type === 'conflict') {
+        reportSnapshotValidity({ noteId, baseVersion: baseVersionRef.current, dirty: true, pending: false, conflicted: true });
         setSaveSnapshot({ selectedVersion, state: 'conflict' });
         setRuntimeConflict({ noteId: event.noteId, serverNote: event.serverNote, draft: event.draft });
       } else {
+        reportSnapshotValidity({ noteId, baseVersion: baseVersionRef.current, dirty: true, pending: false, conflicted: false });
         setSaveSnapshot({ selectedVersion, state: 'error' });
       }
     });
-  }, [autosave, noteId, selectedVersion]);
+  }, [autosave, noteId, reportSnapshotValidity, selectedVersion]);
 
   const retrySave = useCallback(async () => {
     const current = draftRef.current;
@@ -254,7 +328,12 @@ export function NoteEditor({
       >
         <div ref={mountRef} />
       </article>
-      <NoteHistoryDialog open={historyOpen} onOpenChange={setHistoryOpen} note={note} client={client} onRestored={(restored) => { baseVersionRef.current = restored.version; onNoteChange?.(restored); }} />
+      <NoteHistoryDialog open={historyOpen} onOpenChange={setHistoryOpen} note={note} client={client} onRestored={(restored) => {
+        baseVersionRef.current = restored.version;
+        draftRef.current = null;
+        reportSnapshotValidity({ noteId: restored.id, baseVersion: restored.version, dirty: false, pending: false, conflicted: false });
+        onNoteChange?.(restored);
+      }} />
       {draftStore && effectiveConflict && (
         <NoteConflictDialog
           open={conflictVisibility.open}
@@ -264,7 +343,13 @@ export function NoteEditor({
           serverNote={effectiveConflict}
           client={client}
           draftStore={draftStore}
-          onAdoptServer={(server) => { baseVersionRef.current = server.version; setRuntimeConflict(null); onNoteChangeRef.current?.(server); }}
+          onAdoptServer={(server) => {
+            baseVersionRef.current = server.version;
+            draftRef.current = null;
+            setRuntimeConflict(null);
+            reportSnapshotValidity({ noteId: server.id, baseVersion: server.version, dirty: false, pending: false, conflicted: false });
+            onNoteChangeRef.current?.(server);
+          }}
         />
       )}
     </section>

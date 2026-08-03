@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EditorView } from 'prosemirror-view';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
-import { NoteEditor } from '@/components/a3/notes/note-editor';
+import { NoteEditor, type NoteEditorSnapshotValidity } from '@/components/a3/notes/note-editor';
 import { NoteAttachments } from '@/components/a3/notes/note-attachments';
 import { NoteConflictDialog } from '@/components/a3/notes/note-conflict-dialog';
 import { NoteHistoryDialog } from '@/components/a3/notes/note-history-dialog';
@@ -206,6 +206,36 @@ describe('personal note ProseMirror document contract', () => {
 });
 
 describe('document-first note editor lifecycle and save state', () => {
+  it('reports clean snapshot validity after switching, reloading, and unmounting', () => {
+    const states: NoteEditorSnapshotValidity[] = [];
+    const views: EditorView[] = [];
+    const renderEditor = (currentNote: NoteDetail) => (
+      <NoteEditor
+        note={currentNote}
+        client={{} as NotesClient}
+        autosave={autosaveStub()}
+        attachments={[]}
+        onEditorReady={(view) => views.push(view)}
+        onSnapshotValidityChange={(state) => states.push(state)}
+      />
+    );
+    mount(renderEditor(note('note-1', 3)));
+    expect(states.at(-1)).toEqual({ noteId: 'note-1', baseVersion: 3, dirty: false, pending: false, conflicted: false });
+
+    act(() => views[0]!.dispatch(views[0]!.state.tr.insertText('本地编辑')));
+    expect(states.at(-1)).toEqual({ noteId: 'note-1', baseVersion: 3, dirty: true, pending: true, conflicted: false });
+
+    act(() => root!.render(renderEditor(note('note-2', 7))));
+    expect(states.at(-1)).toEqual({ noteId: 'note-2', baseVersion: 7, dirty: false, pending: false, conflicted: false });
+
+    act(() => root!.render(renderEditor(note('note-2', 8))));
+    expect(states.at(-1)).toEqual({ noteId: 'note-2', baseVersion: 8, dirty: false, pending: false, conflicted: false });
+
+    act(() => root!.unmount());
+    root = null;
+    expect(states.at(-1)).toEqual({ noteId: null, baseVersion: null, dirty: false, pending: false, conflicted: false });
+  });
+
   it('keeps one dominant editor view, emits JSON to autosave, and destroys it on note switch and unmount', async () => {
     const schedule = vi.fn().mockResolvedValue(undefined);
     const autosave = autosaveStub(schedule);
@@ -318,11 +348,12 @@ describe('document-first note editor lifecycle and save state', () => {
 
   it('does not show saved for an older ACK while a newer mutation remains pending', () => {
     let listener: ((event: AutosaveEvent) => void) | undefined;
+    const snapshotStates: NoteEditorSnapshotValidity[] = [];
     const autosave = {
       schedule: vi.fn(), flush: vi.fn(),
       subscribe: vi.fn((_noteId: string, next: typeof listener) => { listener = next; return () => undefined; }),
     } as unknown as NotesAutosaveController;
-    const container = mount(<NoteEditor note={note()} client={{} as NotesClient} autosave={autosave} attachments={[]} />);
+    const container = mount(<NoteEditor note={note()} client={{} as NotesClient} autosave={autosave} attachments={[]} onSnapshotValidityChange={(state) => snapshotStates.push(state)} />);
 
     act(() => listener?.({ type: 'scheduled', noteId: 'note-1', clientMutationId: 'new' }));
     act(() => listener?.({
@@ -331,6 +362,7 @@ describe('document-first note editor lifecycle and save state', () => {
 
     expect(container.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('等待保存');
     expect(container.querySelector('[data-testid="note-save-status"]')?.textContent).not.toContain('已保存');
+    expect(snapshotStates.at(-1)).toEqual({ noteId: 'note-1', baseVersion: 4, dirty: true, pending: true, conflicted: false });
   });
 
   it('derives saved and conflict states from real autosave outcomes', async () => {
@@ -347,10 +379,15 @@ describe('document-first note editor lifecycle and save state', () => {
     const serverNote = { ...note('note-2', 4), content: doc('服务器版本') };
     const conflictSetup = realAutosave({ success: false, status: 409, code: 'note_version_conflict', error: '版本冲突', serverVersion: 4, serverNote });
     const conflictViews: EditorView[] = [];
-    const conflictContainer = mount(<NoteEditor note={note('note-2')} client={{ createNote: vi.fn() } as unknown as NotesClient} autosave={conflictSetup.controller} draftStore={conflictSetup.store} attachments={[]} onEditorReady={(view) => conflictViews.push(view)} />);
+    const conflictSnapshots: NoteEditorSnapshotValidity[] = [];
+    const conflictContainer = mount(<NoteEditor note={note('note-2')} client={{ createNote: vi.fn() } as unknown as NotesClient} autosave={conflictSetup.controller} draftStore={conflictSetup.store} attachments={[]} onEditorReady={(view) => conflictViews.push(view)} onSnapshotValidityChange={(state) => conflictSnapshots.push(state)} />);
     act(() => conflictViews[0]!.dispatch(conflictViews[0]!.state.tr.insertText('本地版本')));
     await vi.waitFor(() => expect(conflictContainer.querySelector('[data-testid="note-save-status"]')?.textContent).toContain('存在冲突'));
     await vi.waitFor(() => expect(document.body.textContent).toContain('笔记版本冲突'));
+    expect(conflictSnapshots.at(-1)).toMatchObject({ noteId: 'note-2', baseVersion: 3, dirty: true, conflicted: true });
+    clickByName('采用服务器版本');
+    clickByName('确认采用');
+    await vi.waitFor(() => expect(conflictSnapshots.at(-1)).toEqual({ noteId: 'note-2', baseVersion: 4, dirty: false, pending: false, conflicted: false }));
     conflictSetup.controller.dispose();
   });
 
