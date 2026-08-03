@@ -278,6 +278,27 @@ backend\.venv\Scripts\python.exe backend\manage.py check
 backend\.venv\Scripts\python.exe backend\manage.py validate_demo_flow --skip-seed --strict
 ```
 
+个人笔记专项验证：
+
+```powershell
+cd <project-root>
+backend\.venv\Scripts\python.exe backend\manage.py test backend.apps.notes
+backend\.venv\Scripts\python.exe backend\manage.py evaluate_notes_memory --offline --strict --output backend\tmp\notes_memory_metrics.json
+
+cd OpenMAIC
+pnpm.cmd vitest run tests/a3-personal-notes-model.test.ts tests/a3-personal-notes-autosave.test.ts tests/a3-personal-notes-layout.test.tsx tests/a3-personal-notes-ai.test.tsx tests/a3-personal-notes-memory.test.tsx
+npx.cmd playwright test e2e/tests/a3-personal-notes.spec.ts --project=chromium --workers=1
+```
+
+个人笔记按钮级路径：
+
+```text
+个人笔记 -> 自动保存 -> 附件解析 -> 限定范围 AI -> 引用 -> 差异确认写回
+个人笔记 -> 每日总结 -> 记忆候选 -> 用户确认 -> 跨会话使用 -> 更正替换 -> 暂停/删除 -> 后续会话不再使用
+```
+
+`/a3/notes` 独占个人笔记、每日总结和个人笔记记忆。AI 课堂与面对面辅导继续独占课堂会话和课程 RAG，不得读取 `NoteMemory`，不得修改 `RetrieverAgent` 签名，也不得为个人记忆新建向量索引、FAISS、知识图谱或检索 Agent。只有当前用户、`confirmed`、已生效且未暂停、未过期、未替换、未删除的记忆可以进入个人笔记助手上下文。评测产物不得包含原始笔记正文、查询文本、API key 或用户隐私字段。
+
 OpenMAIC 接入专项：
 
 ```powershell
