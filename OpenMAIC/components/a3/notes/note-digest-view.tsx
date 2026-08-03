@@ -22,23 +22,27 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
   const [state, setState] = useState<LoadState>('loading');
   const [error, setError] = useState('');
   const [busyOperationId, setBusyOperationId] = useState<number | null>(null);
-  const operationEpoch = useRef(0);
-  const activeController = useRef<AbortController | null>(null);
+  const readEpoch = useRef(0);
+  const readController = useRef<AbortController | null>(null);
+  const writeEpoch = useRef(0);
+  const activeWriteId = useRef<number | null>(null);
+  const writeController = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
   const selectedDateRef = useRef('');
 
   const load = useCallback(async (date?: string) => {
-    const operationId = ++operationEpoch.current;
+    if (activeWriteId.current !== null) return;
+    const operationId = ++readEpoch.current;
     const requestedDate = date ?? '';
-    activeController.current?.abort();
+    readController.current?.abort();
     const controller = new AbortController();
-    activeController.current = controller;
-    setBusyOperationId(null);
+    readController.current = controller;
     setState('loading');
     setError('');
     try {
       const result = await client.listDigests(date, { signal: controller.signal });
       if (
-        operationId !== operationEpoch.current
+        operationId !== readEpoch.current
         || controller.signal.aborted
         || (requestedDate && selectedDateRef.current !== requestedDate)
       ) return;
@@ -48,33 +52,44 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
         setError(result.error);
         return;
       }
-      setDigests(result.digests);
-      setSelectedId((current) => result.digests.some((item) => item.id === current) ? current : result.digests[0]?.id ?? '');
-      if (!date && result.digests[0]) {
-        selectedDateRef.current = result.digests[0].digestDate;
-        setSelectedDate(result.digests[0].digestDate);
+      const effectiveDate = requestedDate || result.digests.reduce(
+        (latest, item) => item.digestDate > latest ? item.digestDate : latest,
+        '',
+      );
+      const dateDigests = effectiveDate
+        ? result.digests.filter((item) => item.digestDate === effectiveDate)
+        : [];
+      setDigests(dateDigests);
+      setSelectedId((current) => dateDigests.some((item) => item.id === current) ? current : dateDigests[0]?.id ?? '');
+      if (!requestedDate && effectiveDate) {
+        selectedDateRef.current = effectiveDate;
+        setSelectedDate(effectiveDate);
       }
       setState('ready');
     } catch (loadError) {
       if (
         controller.signal.aborted
-        || operationId !== operationEpoch.current
+        || operationId !== readEpoch.current
         || (loadError instanceof DOMException && loadError.name === 'AbortError')
       ) return;
       setDigests([]);
       setState('error');
       setError('每日总结加载失败，请重试');
     } finally {
-      if (operationId === operationEpoch.current) activeController.current = null;
+      if (operationId === readEpoch.current) readController.current = null;
     }
   }, [client]);
 
   useEffect(() => {
+    mounted.current = true;
     const handle = window.setTimeout(() => void load(), 0);
     return () => {
+      mounted.current = false;
       window.clearTimeout(handle);
-      operationEpoch.current += 1;
-      activeController.current?.abort();
+      readEpoch.current += 1;
+      readController.current?.abort();
+      writeEpoch.current += 1;
+      writeController.current?.abort();
     };
   }, [load]);
 
@@ -82,25 +97,28 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
   const busy = busyOperationId !== null;
 
   const changeSelectedDate = (value: string) => {
+    if (activeWriteId.current !== null) return;
     selectedDateRef.current = value;
     setSelectedDate(value);
     void load(value);
   };
 
   const createRevision = async () => {
-    if (!selectedDate || busy) return;
+    if (!selectedDate || activeWriteId.current !== null) return;
     const operationDate = selectedDateRef.current || selectedDate;
-    const operationId = ++operationEpoch.current;
-    activeController.current?.abort();
+    readEpoch.current += 1;
+    readController.current?.abort();
+    const operationId = ++writeEpoch.current;
+    activeWriteId.current = operationId;
     const controller = new AbortController();
-    activeController.current = controller;
+    writeController.current = controller;
     setBusyOperationId(operationId);
     setError('');
     try {
       const result = await client.createManualDigest(operationDate, { signal: controller.signal });
       if (
-        controller.signal.aborted
-        || operationId !== operationEpoch.current
+        !mounted.current
+        || operationId !== activeWriteId.current
         || selectedDateRef.current !== operationDate
       ) return;
       if (!result.success) {
@@ -108,33 +126,41 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
         return;
       }
       if (result.digest.digestDate !== operationDate) return;
-      setDigests((current) => [result.digest, ...current]);
+      setDigests((current) => [
+        result.digest,
+        ...current.filter((item) => item.digestDate === operationDate && item.id !== result.digest.id),
+      ]);
       setSelectedId(result.digest.id);
       setState('ready');
     } catch (operationError) {
       if (!(operationError instanceof DOMException && operationError.name === 'AbortError')) {
-        if (operationId === operationEpoch.current) setError('每日总结创建失败，请重试');
+        if (mounted.current && operationId === activeWriteId.current) setError('每日总结创建失败，请重试');
       }
     } finally {
-      if (operationId === operationEpoch.current) activeController.current = null;
-      setBusyOperationId((current) => current === operationId ? null : current);
+      if (operationId === activeWriteId.current) {
+        activeWriteId.current = null;
+        writeController.current = null;
+        if (mounted.current) setBusyOperationId((current) => current === operationId ? null : current);
+      }
     }
   };
 
   const retry = async () => {
-    if (!selected || selected.status !== 'failed' || busy) return;
-    const operationDate = selectedDateRef.current || selected.digestDate;
-    const operationId = ++operationEpoch.current;
-    activeController.current?.abort();
+    if (!selected || selected.status !== 'failed' || activeWriteId.current !== null) return;
+    const operationDate = selected.digestDate;
+    readEpoch.current += 1;
+    readController.current?.abort();
+    const operationId = ++writeEpoch.current;
+    activeWriteId.current = operationId;
     const controller = new AbortController();
-    activeController.current = controller;
+    writeController.current = controller;
     setBusyOperationId(operationId);
     setError('');
     try {
       const result = await client.retryDigest(selected.id, { signal: controller.signal });
       if (
-        controller.signal.aborted
-        || operationId !== operationEpoch.current
+        !mounted.current
+        || operationId !== activeWriteId.current
         || selectedDateRef.current !== operationDate
       ) return;
       if (!result.success) {
@@ -142,15 +168,20 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
         return;
       }
       if (result.digest.digestDate !== operationDate) return;
-      setDigests((current) => current.map((item) => item.id === result.digest.id ? result.digest : item));
+      setDigests((current) => current
+        .filter((item) => item.digestDate === operationDate)
+        .map((item) => item.id === result.digest.id ? result.digest : item));
       setState('ready');
     } catch (operationError) {
       if (!(operationError instanceof DOMException && operationError.name === 'AbortError')) {
-        if (operationId === operationEpoch.current) setError('每日总结重试失败，请稍后再试');
+        if (mounted.current && operationId === activeWriteId.current) setError('每日总结重试失败，请稍后再试');
       }
     } finally {
-      if (operationId === operationEpoch.current) activeController.current = null;
-      setBusyOperationId((current) => current === operationId ? null : current);
+      if (operationId === activeWriteId.current) {
+        activeWriteId.current = null;
+        writeController.current = null;
+        if (mounted.current) setBusyOperationId((current) => current === operationId ? null : current);
+      }
     }
   };
 
@@ -166,6 +197,7 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
             type="date"
             value={selectedDate}
             onChange={(event) => changeSelectedDate(event.target.value)}
+            disabled={busy}
             className="h-8 rounded-md border border-input bg-background px-2 text-sm text-foreground"
           />
         </label>
@@ -174,11 +206,11 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
           value={selected?.id ?? ''}
           onChange={(event) => setSelectedId(event.target.value)}
           className="h-8 rounded-md border border-input bg-background px-2 text-sm"
-          disabled={!digests.length}
+          disabled={!digests.length || busy}
         >
           {digests.map((item) => <option key={item.id} value={item.id}>修订 {item.revision}</option>)}
         </select>
-        <Button type="button" size="icon-sm" variant="ghost" className="size-8 rounded-md" aria-label="刷新总结状态" title="刷新总结状态" disabled={state === 'loading'} onClick={() => void load(selectedDate || undefined)}>
+        <Button type="button" size="icon-sm" variant="ghost" className="size-8 rounded-md" aria-label="刷新总结状态" title="刷新总结状态" disabled={state === 'loading' || busy} onClick={() => void load(selectedDate || undefined)}>
           <RotateCcw className="size-4" />
         </Button>
         <Button type="button" size="sm" variant="outline" className="rounded-md" disabled={!selectedDate || busy} onClick={() => void createRevision()}>
@@ -192,7 +224,7 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
         {state === 'error' && (
           <div role="alert" className="space-y-3">
             <p className="text-sm text-destructive">{error || '每日总结加载失败'}</p>
-            <Button type="button" size="sm" variant="outline" onClick={() => void load(selectedDate || undefined)}>重新加载</Button>
+            <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void load(selectedDate || undefined)}>重新加载</Button>
           </div>
         )}
         {state === 'ready' && !selected && (
@@ -231,7 +263,7 @@ export function NoteDigestView({ client, onOpenNote }: NoteDigestViewProps) {
               <div className="mt-3 space-y-3">
                 {selected.sourceSnapshot.notes.map((note) => (
                   <div key={`${note.id}:${note.version}`} className="border-l-2 border-border pl-3">
-                    <button type="button" className="inline-flex items-center gap-1 text-left text-sm font-medium text-blue-700 hover:underline dark:text-blue-300" onClick={() => onOpenNote(note.id)}>
+                    <button type="button" disabled={busy} className="inline-flex items-center gap-1 text-left text-sm font-medium text-blue-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-blue-300" onClick={() => onOpenNote(note.id)}>
                       {note.title || '未命名笔记'} · 版本 {note.version}<ExternalLink className="size-3.5" />
                     </button>
                     {note.attachments.map((attachment) => (

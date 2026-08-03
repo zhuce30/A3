@@ -152,84 +152,6 @@ describe('personal note daily digest view', () => {
     expect(host.querySelector('[aria-label="打开笔记 AI"]')).toBeNull();
   });
 
-  it('ignores a late manual response after the selected date changes', async () => {
-    const manual = deferred<{ success: true; digest: NoteDigest }>();
-    const client = clientStub({
-      createManualDigest: vi.fn().mockReturnValue(manual.promise),
-      listDigests: vi.fn(async (date?: string) => ({
-        success: true as const,
-        digests: date === '2026-08-03' ? [{ ...digests[1], id: 'new-date', digestDate: '2026-08-03' }] : digests,
-      })),
-    });
-    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
-    await vi.waitFor(() => expect(host.textContent).toContain('修订 2'));
-    const create = [...host.querySelectorAll('button')].find((button) => button.textContent?.includes('生成新修订'))!;
-    act(() => create.click());
-    changeDate(host, '2026-08-03');
-    await vi.waitFor(() => expect(host.textContent).toContain('2026-08-03'));
-
-    await act(async () => manual.resolve({ success: true, digest: { ...digests[0], id: 'late-old-date' } }));
-
-    expect(host.textContent).not.toContain('摘要模型暂时不可用');
-    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('new-date');
-  });
-
-  it('an old operation cannot clear busy state owned by a newer operation', async () => {
-    const oldManual = deferred<{ success: true; digest: NoteDigest }>();
-    const newManual = deferred<{ success: true; digest: NoteDigest }>();
-    const createManualDigest = vi.fn()
-      .mockReturnValueOnce(oldManual.promise)
-      .mockReturnValueOnce(newManual.promise);
-    const client = clientStub({ createManualDigest });
-    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
-    await vi.waitFor(() => expect(host.textContent).toContain('修订 2'));
-    const create = [...host.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.includes('生成新修订'))!;
-    act(() => create.click());
-    changeDate(host, '2026-08-03');
-    await vi.waitFor(() => expect(create.disabled).toBe(false));
-    act(() => create.click());
-    expect(create.disabled).toBe(true);
-
-    await act(async () => oldManual.resolve({ success: true, digest: { ...digests[0], id: 'old-operation' } }));
-    expect(create.disabled).toBe(true);
-
-    await act(async () => newManual.resolve({ success: true, digest: { ...digests[1], id: 'new-operation', digestDate: '2026-08-03' } }));
-    expect(create.disabled).toBe(false);
-    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('new-operation');
-  });
-
-  it('ignores late retry and list responses from an older date', async () => {
-    const oldRetry = deferred<{ success: true; digest: NoteDigest }>();
-    const oldList = deferred<{ success: true; digests: NoteDigest[] }>();
-    const listDigests = vi.fn((date?: string) => {
-      if (date === '2026-08-01') return oldList.promise;
-      if (date === '2026-08-03') {
-        return Promise.resolve({ success: true as const, digests: [{ ...digests[1], id: 'latest-date', digestDate: '2026-08-03' }] });
-      }
-      return Promise.resolve({ success: true as const, digests });
-    });
-    const client = clientStub({
-      listDigests,
-      retryDigest: vi.fn().mockReturnValue(oldRetry.promise),
-    });
-    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
-    await vi.waitFor(() => expect(host.textContent).toContain('摘要模型暂时不可用'));
-    const retry = [...host.querySelectorAll('button')].find((button) => button.textContent?.includes('重试失败修订'))!;
-    act(() => retry.click());
-    changeDate(host, '2026-08-01');
-    changeDate(host, '2026-08-03');
-    await vi.waitFor(() => expect((host.querySelector('select') as HTMLSelectElement).value).toBe('latest-date'));
-
-    await act(async () => {
-      oldRetry.resolve({ success: true, digest: { ...digests[0], id: 'late-retry' } });
-      oldList.resolve({ success: true, digests: [{ ...digests[0], id: 'late-list', digestDate: '2026-08-01' }] });
-    });
-
-    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('latest-date');
-    expect(host.textContent).toContain('2026-08-03');
-    expect(host.textContent).not.toContain('摘要模型暂时不可用');
-  });
-
   it('ignores a stale refresh that resolves after a completed manual revision', async () => {
     const staleRefresh = deferred<{ success: true; digests: NoteDigest[] }>();
     const created = { ...digests[1], id: 'digest-3', revision: 3, generatedBy: 'manual' as const };
@@ -250,7 +172,10 @@ describe('personal note daily digest view', () => {
     await act(async () => create.click());
     expect((host.querySelector('select') as HTMLSelectElement).value).toBe('digest-3');
 
-    await act(async () => staleRefresh.resolve({ success: true, digests }));
+    await act(async () => staleRefresh.resolve({
+      success: true,
+      digests: [{ ...digests[0], id: 'mixed-old-create', digestDate: '2026-08-01' }, ...digests],
+    }));
 
     expect((host.querySelector('select') as HTMLSelectElement).value).toBe('digest-3');
     expect(host.textContent).toContain('修订 3');
@@ -278,7 +203,10 @@ describe('personal note daily digest view', () => {
     });
     expect(host.textContent).toContain('总结已排队');
 
-    await act(async () => staleRefresh.resolve({ success: true, digests }));
+    await act(async () => staleRefresh.resolve({
+      success: true,
+      digests: [{ ...digests[0], id: 'mixed-old-retry', digestDate: '2026-08-01' }, ...digests],
+    }));
 
     expect(host.textContent).toContain('总结已排队');
     expect(host.textContent).not.toContain('摘要模型暂时不可用');
@@ -309,5 +237,117 @@ describe('personal note daily digest view', () => {
 
     expect((host.querySelector('select') as HTMLSelectElement).value).toBe('latest-refresh');
     expect(host.textContent).toContain('修订 4');
+  });
+
+  it('selects the latest date and excludes mixed-date revisions from the initial payload', async () => {
+    const mixed = [
+      { ...digests[0], id: 'older-failed', digestDate: '2026-08-01', revision: 9 },
+      { ...digests[1], id: 'latest-one', digestDate: '2026-08-03', revision: 1 },
+      { ...digests[0], id: 'latest-two', digestDate: '2026-08-03', revision: 2 },
+      { ...digests[1], id: 'middle', digestDate: '2026-08-02', revision: 7 },
+    ];
+    const client = clientStub({
+      listDigests: vi.fn().mockResolvedValue({ success: true, digests: mixed }),
+    });
+    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
+    await vi.waitFor(() => expect((host.querySelector('input[type="date"]') as HTMLInputElement).value).toBe('2026-08-03'));
+
+    const options = [...host.querySelectorAll<HTMLOptionElement>('select option')];
+    expect(options.map((option) => option.value)).toEqual(['latest-one', 'latest-two']);
+  });
+
+  it('filters an explicit old date and retries its failed digest', async () => {
+    const oldFailed = { ...digests[0], id: 'old-failed', digestDate: '2026-08-01', revision: 5 };
+    const newer = { ...digests[1], id: 'newer', digestDate: '2026-08-03', revision: 1 };
+    const client = clientStub({
+      listDigests: vi.fn().mockResolvedValue({ success: true, digests: [newer, oldFailed] }),
+      retryDigest: vi.fn().mockResolvedValue({ success: true, digest: { ...oldFailed, status: 'queued' } }),
+    });
+    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
+    await vi.waitFor(() => expect((host.querySelector('input[type="date"]') as HTMLInputElement).value).toBe('2026-08-03'));
+    changeDate(host, '2026-08-01');
+    await vi.waitFor(() => expect((host.querySelector('select') as HTMLSelectElement).value).toBe('old-failed'));
+    expect(host.querySelectorAll('select option')).toHaveLength(1);
+
+    const retry = host.querySelector<HTMLButtonElement>('article [role="alert"] button')!;
+    await act(async () => retry.click());
+
+    expect(client.retryDigest).toHaveBeenCalledWith('old-failed', { signal: expect.any(AbortSignal) });
+    expect((host.querySelector('input[type="date"]') as HTMLInputElement).value).toBe('2026-08-01');
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('old-failed');
+    expect(host.querySelector('article [role="alert"]')).toBeNull();
+  });
+
+  it('blocks reads, date changes, navigation and duplicate create until create settles', async () => {
+    const pending = deferred<{ success: true; digest: NoteDigest }>();
+    const openNote = vi.fn();
+    const client = clientStub({ createManualDigest: vi.fn().mockReturnValue(pending.promise) });
+    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={openNote} />));
+    await vi.waitFor(() => expect(host.querySelector('article')).not.toBeNull());
+    const dateInput = host.querySelector<HTMLInputElement>('input[type="date"]')!;
+    const select = host.querySelector<HTMLSelectElement>('select')!;
+    const [refresh, create] = [...host.querySelectorAll<HTMLButtonElement>('header button')];
+    const retry = host.querySelector<HTMLButtonElement>('article [role="alert"] button')!;
+    const source = host.querySelector<HTMLButtonElement>('article section button')!;
+
+    act(() => create.click());
+    expect([dateInput.disabled, select.disabled, refresh.disabled, create.disabled, retry.disabled, source.disabled]).toEqual([
+      true, true, true, true, true, true,
+    ]);
+    act(() => {
+      create.click();
+      retry.click();
+      refresh.click();
+      source.click();
+    });
+    changeDate(host, '2026-08-03');
+    expect(client.createManualDigest).toHaveBeenCalledTimes(1);
+    expect(client.retryDigest).not.toHaveBeenCalled();
+    expect(client.listDigests).toHaveBeenCalledTimes(1);
+    expect(openNote).not.toHaveBeenCalled();
+    expect(dateInput.value).toBe('2026-08-02');
+    expect(create.disabled).toBe(true);
+
+    await act(async () => pending.resolve({
+      success: true,
+      digest: { ...digests[1], id: 'created-after-wait', revision: 3, generatedBy: 'manual' },
+    }));
+    expect(dateInput.disabled).toBe(false);
+    expect(select.disabled).toBe(false);
+    expect(refresh.disabled).toBe(false);
+    expect(create.disabled).toBe(false);
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe('created-after-wait');
+  });
+
+  it('blocks reads, date changes and duplicate retry until retry settles', async () => {
+    const pending = deferred<{ success: true; digest: NoteDigest }>();
+    const client = clientStub({ retryDigest: vi.fn().mockReturnValue(pending.promise) });
+    await act(async () => root.render(<NoteDigestView client={client} onOpenNote={vi.fn()} />));
+    await vi.waitFor(() => expect(host.querySelector('article [role="alert"]')).not.toBeNull());
+    const dateInput = host.querySelector<HTMLInputElement>('input[type="date"]')!;
+    const [refresh, create] = [...host.querySelectorAll<HTMLButtonElement>('header button')];
+    const retry = host.querySelector<HTMLButtonElement>('article [role="alert"] button')!;
+
+    act(() => retry.click());
+    expect(retry.disabled).toBe(true);
+    expect(dateInput.disabled).toBe(true);
+    expect(refresh.disabled).toBe(true);
+    expect(create.disabled).toBe(true);
+    act(() => {
+      retry.click();
+      refresh.click();
+      create.click();
+    });
+    changeDate(host, '2026-08-03');
+    expect(client.retryDigest).toHaveBeenCalledTimes(1);
+    expect(client.createManualDigest).not.toHaveBeenCalled();
+    expect(client.listDigests).toHaveBeenCalledTimes(1);
+    expect(dateInput.value).toBe('2026-08-02');
+
+    await act(async () => pending.resolve({ success: true, digest: { ...digests[0], status: 'queued' } }));
+    expect(dateInput.disabled).toBe(false);
+    expect(refresh.disabled).toBe(false);
+    expect(create.disabled).toBe(false);
+    expect(host.querySelector('article [role="alert"]')).toBeNull();
   });
 });
