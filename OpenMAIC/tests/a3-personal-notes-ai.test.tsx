@@ -197,7 +197,7 @@ describe('personal note AI drawer', () => {
     await vi.waitFor(() => expect(client.createAiSession).toHaveBeenCalledWith({
       title: '解释死锁条件',
       scope: { type: 'note', noteIds: ['note-1'] },
-    }));
+    }, { signal: expect.any(AbortSignal) }));
   });
 
   it('requires an explicit selected-notes scope and sends only checked notes', async () => {
@@ -214,7 +214,7 @@ describe('personal note AI drawer', () => {
 
     await vi.waitFor(() => expect(client.createAiSession).toHaveBeenCalledWith(expect.objectContaining({
       scope: { type: 'selection', noteIds: ['note-2'] },
-    })));
+    }), { signal: expect.any(AbortSignal) }));
   });
 
   it('jumps from a citation to the cited note section', () => {
@@ -267,8 +267,123 @@ describe('personal note AI drawer', () => {
 
     await vi.waitFor(() => expect(submitAiChat).toHaveBeenCalledWith(expect.objectContaining({
       message: expect.stringContaining('只提供建议，不要直接修改笔记'),
-    })));
+    }), { signal: expect.any(AbortSignal) }));
     expect(saveNote).not.toHaveBeenCalled();
+  });
+
+  it('resumes only the latest persisted pending assistant message after reload', async () => {
+    const watchAiMessage = vi.fn(() => vi.fn());
+    const pending = assistantMessage({ id: 'pending-1', status: 'queued' });
+    const latestPending = assistantMessage({ id: 'pending-2', status: 'streaming' });
+    const client = clientStub({
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '待恢复', scopeType: 'note', scopeSnapshot: { type: 'note', notes: [{ id: 'note-1' }] }, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [pending, latestPending] }),
+      watchAiMessage,
+    });
+    const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+
+    await vi.waitFor(() => expect(container.textContent).toContain('正在生成回答'));
+    expect(watchAiMessage).toHaveBeenCalledTimes(1);
+    expect(watchAiMessage).toHaveBeenCalledWith('pending-2', expect.anything());
+  });
+
+  it('fences a delayed session creation after selected-note scope changes', async () => {
+    const created = deferred<ReturnType<typeof sessionSuccess>>();
+    const createAiSession = vi.fn((_input: unknown, _options: { signal: AbortSignal }) => created.promise);
+    const submitAiChat = vi.fn();
+    const watchAiMessage = vi.fn();
+    const second = note('note-2', '计算机网络');
+    const client = clientStub({ createAiSession, submitAiChat, watchAiMessage });
+    const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note(), second]} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+    change(container.querySelector<HTMLTextAreaElement>('[aria-label="向笔记 AI 提问"]')!, '旧范围问题');
+    click('发送');
+    await vi.waitFor(() => expect(createAiSession).toHaveBeenCalledTimes(1));
+    change(container.querySelector<HTMLSelectElement>('[aria-label="AI 作用范围"]')!, 'selection');
+    act(() => container.querySelector<HTMLInputElement>('input[aria-label="选择计算机网络"]')!.click());
+    await act(async () => created.resolve(sessionSuccess('old-session')));
+
+    expect(createAiSession.mock.calls[0]?.[1]?.signal.aborted).toBe(true);
+    expect(submitAiChat).not.toHaveBeenCalled();
+    expect(watchAiMessage).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('旧范围问题');
+  });
+
+  it('fences a delayed chat response after unmount without creating an EventSource', async () => {
+    const submitted = deferred<{ success: true; message: NoteAiMessage; idempotent: false }>();
+    const submitAiChat = vi.fn((_input: unknown, _options: { signal: AbortSignal }) => submitted.promise);
+    const watchAiMessage = vi.fn();
+    const client = clientStub({ submitAiChat, watchAiMessage });
+    const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+    change(container.querySelector<HTMLTextAreaElement>('[aria-label="向笔记 AI 提问"]')!, '卸载前问题');
+    click('发送');
+    await vi.waitFor(() => expect(submitAiChat).toHaveBeenCalledTimes(1));
+    act(() => root!.unmount());
+    root = null;
+    await act(async () => submitted.resolve({ success: true, message: assistantMessage(), idempotent: false }));
+
+    expect(submitAiChat.mock.calls[0]?.[1]?.signal.aborted).toBe(true);
+    expect(watchAiMessage).not.toHaveBeenCalled();
+  });
+
+  it('invalidates old-scope messages and stream when the current note changes', async () => {
+    const stopWatching = vi.fn();
+    const secondMessages = deferred<{ success: true; messages: NoteAiMessage[] }>();
+    const client = clientStub({
+      listAiSessions: vi.fn()
+        .mockResolvedValueOnce({ success: true, sessions: [{ id: 'session-1', title: '第一篇', scopeType: 'note', scopeSnapshot: { type: 'note', notes: [{ id: 'note-1' }] }, status: 'active', createdAt: now, updatedAt: now }] })
+        .mockResolvedValueOnce({ success: true, sessions: [{ id: 'session-2', title: '第二篇', scopeType: 'note', scopeSnapshot: { type: 'note', notes: [{ id: 'note-2' }] }, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn()
+        .mockResolvedValueOnce({ success: true, messages: [assistantMessage({ id: 'pending', status: 'streaming', content: '' }), assistantMessage({ id: 'old-answer', status: 'succeeded', content: '第一篇旧回答' })] })
+        .mockImplementationOnce(() => secondMessages.promise),
+      watchAiMessage: vi.fn(() => stopWatching),
+    });
+    const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note(), note('note-2', '第二篇')]} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.textContent).toContain('第一篇旧回答'));
+
+    act(() => root!.render(<NoteAiDrawer client={client} currentNote={note('note-2', '第二篇')} notes={[note(), note('note-2', '第二篇')]} isMobile={false} onCitationNavigate={vi.fn()} />));
+    await vi.waitFor(() => expect(client.listAiMessages).toHaveBeenCalledWith('session-2'));
+
+    expect(container.textContent).not.toContain('第一篇旧回答');
+    expect(stopWatching).toHaveBeenCalledTimes(1);
+    await act(async () => secondMessages.resolve({ success: true, messages: [] }));
+  });
+
+  it('renders attachment citations without a note-body jump action', async () => {
+    const navigate = vi.fn();
+    const citation = { noteId: 'note-1', attachmentId: 'attachment-1', title: '讲义.pdf', location: '附件第 2 段', paragraphIndex: 1, charStart: 4, charEnd: 8, snippet: '附件内容' };
+    const client = clientStub({
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '附件', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ status: 'succeeded', content: '来自附件', citations: [citation] })] }),
+    });
+    const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={navigate} />);
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.textContent).toContain('讲义.pdf'));
+
+    expect(container.querySelector('button[aria-label="跳转到讲义.pdf附件第 2 段"]')).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('makes New conversation clear history without creating until the next send', async () => {
+    const createAiSession = vi.fn().mockResolvedValue(sessionSuccess('session-2'));
+    const client = clientStub({
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '旧会话', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ status: 'succeeded', content: '旧会话回答' })] }),
+      createAiSession,
+    });
+    const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.textContent).toContain('旧会话回答'));
+    change(container.querySelector<HTMLSelectElement>('[aria-label="AI 会话"]')!, '');
+
+    expect(container.textContent).not.toContain('旧会话回答');
+    expect(createAiSession).not.toHaveBeenCalled();
+    change(container.querySelector<HTMLTextAreaElement>('[aria-label="向笔记 AI 提问"]')!, '新会话问题');
+    click('发送');
+    await vi.waitFor(() => expect(createAiSession).toHaveBeenCalledTimes(1));
   });
 
   it('maps document-wide citation offsets into the cited editor paragraph', async () => {
@@ -327,6 +442,23 @@ describe('personal note AI drawer', () => {
     expect(requests.filter((item) => item.method === 'POST' && item.url.endsWith('/assistant/chat/'))).toHaveLength(1);
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(container.textContent).not.toContain('正在恢复回答');
+  });
+
+  it('closes the actual EventSource on server stream-error without entering reconnect state', () => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const onDisconnect = vi.fn();
+    const onError = vi.fn();
+    const client = new NotesClient({ fetch: vi.fn() });
+    client.watchAiMessage('persisted-message', { onMessage: vi.fn(), onDisconnect, onError });
+    const source = FakeEventSource.instances[0]!;
+
+    source.emit('stream-error', { success: false, error: '消息不存在' });
+    source.disconnect();
+
+    expect(source.closed).toBe(true);
+    expect(onError).toHaveBeenCalledWith('消息不存在');
+    expect(onDisconnect).not.toHaveBeenCalled();
+    expect(FakeEventSource.reconnectUrls).toEqual([]);
   });
 });
 
@@ -425,6 +557,7 @@ class FakeEventSource {
   static reconnectUrls: string[] = [];
   readonly url: string;
   onerror: ((event: Event) => void) | null = null;
+  closed = false;
   private listeners = new Map<string, Set<(event: Event) => void>>();
 
   constructor(url: string | URL) {
@@ -440,6 +573,7 @@ class FakeEventSource {
   }
 
   disconnect() {
+    if (this.closed) return;
     this.onerror?.(new Event('error'));
     FakeEventSource.reconnectUrls.push(this.url);
   }
@@ -449,7 +583,9 @@ class FakeEventSource {
     this.listeners.get(type)?.forEach((listener) => listener(event));
   }
 
-  close() {}
+  close() {
+    this.closed = true;
+  }
 }
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -478,4 +614,14 @@ async function readToEnd(reader: ReadableStreamDefaultReader<Uint8Array>) {
     if (result.done) return output;
     output += new TextDecoder().decode(result.value);
   }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}
+
+function sessionSuccess(id = 'session-1') {
+  return { success: true as const, session: { id, title: '会话', scopeType: 'note' as const, scopeSnapshot: {}, status: 'active' as const, createdAt: now, updatedAt: now } };
 }

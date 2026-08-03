@@ -165,8 +165,8 @@ export class NotesClient {
     return this.json<{ sessions: NoteAiSession[] }>('GET', 'assistant/sessions/');
   }
 
-  createAiSession(input: { title: string; scope: NoteAiScopeInput }) {
-    return this.json<{ session: NoteAiSession }>('POST', 'assistant/sessions/', input);
+  createAiSession(input: { title: string; scope: NoteAiScopeInput }, options: { signal?: AbortSignal } = {}) {
+    return this.json<{ session: NoteAiSession }>('POST', 'assistant/sessions/', input, options);
   }
 
   listAiMessages(sessionId: string, options: { signal?: AbortSignal } = {}) {
@@ -178,8 +178,11 @@ export class NotesClient {
     );
   }
 
-  submitAiChat(input: { sessionId: string; clientRequestId: string; message: string; includeCourseEvidence?: boolean }) {
-    return this.json<{ message: NoteAiMessage; idempotent: boolean }>('POST', 'assistant/chat/', input);
+  submitAiChat(
+    input: { sessionId: string; clientRequestId: string; message: string; includeCourseEvidence?: boolean },
+    options: { signal?: AbortSignal } = {},
+  ) {
+    return this.json<{ message: NoteAiMessage; idempotent: boolean }>('POST', 'assistant/chat/', input, options);
   }
 
   watchAiMessage(messageId: string, handlers: AiMessageWatchHandlers) {
@@ -192,6 +195,10 @@ export class NotesClient {
         const payload = JSON.parse((event as MessageEvent<string>).data) as { message?: NoteAiMessage; error?: string };
         if (payload.message) handlers.onMessage(payload.message);
         if (event.type === 'final') {
+          settled = true;
+          source.close();
+        }
+        if (event.type === 'stream-error') {
           settled = true;
           source.close();
         }
