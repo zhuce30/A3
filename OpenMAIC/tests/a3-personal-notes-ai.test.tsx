@@ -532,6 +532,82 @@ describe('personal note AI drawer', () => {
     expect(document.body.textContent).not.toContain('写入操作系统复习');
   });
 
+  it('discards a delayed confirm after the target note changes without applying the old note', async () => {
+    const confirm = deferred<{ success: true; note: NoteDetail; idempotent: false }>();
+    const onWritebackApplied = vi.fn();
+    const sessions = [{ id: 'session-1', title: '建议', scopeType: 'note' as const, scopeSnapshot: {}, status: 'active' as const, createdAt: now, updatedAt: now }];
+    const client = clientStub({
+      createWritebackPreview: vi.fn().mockResolvedValue({ success: true, preview: writebackPreview() }),
+      confirmWritebackPreview: vi.fn().mockReturnValue(confirm.promise),
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ status: 'succeeded', content: '建议正文' })] }),
+    });
+    const notes = [note(), note('note-2', '第二篇')];
+    mount(<NoteAiDrawer client={client} currentNote={notes[0]!} notes={notes} isMobile={false} onCitationNavigate={vi.fn()} onWritebackApplied={onWritebackApplied} />);
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(document.body.textContent).toContain('建议正文'));
+    click('生成写回建议');
+    await vi.waitFor(() => expect(document.body.textContent).toContain('确认写入'));
+    click('确认写入笔记正文');
+    act(() => root!.render(<NoteAiDrawer client={client} currentNote={notes[1]!} notes={notes} isMobile={false} onCitationNavigate={vi.fn()} onWritebackApplied={onWritebackApplied} />));
+    await act(async () => confirm.resolve({ success: true, note: { ...notes[0]!, version: 4 }, idempotent: false }));
+
+    expect(onWritebackApplied).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain('写入操作系统复习');
+  });
+
+  it('discards a delayed abandon after the scope changes', async () => {
+    const abandon = deferred<{ success: true; preview: NoteWritebackPreview; idempotent: false }>();
+    const client = clientStub({
+      createWritebackPreview: vi.fn().mockResolvedValue({ success: true, preview: writebackPreview() }),
+      abandonWritebackPreview: vi.fn().mockReturnValue(abandon.promise),
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '建议', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ status: 'succeeded', content: '建议正文' })] }),
+    });
+    const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(document.body.textContent).toContain('建议正文'));
+    click('生成写回建议');
+    await vi.waitFor(() => expect(document.body.textContent).toContain('确认写入'));
+    click('放弃写回建议');
+    change(container.querySelector<HTMLSelectElement>('[aria-label="AI 作用范围"]')!, 'selection');
+    expect(document.body.textContent).not.toContain('写入操作系统复习');
+    await act(async () => abandon.resolve({ success: true, preview: writebackPreview({ status: 'abandoned' }), idempotent: false }));
+    change(container.querySelector<HTMLSelectElement>('[aria-label="AI 作用范围"]')!, 'note');
+    expect(document.body.textContent).toContain('写入操作系统复习');
+  });
+
+  it('releases stale preview ownership without an old response clearing a newer busy state', async () => {
+    const oldPreview = deferred<{ success: true; preview: NoteWritebackPreview }>();
+    const newPreview = deferred<{ success: true; preview: NoteWritebackPreview }>();
+    const createWritebackPreview = vi.fn()
+      .mockReturnValueOnce(oldPreview.promise)
+      .mockReturnValueOnce(newPreview.promise);
+    const client = clientStub({
+      createWritebackPreview,
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '建议', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ status: 'succeeded', content: '建议正文' })] }),
+    });
+    const notes = [note(), note('note-2', '第二篇')];
+    mount(<NoteAiDrawer client={client} currentNote={notes[0]!} notes={notes} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(document.body.textContent).toContain('建议正文'));
+    click('生成写回建议');
+    act(() => root!.render(<NoteAiDrawer client={client} currentNote={notes[1]!} notes={notes} isMobile={false} onCitationNavigate={vi.fn()} />));
+    await vi.waitFor(() => {
+      const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.textContent?.includes('生成写回建议'));
+      expect(button?.disabled).toBe(false);
+    });
+    click('生成写回建议');
+    expect(createWritebackPreview).toHaveBeenCalledTimes(2);
+
+    await act(async () => oldPreview.resolve({ success: true, preview: writebackPreview() }));
+    const busyButton = [...document.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.textContent?.includes('生成写回建议'));
+    expect(busyButton?.disabled).toBe(true);
+    await act(async () => newPreview.resolve({ success: true, preview: writebackPreview({ targetNote: { id: 'note-2', title: '第二篇' } }) }));
+    await vi.waitFor(() => expect(document.body.textContent).toContain('写入第二篇'));
+  });
+
   it('resumes only the latest persisted pending assistant message after reload', async () => {
     const watchAiMessage = vi.fn(() => vi.fn());
     const pending = assistantMessage({ id: 'pending-1', status: 'queued' });

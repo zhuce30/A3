@@ -20,6 +20,14 @@ interface NoteAiDrawerProps {
 
 type ScopeMode = 'note' | 'selection';
 
+interface WritebackOperation {
+  id: number;
+  generation: number;
+  scopeKey: string;
+  targetNoteId: string;
+  previewId?: string;
+}
+
 export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationNavigate, onWritebackApplied }: NoteAiDrawerProps) {
   const [open, setOpen] = useState(false);
   const [scopeMode, setScopeMode] = useState<ScopeMode>('note');
@@ -34,22 +42,36 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
   const [error, setError] = useState('');
   const [disconnectedMessageId, setDisconnectedMessageId] = useState('');
   const [writebackPreview, setWritebackPreview] = useState<NoteWritebackPreview | null>(null);
-  const [writebackBusy, setWritebackBusy] = useState(false);
+  const [writebackPreviewScopeKey, setWritebackPreviewScopeKey] = useState('');
+  const [writebackBusyOwner, setWritebackBusyOwner] = useState<WritebackOperation | null>(null);
   const [writebackError, setWritebackError] = useState('');
   const [writebackStale, setWritebackStale] = useState(false);
   const streamCleanup = useRef<(() => void) | null>(null);
   const watchedMessageId = useRef('');
   const operationAbort = useRef<AbortController | null>(null);
   const requestGeneration = useRef(0);
+  const writebackOperationCounter = useRef(0);
+  const writebackOperation = useRef<WritebackOperation | null>(null);
+  const mounted = useRef(true);
 
   const scope = useMemo<NoteAiScopeInput | null>(() => {
     if (scopeMode === 'note') return currentNote ? { type: 'note', noteIds: [currentNote.id] } : null;
     return selectedNoteIds.length ? { type: 'selection', noteIds: selectedNoteIds } : null;
   }, [currentNote, scopeMode, selectedNoteIds]);
   const scopeKey = scope ? JSON.stringify(scope) : '';
+  const writebackContext = useRef({ scopeKey, targetNoteId: currentNote?.id ?? '' });
+  writebackContext.current = { scopeKey, targetNoteId: currentNote?.id ?? '' };
+  const writebackPreviewRef = useRef(writebackPreview);
+  writebackPreviewRef.current = writebackPreview;
   const scopedActiveSession = activeScopeKey === scopeKey ? activeSession : null;
   const scopedMessages = activeScopeKey === scopeKey ? messages : [];
   const sending = sendState.scopeKey === scopeKey && sendState.busy;
+  const writebackBusy = Boolean(
+    writebackBusyOwner
+    && writebackBusyOwner.generation === requestGeneration.current
+    && writebackBusyOwner.scopeKey === scopeKey
+    && writebackBusyOwner.targetNoteId === currentNote?.id,
+  );
   const scopedSessions = sessions.filter((session) => {
     const sessionScopeKey = scopeKeyForSnapshot(session);
     return !sessionScopeKey || sessionScopeKey === scopeKey;
@@ -67,6 +89,10 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     watchedMessageId.current = '';
   }, []);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   useEffect(() => () => invalidateAsync(), [invalidateAsync, scopeKey]);
 
   useEffect(() => {
@@ -268,51 +294,85 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     setOpen(false);
   };
 
+  const beginWritebackOperation = (targetNoteId: string, previewId?: string) => {
+    const operation: WritebackOperation = {
+      id: writebackOperationCounter.current + 1,
+      generation: requestGeneration.current,
+      scopeKey,
+      targetNoteId,
+      previewId,
+    };
+    writebackOperationCounter.current = operation.id;
+    writebackOperation.current = operation;
+    setWritebackBusyOwner(operation);
+    return operation;
+  };
+
+  const settleWritebackOperation = (operation: WritebackOperation) => {
+    if (writebackOperation.current?.id !== operation.id) return false;
+    writebackOperation.current = null;
+    if (mounted.current) {
+      setWritebackBusyOwner((current) => current?.id === operation.id ? null : current);
+    }
+    const context = writebackContext.current;
+    return (
+      mounted.current
+      && operation.generation === requestGeneration.current
+      && operation.scopeKey === context.scopeKey
+      && operation.targetNoteId === context.targetNoteId
+      && (!operation.previewId || (
+        writebackPreviewRef.current?.id === operation.previewId
+        && writebackPreviewRef.current.targetNote.id === operation.targetNoteId
+      ))
+    );
+  };
+
   const generateWritebackPreview = async () => {
     if (!currentNote || !writebackSource || writebackBusy) return;
-    const generation = requestGeneration.current;
-    setWritebackBusy(true);
+    const operation = beginWritebackOperation(currentNote.id);
     setWritebackError('');
     setWritebackStale(false);
     const result = await client.createWritebackPreview({
       targetNoteId: currentNote.id,
       messageId: writebackSource.id,
     });
-    if (generation !== requestGeneration.current) return;
-    setWritebackBusy(false);
+    if (!settleWritebackOperation(operation)) return;
     if (!result.success) {
       setWritebackError(result.error);
       return;
     }
     setWritebackPreview(result.preview);
+    setWritebackPreviewScopeKey(operation.scopeKey);
   };
 
   const confirmWriteback = async () => {
     if (!writebackPreview || writebackBusy) return;
-    setWritebackBusy(true);
+    const operation = beginWritebackOperation(writebackPreview.targetNote.id, writebackPreview.id);
     setWritebackError('');
     const result = await client.confirmWritebackPreview(writebackPreview.id);
-    setWritebackBusy(false);
+    if (!settleWritebackOperation(operation)) return;
     if (!result.success) {
       setWritebackError(result.status === 409 ? '正文已更新，请重新生成建议' : result.error);
       if (result.status === 409) setWritebackStale(true);
       return;
     }
     setWritebackPreview(null);
+    setWritebackPreviewScopeKey('');
     setWritebackStale(false);
     onWritebackApplied?.(result.note);
   };
 
   const abandonWriteback = async () => {
     if (!writebackPreview || writebackBusy) return;
-    setWritebackBusy(true);
+    const operation = beginWritebackOperation(writebackPreview.targetNote.id, writebackPreview.id);
     const result = await client.abandonWritebackPreview(writebackPreview.id);
-    setWritebackBusy(false);
+    if (!settleWritebackOperation(operation)) return;
     if (!result.success) {
       setWritebackError(result.error);
       return;
     }
     setWritebackPreview(null);
+    setWritebackPreviewScopeKey('');
     setWritebackError('');
   };
 
@@ -462,7 +522,7 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
         </div>
         {disconnectedMessageId && <p className="mt-3 text-xs text-amber-700" role="status">连接已中断，正在恢复回答...</p>}
         {error && <p className="mt-3 text-sm text-destructive" role="alert">{error}</p>}
-        {writebackPreview && writebackPreview.targetNote.id === currentNote?.id && (
+        {writebackPreview && writebackPreviewScopeKey === scopeKey && writebackPreview.targetNote.id === currentNote?.id && (
           <NoteWritebackPreviewPanel
             preview={writebackPreview}
             busy={writebackBusy}
