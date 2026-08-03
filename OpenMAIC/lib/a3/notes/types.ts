@@ -147,13 +147,36 @@ export interface NoteDigest {
   status: 'queued' | 'processing' | 'succeeded' | 'failed';
   title: string;
   contentMd: string;
-  sourceSnapshot: NoteMetadata;
+  sourceSnapshot: NoteDigestSnapshot;
   generatedBy: 'automatic' | 'manual';
   idempotencyKey: string;
   errorCode: string;
   errorMessage: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface NoteDigestSnapshotAttachment {
+  id: string;
+  parseVersion: number;
+  displayName: string;
+  extractedText?: string;
+}
+
+export interface NoteDigestSnapshotNote {
+  id: string;
+  version: number;
+  title: string;
+  contentText?: string;
+  lastEditedAt?: string;
+  attachments: NoteDigestSnapshotAttachment[];
+}
+
+export interface NoteDigestSnapshot {
+  schemaVersion?: number;
+  date?: string;
+  timezone?: 'Asia/Shanghai';
+  notes: NoteDigestSnapshotNote[];
 }
 
 export interface NoteMemory {

@@ -11,7 +11,7 @@ from django.db import close_old_connections, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from backend.apps.notes.models import NoteAiMessage, NoteAttachment, NoteExportJob
+from backend.apps.notes.models import Note, NoteAiMessage, NoteAttachment, NoteDailyDigest, NoteExportJob
 
 
 PARSE_HARD_LIMIT = max(11, int(settings.A3_NOTES_PARSE_TIMEOUT_SECONDS))
@@ -19,6 +19,168 @@ PARSE_SOFT_LIMIT = max(1, PARSE_HARD_LIMIT - 10)
 MAX_PARSE_ATTEMPTS = 3
 STALE_JOB_MINUTES = 30
 ASSISTANT_STALE_MINUTES = 10
+DIGEST_STALE_MINUTES = 30
+
+
+def _digest_lease_filter(digest_id, generation: int, lease_token: uuid.UUID):
+    return NoteDailyDigest.objects.filter(
+        id=digest_id,
+        status=NoteDailyDigest.Status.PROCESSING,
+        run_generation=generation,
+        run_lease_token=lease_token,
+    )
+
+
+@shared_task(name="notes.generate_daily_digest", acks_late=True, reject_on_worker_lost=True)
+def generate_daily_digest_task(digest_id: str, expected_generation: int, expected_lease_token: str) -> dict:
+    from backend.apps.notes.services import digest_service
+
+    close_old_connections()
+    try:
+        generation = int(expected_generation)
+        lease_token = uuid.UUID(str(expected_lease_token))
+    except (TypeError, ValueError, AttributeError):
+        return {"skipped": True}
+    now = timezone.now()
+    claimed = NoteDailyDigest.objects.filter(
+        id=digest_id,
+        status=NoteDailyDigest.Status.QUEUED,
+        run_generation=generation,
+        run_lease_token=lease_token,
+    ).update(
+        status=NoteDailyDigest.Status.PROCESSING,
+        run_started_at=now,
+        run_heartbeat_at=now,
+        error_code="",
+        error_message="",
+    )
+    if not claimed:
+        return {"skipped": True}
+    digest = _digest_lease_filter(digest_id, generation, lease_token).first()
+    if digest is None:
+        return {"skipped": True}
+    try:
+        content = digest_service.generate_digest_markdown(digest.source_snapshot).strip()
+        if not content:
+            raise ValueError("empty digest")
+        title = f"{digest.digest_date.month} 月 {digest.digest_date.day} 日笔记总结"
+        updated = _digest_lease_filter(digest.id, generation, lease_token).update(
+            status=NoteDailyDigest.Status.SUCCEEDED,
+            title=title,
+            content_md=content,
+            error_code="",
+            error_message="",
+            run_lease_token=None,
+            run_heartbeat_at=timezone.now(),
+        )
+        if not updated:
+            return {"skipped": True}
+        return {"status": "succeeded", "digestId": str(digest.id)}
+    except Exception as exc:
+        if isinstance(exc, digest_service.DigestServiceError):
+            code = exc.code
+            message = str(exc)
+        elif isinstance(exc, ValueError):
+            code = "digest_generation_empty"
+            message = "摘要生成结果为空，请重试"
+        else:
+            code = "digest_model_unavailable"
+            message = "摘要模型暂时不可用，请稍后重试"
+        updated = _digest_lease_filter(digest.id, generation, lease_token).update(
+            status=NoteDailyDigest.Status.FAILED,
+            title="",
+            content_md="",
+            error_code=code,
+            error_message=message,
+            run_lease_token=None,
+            run_heartbeat_at=timezone.now(),
+        )
+        if not updated:
+            return {"skipped": True}
+        return {"status": "failed", "digestId": str(digest.id)}
+
+
+def recover_stale_digest_jobs(*, now=None, stale_minutes: int = DIGEST_STALE_MINUTES) -> dict:
+    from backend.apps.notes.services import digest_service
+
+    current = now or timezone.now()
+    cutoff = current - timedelta(minutes=stale_minutes)
+    processing_ids = list(
+        NoteDailyDigest.objects.filter(
+            status=NoteDailyDigest.Status.PROCESSING,
+            run_heartbeat_at__lt=cutoff,
+        ).values_list("id", flat=True)[: int(settings.A3_NOTES_CLEANUP_BATCH_SIZE)]
+    )
+    remaining = max(0, int(settings.A3_NOTES_CLEANUP_BATCH_SIZE) - len(processing_ids))
+    queued_ids = list(
+        NoteDailyDigest.objects.filter(
+            status=NoteDailyDigest.Status.QUEUED,
+            updated_at__lt=cutoff,
+        ).values_list("id", flat=True)[:remaining]
+    )
+    recovered = 0
+    failed = 0
+    for digest_id in [*processing_ids, *queued_ids]:
+        digest = NoteDailyDigest.objects.filter(pk=digest_id).first()
+        if digest is None:
+            continue
+        if digest.status == NoteDailyDigest.Status.PROCESSING:
+            changed = NoteDailyDigest.objects.filter(
+                pk=digest.pk,
+                status=NoteDailyDigest.Status.PROCESSING,
+                run_heartbeat_at__lt=cutoff,
+            ).update(
+                status=NoteDailyDigest.Status.QUEUED,
+                run_lease_token=None,
+                run_started_at=None,
+                run_heartbeat_at=None,
+            )
+            if not changed:
+                continue
+            digest.refresh_from_db()
+        try:
+            digest_service.enqueue_digest(digest, force=True)
+            recovered += 1
+        except Exception:
+            failed += 1
+            NoteDailyDigest.objects.filter(pk=digest.pk, status=NoteDailyDigest.Status.QUEUED).update(
+                status=NoteDailyDigest.Status.FAILED,
+                error_code="digest_recovery_failed",
+                error_message="每日总结恢复失败，请手动重试",
+                run_lease_token=None,
+            )
+    return {"recovered": recovered, "failed": failed}
+
+
+@shared_task(name="notes.create_previous_day_digests")
+def create_previous_day_digests_task(*, now_iso: str | None = None) -> dict:
+    from backend.apps.notes.services import digest_service
+
+    if now_iso:
+        current = timezone.datetime.fromisoformat(now_iso)
+        if timezone.is_naive(current):
+            current = timezone.make_aware(current, digest_service.BEIJING)
+        current = current.astimezone(digest_service.BEIJING)
+    else:
+        current = timezone.localtime(timezone.now(), digest_service.BEIJING)
+    target_date = current.date() - timedelta(days=1)
+    start, end = digest_service.beijing_day_bounds(target_date)
+    user_ids = list(
+        Note.objects.filter(
+            deleted_at__isnull=True,
+            last_edited_at__gte=start,
+            last_edited_at__lt=end,
+        ).order_by().values_list("user_id", flat=True).distinct()
+    )
+    created = 0
+    user_model = Note._meta.get_field("user").remote_field.model
+    for user in user_model.objects.filter(pk__in=user_ids).iterator():
+        key = f"auto:{user.pk}:{target_date.isoformat()}"
+        existed = NoteDailyDigest.objects.filter(user=user, idempotency_key=key).exists()
+        digest_service.create_automatic_digest(user, target_date)
+        if not existed:
+            created += 1
+    return {"date": target_date.isoformat(), "created": created}
 
 
 def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
@@ -830,6 +992,7 @@ def cleanup_stale_jobs_task() -> dict:
     dispatch_recovered, dispatch_failed = _recover_stale_assistant_dispatches(
         now - timedelta(minutes=ASSISTANT_STALE_MINUTES), limit
     )
+    digest_recovery = recover_stale_digest_jobs(now=now, stale_minutes=DIGEST_STALE_MINUTES)
     return {
         "parseRecovered": parse_recovered,
         "parseFailed": parse_failed,
@@ -839,4 +1002,6 @@ def cleanup_stale_jobs_task() -> dict:
         "assistantFailed": assistant_failed,
         "assistantDispatchRecovered": dispatch_recovered,
         "assistantDispatchFailed": dispatch_failed,
+        "digestRecovered": digest_recovery["recovered"],
+        "digestFailed": digest_recovery["failed"],
     }

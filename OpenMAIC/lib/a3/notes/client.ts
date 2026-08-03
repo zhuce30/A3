@@ -6,6 +6,7 @@ import type {
   NoteAiSession,
   NoteContent,
   NoteDetail,
+  NoteDigest,
   NoteExportJob,
   NoteNotebook,
   NoteRevision,
@@ -118,6 +119,23 @@ export class NotesClient {
       undefined,
       options,
     );
+  }
+
+  listDigests(date?: string, options: { signal?: AbortSignal } = {}) {
+    const query = date ? new URLSearchParams({ date }) : '';
+    return this.json<{ digests: NoteDigest[] }>('GET', this.withQuery('digests/', query), undefined, options);
+  }
+
+  getDigest(digestId: string, options: { signal?: AbortSignal } = {}) {
+    return this.json<{ digest: NoteDigest }>('GET', `digests/${encodeURIComponent(digestId)}/`, undefined, options);
+  }
+
+  createManualDigest(date: string) {
+    return this.json<{ digest: NoteDigest }>('POST', 'digests/manual/', { date });
+  }
+
+  retryDigest(digestId: string) {
+    return this.json<{ digest: NoteDigest }>('POST', `digests/${encodeURIComponent(digestId)}/retry/`, {});
   }
 
   uploadAttachment(noteId: string, file: File) {

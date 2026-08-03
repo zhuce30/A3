@@ -8,6 +8,7 @@ import type {
   NoteAttachment,
   NoteConflict,
   NoteDetail,
+  NoteDigest,
   NoteRevision,
   NoteSummary,
 } from '@/lib/a3/notes/types';
@@ -153,6 +154,28 @@ describe('personal notes frontend contracts', () => {
       `/api/a3/notes/notes/${note.id}/attachments/`,
       expect.objectContaining({ method: 'GET', credentials: 'include' }),
     );
+  });
+
+  it('uses the owned digest list, manual revision, and retry endpoints', async () => {
+    const digest: NoteDigest = {
+      id: 'digest-1', digestDate: '2026-08-02', revision: 1, status: 'failed', title: '', contentMd: '',
+      sourceSnapshot: { notes: [{ id: note.id, version: 3, title: note.title, attachments: [] }] },
+      generatedBy: 'manual', idempotencyKey: 'manual:1', errorCode: 'digest_model_unavailable',
+      errorMessage: '摘要模型暂时不可用', createdAt: note.createdAt, updatedAt: note.updatedAt,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ success: true, digests: [digest] }))
+      .mockResolvedValueOnce(Response.json({ success: true, digest }, { status: 201 }))
+      .mockResolvedValueOnce(Response.json({ success: true, digest: { ...digest, status: 'queued' } }, { status: 202 }));
+    const client = new NotesClient({ fetch: fetchMock });
+
+    await client.listDigests('2026-08-02');
+    await client.createManualDigest('2026-08-02');
+    await client.retryDigest(digest.id);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/a3/notes/digests/?date=2026-08-02', expect.objectContaining({ method: 'GET' }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/a3/notes/digests/manual/', expect.objectContaining({ method: 'POST', body: JSON.stringify({ date: '2026-08-02' }) }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/a3/notes/digests/digest-1/retry/', expect.objectContaining({ method: 'POST' }));
   });
 });
 

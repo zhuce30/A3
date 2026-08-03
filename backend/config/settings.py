@@ -214,6 +214,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "notes.cleanup_expired_exports",
         "schedule": crontab(hour=2, minute=10),
     },
+    "a3-notes-create-previous-day-digests": {
+        "task": "notes.create_previous_day_digests",
+        "schedule": crontab(hour=2, minute=10),
+    },
     "a3-notes-cleanup-trash-daily": {
         "task": "notes.cleanup_trashed_notes",
         "schedule": crontab(hour=2, minute=30),

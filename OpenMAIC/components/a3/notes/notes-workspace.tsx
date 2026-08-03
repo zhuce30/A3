@@ -13,6 +13,7 @@ import { NotesClient } from '@/lib/a3/notes/client';
 import { NotesDraftStore, type PersistableNoteDraft } from '@/lib/a3/notes/draft-store';
 import type { NoteAiCitation, NoteAttachment, NoteDetail, NoteNotebook, NoteSummary, NoteTag } from '@/lib/a3/notes/types';
 import { NoteAiDrawer } from './note-ai-drawer';
+import { NoteDigestView } from './note-digest-view';
 import { NoteEditor, type NoteEditorSnapshotValidity } from './note-editor';
 import { NotesNavigation, type NotesSmartView } from './notes-navigation';
 
@@ -237,8 +238,14 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     setError('');
     if (view === 'daily-summaries') {
       if (generation !== listLoadGeneration.current) return;
+      noteLoadGeneration.current += 1;
+      noteAbortController.current?.abort();
       setNotes([]);
       setSelectedNote(null);
+      editorNoteIdRef.current = null;
+      updateEditorSnapshot(EMPTY_EDITOR_SNAPSHOT);
+      setAttachments([]);
+      setRecoverableDraft(undefined);
       setListState('ready');
       return;
     }
@@ -320,6 +327,15 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     editorNoteIdRef.current = null;
     updateEditorSnapshot(EMPTY_EDITOR_SNAPSHOT);
     setRecoverableDraft(undefined);
+    if (isMobile && next.view === 'daily-summaries') setMobileView('editor');
+  };
+
+  const openDigestSource = (noteId: string) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('note', noteId);
+    window.history.replaceState({ notesView: 'editor', noteId }, '', `${url.pathname}${url.search}${url.hash}`);
+    selectScope({ view: 'recent' });
+    if (isMobile) setMobileView('editor');
   };
 
   const openNote = async (item: NoteSummary) => {
@@ -533,7 +549,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
           </Button>
         </div>
       )}
-      {citationNotice && (
+      {view !== 'daily-summaries' && citationNotice && (
         <p
           data-testid="stale-citation-notice"
           role="status"
@@ -542,7 +558,9 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
           {citationNotice}
         </p>
       )}
-      {selectedNote || editorState !== 'ready' ? (
+      {view === 'daily-summaries' ? (
+        <NoteDigestView client={client} onOpenNote={openDigestSource} />
+      ) : selectedNote || editorState !== 'ready' ? (
         <NoteEditor
           note={selectedNote}
           client={client}
@@ -618,14 +636,14 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
       <div className="hidden min-h-0 border-r border-border/70 min-[1028px]:block">{navigation}</div>
       <div className="hidden min-h-0 min-w-0 min-[1028px]:flex">
         <div className="min-h-0 min-w-0 flex-1">{editor}</div>
-        <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} editorSnapshot={editorSnapshot} isMobile={false} onCitationNavigate={(citation) => void navigateCitation(citation)} onWritebackApplied={(note) => {
+        {view !== 'daily-summaries' && <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} editorSnapshot={editorSnapshot} isMobile={false} onCitationNavigate={(citation) => void navigateCitation(citation)} onWritebackApplied={(note) => {
           setSelectedNote(note);
           setNotes((current) => current.map((item) => item.id === note.id ? note : item));
-        }} />
+        }} />}
       </div>
       {isMobile && mobileView === 'list' && <div data-notes-mobile-view="list" className="min-h-0 min-[1028px]:hidden">{navigation}</div>}
       {isMobile && mobileView === 'editor' && <div data-notes-mobile-view="editor" className="min-h-0 min-[1028px]:hidden">{editor}</div>}
-      {isMobile && <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} editorSnapshot={editorSnapshot} isMobile onCitationNavigate={(citation) => void navigateCitation(citation)} onWritebackApplied={(note) => {
+      {isMobile && view !== 'daily-summaries' && <NoteAiDrawer client={client} currentNote={selectedNote} notes={notes} editorSnapshot={editorSnapshot} isMobile onCitationNavigate={(citation) => void navigateCitation(citation)} onWritebackApplied={(note) => {
         setSelectedNote(note);
         setNotes((current) => current.map((item) => item.id === note.id ? note : item));
       }} />}
