@@ -187,8 +187,13 @@ export interface NoteMemory {
   importance: number;
   confidence: number;
   sourceSessionId: string | null;
-  sourceMessageId: string | null;
-  sourceNoteRefs: unknown[];
+  sourceMessageIds: string[];
+  sourceNoteRefs: Array<{
+    id: string;
+    version?: number;
+    title?: string;
+  }>;
+  reason: string;
   validFrom: string;
   validUntil: string | null;
   supersededById: string | null;
@@ -196,6 +201,15 @@ export interface NoteMemory {
   deletedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface NoteMemoryUpdateInput {
+  content?: string;
+  memoryType?: NoteMemory['memoryType'];
+  importance?: number;
+  confidence?: number;
+  validFrom?: string;
+  validUntil?: string | null;
 }
 
 export interface NoteExportJob {

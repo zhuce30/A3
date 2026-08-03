@@ -1,13 +1,14 @@
 'use client';
 
-import { Bot, CheckCircle2, ChevronRight, FilePenLine, RefreshCw, Send, ShieldAlert, X } from 'lucide-react';
+import { Bot, Brain, CheckCircle2, ChevronDown, ChevronRight, FilePenLine, RefreshCw, Send, ShieldAlert, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { NotesClient } from '@/lib/a3/notes/client';
-import type { NoteAiCitation, NoteAiMessage, NoteAiScopeInput, NoteAiSession, NoteDetail, NoteSummary, NoteWritebackPreview } from '@/lib/a3/notes/types';
+import type { NoteAiCitation, NoteAiMessage, NoteAiScopeInput, NoteAiSession, NoteDetail, NoteMemory, NoteSummary, NoteWritebackPreview } from '@/lib/a3/notes/types';
 import type { NoteEditorSnapshotValidity } from './note-editor';
+import { NoteMemoryManager } from './note-memory-manager';
 import { NoteWritebackPreviewPanel } from './note-writeback-preview';
 
 interface NoteAiDrawerProps {
@@ -21,6 +22,7 @@ interface NoteAiDrawerProps {
 }
 
 type ScopeMode = 'note' | 'selection';
+type DrawerPanel = 'conversation' | 'memory';
 
 interface WritebackOperation {
   id: number;
@@ -33,12 +35,14 @@ interface WritebackOperation {
 
 export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMobile, onCitationNavigate, onWritebackApplied }: NoteAiDrawerProps) {
   const [open, setOpen] = useState(false);
+  const [panel, setPanel] = useState<DrawerPanel>('conversation');
   const [scopeMode, setScopeMode] = useState<ScopeMode>('note');
   const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>([]);
   const [sessions, setSessions] = useState<NoteAiSession[]>([]);
   const [activeSession, setActiveSession] = useState<NoteAiSession | null>(null);
   const [activeScopeKey, setActiveScopeKey] = useState('');
   const [messages, setMessages] = useState<NoteAiMessage[]>([]);
+  const [knownMemories, setKnownMemories] = useState<NoteMemory[]>([]);
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
   const [sendState, setSendState] = useState({ scopeKey: '', busy: false });
@@ -183,6 +187,15 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
       setLoading(false);
     });
   }, [client, open, scopeKey]);
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    void client.listMemories().then((result) => {
+      if (active && result.success) setKnownMemories(result.memories);
+    });
+    return () => { active = false; };
+  }, [client, open]);
 
   const updateMessage = useCallback((message: NoteAiMessage) => {
     setMessages((current) => {
@@ -514,6 +527,49 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
         </Button>
       </header>
 
+      <div className="grid h-10 shrink-0 grid-cols-2 border-b border-border/70 p-1" role="tablist" aria-label="笔记 AI 功能">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={panel === 'conversation'}
+          onClick={() => setPanel('conversation')}
+          className={`rounded-sm text-xs transition-colors ${panel === 'conversation' ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+        >
+          对话
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={panel === 'memory'}
+          onClick={() => setPanel('memory')}
+          className={`inline-flex items-center justify-center gap-1.5 rounded-sm text-xs transition-colors ${panel === 'memory' ? 'bg-amber-100 font-medium text-amber-950 dark:bg-amber-950/50 dark:text-amber-100' : 'text-muted-foreground hover:text-foreground'}`}
+        >
+          <Brain className="size-3.5" aria-hidden="true" />记忆
+        </button>
+      </div>
+
+      {panel === 'memory' ? (
+        <NoteMemoryManager
+          client={client}
+          notes={notes}
+          onSourceOpen={(noteId) => {
+            const source = notes.find((item) => item.id === noteId);
+            onCitationNavigate({
+              sourceKind: 'personal_note',
+              sourceId: noteId,
+              noteId,
+              noteVersion: source?.version,
+              title: source?.title || '来源笔记',
+              location: '记忆来源',
+              snippet: '',
+            });
+            setPanel('conversation');
+          }}
+          onMemoriesChange={setKnownMemories}
+        />
+      ) : (
+        <>
+
       <div className="shrink-0 space-y-2 border-b border-border/70 p-3">
         <label className="block text-xs font-medium text-muted-foreground" htmlFor="note-ai-scope">作用范围</label>
         <select
@@ -585,6 +641,25 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
                 {message.role === 'assistant' && <MessageState message={message} />}
               </div>
               {message.content && <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>}
+              {message.role === 'assistant' && (
+                <MemoryUseDisclosure
+                  message={message}
+                  memories={knownMemories}
+                  notes={notes}
+                  onSourceOpen={(noteId) => {
+                    const source = notes.find((item) => item.id === noteId);
+                    onCitationNavigate({
+                      sourceKind: 'personal_note',
+                      sourceId: noteId,
+                      noteId,
+                      noteVersion: source?.version,
+                      title: source?.title || '来源笔记',
+                      location: '记忆来源',
+                      snippet: '',
+                    });
+                  }}
+                />
+              )}
               {message.role === 'assistant' && (message.status === 'queued' || message.status === 'streaming') && (
                 <p className="text-sm text-muted-foreground">正在生成回答...</p>
               )}
@@ -679,8 +754,63 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
           </Button>
         </div>
       </div>
+        </>
+      )}
     </aside>
   );
+}
+
+function MemoryUseDisclosure({ message, memories, notes, onSourceOpen }: {
+  message: NoteAiMessage;
+  memories: NoteMemory[];
+  notes: NoteSummary[];
+  onSourceOpen: (noteId: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const ids = Array.isArray(message.metadata.memoryIds)
+    ? message.metadata.memoryIds.filter((item): item is string => typeof item === 'string')
+    : [];
+  const used = ids.flatMap((id) => {
+    const memory = memories.find((item) => item.id === id);
+    return memory && memory.status !== 'candidate' ? [memory] : [];
+  });
+  if (used.length === 0) return null;
+  return (
+    <div className="mt-2 border-y border-border/60 py-1.5 text-xs">
+      <button type="button" className="flex w-full items-center justify-between gap-2 py-1 text-left text-muted-foreground hover:text-foreground" onClick={() => setExpanded((value) => !value)}>
+        <span>使用了 {used.length} 条已确认记忆</span>
+        <ChevronDown className={`size-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} aria-hidden="true" />
+      </button>
+      {expanded && (
+        <div className="space-y-2 pb-1 pt-2">
+          {used.map((memory) => (
+            <div key={memory.id} className="border-l-2 border-amber-400 pl-2">
+              <p className="leading-5 text-foreground">{memory.content}</p>
+              <p className="mt-0.5 text-muted-foreground">状态：{memoryStateLabel(memory.status)}</p>
+              {memory.sourceNoteRefs.map((ref) => {
+                const title = ref.title || notes.find((item) => item.id === ref.id)?.title || '来源笔记';
+                return (
+                  <button key={`${ref.id}-${ref.version ?? ''}`} type="button" className="mt-0.5 block underline decoration-amber-500/70 underline-offset-4" onClick={() => onSourceOpen(ref.id)}>
+                    来源：{title}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function memoryStateLabel(status: NoteMemory['status']) {
+  return {
+    candidate: '待确认',
+    confirmed: '已启用',
+    paused: '已暂停',
+    superseded: '已替换',
+    deleted: '已删除',
+  }[status];
 }
 
 function MessageState({ message }: { message: NoteAiMessage }) {

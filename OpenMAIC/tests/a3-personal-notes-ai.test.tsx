@@ -73,6 +73,7 @@ function clientStub(overrides: Partial<NotesClient> = {}) {
       session: { id: 'session-1', title: '', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now },
     }),
     listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [] }),
+    listMemories: vi.fn().mockResolvedValue({ success: true, memories: [] }),
     submitAiChat: vi.fn().mockResolvedValue({ success: true, message: assistantMessage(), idempotent: false }),
     createWritebackPreview: vi.fn(),
     confirmWritebackPreview: vi.fn(),

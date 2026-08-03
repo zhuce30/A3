@@ -8,6 +8,8 @@ import type {
   NoteDetail,
   NoteDigest,
   NoteExportJob,
+  NoteMemory,
+  NoteMemoryUpdateInput,
   NoteNotebook,
   NoteRevision,
   NoteSummary,
@@ -136,6 +138,35 @@ export class NotesClient {
 
   retryDigest(digestId: string, options: { signal?: AbortSignal } = {}) {
     return this.json<{ digest: NoteDigest }>('POST', `digests/${encodeURIComponent(digestId)}/retry/`, {}, options);
+  }
+
+  listMemories(status?: NoteMemory['status'], options: { signal?: AbortSignal } = {}) {
+    const query = status ? new URLSearchParams({ status }) : '';
+    return this.json<{ memories: NoteMemory[] }>('GET', this.withQuery('memories/', query), undefined, options);
+  }
+
+  confirmMemory(memoryId: string, input: NoteMemoryUpdateInput) {
+    return this.json<{ memory: NoteMemory }>('POST', `memories/${encodeURIComponent(memoryId)}/confirm/`, input);
+  }
+
+  pauseMemory(memoryId: string) {
+    return this.json<{ memory: NoteMemory }>('POST', `memories/${encodeURIComponent(memoryId)}/pause/`, {});
+  }
+
+  resumeMemory(memoryId: string) {
+    return this.json<{ memory: NoteMemory }>('POST', `memories/${encodeURIComponent(memoryId)}/resume/`, {});
+  }
+
+  supersedeMemory(memoryId: string, input: NoteMemoryUpdateInput & { replacementId?: string }) {
+    return this.json<{ memory: NoteMemory; replacement: NoteMemory }>(
+      'POST',
+      `memories/${encodeURIComponent(memoryId)}/supersede/`,
+      input,
+    );
+  }
+
+  deleteMemory(memoryId: string) {
+    return this.json<{ memory: NoteMemory }>('POST', `memories/${encodeURIComponent(memoryId)}/delete/`, {});
   }
 
   uploadAttachment(noteId: string, file: File) {
