@@ -382,7 +382,7 @@ describe('personal note AI drawer', () => {
       content: '死锁需要同时满足四个条件。',
       status: 'succeeded',
       verified: true,
-      citations: [{ noteId: 'note-1', title: '操作系统复习', location: '第 2 段', paragraphIndex: 1, charStart: 6, charEnd: 11, snippet: '死锁与调度' }],
+      citations: [{ noteId: 'note-1', noteVersion: 3, title: '操作系统复习', location: '第 2 段', paragraphIndex: 1, charStart: 6, charEnd: 11, snippet: '死锁与调度' }],
     });
     const client = clientStub({
       listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '死锁', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
@@ -597,6 +597,31 @@ describe('personal note AI drawer', () => {
     expect(editorView!.state.doc.textBetween(editorView!.state.selection.from, editorView!.state.selection.to)).toBe('死锁');
   });
 
+  it.each([
+    ['missing', undefined],
+    ['NaN', Number.NaN],
+    ['positive infinity', Number.POSITIVE_INFINITY],
+    ['zero', 0],
+    ['negative', -1],
+    ['fractional', 1.5],
+  ])('rejects a %s personal note citation version without changing selection', async (_label, noteVersion) => {
+    let editorView: EditorView | undefined;
+    const citation = { noteId: 'note-1', noteVersion, title: '操作系统复习', location: '第 2 段', paragraphIndex: 1, charStart: 6, charEnd: 8, snippet: '死锁' };
+    const client = clientStub({
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '无效版本引用', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ content: '查看引用', status: 'succeeded', citations: [citation] })] }),
+    });
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} onEditorReady={(view) => { editorView = view; }} />);
+    await vi.waitFor(() => expect(editorView).toBeTruthy());
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.querySelector('button[aria-label="跳转到操作系统复习第 2 段"]')).toBeTruthy());
+    const selectionBeforeCitation = { from: editorView!.state.selection.from, to: editorView!.state.selection.to };
+    click('跳转到操作系统复习第 2 段');
+
+    expect({ from: editorView!.state.selection.from, to: editorView!.state.selection.to }).toEqual(selectionBeforeCitation);
+    expect(container.querySelector('[data-testid="stale-citation-notice"]')?.textContent).toContain('笔记内容已更新，该引用对应旧版本，请在历史版本中查看');
+  });
+
   it('rejects a same-version citation immediately after the displayed document is edited', async () => {
     let editorView: EditorView | undefined;
     const citation = { noteId: 'note-1', noteVersion: 3, title: '操作系统复习', location: '第 2 段', paragraphIndex: 1, charStart: 6, charEnd: 8, snippet: '死锁' };
@@ -690,7 +715,7 @@ describe('personal note AI drawer', () => {
   it('clears a pending citation when its note load fails', async () => {
     const first = note('note-1', '当前笔记');
     const third = { ...note('note-3', '后续笔记'), content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '后续正文' }] }] }, contentText: '后续正文' };
-    const citation = { noteId: 'note-2', title: '缺失笔记', location: '第 1 段', paragraphIndex: 0, charStart: 1, charEnd: 3, snippet: '缺失' };
+    const citation = { noteId: 'note-2', noteVersion: 3, title: '缺失笔记', location: '第 1 段', paragraphIndex: 0, charStart: 1, charEnd: 3, snippet: '缺失' };
     const views: EditorView[] = [];
     const client = clientStub({
       searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [first, third] }),
@@ -715,8 +740,8 @@ describe('personal note AI drawer', () => {
   it('lets a newer current-note citation supersede an older in-flight citation load', async () => {
     const first = { ...note('note-1', '当前笔记'), content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '当前正文' }] }] }, contentText: '当前正文' };
     const slowNote = deferred<{ success: true; note: NoteDetail }>();
-    const older = { noteId: 'note-2', title: '较慢笔记', location: '第 1 段', paragraphIndex: 0, charStart: 0, charEnd: 2, snippet: '较慢' };
-    const newer = { noteId: 'note-1', title: '当前笔记', location: '第 1 段', paragraphIndex: 0, charStart: 2, charEnd: 4, snippet: '正文' };
+    const older = { noteId: 'note-2', noteVersion: 3, title: '较慢笔记', location: '第 1 段', paragraphIndex: 0, charStart: 0, charEnd: 2, snippet: '较慢' };
+    const newer = { noteId: 'note-1', noteVersion: 3, title: '当前笔记', location: '第 1 段', paragraphIndex: 0, charStart: 2, charEnd: 4, snippet: '正文' };
     const views: EditorView[] = [];
     const client = clientStub({
       searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [first] }),
