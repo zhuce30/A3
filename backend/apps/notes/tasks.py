@@ -32,12 +32,17 @@ def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
         if queued is None:
             message.refresh_from_db()
             return message
-        queued.run_generation += 1
-        queued.run_lease_token = uuid.uuid4()
+        preserve_confirmed_delivery = (
+            queued.dispatch_confirmed_at is not None
+            and queued.run_lease_token is not None
+        )
+        if not preserve_confirmed_delivery:
+            queued.run_generation += 1
+            queued.run_lease_token = uuid.uuid4()
+            queued.dispatch_confirmed_at = None
         queued.run_started_at = None
         queued.run_heartbeat_at = None
         queued.dispatch_attempted_at = attempted_at
-        queued.dispatch_confirmed_at = None
         queued.save(
             update_fields={
                 "run_generation",
@@ -65,16 +70,18 @@ def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
             error_message="",
         )
     except Exception:
+        failure_updates = {
+            "error_code": "assistant_enqueue_failed",
+            "error_message": "AI 助手任务暂时无法提交，请重试",
+        }
+        if not preserve_confirmed_delivery:
+            failure_updates["dispatch_confirmed_at"] = None
         NoteAiMessage.objects.filter(
             id=message.id,
             status=NoteAiMessage.Status.QUEUED,
             run_generation=generation,
             run_lease_token=lease_token,
-        ).update(
-            dispatch_confirmed_at=None,
-            error_code="assistant_enqueue_failed",
-            error_message="AI 助手任务暂时无法提交，请重试",
-        )
+        ).update(**failure_updates)
     message.refresh_from_db()
     return message
 
@@ -412,7 +419,10 @@ def _recover_stale_assistant_dispatches(cutoff, limit: int) -> tuple[int, int]:
                 dispatch_confirmed_at__isnull=True,
                 dispatch_attempted_at__lt=cutoff,
             )
-            | Q(dispatch_confirmed_at__lt=cutoff)
+            | Q(
+                dispatch_confirmed_at__lt=cutoff,
+                dispatch_attempted_at__lt=cutoff,
+            )
         )
         .order_by("dispatch_attempted_at", "created_at")
         .values_list("id", flat=True)[:limit]

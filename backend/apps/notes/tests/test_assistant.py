@@ -1081,6 +1081,45 @@ class AssistantTaskTests(PersonalNoteAssistantTestCase):
         )
         self.assertEqual(stale_delivery, {"skipped": True})
 
+    @patch("backend.apps.notes.tasks.generate_assistant_message_task.delay")
+    def test_confirmed_delayed_dispatch_recovery_preserves_current_lease(self, delay) -> None:
+        from backend.apps.notes.tasks import (
+            _claim_assistant_lease,
+            _recover_stale_assistant_dispatches,
+        )
+
+        _user_message, assistant = self.queued_pair()
+        generation = assistant.run_generation
+        lease = assistant.run_lease_token
+        stale_at = timezone.now() - timedelta(hours=1)
+        NoteAiMessage.objects.filter(pk=assistant.pk).update(
+            dispatch_attempted_at=stale_at,
+            dispatch_confirmed_at=stale_at,
+        )
+        cutoff = timezone.now() - timedelta(minutes=5)
+
+        first = _recover_stale_assistant_dispatches(cutoff, 10)
+        second = _recover_stale_assistant_dispatches(cutoff, 10)
+        third = _recover_stale_assistant_dispatches(cutoff, 10)
+
+        assistant.refresh_from_db()
+        self.assertEqual(first, (1, 0))
+        self.assertEqual(second, (0, 0))
+        self.assertEqual(third, (0, 0))
+        self.assertEqual(assistant.run_generation, generation)
+        self.assertEqual(assistant.run_lease_token, lease)
+        delay.assert_called_once_with(str(assistant.id), generation, str(lease))
+
+        claimed, active_lease = _claim_assistant_lease(
+            str(assistant.id), generation, lease, redelivered=False
+        )
+        duplicate, _duplicate_lease = _claim_assistant_lease(
+            str(assistant.id), generation, lease, redelivered=False
+        )
+        self.assertIsNotNone(claimed)
+        self.assertEqual(active_lease, lease)
+        self.assertIsNone(duplicate)
+
     @patch("backend.apps.notes.services.assistant_service.generate_note_answer")
     def test_old_worker_cannot_overwrite_newer_generation_terminal_state(self, generate) -> None:
         _user_message, assistant = self.queued_pair()
