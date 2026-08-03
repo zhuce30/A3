@@ -84,6 +84,16 @@ def _public_message_metadata(metadata: Any) -> dict[str, Any]:
     refusal_reason = metadata.get("refusalReason")
     if isinstance(refusal_reason, str):
         result["refusalReason"] = refusal_reason[:240]
+    memory_ids = metadata.get("memoryIds")
+    if isinstance(memory_ids, list):
+        public_memory_ids = []
+        for value in memory_ids[:16]:
+            try:
+                public_memory_ids.append(str(uuid.UUID(str(value))))
+            except (ValueError, TypeError, AttributeError):
+                continue
+        if public_memory_ids:
+            result["memoryIds"] = public_memory_ids
     return result
 
 

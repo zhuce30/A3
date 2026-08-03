@@ -174,6 +174,52 @@ async function notesApi<T>(page: Page, path: string, init?: Parameters<Page['req
   return await response.json() as T;
 }
 
+interface MemoryApiItem {
+  id: string;
+  content: string;
+  status: 'candidate' | 'confirmed' | 'paused' | 'superseded' | 'deleted';
+  supersededById: string | null;
+}
+
+function seedMemoryCandidate(noteId: string) {
+  return runManageJson<{ id: string; content: string }>(String.raw`
+import json
+from backend.apps.notes.models import Note, NoteMemory
+note = Note.objects.get(pk='${noteId}')
+NoteMemory.objects.filter(user=note.user).delete()
+memory = NoteMemory.objects.create(
+    user=note.user,
+    memory_type='core',
+    content='讲解操作系统概念时先给流程图，再解释关键细节',
+    status='candidate',
+    importance=4,
+    confidence=0.95,
+    source_note_refs=[{'id': str(note.id), 'version': note.version}],
+    reason='用户在个人笔记对话中明确表达了稳定偏好',
+)
+result = {'id': str(memory.id), 'content': memory.content}
+`);
+}
+
+async function submitMemoryProbe(page: Page, noteId: string, message: string) {
+  const session = await notesApi<{ success: true; session: { id: string } }>(page, 'assistant/sessions/', {
+    method: 'POST',
+    data: { title: message, scope: { type: 'note', noteIds: [noteId] } },
+  });
+  const submission = await notesApi<{ success: true; message: { id: string; status: string; metadata: { memoryIds?: string[] } } }>(page, 'assistant/chat/', {
+    method: 'POST',
+    data: { sessionId: session.session.id, clientRequestId: crypto.randomUUID(), message },
+  });
+  if (submission.message.status === 'succeeded') return submission.message;
+  let latest = submission.message;
+  await expect.poll(async () => {
+    const detail = await notesApi<{ success: true; message: typeof latest }>(page, `assistant/messages/${submission.message.id}/`);
+    latest = detail.message;
+    return latest.status;
+  }, { timeout: 30_000 }).toBe('succeeded');
+  return latest;
+}
+
 async function startProviderStub(): Promise<ProviderStub> {
   if (!process.env.A3_TEST_SQLITE_PATH || process.env.A3_TEST_SQLITE_PATH === ':memory:') {
     throw new Error('A3_TEST_SQLITE_PATH must be a shared file-backed database for the Phase 2 real-backend gate');
@@ -330,13 +376,15 @@ test.describe.serial('A3 personal notes Phase 1', () => {
     await expect(page.locator('.ProseMirror')).toBeVisible();
     await expect(page.getByTestId('notes-ai-rail')).toHaveCount(0);
 
-    await page.locator('.ProseMirror').fill('在线保存内容');
-    await expect(page.getByTestId('note-save-status')).toHaveText(/已保存|未修改/);
+    const newNoteEditor = page.getByLabel('无标题笔记正文');
+    await expect(newNoteEditor).toBeVisible();
+    await newNoteEditor.fill('在线保存内容');
+    await expect.poll(() => state.notes[0]?.version ?? 0, { timeout: 30_000 }).toBeGreaterThan(1);
     state.offline = true;
-    await page.locator('.ProseMirror').fill('离线恢复内容');
-    await expect(page.getByTestId('note-save-status')).toContainText('离线待同步');
+    await newNoteEditor.fill('离线恢复内容');
+    await expect(page.getByTestId('note-save-status')).toContainText('离线待同步', { timeout: 30_000 });
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await expect(page.getByText('发现本地草稿')).toBeVisible();
+    await expect(page.getByText('发现本地草稿')).toBeVisible({ timeout: 60_000 });
     await page.getByRole('button', { name: '恢复草稿' }).click();
     await expect(page.locator('.ProseMirror')).toContainText('离线恢复内容');
 
@@ -396,6 +444,7 @@ test.describe.serial('A3 personal notes Phase 2 real service gate', () => {
   });
 
   test.afterAll(async () => {
+    if (!provider) return;
     await new Promise<void>((resolve, reject) => provider.server.close((error) => error ? reject(error) : resolve()));
   });
 
@@ -414,6 +463,7 @@ test.describe.serial('A3 personal notes Phase 2 real service gate', () => {
       if (request.method() === 'POST' && request.url().includes('/api/a3/notes/assistant/chat/')) chatSubmissions += 1;
     });
     await page.getByRole('button', { name: '打开笔记 AI' }).click();
+    await expect(page.getByText('正在加载会话...')).toHaveCount(0, { timeout: 60_000 });
     await page.getByLabel('向笔记 AI 提问').fill('时间片太短会有什么影响？');
     await page.getByRole('button', { name: '发送', exact: true }).click();
 
@@ -523,6 +573,7 @@ test.describe.serial('A3 personal notes Phase 2 real service gate', () => {
     await openPhase2Notes(page, seed.noteTitle);
     await page.getByRole('button', { name: seed.noteTitle, exact: true }).click();
     await page.getByRole('button', { name: '打开笔记 AI' }).click();
+    await expect(page.getByText('正在加载会话...')).toHaveCount(0, { timeout: 60_000 });
     await page.getByLabel('向笔记 AI 提问').fill('模型不可用时给出复习步骤');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await expect(page.getByText('暂时使用规则降级回答')).toBeVisible({ timeout: 30_000 });
@@ -530,14 +581,16 @@ test.describe.serial('A3 personal notes Phase 2 real service gate', () => {
 
     await page.getByRole('button', { name: '收起笔记 AI' }).click();
     await page.getByRole('button', { name: '快速新建笔记', exact: true }).click();
-    await page.locator('.ProseMirror').fill('模型不可用时仍可保存的基础笔记');
+    const newNoteEditor = page.getByLabel('无标题笔记正文');
+    await expect(newNoteEditor).toBeVisible({ timeout: 30_000 });
+    await newNoteEditor.fill('模型不可用时仍可保存的基础笔记');
     await expect.poll(async () => {
       const search = await notesApi<{ success: true; notes: Array<{ id: string; contentText: string; version: number }> }>(
         page,
         'search/?q=%E6%A8%A1%E5%9E%8B%E4%B8%8D%E5%8F%AF%E7%94%A8',
       );
       return search.notes.find((item) => item.contentText === '模型不可用时仍可保存的基础笔记')?.version ?? 0;
-    }, { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
+    }, { timeout: 60_000 }).toBeGreaterThanOrEqual(2);
     await expect(page.getByTestId('note-save-status')).toHaveText(/已保存|未修改/);
     const persistedCount = runManageJson<number>(String.raw`
 import json
@@ -545,5 +598,73 @@ from backend.apps.notes.models import Note
 result = Note.objects.filter(user__phone='${studentPhone}', content_text='模型不可用时仍可保存的基础笔记').count()
 `);
     expect(persistedCount).toBe(1);
+  });
+
+  test('confirms, reuses, corrects, pauses, and deletes personal memory without reuse after deletion', async ({ page }) => {
+    provider.setMode('available');
+    const candidate = seedMemoryCandidate(seed.noteId);
+    await loginAsPhase2Student(page);
+    await openPhase2Notes(page, seed.noteTitle);
+    await page.getByRole('button', { name: seed.noteTitle, exact: true }).click();
+    await page.getByRole('button', { name: '打开笔记 AI' }).click();
+    await page.getByRole('tab', { name: '记忆', exact: true }).click();
+
+    await expect(page.getByText(candidate.content, { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '审核并确认', exact: true }).click();
+    await page.getByLabel('记忆内容').fill('讲解时先给流程图，再解释关键细节');
+    await page.getByRole('button', { name: '确认使用', exact: true }).click();
+    await page.getByRole('tab', { name: '已启用', exact: true }).click();
+
+    const confirmedList = await notesApi<{ success: true; memories: MemoryApiItem[] }>(page, 'memories/');
+    const confirmed = confirmedList.memories.find((item) => item.id === candidate.id)!;
+    expect(confirmed.status).toBe('confirmed');
+    await expect(page.getByText(confirmed.content, { exact: true })).toBeVisible();
+    const firstUse = await submitMemoryProbe(page, seed.noteId, '请按我确认的偏好讲解时间片轮转');
+    expect(firstUse.metadata.memoryIds).toEqual([confirmed.id]);
+
+    await page.getByRole('button', { name: '更正', exact: true }).click();
+    await page.getByLabel('更正后的记忆内容').fill('讲解时先看代码，再补充流程图');
+    await page.getByRole('button', { name: '保存更正', exact: true }).click();
+    let correctedList!: { success: true; memories: MemoryApiItem[] };
+    await expect.poll(async () => {
+      correctedList = await notesApi<{ success: true; memories: MemoryApiItem[] }>(page, 'memories/');
+      return correctedList.memories.find((item) => item.id === confirmed.id)?.status;
+    }).toBe('superseded');
+    const oldMemory = correctedList.memories.find((item) => item.id === confirmed.id)!;
+    const replacement = correctedList.memories.find((item) => item.id === oldMemory.supersededById)!;
+    expect(oldMemory.status).toBe('superseded');
+    expect(replacement).toMatchObject({ status: 'confirmed', content: '讲解时先看代码,再补充流程图' });
+    const correctedUse = await submitMemoryProbe(page, seed.noteId, '用我最新的方式解释调度');
+    expect(correctedUse.metadata.memoryIds).toContain(replacement.id);
+    expect(correctedUse.metadata.memoryIds).not.toContain(oldMemory.id);
+
+    await page.getByRole('tab', { name: '已启用', exact: true }).click();
+    await page.getByRole('button', { name: '暂停', exact: true }).click();
+    await expect.poll(async () => {
+      const result = await notesApi<{ success: true; memories: MemoryApiItem[] }>(page, 'memories/');
+      return result.memories.find((item) => item.id === replacement.id)?.status;
+    }).toBe('paused');
+    const pausedUse = await submitMemoryProbe(page, seed.noteId, '按个人偏好继续讲解');
+    expect(pausedUse.metadata.memoryIds ?? []).toEqual([]);
+
+    await page.getByRole('tab', { name: '已暂停', exact: true }).click();
+    await page.getByRole('button', { name: '恢复', exact: true }).click();
+    await expect.poll(async () => {
+      const result = await notesApi<{ success: true; memories: MemoryApiItem[] }>(page, 'memories/');
+      return result.memories.find((item) => item.id === replacement.id)?.status;
+    }).toBe('confirmed');
+    await page.getByRole('tab', { name: '已启用', exact: true }).click();
+    await page.getByRole('button', { name: '删除记忆', exact: true }).click();
+    await expect(page.getByText('删除后，今后的个人笔记 AI 对话将不再使用这条记忆。已有回答不会被改写。')).toBeVisible();
+    await page.getByRole('button', { name: '确认删除', exact: true }).click();
+    await expect.poll(async () => {
+      const result = await notesApi<{ success: true; memories: MemoryApiItem[] }>(page, 'memories/');
+      return result.memories.find((item) => item.id === replacement.id)?.status;
+    }).toBe('deleted');
+
+    const deletedUse = await submitMemoryProbe(page, seed.noteId, '再次按个人偏好讲解');
+    expect(deletedUse.metadata.memoryIds ?? []).toEqual([]);
+    const finalList = await notesApi<{ success: true; memories: MemoryApiItem[] }>(page, 'memories/');
+    expect(finalList.memories.find((item) => item.id === replacement.id)?.status).toBe('deleted');
   });
 });

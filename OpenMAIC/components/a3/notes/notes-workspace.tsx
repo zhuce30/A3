@@ -99,6 +99,10 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const citationNavigationGeneration = useRef(0);
   const editorNoteIdRef = useRef<string | null>(null);
   const editorSnapshotRef = useRef<NoteEditorSnapshotValidity>(EMPTY_EDITOR_SNAPSHOT);
+  const autosaveDisposalRef = useRef<{
+    controller: NotesAutosaveController;
+    handle: number;
+  } | null>(null);
   const [editorSnapshot, setEditorSnapshot] = useState<NoteEditorSnapshotValidity>(EMPTY_EDITOR_SNAPSHOT);
 
   const updateEditorSnapshot = useCallback((state: NoteEditorSnapshotValidity) => {
@@ -140,7 +144,22 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     listLoadGeneration.current += 1;
     noteAbortController.current?.abort();
     listAbortController.current?.abort();
-    if (ownsAutosave) autosave.dispose();
+  }, []);
+
+  useEffect(() => {
+    const pending = autosaveDisposalRef.current;
+    if (pending?.controller === autosave) {
+      window.clearTimeout(pending.handle);
+      autosaveDisposalRef.current = null;
+    }
+    return () => {
+      if (!ownsAutosave) return;
+      const handle = window.setTimeout(() => {
+        autosave.dispose();
+        if (autosaveDisposalRef.current?.handle === handle) autosaveDisposalRef.current = null;
+      }, 0);
+      autosaveDisposalRef.current = { controller: autosave, handle };
+    };
   }, [autosave, ownsAutosave]);
 
   useEffect(() => {

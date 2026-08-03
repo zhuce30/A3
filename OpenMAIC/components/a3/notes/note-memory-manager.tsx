@@ -1,6 +1,6 @@
 'use client';
 
-import { Check, CirclePause, FileText, History, PencilLine, RotateCcw, Trash2, X } from 'lucide-react';
+import { Check, CirclePause, FileText, PencilLine, RotateCcw, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -48,7 +48,6 @@ export function NoteMemoryManager({ client, notes, onSourceOpen, onMemoriesChang
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
     void client.listMemories().then((result) => {
       if (!active) return;
       if (!result.success) setError(result.error);

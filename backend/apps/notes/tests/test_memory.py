@@ -491,4 +491,7 @@ class MemoryAssistantIntegrationTests(PersonalNoteMemoryTestCase):
         assistant.refresh_from_db()
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(assistant.metadata["memoryIds"], [str(confirmed.id)])
+        from backend.apps.notes.services.assistant_service import serialize_message
+
+        self.assertEqual(serialize_message(assistant)["metadata"]["memoryIds"], [str(confirmed.id)])
         enqueue_extraction.assert_called_once_with("assistant_message", assistant.id)
