@@ -252,6 +252,13 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
     setOpen(true);
   };
 
+  const closeDrawer = () => {
+    invalidateAsync();
+    setDisconnectedMessageId('');
+    setSendState({ scopeKey, busy: false });
+    setOpen(false);
+  };
+
   if (!open) {
     return (
       <aside
@@ -286,7 +293,7 @@ export function NoteAiDrawer({ client, currentNote, notes, isMobile, onCitationN
           <Bot className="size-4 shrink-0" aria-hidden="true" />
           <h2 className="truncate text-sm font-semibold">笔记 AI</h2>
         </div>
-        <Button type="button" variant="ghost" size="icon-sm" className="size-8 rounded-md" aria-label="收起笔记 AI" onClick={() => setOpen(false)}>
+        <Button type="button" variant="ghost" size="icon-sm" className="size-8 rounded-md" aria-label="收起笔记 AI" onClick={closeDrawer}>
           {isMobile ? <X className="size-4" /> : <ChevronRight className="size-4" />}
         </Button>
       </header>

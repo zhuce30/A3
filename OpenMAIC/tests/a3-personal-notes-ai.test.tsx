@@ -288,6 +288,34 @@ describe('personal note AI drawer', () => {
     expect(watchAiMessage).toHaveBeenCalledWith('pending-2', expect.anything());
   });
 
+  it('replaces the pending watcher after collapse and reopen, then accepts the final update', async () => {
+    const handlers: Array<{ onMessage: (message: NoteAiMessage) => void }> = [];
+    const cleanups: ReturnType<typeof vi.fn>[] = [];
+    const watchAiMessage = vi.fn((_messageId, nextHandlers) => {
+      handlers.push(nextHandlers);
+      const cleanup = vi.fn();
+      cleanups.push(cleanup);
+      return cleanup;
+    });
+    const client = clientStub({
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '待恢复', scopeType: 'note', scopeSnapshot: { type: 'note', notes: [{ id: 'note-1' }] }, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ id: 'pending-reopen', status: 'streaming' })] }),
+      watchAiMessage,
+    });
+    const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} />);
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(watchAiMessage).toHaveBeenCalledTimes(1));
+    click('收起笔记 AI');
+    expect(cleanups[0]).toHaveBeenCalledTimes(1);
+
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(watchAiMessage).toHaveBeenCalledTimes(2));
+    act(() => handlers[1]!.onMessage(assistantMessage({ id: 'pending-reopen', status: 'succeeded', content: '重开后完成' })));
+
+    expect(container.textContent).toContain('重开后完成');
+    expect(watchAiMessage).toHaveBeenNthCalledWith(2, 'pending-reopen', expect.anything());
+  });
+
   it('fences a delayed session creation after selected-note scope changes', async () => {
     const created = deferred<ReturnType<typeof sessionSuccess>>();
     const createAiSession = vi.fn((_input: unknown, _options: { signal: AbortSignal }) => created.promise);
@@ -408,6 +436,58 @@ describe('personal note AI drawer', () => {
     click('跳转到操作系统复习第 2 段');
 
     expect(editorView!.state.doc.textBetween(editorView!.state.selection.from, editorView!.state.selection.to)).toBe('死锁');
+  });
+
+  it('clears a pending citation when its note load fails', async () => {
+    const first = note('note-1', '当前笔记');
+    const third = { ...note('note-3', '后续笔记'), content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '后续正文' }] }] }, contentText: '后续正文' };
+    const citation = { noteId: 'note-2', title: '缺失笔记', location: '第 1 段', paragraphIndex: 0, charStart: 1, charEnd: 3, snippet: '缺失' };
+    const views: EditorView[] = [];
+    const client = clientStub({
+      searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [first, third] }),
+      getNote: vi.fn(async (noteId: string) => noteId === 'note-2' ? { success: false as const, error: '引用笔记加载失败' } : { success: true as const, note: noteId === 'note-3' ? third : first }),
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '引用', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ status: 'succeeded', content: '查看引用', citations: [citation] })] }),
+    });
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} onEditorReady={(view) => views.push(view)} />);
+    await vi.waitFor(() => expect(views).toHaveLength(1));
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.querySelector('button[aria-label="跳转到缺失笔记第 1 段"]')).toBeTruthy());
+    click('跳转到缺失笔记第 1 段');
+    await vi.waitFor(() => expect(container.textContent).toContain('引用笔记加载失败'));
+    click('后续笔记');
+    await vi.waitFor(() => expect(views).toHaveLength(2));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    expect(views[1]!.state.selection.from).toBe(1);
+    expect(views[1]!.state.selection.empty).toBe(true);
+  });
+
+  it('lets a newer current-note citation supersede an older in-flight citation load', async () => {
+    const first = { ...note('note-1', '当前笔记'), content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '当前正文' }] }] }, contentText: '当前正文' };
+    const slowNote = deferred<{ success: true; note: NoteDetail }>();
+    const older = { noteId: 'note-2', title: '较慢笔记', location: '第 1 段', paragraphIndex: 0, charStart: 0, charEnd: 2, snippet: '较慢' };
+    const newer = { noteId: 'note-1', title: '当前笔记', location: '第 1 段', paragraphIndex: 0, charStart: 2, charEnd: 4, snippet: '正文' };
+    const views: EditorView[] = [];
+    const client = clientStub({
+      searchNotes: vi.fn().mockResolvedValue({ success: true, notes: [first] }),
+      getNote: vi.fn((noteId: string) => noteId === 'note-2' ? slowNote.promise : Promise.resolve({ success: true as const, note: first })),
+      listAiSessions: vi.fn().mockResolvedValue({ success: true, sessions: [{ id: 'session-1', title: '引用', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }] }),
+      listAiMessages: vi.fn().mockResolvedValue({ success: true, messages: [assistantMessage({ status: 'succeeded', content: '两个引用', citations: [older, newer] })] }),
+    });
+    const container = mount(<NotesWorkspace client={client} userId="student-1" autosave={autosaveStub()} onEditorReady={(view) => views.push(view)} />);
+    await vi.waitFor(() => expect(views).toHaveLength(1));
+    click('打开笔记 AI');
+    await vi.waitFor(() => expect(container.querySelector('button[aria-label="跳转到较慢笔记第 1 段"]')).toBeTruthy());
+    click('跳转到较慢笔记第 1 段');
+    await vi.waitFor(() => expect(client.getNote).toHaveBeenCalledWith('note-2', expect.anything()));
+    click('跳转到当前笔记第 1 段');
+    await act(async () => slowNote.resolve({ success: true, note: note('note-2', '较慢笔记') }));
+    await vi.waitFor(() => expect(views.at(-1)?.state.doc.textContent).toBe('当前正文'));
+
+    const activeView = views.at(-1)!;
+    expect(activeView.state.doc.textBetween(activeView.state.selection.from, activeView.state.selection.to)).toBe('正文');
+    expect(container.querySelector('[aria-label="笔记编辑器"]')?.textContent).toContain('当前笔记');
   });
 
   it('reconnects the actual EventSource with the persisted messageId without a second create or chat POST', async () => {

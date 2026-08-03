@@ -63,7 +63,9 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const noteAbortController = useRef<AbortController | null>(null);
   const listAbortController = useRef<AbortController | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
-  const pendingCitation = useRef<NoteAiCitation | null>(null);
+  const pendingCitation = useRef<{ token: number; noteId: string; citation: NoteAiCitation } | null>(null);
+  const citationNavigationGeneration = useRef(0);
+  const editorNoteIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     selectedNoteIdRef.current = selectedNote?.id ?? null;
@@ -146,39 +148,42 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
         client.getNote(noteId, { signal: controller.signal }),
         client.listAttachments(noteId, { signal: controller.signal }),
       ]);
-      if (generation !== noteLoadGeneration.current || controller.signal.aborted) return;
+      if (generation !== noteLoadGeneration.current || controller.signal.aborted) return false;
       if (!result.success) {
         setEditorState('error');
         setEditorError(result.error);
         setFailedNoteId(noteId);
-        return;
+        return false;
       }
       if (!attachmentResult.success) {
         setEditorState('error');
         setEditorError(attachmentResult.error);
         setFailedNoteId(noteId);
-        return;
+        return false;
       }
       let draft: PersistableNoteDraft | undefined;
       try {
         draft = await draftStore.getDraft(noteId);
       } catch {
-        if (generation !== noteLoadGeneration.current || controller.signal.aborted) return;
+        if (generation !== noteLoadGeneration.current || controller.signal.aborted) return false;
         setEditorState('error');
         setEditorError('本地草稿读取失败，请重试');
         setFailedNoteId(noteId);
-        return;
+        return false;
       }
-      if (generation !== noteLoadGeneration.current || controller.signal.aborted) return;
+      if (generation !== noteLoadGeneration.current || controller.signal.aborted) return false;
+      editorNoteIdRef.current = result.note.id;
       setSelectedNote(result.note);
       setAttachments(attachmentResult.attachments);
       setRecoverableDraft(draft);
       setEditorState('ready');
+      return true;
     } catch (loadError) {
-      if (generation !== noteLoadGeneration.current || isAbortError(loadError)) return;
+      if (generation !== noteLoadGeneration.current || isAbortError(loadError)) return false;
       setEditorState('error');
       setEditorError('笔记加载失败，请重试');
       setFailedNoteId(noteId);
+      return false;
     }
   }, [client, draftStore]);
 
@@ -260,6 +265,8 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   }, [focusNoteId, mobileView, notes]);
 
   const selectScope = (next: { view?: NotesSmartView; notebookId?: string; tagId?: string }) => {
+    citationNavigationGeneration.current += 1;
+    pendingCitation.current = null;
     listLoadGeneration.current += 1;
     listAbortController.current?.abort();
     noteLoadGeneration.current += 1;
@@ -272,6 +279,8 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   };
 
   const openNote = async (item: NoteSummary) => {
+    citationNavigationGeneration.current += 1;
+    pendingCitation.current = null;
     setFocusNoteId(item.id);
     if (view !== 'trash') await loadNote(item.id);
     if (isMobile && view !== 'trash') {
@@ -307,6 +316,7 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     setSelectedTagId(null);
     setNotes((current) => [result.note, ...current.filter((item) => item.id !== result.note.id)]);
     setSelectedNote(result.note);
+    editorNoteIdRef.current = result.note.id;
     setRecoverableDraft(undefined);
     setAttachments([]);
     setEditorState('ready');
@@ -349,9 +359,9 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
     setNotes((current) => current.map((item) => item.id === updated.id ? updated : item));
   };
 
-  const revealCitation = useCallback((citation: NoteAiCitation) => {
-    const view = editorViewRef.current;
-    if (!view) return;
+  const revealCitation = useCallback((citation: NoteAiCitation, targetView = editorViewRef.current) => {
+    const view = targetView;
+    if (!view || view.isDestroyed || editorViewRef.current !== view) return;
     const paragraphIndex = Math.max(0, citation.paragraphIndex ?? 0);
     let paragraphStart: number | null = null;
     let paragraphSize = 0;
@@ -376,23 +386,47 @@ export function NotesWorkspace({ client: providedClient, userId: providedUserId,
   const editorReady = useCallback((view: EditorView) => {
     editorViewRef.current = view;
     onEditorReady?.(view);
-    const citation = pendingCitation.current;
-    if (citation) {
-      pendingCitation.current = null;
-      window.requestAnimationFrame(() => revealCitation(citation));
+    const pending = pendingCitation.current;
+    if (pending && pending.noteId === editorNoteIdRef.current) {
+      const { token } = pending;
+      window.requestAnimationFrame(() => {
+        const current = pendingCitation.current;
+        if (!current || current.token !== token || token !== citationNavigationGeneration.current) return;
+        if (current.noteId !== editorNoteIdRef.current) return;
+        if (editorViewRef.current !== view || view.isDestroyed) return;
+        pendingCitation.current = null;
+        revealCitation(current.citation, view);
+      });
     }
   }, [onEditorReady, revealCitation]);
 
   const navigateCitation = useCallback(async (citation: NoteAiCitation) => {
     if (!citation.noteId) return;
+    const token = citationNavigationGeneration.current + 1;
+    citationNavigationGeneration.current = token;
+    pendingCitation.current = null;
     if (citation.noteId === selectedNoteIdRef.current) {
-      revealCitation(citation);
+      noteLoadGeneration.current += 1;
+      noteAbortController.current?.abort();
+      if (editorState === 'ready') {
+        revealCitation(citation);
+      } else {
+        pendingCitation.current = { token, noteId: citation.noteId, citation };
+        const loaded = await loadNote(citation.noteId);
+        if (token !== citationNavigationGeneration.current) return;
+        if (!loaded) pendingCitation.current = null;
+      }
       return;
     }
-    pendingCitation.current = citation;
-    await loadNote(citation.noteId);
+    pendingCitation.current = { token, noteId: citation.noteId, citation };
+    const loaded = await loadNote(citation.noteId);
+    if (token !== citationNavigationGeneration.current) return;
+    if (!loaded) {
+      pendingCitation.current = null;
+      return;
+    }
     if (isMobile) setMobileView('editor');
-  }, [isMobile, loadNote, revealCitation]);
+  }, [editorState, isMobile, loadNote, revealCitation]);
 
   const registerNoteButton = (noteId: string, element: HTMLButtonElement | null) => {
     if (element) noteButtons.current.set(noteId, element);
