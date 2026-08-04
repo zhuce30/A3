@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { a3Messages } from '@/lib/a3/i18n';
-import { a3GetActiveNavHref, a3NavItems } from '@/lib/a3/navigation';
+import { a3GetActiveNavHref, a3GetNavItemsForRole, a3NavItems } from '@/lib/a3/navigation';
 
 const root = process.cwd();
 const todayView = readFileSync(join(root, 'components/a3/features/today-learning-view.tsx'), 'utf8');
@@ -13,6 +13,24 @@ const knowledgeBaseView = readFileSync(join(root, 'components/a3/features/knowle
 const shellSource = readFileSync(join(root, 'components/a3/layout/a3-shell.tsx'), 'utf8');
 
 describe('A3 student navigation consolidation', () => {
+  it('places personal notes after AI learning for students only', () => {
+    expect(a3GetNavItemsForRole('student').map((item) => item.href)).toEqual([
+      '/a3/today',
+      '/a3/study-plan',
+      '/a3/assessment',
+      '/a3/classroom',
+      '/a3/notes',
+      '/a3/knowledge-base',
+      '/a3/report',
+    ]);
+    expect(a3GetNavItemsForRole('teacher').map((item) => item.href)).not.toContain('/a3/notes');
+    expect(a3GetNavItemsForRole('admin').map((item) => item.href)).not.toContain('/a3/notes');
+    expect(a3NavItems.find((item) => item.href === '/a3/notes')).toMatchObject({
+      label: '个人笔记',
+      roles: ['student'],
+    });
+  });
+
   it('keeps the student sidebar focused on six primary learning jobs', () => {
     expect(a3NavItems.filter((item) => !item.roles).map((item) => [item.href, item.label])).toEqual([
       ['/a3/today', '今日学习'],
@@ -83,6 +101,7 @@ describe('A3 student navigation consolidation', () => {
     expect(shellSource).toContain('aria-expanded={expanded}');
     expect(shellSource).toContain('onClick={() => toggleNavGroup(item.href)}');
     expect(shellSource).toContain('data-testid={`a3-sidebar-page-${item.href.replaceAll');
+    expect(shellSource).toContain("'/a3/notes': '个人笔记'");
   });
 
   it('removes secondary, demo, and personal utility pages from the student sidebar', () => {

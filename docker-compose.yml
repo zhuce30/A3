@@ -51,6 +51,7 @@ services:
       A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:-a3-docker-dev-video-worker-token}
       A3_VIDEO_STORAGE_ROOT: /app/storage/a3-videos
       A3_VIDEO_STORAGE_MAX_BYTES: ${A3_VIDEO_STORAGE_MAX_BYTES:-209715200}
+      A3_NOTES_STORAGE_ROOT: /app/storage/a3-notes
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "1"
       A3_SEED_DEMO_DATA: "1"
@@ -61,6 +62,7 @@ services:
       - ./backend/knowledge_base:/app/backend/knowledge_base
       - ./backend/tmp:/app/backend/tmp
       - a3-video-data:/app/storage/a3-videos
+      - a3-notes-data:/app/storage/a3-notes
     depends_on:
       mysql:
         condition: service_healthy
@@ -88,6 +90,7 @@ services:
       A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:-a3-docker-dev-video-worker-token}
       A3_VIDEO_STORAGE_ROOT: /app/storage/a3-videos
       A3_VIDEO_STORAGE_MAX_BYTES: ${A3_VIDEO_STORAGE_MAX_BYTES:-209715200}
+      A3_NOTES_STORAGE_ROOT: /app/storage/a3-notes
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "0"
       A3_SEED_DEMO_DATA: "0"
@@ -96,6 +99,7 @@ services:
       - ./backend/knowledge_base:/app/backend/knowledge_base
       - ./backend/tmp:/app/backend/tmp
       - a3-video-data:/app/storage/a3-videos
+      - a3-notes-data:/app/storage/a3-notes
     depends_on:
       backend:
         condition: service_started
@@ -237,3 +241,4 @@ volumes:
   a3-mysql-data:
   a3-redis-data:
   a3-video-data:
+  a3-notes-data:

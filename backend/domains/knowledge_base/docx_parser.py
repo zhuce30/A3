@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -20,7 +20,12 @@ class DocxContentBlock:
     table_index: int | None = None
 
 
-def parse_docx_blocks(path: Path) -> list[DocxContentBlock]:
+def parse_docx_blocks(
+    path: Path,
+    *,
+    max_blocks: int | None = None,
+    max_chars: int | None = None,
+) -> list[DocxContentBlock]:
     try:
         from docx import Document
         from docx.oxml.table import CT_Tbl
@@ -33,15 +38,41 @@ def parse_docx_blocks(path: Path) -> list[DocxContentBlock]:
     document = Document(str(path))
     blocks: list[DocxContentBlock] = []
     paragraph_buffer: list[tuple[int, str]] = []
+    paragraph_buffer_chars = 0
     section = path.stem
     heading_level = 0
     paragraph_index = 0
     table_index = 0
+    emitted_chars = 0
+    exhausted = (max_blocks is not None and max_blocks <= 0) or (max_chars is not None and max_chars <= 0)
+
+    def append_block(block: DocxContentBlock) -> None:
+        nonlocal emitted_chars, exhausted
+        if exhausted:
+            return
+        if max_blocks is not None and len(blocks) >= max_blocks:
+            exhausted = True
+            return
+        markdown = block.markdown
+        if max_chars is not None:
+            remaining = max_chars - emitted_chars
+            if remaining <= 0:
+                exhausted = True
+                return
+            if len(markdown) > remaining:
+                markdown = markdown[:remaining]
+                exhausted = True
+        blocks.append(replace(block, markdown=markdown))
+        emitted_chars += len(markdown)
+        if (max_blocks is not None and len(blocks) >= max_blocks) or (
+            max_chars is not None and emitted_chars >= max_chars
+        ):
+            exhausted = True
 
     def flush_paragraphs() -> None:
-        nonlocal paragraph_buffer
+        nonlocal paragraph_buffer, paragraph_buffer_chars
         for chunk in _chunk_paragraphs(paragraph_buffer):
-            blocks.append(
+            append_block(
                 DocxContentBlock(
                     block_type="text",
                     markdown="\n\n".join(text for _, text in chunk),
@@ -52,9 +83,14 @@ def parse_docx_blocks(path: Path) -> list[DocxContentBlock]:
                     paragraph_end=chunk[-1][0],
                 )
             )
+            if exhausted:
+                break
         paragraph_buffer = []
+        paragraph_buffer_chars = 0
 
     for child in document.element.body.iterchildren():
+        if exhausted:
+            break
         if isinstance(child, CT_P):
             paragraph = Paragraph(child, document)
             text = _clean_text(paragraph.text)
@@ -64,18 +100,29 @@ def parse_docx_blocks(path: Path) -> list[DocxContentBlock]:
             next_heading_level = _heading_level(paragraph.style.name if paragraph.style else "")
             if next_heading_level:
                 flush_paragraphs()
+                if exhausted:
+                    break
                 section = text
                 heading_level = next_heading_level
                 continue
-            paragraph_buffer.append((paragraph_index, _paragraph_markdown(paragraph, text)))
+            markdown = _paragraph_markdown(paragraph, text)
+            paragraph_buffer_chars += len(markdown) + (2 if paragraph_buffer else 0)
+            paragraph_buffer.append((paragraph_index, markdown))
+            remaining_chars = None if max_chars is None else max_chars - emitted_chars
+            if paragraph_buffer_chars >= DOCX_TEXT_CHUNK_MAX_CHARS or (
+                remaining_chars is not None and paragraph_buffer_chars >= remaining_chars
+            ):
+                flush_paragraphs()
             continue
 
         if isinstance(child, CT_Tbl):
             flush_paragraphs()
+            if exhausted:
+                break
             table_index += 1
             markdown = _table_markdown(Table(child, document))
             if markdown:
-                blocks.append(
+                append_block(
                     DocxContentBlock(
                         block_type="table",
                         markdown=markdown,
@@ -86,7 +133,8 @@ def parse_docx_blocks(path: Path) -> list[DocxContentBlock]:
                     )
                 )
 
-    flush_paragraphs()
+    if not exhausted:
+        flush_paragraphs()
     return blocks
 
 

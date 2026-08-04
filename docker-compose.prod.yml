@@ -61,6 +61,7 @@ services:
       A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:?set A3_VIDEO_WORKER_TOKEN in .env.production}
       A3_VIDEO_STORAGE_ROOT: /app/storage/a3-videos
       A3_VIDEO_STORAGE_MAX_BYTES: ${A3_VIDEO_STORAGE_MAX_BYTES:-209715200}
+      A3_NOTES_STORAGE_ROOT: /app/storage/a3-notes
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "1"
       A3_SEED_DEMO_DATA: ${A3_SEED_DEMO_DATA:-1}
@@ -70,6 +71,7 @@ services:
       A3_ASSESSMENT_EXPORT_LLM_MAX_ATTEMPTS: ${A3_ASSESSMENT_EXPORT_LLM_MAX_ATTEMPTS:-3}
     volumes:
       - a3-video-data:/app/storage/a3-videos
+      - a3-notes-data:/app/storage/a3-notes
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/ready/', timeout=3)"]
       interval: 15s
@@ -117,11 +119,13 @@ services:
       A3_VIDEO_WORKER_TOKEN: ${A3_VIDEO_WORKER_TOKEN:?set A3_VIDEO_WORKER_TOKEN in .env.production}
       A3_VIDEO_STORAGE_ROOT: /app/storage/a3-videos
       A3_VIDEO_STORAGE_MAX_BYTES: ${A3_VIDEO_STORAGE_MAX_BYTES:-209715200}
+      A3_NOTES_STORAGE_ROOT: /app/storage/a3-notes
       A3_WAIT_FOR_DB: "1"
       A3_RUN_MIGRATIONS: "0"
       A3_SEED_DEMO_DATA: "0"
     volumes:
       - a3-video-data:/app/storage/a3-videos
+      - a3-notes-data:/app/storage/a3-notes
 
   resource-worker:
     image: ${A3_BACKEND_IMAGE:-ghcr.io/zhuce30/a3-backend:latest}
@@ -334,3 +338,4 @@ volumes:
   a3-caddy-logs:
   a3-frontend-data:
   a3-video-data:
+  a3-notes-data:

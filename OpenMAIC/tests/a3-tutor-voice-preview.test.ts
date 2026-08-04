@@ -689,7 +689,7 @@ describe('A3 tutor voice preview route security', () => {
 
   it('does not let garbage cookies bypass the pre-Django session limiter', async () => {
     vi.stubEnv('DJANGO_SESSION_COOKIE_NAME', 'a3_sessionid');
-    const { handleTutorVoicePreview } = await import('@/app/api/a3/tutors/voice-preview/route');
+    const { handleTutorVoicePreview } = await import('@/lib/server/a3-tutor-voice-preview-route-handler');
     const fetchMock = vi.fn(async () => Response.json({
       success: true,
       personas: [{ id: 'structured-teacher', voicePreviewEnabled: true }],
@@ -714,7 +714,7 @@ describe('A3 tutor voice preview route security', () => {
 
   it('requires a cookie before reading the request body', async () => {
     const { handleTutorVoicePreview } = await import(
-      '@/app/api/a3/tutors/voice-preview/route'
+      '@/lib/server/a3-tutor-voice-preview-route-handler'
     );
     const response = await handleTutorVoicePreview(
       new Request('http://localhost/api/a3/tutors/voice-preview', {
@@ -730,7 +730,7 @@ describe('A3 tutor voice preview route security', () => {
 
   it('returns binary audio with no provider metadata in headers or body', async () => {
     const { handleTutorVoicePreview } = await import(
-      '@/app/api/a3/tutors/voice-preview/route'
+      '@/lib/server/a3-tutor-voice-preview-route-handler'
     );
     global.fetch = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);

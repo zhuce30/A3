@@ -65,6 +65,7 @@ PPT背景/
 
 # Large local knowledge-base/runtime data
 backend/.cache/
+.pnpm-store/
 backend/knowledge_base/faiss_index/
 data/uploads/
 data/PPT/

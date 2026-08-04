@@ -73,6 +73,32 @@ backend\.venv\Scripts\python.exe backend\manage.py check
 backend\.venv\Scripts\python.exe backend\manage.py validate_demo_flow --skip-seed --strict
 ```
 
+## 个人笔记与 AI 课堂边界
+
+`/a3/notes` 是个人笔记编辑、附件解析、版本恢复、限定范围 AI、引用跳转、差异写回、每日总结和个人笔记记忆的唯一产品归属页。
+
+个人记忆只允许进入个人笔记助手：
+
+```text
+NoteMemory(confirmed + effective + current user)
+-> personal notes context service
+-> /api/notes/assistant/chat/
+-> message.metadata.memoryIds
+-> /a3/notes 使用披露
+```
+
+`/a3/classroom` 和 `/a3/coaching` 仍负责课堂对话、学习目标与课程知识库 RAG。它们不得查询、读取或注入 `NoteMemory`；`RetrieverAgent` 的课程检索契约保持不变。个人笔记记忆也不得写入课程向量索引、FAISS 或知识图谱。
+
+专项验证：
+
+```powershell
+backend\.venv\Scripts\python.exe backend\manage.py test backend.apps.notes
+backend\.venv\Scripts\python.exe backend\manage.py evaluate_notes_memory --offline --strict --output backend\tmp\notes_memory_metrics.json
+cd OpenMAIC
+pnpm.cmd vitest run tests/a3-personal-notes-ai.test.tsx tests/a3-personal-notes-memory.test.tsx
+npx.cmd playwright test e2e/tests/a3-personal-notes.spec.ts --project=chromium --workers=1
+```
+
 ## 后续规则
 
 1. 新增 OpenMAIC 能力前，必须先确定归属的 A3 页面。

@@ -1,0 +1,1110 @@
+from __future__ import annotations
+
+import uuid
+from datetime import timedelta
+from threading import Event, Thread
+
+from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.db import close_old_connections, transaction
+from django.db.models import Q
+from django.utils import timezone
+
+from backend.apps.notes.models import (
+    Note,
+    NoteAiMessage,
+    NoteAttachment,
+    NoteDailyDigest,
+    NoteDailyState,
+    NoteExportJob,
+    NoteRevision,
+)
+
+
+PARSE_HARD_LIMIT = max(11, int(settings.A3_NOTES_PARSE_TIMEOUT_SECONDS))
+PARSE_SOFT_LIMIT = max(1, PARSE_HARD_LIMIT - 10)
+MAX_PARSE_ATTEMPTS = 3
+STALE_JOB_MINUTES = 30
+ASSISTANT_STALE_MINUTES = 10
+DIGEST_STALE_MINUTES = 30
+
+
+def _heartbeat_digest_once(digest_id, generation: int, lease_token: uuid.UUID) -> bool:
+    return bool(
+        _digest_lease_filter(digest_id, generation, lease_token).update(
+            run_heartbeat_at=timezone.now()
+        )
+    )
+
+
+class DigestHeartbeat:
+    def __init__(
+        self,
+        digest_id,
+        generation: int,
+        lease_token: uuid.UUID,
+        *,
+        interval_seconds: float,
+    ) -> None:
+        self.digest_id = digest_id
+        self.generation = generation
+        self.lease_token = lease_token
+        self.interval_seconds = max(0.01, float(interval_seconds))
+        self._stop = Event()
+        self._thread = Thread(
+            target=self._run,
+            name=f"note-digest-heartbeat-{digest_id}",
+            daemon=True,
+        )
+
+    @property
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        close_old_connections()
+        try:
+            while not self._stop.wait(self.interval_seconds):
+                try:
+                    if not _heartbeat_digest_once(
+                        self.digest_id,
+                        self.generation,
+                        self.lease_token,
+                    ):
+                        return
+                except Exception:
+                    return
+        finally:
+            close_old_connections()
+
+
+def _digest_lease_filter(digest_id, generation: int, lease_token: uuid.UUID):
+    return NoteDailyDigest.objects.filter(
+        id=digest_id,
+        status=NoteDailyDigest.Status.PROCESSING,
+        run_generation=generation,
+        run_lease_token=lease_token,
+    )
+
+
+@shared_task(name="notes.extract_memory_candidates", acks_late=True, reject_on_worker_lost=True)
+def extract_memory_candidates_task(source_kind: str, source_id: str) -> dict:
+    from backend.apps.notes.services import memory_service
+
+    close_old_connections()
+    try:
+        if source_kind == "assistant_message":
+            memories = memory_service.extract_candidates_for_assistant_message(source_id)
+        elif source_kind == "daily_digest":
+            memories = memory_service.extract_candidates_for_digest(source_id)
+        else:
+            return {"skipped": True}
+        return {
+            "status": "succeeded",
+            "candidateIds": [str(item.id) for item in memories],
+        }
+    finally:
+        close_old_connections()
+
+
+def enqueue_memory_candidate_extraction(source_kind: str, source_id) -> None:
+    try:
+        extract_memory_candidates_task.delay(source_kind, str(source_id))
+    except Exception:
+        return
+
+
+@shared_task(name="notes.generate_daily_digest", acks_late=True, reject_on_worker_lost=True)
+def generate_daily_digest_task(digest_id: str, expected_generation: int, expected_lease_token: str) -> dict:
+    from backend.apps.notes.services import digest_service
+
+    close_old_connections()
+    try:
+        generation = int(expected_generation)
+        lease_token = uuid.UUID(str(expected_lease_token))
+    except (TypeError, ValueError, AttributeError):
+        return {"skipped": True}
+    now = timezone.now()
+    claimed = NoteDailyDigest.objects.filter(
+        id=digest_id,
+        status=NoteDailyDigest.Status.QUEUED,
+        run_generation=generation,
+        run_lease_token=lease_token,
+    ).update(
+        status=NoteDailyDigest.Status.PROCESSING,
+        run_started_at=now,
+        run_heartbeat_at=now,
+        error_code="",
+        error_message="",
+    )
+    if not claimed:
+        return {"skipped": True}
+    digest = _digest_lease_filter(digest_id, generation, lease_token).first()
+    if digest is None:
+        return {"skipped": True}
+    try:
+        with DigestHeartbeat(
+            digest.id,
+            generation,
+            lease_token,
+            interval_seconds=float(settings.A3_NOTES_DIGEST_HEARTBEAT_SECONDS),
+        ):
+            content = digest_service.generate_digest_markdown(digest.source_snapshot).strip()
+        if not content:
+            raise ValueError("empty digest")
+        title = f"{digest.digest_date.month} 月 {digest.digest_date.day} 日笔记总结"
+        updated = _digest_lease_filter(digest.id, generation, lease_token).update(
+            status=NoteDailyDigest.Status.SUCCEEDED,
+            title=title,
+            content_md=content,
+            error_code="",
+            error_message="",
+            run_lease_token=None,
+            run_heartbeat_at=timezone.now(),
+        )
+        if not updated:
+            return {"skipped": True}
+        enqueue_memory_candidate_extraction("daily_digest", digest.id)
+        return {"status": "succeeded", "digestId": str(digest.id)}
+    except Exception as exc:
+        if isinstance(exc, digest_service.DigestServiceError):
+            code = exc.code
+            message = str(exc)
+        elif isinstance(exc, ValueError):
+            code = "digest_generation_empty"
+            message = "摘要生成结果为空，请重试"
+        else:
+            code = "digest_model_unavailable"
+            message = "摘要模型暂时不可用，请稍后重试"
+        updated = _digest_lease_filter(digest.id, generation, lease_token).update(
+            status=NoteDailyDigest.Status.FAILED,
+            title="",
+            content_md="",
+            error_code=code,
+            error_message=message,
+            run_lease_token=None,
+            run_heartbeat_at=timezone.now(),
+        )
+        if not updated:
+            return {"skipped": True}
+        return {"status": "failed", "digestId": str(digest.id)}
+    finally:
+        close_old_connections()
+
+
+def recover_stale_digest_jobs(*, now=None, stale_minutes: int = DIGEST_STALE_MINUTES) -> dict:
+    from backend.apps.notes.services import digest_service
+
+    current = now or timezone.now()
+    cutoff = current - timedelta(minutes=stale_minutes)
+    processing_ids = list(
+        NoteDailyDigest.objects.filter(
+            status=NoteDailyDigest.Status.PROCESSING,
+            run_heartbeat_at__lt=cutoff,
+        ).values_list("id", flat=True)[: int(settings.A3_NOTES_CLEANUP_BATCH_SIZE)]
+    )
+    remaining = max(0, int(settings.A3_NOTES_CLEANUP_BATCH_SIZE) - len(processing_ids))
+    queued_ids = list(
+        NoteDailyDigest.objects.filter(
+            status=NoteDailyDigest.Status.QUEUED,
+            updated_at__lt=cutoff,
+        ).values_list("id", flat=True)[:remaining]
+    )
+    recovered = 0
+    failed = 0
+    for digest_id in [*processing_ids, *queued_ids]:
+        digest = NoteDailyDigest.objects.filter(pk=digest_id).first()
+        if digest is None:
+            continue
+        if digest.status == NoteDailyDigest.Status.PROCESSING:
+            changed = NoteDailyDigest.objects.filter(
+                pk=digest.pk,
+                status=NoteDailyDigest.Status.PROCESSING,
+                run_heartbeat_at__lt=cutoff,
+            ).update(
+                status=NoteDailyDigest.Status.QUEUED,
+                run_lease_token=None,
+                run_started_at=None,
+                run_heartbeat_at=None,
+            )
+            if not changed:
+                continue
+            digest.refresh_from_db()
+        try:
+            digest_service.enqueue_digest(digest, force=True)
+            recovered += 1
+        except Exception:
+            failed += 1
+            NoteDailyDigest.objects.filter(pk=digest.pk, status=NoteDailyDigest.Status.QUEUED).update(
+                status=NoteDailyDigest.Status.FAILED,
+                error_code="digest_recovery_failed",
+                error_message="每日总结恢复失败，请手动重试",
+                run_lease_token=None,
+            )
+    return {"recovered": recovered, "failed": failed}
+
+
+@shared_task(name="notes.create_previous_day_digests")
+def create_previous_day_digests_task(*, now_iso: str | None = None) -> dict:
+    from backend.apps.notes.services import digest_service
+
+    if now_iso:
+        current = timezone.datetime.fromisoformat(now_iso)
+        if timezone.is_naive(current):
+            current = timezone.make_aware(current, digest_service.BEIJING)
+        current = current.astimezone(digest_service.BEIJING)
+    else:
+        current = timezone.localtime(timezone.now(), digest_service.BEIJING)
+    target_date = current.date() - timedelta(days=1)
+    user_ids = NoteDailyState.objects.filter(
+        local_date=target_date,
+        was_edited=True,
+        deleted_at_day_end=False,
+    ).order_by().values_list("note__user_id", flat=True).distinct()
+    created = 0
+    user_model = Note._meta.get_field("user").remote_field.model
+    for user in user_model.objects.filter(pk__in=user_ids).iterator():
+        key = f"auto:{user.pk}:{target_date.isoformat()}"
+        existed = NoteDailyDigest.objects.filter(user=user, idempotency_key=key).exists()
+        digest_service.create_automatic_digest(user, target_date)
+        if not existed:
+            created += 1
+    return {"date": target_date.isoformat(), "created": created}
+
+
+def enqueue_assistant_message(message: NoteAiMessage) -> NoteAiMessage:
+    attempted_at = timezone.now()
+    with transaction.atomic():
+        queued = NoteAiMessage.objects.select_for_update().filter(
+            id=message.id,
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.QUEUED,
+        ).first()
+        if queued is None:
+            message.refresh_from_db()
+            return message
+        preserve_confirmed_delivery = (
+            queued.dispatch_confirmed_at is not None
+            and queued.run_lease_token is not None
+        )
+        if not preserve_confirmed_delivery:
+            queued.run_generation += 1
+            queued.run_lease_token = uuid.uuid4()
+            queued.dispatch_confirmed_at = None
+        queued.run_started_at = None
+        queued.run_heartbeat_at = None
+        queued.dispatch_attempted_at = attempted_at
+        queued.save(
+            update_fields={
+                "run_generation",
+                "run_lease_token",
+                "run_started_at",
+                "run_heartbeat_at",
+                "dispatch_attempted_at",
+                "dispatch_confirmed_at",
+            }
+        )
+        generation = queued.run_generation
+        lease_token = queued.run_lease_token
+    try:
+        generate_assistant_message_task.delay(
+            str(message.id), generation, str(lease_token)
+        )
+        NoteAiMessage.objects.filter(
+            id=message.id,
+            status=NoteAiMessage.Status.QUEUED,
+            run_generation=generation,
+            run_lease_token=lease_token,
+        ).update(
+            dispatch_confirmed_at=timezone.now(),
+            error_code="",
+            error_message="",
+        )
+    except Exception:
+        failure_updates = {
+            "error_code": "assistant_enqueue_failed",
+            "error_message": "AI 助手任务暂时无法提交，请重试",
+        }
+        if not preserve_confirmed_delivery:
+            failure_updates["dispatch_confirmed_at"] = None
+        NoteAiMessage.objects.filter(
+            id=message.id,
+            status=NoteAiMessage.Status.QUEUED,
+            run_generation=generation,
+            run_lease_token=lease_token,
+        ).update(**failure_updates)
+    message.refresh_from_db()
+    return message
+
+
+def _assistant_lease_filter(message_id, generation: int, lease_token: uuid.UUID):
+    return NoteAiMessage.objects.filter(
+        id=message_id,
+        role=NoteAiMessage.Role.ASSISTANT,
+        status=NoteAiMessage.Status.STREAMING,
+        run_generation=generation,
+        run_lease_token=lease_token,
+    )
+
+
+def _persist_assistant_failure(
+    message_id,
+    generation: int,
+    lease_token: uuid.UUID,
+    code: str,
+    error_message: str,
+    *,
+    trace_id: str = "",
+) -> bool:
+    message = _assistant_lease_filter(message_id, generation, lease_token).first()
+    if message is None:
+        return False
+    return bool(
+        _assistant_lease_filter(message_id, generation, lease_token).update(
+            status=NoteAiMessage.Status.FAILED,
+            degraded=True,
+            verified=False,
+            error_code=code,
+            error_message=error_message,
+            metadata={**message.metadata, "traceId": trace_id or str(uuid.uuid4())},
+            run_lease_token=None,
+            run_heartbeat_at=timezone.now(),
+        )
+    )
+
+
+def _claim_assistant_lease(
+    message_id: str,
+    generation: int,
+    lease_token: uuid.UUID,
+    *,
+    redelivered: bool,
+) -> tuple[NoteAiMessage | None, uuid.UUID]:
+    now = timezone.now()
+    claimed = NoteAiMessage.objects.filter(
+        id=message_id,
+        role=NoteAiMessage.Role.ASSISTANT,
+        status=NoteAiMessage.Status.QUEUED,
+        run_generation=generation,
+        run_lease_token=lease_token,
+    ).update(
+        status=NoteAiMessage.Status.STREAMING,
+        content="",
+        error_code="",
+        error_message="",
+        dispatch_confirmed_at=now,
+        run_started_at=now,
+        run_heartbeat_at=now,
+    )
+    active_lease = lease_token
+    if not claimed and redelivered:
+        with transaction.atomic():
+            stale = NoteAiMessage.objects.select_for_update().filter(
+                id=message_id,
+                role=NoteAiMessage.Role.ASSISTANT,
+                status=NoteAiMessage.Status.STREAMING,
+                run_generation=generation,
+                run_lease_token=lease_token,
+                run_heartbeat_at__lt=now - timedelta(minutes=ASSISTANT_STALE_MINUTES),
+            ).first()
+            if stale is not None:
+                active_lease = uuid.uuid4()
+                stale.run_lease_token = active_lease
+                stale.run_started_at = now
+                stale.run_heartbeat_at = now
+                stale.save(
+                    update_fields={
+                        "run_lease_token",
+                        "run_started_at",
+                        "run_heartbeat_at",
+                    }
+                )
+                claimed = 1
+    if not claimed:
+        return None, active_lease
+    message = NoteAiMessage.objects.select_related("session", "session__user").filter(
+        id=message_id,
+        status=NoteAiMessage.Status.STREAMING,
+        run_generation=generation,
+        run_lease_token=active_lease,
+    ).first()
+    return message, active_lease
+
+
+def _persist_assistant_partial(
+    message_id: str,
+    generation: int,
+    lease_token: uuid.UUID,
+    content: str,
+) -> bool:
+    return bool(
+        _assistant_lease_filter(message_id, generation, lease_token).update(
+            content=content,
+            run_heartbeat_at=timezone.now(),
+        )
+    )
+
+
+@shared_task(name="notes.generate_assistant_message", acks_late=True, reject_on_worker_lost=True)
+def generate_assistant_message_task(
+    message_id: str, expected_generation: int, expected_lease_token: str
+) -> dict:
+    from backend.apps.notes.services import assistant_service
+
+    close_old_connections()
+    trace_id = ""
+    generation = 0
+    lease_token = uuid.uuid4()
+    try:
+        try:
+            generation = int(expected_generation)
+            lease_token = uuid.UUID(str(expected_lease_token))
+        except (TypeError, ValueError, AttributeError):
+            return {"skipped": True}
+        message, lease_token = _claim_assistant_lease(
+            message_id,
+            generation,
+            lease_token,
+            redelivered=_task_was_redelivered(generate_assistant_message_task),
+        )
+        if message is None:
+            return {"skipped": True}
+        user_message_id = message.metadata.get("userMessageId")
+        user_message = NoteAiMessage.objects.filter(
+            id=user_message_id,
+            session=message.session,
+            role=NoteAiMessage.Role.USER,
+        ).first()
+        if user_message is None:
+            _persist_assistant_failure(
+                message.id,
+                generation,
+                lease_token,
+                "assistant_user_message_missing",
+                "用户消息不存在，无法生成回答",
+            )
+            return {"status": "failed", "messageId": str(message.id)}
+
+        trace_id = str(uuid.uuid4())
+        safety = assistant_service.run_safety(message.session.user, user_message.content)
+        if safety.get("safe") is not True:
+            updated = _assistant_lease_filter(
+                message.id, generation, lease_token
+            ).update(
+                status=NoteAiMessage.Status.SUCCEEDED,
+                content="这个请求涉及安全或权限风险，我不能按原请求处理。请改为不包含隐私、越权或危险行为的学习问题。",
+                safety=safety,
+                verified=False,
+                claims=[],
+                citations=[],
+                metadata={**message.metadata, "traceId": trace_id},
+                run_lease_token=None,
+                run_heartbeat_at=timezone.now(),
+            )
+            if not updated:
+                return {"skipped": True}
+            return {"status": "succeeded", "messageId": str(message.id), "refused": True}
+
+        context = assistant_service.build_context_for_message(message, user_message.content)
+        updated = _assistant_lease_filter(message.id, generation, lease_token).update(
+            safety=safety,
+            citations=context.citations,
+            run_heartbeat_at=timezone.now(),
+            metadata={
+                **message.metadata,
+                "traceId": trace_id,
+                "contextCharacters": context.character_count,
+                "contextTokens": context.token_count,
+                "memoryIds": list(getattr(context, "memory_ids", [])),
+            },
+        )
+        if not updated:
+            return {"skipped": True}
+        generated = assistant_service.generate_note_answer(
+            user_message.content, context_text=context.text, sources=context.sources
+        )
+        answer = str(generated.get("answer") or "")[: assistant_service.MAX_ANSWER_CHARACTERS]
+        if not answer:
+            raise RuntimeError("empty assistant answer")
+        for end in range(assistant_service.PARTIAL_WRITE_CHARACTERS, len(answer), assistant_service.PARTIAL_WRITE_CHARACTERS):
+            updated = _persist_assistant_partial(
+                str(message.id), generation, lease_token, answer[:end]
+            )
+            if not updated:
+                return {"skipped": True}
+        updated = _persist_assistant_partial(
+            str(message.id), generation, lease_token, answer
+        )
+        if not updated:
+            return {"skipped": True}
+
+        degraded = bool(generated.get("fallback"))
+        error_code = ""
+        error_message = ""
+        try:
+            verification = assistant_service.run_verifier(
+                message.session.user, user_message.content, answer, context.sources
+            )
+        except Exception:
+            verification = {"verified": False, "claims": []}
+            degraded = True
+            error_code = "assistant_verifier_degraded"
+            error_message = "回答已生成，但引用验证暂时不可用"
+        replacement = verification.get("answer")
+        final_answer = (
+            str(replacement)[: assistant_service.MAX_ANSWER_CHARACTERS]
+            if isinstance(replacement, str) and replacement.strip()
+            else answer
+        )
+        verifier_citations = verification.get("citations")
+        final_citations = (
+            verifier_citations
+            if isinstance(verifier_citations, list)
+            else context.citations
+        )
+        verified = bool(verification.get("verified")) and bool(final_citations)
+        claims = verification.get("claims") if isinstance(verification.get("claims"), list) else []
+        final_safety = verification.get("safety") if isinstance(verification.get("safety"), dict) else safety
+        refusal_reason = verification.get("refusalReason")
+        final_metadata = {
+            **message.metadata,
+            "traceId": trace_id,
+            "provider": str(generated.get("provider") or ""),
+            "model": str(generated.get("model") or ""),
+            "contextCharacters": context.character_count,
+            "contextTokens": context.token_count,
+            "memoryIds": list(getattr(context, "memory_ids", [])),
+        }
+        if isinstance(refusal_reason, str):
+            final_metadata["refusalReason"] = refusal_reason
+        updated = _assistant_lease_filter(message.id, generation, lease_token).update(
+            status=NoteAiMessage.Status.SUCCEEDED,
+            content=final_answer,
+            citations=final_citations,
+            verified=verified,
+            claims=claims,
+            safety=final_safety,
+            degraded=degraded,
+            error_code=error_code,
+            error_message=error_message,
+            metadata=final_metadata,
+            run_lease_token=None,
+            run_heartbeat_at=timezone.now(),
+        )
+        if updated:
+            enqueue_memory_candidate_extraction("assistant_message", message.id)
+        return {
+            "status": "succeeded" if updated else "skipped",
+            "messageId": str(message.id),
+        }
+    except Exception:
+        _persist_assistant_failure(
+            message_id,
+            generation,
+            lease_token,
+            "assistant_generation_failed",
+            "AI 回答生成失败，请稍后重试",
+            trace_id=trace_id,
+        )
+        return {"status": "failed", "messageId": str(message_id)}
+    finally:
+        close_old_connections()
+
+
+def _recover_stale_assistant_messages(cutoff, limit: int) -> tuple[int, int]:
+    stale_ids = list(
+        NoteAiMessage.objects.filter(
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.STREAMING,
+        )
+        .filter(
+            Q(run_heartbeat_at__lt=cutoff)
+            | Q(run_heartbeat_at__isnull=True, run_started_at__lt=cutoff)
+        )
+        .order_by("run_heartbeat_at", "run_started_at")
+        .values_list("id", flat=True)[:limit]
+    )
+    recovered = 0
+    failed = 0
+    for message_id in stale_ids:
+        with transaction.atomic():
+            message = NoteAiMessage.objects.select_for_update().filter(
+                id=message_id,
+                role=NoteAiMessage.Role.ASSISTANT,
+                status=NoteAiMessage.Status.STREAMING,
+            ).filter(
+                Q(run_heartbeat_at__lt=cutoff)
+                | Q(run_heartbeat_at__isnull=True, run_started_at__lt=cutoff)
+            ).first()
+            if message is None:
+                continue
+            message.status = NoteAiMessage.Status.QUEUED
+            message.run_lease_token = None
+            message.run_started_at = None
+            message.run_heartbeat_at = None
+            message.error_code = "assistant_stale_requeued"
+            message.error_message = "AI 助手任务中断，已自动重新提交"
+            message.save(
+                update_fields={
+                    "status",
+                    "run_lease_token",
+                    "run_started_at",
+                    "run_heartbeat_at",
+                    "error_code",
+                    "error_message",
+                }
+            )
+        enqueue_assistant_message(message)
+        if message.error_code == "assistant_enqueue_failed":
+            failed += 1
+        else:
+            recovered += 1
+    return recovered, failed
+
+
+def _recover_stale_assistant_dispatches(cutoff, limit: int) -> tuple[int, int]:
+    stale_ids = list(
+        NoteAiMessage.objects.filter(
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.QUEUED,
+        )
+        .filter(
+            Q(dispatch_attempted_at__isnull=True)
+            | Q(
+                dispatch_confirmed_at__isnull=True,
+                dispatch_attempted_at__lt=cutoff,
+            )
+            | Q(
+                dispatch_confirmed_at__lt=cutoff,
+                dispatch_attempted_at__lt=cutoff,
+            )
+        )
+        .order_by("dispatch_attempted_at", "created_at")
+        .values_list("id", flat=True)[:limit]
+    )
+    recovered = 0
+    failed = 0
+    for message_id in stale_ids:
+        message = NoteAiMessage.objects.filter(
+            id=message_id,
+            role=NoteAiMessage.Role.ASSISTANT,
+            status=NoteAiMessage.Status.QUEUED,
+        ).first()
+        if message is None:
+            continue
+        enqueue_assistant_message(message)
+        if message.error_code == "assistant_enqueue_failed":
+            failed += 1
+        else:
+            recovered += 1
+    return recovered, failed
+
+
+def enqueue_attachment_parse(attachment: NoteAttachment) -> NoteAttachment:
+    generation = int(attachment.parse_generation)
+    lease_token = uuid.uuid4()
+    with transaction.atomic():
+        queued = NoteAttachment.objects.select_for_update().filter(
+            id=attachment.id,
+            deleted_at__isnull=True,
+            parse_generation=generation,
+            parse_status=NoteAttachment.ParseStatus.PENDING,
+        ).first()
+        if queued is None:
+            attachment.refresh_from_db()
+            return attachment
+        queued.parse_lease_token = lease_token
+        queued.parse_attempts = 0
+        queued.save(update_fields={"parse_lease_token", "parse_attempts", "updated_at"})
+    try:
+        parse_attachment_task.delay(str(attachment.id), generation, str(lease_token))
+    except Exception:
+        NoteAttachment.objects.filter(
+            id=attachment.id,
+            deleted_at__isnull=True,
+            parse_generation=generation,
+            parse_lease_token=lease_token,
+            parse_status=NoteAttachment.ParseStatus.PENDING,
+        ).update(
+            parse_status=NoteAttachment.ParseStatus.FAILED,
+            parse_started_at=None,
+            error_code="attachment_enqueue_failed",
+            error_message="附件解析任务暂时无法提交，请重试",
+            updated_at=timezone.now(),
+        )
+    attachment.refresh_from_db()
+    return attachment
+
+
+def _task_was_redelivered(task) -> bool:
+    delivery_info = getattr(task.request, "delivery_info", None) or {}
+    return bool(delivery_info.get("redelivered"))
+
+
+def _claim_parse_lease(
+    attachment_id: str,
+    generation: int,
+    lease_token: uuid.UUID,
+    *,
+    redelivered: bool,
+) -> tuple[NoteAttachment | None, bool]:
+    with transaction.atomic():
+        try:
+            attachment = NoteAttachment.objects.select_for_update().filter(
+                id=attachment_id,
+                deleted_at__isnull=True,
+                parse_generation=generation,
+                parse_lease_token=lease_token,
+            ).first()
+        except (ValidationError, ValueError):
+            attachment = None
+        if attachment is None or attachment.parse_status in {
+            NoteAttachment.ParseStatus.SUCCEEDED,
+            NoteAttachment.ParseStatus.FAILED,
+        }:
+            return None, False
+        if attachment.parse_status == NoteAttachment.ParseStatus.PROCESSING and not redelivered:
+            return None, False
+        if attachment.parse_status not in {
+            NoteAttachment.ParseStatus.PENDING,
+            NoteAttachment.ParseStatus.PROCESSING,
+        }:
+            return None, False
+        if attachment.parse_attempts >= MAX_PARSE_ATTEMPTS:
+            attachment.parse_status = NoteAttachment.ParseStatus.FAILED
+            attachment.parse_started_at = None
+            attachment.extracted_text = ""
+            attachment.preview_metadata = {}
+            attachment.error_code = "attachment_parse_attempts_exhausted"
+            attachment.error_message = "附件解析多次中断，请重新提交解析"
+            attachment.save(update_fields={
+                "parse_status", "parse_started_at", "extracted_text", "preview_metadata",
+                "error_code", "error_message", "updated_at",
+            })
+            return None, True
+        attachment.parse_attempts += 1
+        attachment.parse_status = NoteAttachment.ParseStatus.PROCESSING
+        attachment.parse_started_at = timezone.now()
+        attachment.error_code = ""
+        attachment.error_message = ""
+        attachment.save(update_fields={
+            "parse_attempts", "parse_status", "parse_started_at", "error_code", "error_message", "updated_at",
+        })
+        return attachment, False
+
+
+@shared_task(
+    bind=True,
+    name="notes.parse_attachment",
+    soft_time_limit=PARSE_SOFT_LIMIT,
+    time_limit=PARSE_HARD_LIMIT,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def parse_attachment_task(self, attachment_id: str, expected_generation: int, expected_lease_token: str) -> dict:
+    from backend.apps.notes.services.attachment_service import parse_and_persist_attachment
+
+    close_old_connections()
+    try:
+        try:
+            generation = int(expected_generation)
+            lease_token = uuid.UUID(str(expected_lease_token))
+        except (TypeError, ValueError, AttributeError):
+            return {"skipped": True}
+        attachment, exhausted = _claim_parse_lease(
+            attachment_id,
+            generation,
+            lease_token,
+            redelivered=_task_was_redelivered(self),
+        )
+        if exhausted:
+            return {"status": "failed", "attachmentId": str(attachment_id)}
+        if attachment is None:
+            return {"skipped": True}
+        try:
+            return parse_and_persist_attachment(attachment, generation, lease_token)
+        except SoftTimeLimitExceeded:
+            persisted = _persist_parse_failure(
+                attachment.id,
+                generation,
+                lease_token,
+                "attachment_parse_timeout",
+                "附件解析超时，请稍后重试",
+            )
+            if not persisted:
+                return {"skipped": True, "attachmentId": str(attachment.id)}
+            return {"status": "failed", "attachmentId": str(attachment.id)}
+        except Exception:
+            persisted = _persist_parse_failure(
+                attachment.id,
+                generation,
+                lease_token,
+                "attachment_parse_failed",
+                "附件解析失败，请稍后重试",
+            )
+            if not persisted:
+                return {"skipped": True, "attachmentId": str(attachment.id)}
+            return {"status": "failed", "attachmentId": str(attachment.id)}
+    finally:
+        close_old_connections()
+
+
+def _persist_parse_failure(
+    attachment_id,
+    expected_generation: int,
+    expected_lease_token: uuid.UUID,
+    code: str,
+    message: str,
+) -> bool:
+    updated = NoteAttachment.objects.filter(
+        id=attachment_id,
+        deleted_at__isnull=True,
+        parse_generation=expected_generation,
+        parse_lease_token=expected_lease_token,
+        parse_status=NoteAttachment.ParseStatus.PROCESSING,
+    ).update(
+        parse_status=NoteAttachment.ParseStatus.FAILED,
+        parse_started_at=None,
+        extracted_text="",
+        preview_metadata={},
+        error_code=code,
+        error_message=message,
+        updated_at=timezone.now(),
+    )
+    return bool(updated)
+
+
+@shared_task(name="notes.build_export", acks_late=True, reject_on_worker_lost=True)
+def build_export_task(job_id: str, expected_generation: int, expected_lease_token: str) -> dict:
+    from backend.apps.notes.services.export_service import build_note_export
+
+    close_old_connections()
+    try:
+        return build_note_export(job_id, expected_generation, expected_lease_token)
+    finally:
+        close_old_connections()
+
+
+def enqueue_export(job: NoteExportJob) -> NoteExportJob:
+    with transaction.atomic():
+        queued = NoteExportJob.objects.select_for_update().filter(
+            pk=job.pk, status=NoteExportJob.Status.QUEUED
+        ).first()
+        if queued is None:
+            job.refresh_from_db()
+            return job
+        queued.run_generation += 1
+        queued.run_lease_token = uuid.uuid4()
+        queued.run_started_at = None
+        queued.enqueue_attempts = min(65535, queued.enqueue_attempts + 1)
+        queued.save(update_fields={
+            "run_generation", "run_lease_token", "run_started_at",
+            "enqueue_attempts", "updated_at",
+        })
+        generation = queued.run_generation
+        lease_token = queued.run_lease_token
+    try:
+        build_export_task.delay(str(job.id), generation, str(lease_token))
+        NoteExportJob.objects.filter(
+            pk=job.pk,
+            status=NoteExportJob.Status.QUEUED,
+            run_generation=generation,
+            run_lease_token=lease_token,
+        ).update(
+            error_code="",
+            error_message="",
+            updated_at=timezone.now(),
+        )
+    except Exception:
+        NoteExportJob.objects.filter(
+            pk=job.pk,
+            status=NoteExportJob.Status.QUEUED,
+            run_generation=generation,
+            run_lease_token=lease_token,
+        ).update(
+            error_code="export_enqueue_failed",
+            error_message="导出任务暂时无法提交，请稍后重试",
+            updated_at=timezone.now(),
+        )
+    job.refresh_from_db()
+    return job
+
+
+@shared_task(name="notes.cleanup_expired_exports")
+def cleanup_expired_exports_task() -> dict:
+    from backend.apps.notes.services.cleanup_service import cleanup_expired_exports
+
+    return cleanup_expired_exports()
+
+
+@shared_task(name="notes.cleanup_trashed_notes")
+def cleanup_trashed_notes_task() -> dict:
+    from backend.apps.notes.services.cleanup_service import cleanup_trashed_notes
+
+    return cleanup_trashed_notes()
+
+
+def _recover_stale_parse_jobs(cutoff, limit: int) -> tuple[int, int]:
+    stale_ids = list(
+        NoteAttachment.objects.filter(
+            parse_status=NoteAttachment.ParseStatus.PROCESSING,
+            parse_started_at__lt=cutoff,
+            deleted_at__isnull=True,
+        ).order_by("parse_started_at").values_list("id", flat=True)[:limit]
+    )
+    recovered = 0
+    failed = 0
+    for attachment_id in stale_ids:
+        with transaction.atomic():
+            attachment = NoteAttachment.objects.select_for_update().filter(
+                pk=attachment_id,
+                parse_status=NoteAttachment.ParseStatus.PROCESSING,
+                parse_started_at__lt=cutoff,
+                deleted_at__isnull=True,
+            ).first()
+            if attachment is None:
+                continue
+            if attachment.parse_attempts >= MAX_PARSE_ATTEMPTS:
+                attachment.parse_status = NoteAttachment.ParseStatus.FAILED
+                attachment.parse_started_at = None
+                attachment.error_code = "attachment_parse_attempts_exhausted"
+                attachment.error_message = "附件解析多次中断，请重新提交解析"
+                attachment.save(update_fields={
+                    "parse_status", "parse_started_at", "error_code", "error_message", "updated_at",
+                })
+                failed += 1
+                continue
+            lease_token = uuid.uuid4()
+            attachment.parse_status = NoteAttachment.ParseStatus.PENDING
+            attachment.parse_started_at = None
+            attachment.parse_lease_token = lease_token
+            attachment.error_code = ""
+            attachment.error_message = ""
+            attachment.save(update_fields={
+                "parse_status", "parse_started_at", "parse_lease_token",
+                "error_code", "error_message", "updated_at",
+            })
+        try:
+            parse_attachment_task.delay(
+                str(attachment.id), int(attachment.parse_generation), str(lease_token)
+            )
+            recovered += 1
+        except Exception:
+            NoteAttachment.objects.filter(
+                pk=attachment.id,
+                parse_status=NoteAttachment.ParseStatus.PENDING,
+                parse_lease_token=lease_token,
+            ).update(
+                parse_status=NoteAttachment.ParseStatus.FAILED,
+                error_code="attachment_enqueue_failed",
+                error_message="附件解析任务暂时无法提交，请重试",
+                updated_at=timezone.now(),
+            )
+            failed += 1
+    return recovered, failed
+
+
+def _fail_stale_export_job(job_id, observed_started_at, observed_generation, observed_lease) -> bool:
+    updated = NoteExportJob.objects.filter(
+        pk=job_id,
+        status=NoteExportJob.Status.PROCESSING,
+        run_started_at=observed_started_at,
+        run_generation=observed_generation,
+        run_lease_token=observed_lease,
+    ).update(
+        status=NoteExportJob.Status.FAILED,
+        run_lease_token=None,
+        run_started_at=None,
+        relative_path="",
+        output_size_bytes=0,
+        output_sha256="",
+        error_code="export_stale",
+        error_message="导出任务处理超时，请重新创建导出",
+        updated_at=timezone.now(),
+    )
+    return bool(updated)
+
+
+def _recover_stale_export_jobs(
+    cutoff, limit: int, *, enqueue_failure_cutoff=None
+) -> tuple[int, int]:
+    stale_processing = list(
+        NoteExportJob.objects.filter(
+            status=NoteExportJob.Status.PROCESSING,
+            run_started_at__lt=cutoff,
+        ).order_by("run_started_at").values_list(
+            "id", "run_started_at", "run_generation", "run_lease_token"
+        )[:limit]
+    )
+    failed = sum(
+        _fail_stale_export_job(job_id, started_at, generation, lease)
+        for job_id, started_at, generation, lease in stale_processing
+    )
+    remaining = max(0, limit - len(stale_processing))
+    enqueue_failure_cutoff = enqueue_failure_cutoff or cutoff
+    queued_due = (
+        Q(error_code="export_enqueue_failed", updated_at__lt=enqueue_failure_cutoff)
+        | (~Q(error_code="export_enqueue_failed") & Q(updated_at__lt=cutoff))
+    )
+    queued_ids = list(
+        NoteExportJob.objects.filter(status=NoteExportJob.Status.QUEUED)
+        .filter(queued_due)
+        .order_by("updated_at").values_list("id", flat=True)[:remaining]
+    )
+    recovered = 0
+    for job_id in queued_ids:
+        job = NoteExportJob.objects.filter(pk=job_id, status=NoteExportJob.Status.QUEUED).first()
+        if job is None:
+            continue
+        enqueue_export(job)
+        if job.status == NoteExportJob.Status.QUEUED and not job.error_code:
+            recovered += 1
+        else:
+            failed += 1
+    return recovered, failed
+
+
+@shared_task(name="notes.cleanup_stale_jobs")
+def cleanup_stale_jobs_task() -> dict:
+    limit = int(settings.A3_NOTES_CLEANUP_BATCH_SIZE)
+    now = timezone.now()
+    parse_stale_minutes = max(
+        STALE_JOB_MINUTES, (int(settings.A3_NOTES_PARSE_TIMEOUT_SECONDS) * 2 + 59) // 60
+    )
+    parse_cutoff = now - timedelta(minutes=parse_stale_minutes)
+    export_cutoff = now - timedelta(minutes=int(settings.A3_NOTES_EXPORT_STALE_MINUTES))
+    parse_recovered, parse_failed = _recover_stale_parse_jobs(parse_cutoff, limit)
+    export_recovered, export_failed = _recover_stale_export_jobs(
+        export_cutoff,
+        limit,
+        enqueue_failure_cutoff=now - timedelta(minutes=15),
+    )
+    assistant_recovered, assistant_failed = _recover_stale_assistant_messages(
+        now - timedelta(minutes=ASSISTANT_STALE_MINUTES), limit
+    )
+    dispatch_recovered, dispatch_failed = _recover_stale_assistant_dispatches(
+        now - timedelta(minutes=ASSISTANT_STALE_MINUTES), limit
+    )
+    digest_recovery = recover_stale_digest_jobs(now=now, stale_minutes=DIGEST_STALE_MINUTES)
+    return {
+        "parseRecovered": parse_recovered,
+        "parseFailed": parse_failed,
+        "exportRecovered": export_recovered,
+        "exportFailed": export_failed,
+        "assistantRecovered": assistant_recovered,
+        "assistantFailed": assistant_failed,
+        "assistantDispatchRecovered": dispatch_recovered,
+        "assistantDispatchFailed": dispatch_failed,
+        "digestRecovered": digest_recovery["recovered"],
+        "digestFailed": digest_recovery["failed"],
+    }

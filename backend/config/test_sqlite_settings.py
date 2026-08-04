@@ -7,6 +7,7 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": os.getenv("A3_TEST_SQLITE_PATH", ":memory:"),
+        "OPTIONS": {"timeout": 30},
     }
 }
 
