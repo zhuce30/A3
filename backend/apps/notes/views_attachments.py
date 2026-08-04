@@ -82,6 +82,28 @@ def attachment_download(request, attachment_id):
 
 
 @authenticated
+@require_http_methods(["GET"])
+def attachment_preview(request, attachment_id):
+    try:
+        attachment = attachment_service.get_owned_attachment(request.user, attachment_id)
+        if attachment.kind != attachment.Kind.IMAGE or not str(attachment.mime_type).startswith("image/"):
+            raise attachment_service.AttachmentNotFound()
+        path = attachment_service.resolve_relative_path(attachment.relative_path, require_file=True)
+        response = FileResponse(
+            path.open("rb"),
+            as_attachment=False,
+            filename=attachment.display_name,
+            content_type=attachment.mime_type,
+        )
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Cache-Control"] = "private, max-age=3600"
+        return response
+    except attachment_service.AttachmentServiceError as exc:
+        payload, status = _payload_error(exc)
+        return JsonResponse(payload, status=status)
+
+
+@authenticated
 @require_http_methods(["POST"])
 def attachment_reparse(request, attachment_id):
     try:

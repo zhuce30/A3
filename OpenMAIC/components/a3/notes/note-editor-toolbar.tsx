@@ -1,10 +1,11 @@
 'use client';
 
-import type { ComponentType } from 'react';
+import { useMemo, useRef, useState, type ComponentType } from 'react';
 import {
   Bold, Braces, Code2, Image as ImageIcon, Italic, List, ListOrdered,
-  Redo2, RotateCcw, Sigma, Table2, Undo2,
+  LoaderCircle, Redo2, RotateCcw, Sigma, Table2, Undo2,
 } from 'lucide-react';
+import katex from 'katex';
 import { setBlockType, toggleMark } from 'prosemirror-commands';
 import { redo, undo } from 'prosemirror-history';
 import { wrapInList } from 'prosemirror-schema-list';
@@ -12,15 +13,20 @@ import type { Command } from 'prosemirror-state';
 import type { EditorView } from 'prosemirror-view';
 
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import { isSafeNoteImage, noteEditorSchema } from '@/lib/a3/notes/editor-schema';
+import { noteEditorSchema } from '@/lib/a3/notes/editor-schema';
 
 export type NoteSaveState = 'idle' | 'scheduled' | 'saving' | 'saved' | 'offline' | 'conflict' | 'error';
 
 interface NoteEditorToolbarProps {
   view: EditorView | null;
   saveState: NoteSaveState;
+  imageUploadState?: 'idle' | 'uploading' | 'error';
+  imageUploadError?: string;
+  onUploadImage?: (file: File) => void | Promise<void>;
   onRetry?: () => void;
 }
 
@@ -41,7 +47,18 @@ function run(view: EditorView | null, command: Command) {
   return handled;
 }
 
-export function NoteEditorToolbar({ view, saveState, onRetry }: NoteEditorToolbarProps) {
+export function NoteEditorToolbar({
+  view,
+  saveState,
+  imageUploadState = 'idle',
+  imageUploadError = '',
+  onUploadImage,
+  onRetry,
+}: NoteEditorToolbarProps) {
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const [formulaOpen, setFormulaOpen] = useState(false);
+  const [formulaMode, setFormulaMode] = useState<'inline' | 'display'>('inline');
+  const [latex, setLatex] = useState('');
   const strong = noteEditorSchema.marks.strong;
   const em = noteEditorSchema.marks.em;
   const code = noteEditorSchema.marks.code;
@@ -67,27 +84,41 @@ export function NoteEditorToolbar({ view, saveState, onRetry }: NoteEditorToolba
   };
 
   const insertFormula = () => {
-    if (!view) return;
-    const latex = window.prompt('输入 LaTeX 公式')?.trim();
-    if (!latex) return;
-    view.dispatch(view.state.tr.replaceSelectionWith(noteEditorSchema.node('math_inline', { latex })).scrollIntoView());
+    const value = latex.trim();
+    if (!view || !value) return;
+    const nodeType = formulaMode === 'display' ? 'math_display' : 'math_inline';
+    view.dispatch(view.state.tr.replaceSelectionWith(noteEditorSchema.node(nodeType, { latex: value })).scrollIntoView());
     view.focus();
+    setFormulaOpen(false);
+    setLatex('');
   };
 
-  const insertImage = () => {
-    if (!view) return;
-    const src = window.prompt('输入图片 HTTPS 地址')?.trim();
-    if (!src || !isSafeNoteImage(src)) return;
-    const alt = window.prompt('图片说明')?.trim() || null;
-    view.dispatch(view.state.tr.replaceSelectionWith(noteEditorSchema.node('image', { src, alt })).scrollIntoView());
-    view.focus();
+  const selectImage = (file?: File) => {
+    if (!file || !onUploadImage) return;
+    void onUploadImage(file);
+    if (imageInputRef.current) imageInputRef.current.value = '';
   };
 
   const extra = [
     { label: '插入表格', icon: Table2, action: insertTable },
-    { label: '插入公式', icon: Sigma, action: insertFormula },
-    { label: '插入图片', icon: ImageIcon, action: insertImage },
+    { label: '插入公式', icon: Sigma, action: () => setFormulaOpen(true) },
   ];
+
+  const formulaPreview = useMemo(() => {
+    if (!latex.trim()) return '';
+    try {
+      return katex.renderToString(latex.trim(), {
+        displayMode: formulaMode === 'display',
+        throwOnError: false,
+        strict: 'warn',
+        trust: false,
+        output: 'htmlAndMathml',
+        maxExpand: 1000,
+      });
+    } catch {
+      return '';
+    }
+  }, [formulaMode, latex]);
 
   return (
     <div className="flex min-h-11 min-w-0 items-center gap-1 border-b border-border/70 bg-muted/30 px-2 py-1.5" role="toolbar" aria-label="笔记格式工具">
@@ -106,6 +137,21 @@ export function NoteEditorToolbar({ view, saveState, onRetry }: NoteEditorToolba
             <Icon className="size-4" />
           </ToolbarButton>
         ))}
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          aria-label="从本地插入图片"
+          className="sr-only"
+          onChange={(event) => selectImage(event.currentTarget.files?.[0])}
+        />
+        <ToolbarButton
+          label={imageUploadState === 'uploading' ? '图片上传中' : '从本地插入图片'}
+          disabled={!view || !onUploadImage || imageUploadState === 'uploading'}
+          onClick={() => imageInputRef.current?.click()}
+        >
+          {imageUploadState === 'uploading' ? <LoaderCircle className="size-4 animate-spin" /> : <ImageIcon className="size-4" />}
+        </ToolbarButton>
       </div>
       <div
         data-testid="note-save-status"
@@ -125,6 +171,57 @@ export function NoteEditorToolbar({ view, saveState, onRetry }: NoteEditorToolba
           </button>
         )}
       </div>
+      <Dialog open={formulaOpen} onOpenChange={setFormulaOpen}>
+        <DialogContent className="w-[min(34rem,calc(100vw-2rem))] max-w-none gap-0 overflow-hidden p-0">
+          <DialogHeader className="border-b border-border px-5 py-4">
+            <DialogTitle>插入 LaTeX 公式</DialogTitle>
+            <DialogDescription>输入 LaTeX 内容并预览，粘贴笔记时也支持 $...$ 和 $$...$$。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 px-5 py-4">
+            <div className="inline-flex h-9 rounded-md bg-muted p-1" aria-label="公式显示方式">
+              {(['inline', 'display'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setFormulaMode(mode)}
+                  className={cn(
+                    'h-7 rounded px-3 text-sm transition-colors',
+                    formulaMode === mode ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {mode === 'inline' ? '行内公式' : '独立公式'}
+                </button>
+              ))}
+            </div>
+            <Textarea
+              aria-label="LaTeX 公式"
+              value={latex}
+              onChange={(event) => setLatex(event.target.value)}
+              placeholder="例如：E=mc^2 或 \\sum_{i=1}^{n} x_i"
+              className="min-h-24 resize-y font-mono"
+            />
+            <div className="flex flex-wrap gap-2" aria-label="公式示例">
+              {['\\frac{a}{b}', '\\sum_{i=1}^{n}x_i', '\\sqrt{x^2+y^2}', 'P(A\\mid B)'].map((value) => (
+                <button key={value} type="button" onClick={() => setLatex(value)} className="rounded border border-border px-2.5 py-1.5 font-mono text-xs text-muted-foreground hover:bg-muted hover:text-foreground">
+                  {value}
+                </button>
+              ))}
+            </div>
+            <div className="flex min-h-24 items-center justify-center overflow-x-auto rounded-md border border-border bg-muted/20 px-4 py-5" aria-label="公式预览">
+              {formulaPreview
+                ? <div dangerouslySetInnerHTML={{ __html: formulaPreview }} />
+                : <span className="text-sm text-muted-foreground">公式预览</span>}
+            </div>
+          </div>
+          <DialogFooter className="border-t border-border px-5 py-3">
+            <Button type="button" variant="outline" onClick={() => setFormulaOpen(false)}>取消</Button>
+            <Button type="button" disabled={!latex.trim() || !view} onClick={insertFormula}>插入公式</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {imageUploadState === 'error' && imageUploadError && (
+        <span className="sr-only" role="alert">{imageUploadError}</span>
+      )}
     </div>
   );
 }

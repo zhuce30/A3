@@ -344,6 +344,34 @@ class AttachmentRouteTests(AttachmentTestCase):
         self.assertNotIn("\n", response["Content-Disposition"])
         self.assertNotIn(str(Path(self.storage.name).resolve()), response["Content-Disposition"])
 
+    def test_image_preview_is_inline_owned_and_image_only(self) -> None:
+        image = self.create_attachment(
+            kind=NoteAttachment.Kind.IMAGE,
+            display_name="diagram.png",
+            mime_type="image/png",
+        )
+        image_path = Path(self.storage.name) / image.relative_path
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+        preview_url = reverse("notes:attachment-preview", args=[image.id])
+
+        response = self.client.get(preview_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.streaming)
+        self.assertEqual(response["Content-Type"], "image/png")
+        self.assertTrue(response["Content-Disposition"].startswith("inline"))
+        self.assertEqual(b"".join(response.streaming_content), b"\x89PNG\r\n\x1a\n")
+        response.close()
+        self.client.force_login(self.other_user)
+        self.assertEqual(self.client.get(preview_url).status_code, 404)
+
+        self.client.force_login(self.user)
+        document = self.create_attachment()
+        self.assertEqual(
+            self.client.get(reverse("notes:attachment-preview", args=[document.id])).status_code,
+            404,
+        )
+
     def test_missing_deleted_and_foreign_attachments_are_404(self) -> None:
         own = self.create_attachment(deleted_at="2026-08-02T00:00:00Z")
         foreign_note = Note.objects.create(user=self.other_user, title="foreign", content_json=EMPTY_DOC)

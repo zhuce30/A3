@@ -143,6 +143,9 @@ importers:
       lucide-react:
         specifier: ^0.562.0
         version: 0.562.0(react@19.2.3)
+      marked:
+        specifier: ^17.0.4
+        version: 17.0.4
       mathml2omml:
         specifier: workspace:*
         version: link:packages/mathml2omml

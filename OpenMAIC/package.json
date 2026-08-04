@@ -75,6 +75,7 @@
     "katex": "^0.16.33",
     "lodash": "^4.17.21",
     "lucide-react": "^0.562.0",
+    "marked": "^17.0.4",
     "mathml2omml": "workspace:*",
     "mitt": "^3.0.1",
     "motion": "^12.27.5",

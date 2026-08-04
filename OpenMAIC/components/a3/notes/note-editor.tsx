@@ -12,6 +12,7 @@ import type { NotesClient } from '@/lib/a3/notes/client';
 import type { NotesDraftStore } from '@/lib/a3/notes/draft-store';
 import type { NoteAttachment, NoteContent, NoteDetail } from '@/lib/a3/notes/types';
 import { createMathNodeView, noteEditorSchema, parseNoteDocument } from '@/lib/a3/notes/editor-schema';
+import { looksLikeMarkdown, markdownToNoteDocument } from '@/lib/a3/notes/markdown-paste';
 import { NoteAttachments } from './note-attachments';
 import { NoteConflictDialog } from './note-conflict-dialog';
 import { NoteEditorToolbar, type NoteSaveState } from './note-editor-toolbar';
@@ -64,6 +65,8 @@ export function NoteEditor({
   const viewRef = useRef<EditorView | null>(null);
   const draftRef = useRef<EditableNoteDraft | null>(null);
   const localContentRef = useRef<NoteContent>(note?.content ?? {});
+  const localTitleRef = useRef(note?.title ?? '');
+  const localTitleNoteIdRef = useRef(note?.id ?? null);
   const baseVersionRef = useRef(note?.version ?? 0);
   const noteRef = useRef(note);
   const autosaveRef = useRef(autosave);
@@ -84,12 +87,17 @@ export function NoteEditor({
   if (contentSnapshot.selectedVersion !== selectedVersion) {
     setContentSnapshot({ selectedVersion, content: note?.content ?? {} });
   }
+  const [titleSnapshot, setTitleSnapshot] = useState({ noteId: note?.id ?? null, title: note?.title ?? '' });
+  if (titleSnapshot.noteId !== (note?.id ?? null)) {
+    setTitleSnapshot({ noteId: note?.id ?? null, title: note?.title ?? '' });
+  }
   const [saveSnapshot, setSaveSnapshot] = useState<{ selectedVersion: string; state: NoteSaveState }>({ selectedVersion, state: 'idle' });
   if (saveSnapshot.selectedVersion !== selectedVersion) {
     setSaveSnapshot({ selectedVersion, state: 'idle' });
   }
   const [historyOpen, setHistoryOpen] = useState(false);
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
+  const [imageUpload, setImageUpload] = useState<{ state: 'idle' | 'uploading' | 'error'; error: string }>({ state: 'idle', error: '' });
   const [runtimeConflict, setRuntimeConflict] = useState<{ noteId: string; serverNote: NoteDetail; draft: EditableNoteDraft } | null>(null);
   const effectiveConflict = conflictServerNote ?? (runtimeConflict && runtimeConflict.noteId === note?.id ? runtimeConflict.serverNote : undefined);
   const conflictKey = effectiveConflict ? `${effectiveConflict.id}:${effectiveConflict.version}` : '';
@@ -125,6 +133,10 @@ export function NoteEditor({
     baseVersionRef.current = selectedNote.version;
     draftRef.current = null;
     localContentRef.current = selectedNote.content;
+    if (localTitleNoteIdRef.current !== selectedNote.id) {
+      localTitleNoteIdRef.current = selectedNote.id;
+      localTitleRef.current = selectedNote.title;
+    }
     reportSnapshotValidity({
       noteId: selectedNote.id,
       baseVersion: selectedNote.version,
@@ -173,6 +185,14 @@ export function NoteEditor({
       transformPastedHTML(html) {
         return html;
       },
+      handlePaste(current, event) {
+        const markdown = event.clipboardData?.getData('text/plain') ?? '';
+        if (!looksLikeMarkdown(markdown)) return false;
+        event.preventDefault();
+        const parsed = markdownToNoteDocument(markdown);
+        current.dispatch(current.state.tr.replaceSelection(parsed.slice(0, parsed.content.size)).scrollIntoView());
+        return true;
+      },
     });
     viewRef.current = editorView;
     setView(editorView);
@@ -220,6 +240,7 @@ export function NoteEditor({
         if (!pending && noteRef.current) {
           const updatedNote: NoteDetail = {
             ...noteRef.current,
+            title: noteRef.current.title,
             version: baseVersionRef.current,
             content: localContentRef.current,
             contentText: viewRef.current?.state.doc.textContent ?? noteRef.current.contentText,
@@ -268,6 +289,77 @@ export function NoteEditor({
     current.focus();
   };
 
+  const changeTitle = (value: string) => {
+    const currentNoteId = noteRef.current?.id;
+    if (!currentNoteId) return;
+    const next = value.slice(0, 200);
+    localTitleRef.current = next;
+    setTitleSnapshot({ noteId: currentNoteId, title: next });
+  };
+
+  const saveTitle = async () => {
+    if (!note) return;
+    const normalized = localTitleRef.current.trim() || '无标题笔记';
+    localTitleRef.current = normalized;
+    setTitleSnapshot({ noteId: note.id, title: normalized });
+    if (normalized === noteRef.current?.title) return;
+
+    let baseVersion = baseVersionRef.current;
+    if (draftRef.current) {
+      const flushed = await autosaveRef.current.flush(draftRef.current);
+      if (flushed.kind !== 'saved') {
+        setSaveSnapshot({ selectedVersion, state: flushed.kind === 'conflict' ? 'conflict' : 'offline' });
+        return;
+      }
+      baseVersion = Math.max(baseVersion, flushed.resultingVersion);
+      baseVersionRef.current = baseVersion;
+    }
+
+    setSaveSnapshot({ selectedVersion, state: 'saving' });
+    const result = await client.saveNote(note.id, {
+      title: normalized,
+      content: localContentRef.current,
+      baseVersion,
+      clientMutationId: crypto.randomUUID(),
+    });
+    if (!result.success) {
+      setSaveSnapshot({ selectedVersion, state: result.status === 409 ? 'conflict' : 'error' });
+      return;
+    }
+    baseVersionRef.current = result.resultingVersion;
+    draftRef.current = null;
+    const updated = { ...result.note, title: normalized, content: localContentRef.current };
+    noteRef.current = updated;
+    setSaveSnapshot({ selectedVersion, state: 'saved' });
+    reportSnapshotValidity({ noteId: note.id, baseVersion: result.resultingVersion, dirty: false, pending: false, conflicted: false });
+    onNoteChangeRef.current?.(updated);
+  };
+
+  const uploadLocalImage = async (file: File) => {
+    if (!note) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      setImageUpload({ state: 'error', error: '请选择 PNG、JPG 或 WebP 图片' });
+      return;
+    }
+    const targetNoteId = note.id;
+    setImageUpload({ state: 'uploading', error: '' });
+    const result = await client.uploadAttachment(targetNoteId, file);
+    if (!result.success) {
+      setImageUpload({ state: 'error', error: result.error });
+      return;
+    }
+    onAttachmentsChange?.([...attachments.filter((item) => item.id !== result.attachment.id), result.attachment]);
+    if (noteRef.current?.id !== targetNoteId || !viewRef.current) {
+      setImageUpload({ state: 'idle', error: '' });
+      return;
+    }
+    const src = `/api/a3/notes/attachments/${encodeURIComponent(result.attachment.id)}/preview/`;
+    const image = noteEditorSchema.node('image', { src, alt: file.name, title: file.name });
+    viewRef.current.dispatch(viewRef.current.state.tr.replaceSelectionWith(image).scrollIntoView());
+    viewRef.current.focus();
+    setImageUpload({ state: 'idle', error: '' });
+  };
+
   if (loadState === 'loading') {
     return (
       <section className="min-h-[42rem] animate-pulse bg-background" aria-label="正在加载笔记">
@@ -295,13 +387,37 @@ export function NoteEditor({
   return (
     <section className="flex min-h-[42rem] min-w-0 flex-col overflow-hidden bg-background text-foreground" aria-label="笔记编辑器">
       <div className="flex min-h-11 min-w-0 items-center justify-between gap-2 border-b border-border/70 bg-background px-3">
-        <h2 className="min-w-0 truncate text-sm font-semibold">{note.title || '无标题笔记'}</h2>
+        <input
+          aria-label="笔记标题"
+          value={titleSnapshot.title}
+          maxLength={200}
+          onChange={(event) => changeTitle(event.target.value)}
+          onBlur={() => void saveTitle()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') event.currentTarget.blur();
+            if (event.key === 'Escape') {
+              localTitleRef.current = note.title;
+              setTitleSnapshot({ noteId: note.id, title: note.title });
+              event.currentTarget.blur();
+            }
+          }}
+          placeholder="输入笔记标题"
+          className="h-9 min-w-0 flex-1 border-0 bg-transparent px-1 text-sm font-semibold text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-0"
+        />
+        <span className="sr-only" aria-hidden="true">{titleSnapshot.title}</span>
         <div className="flex shrink-0 items-center gap-1">
           <Button type="button" variant="ghost" size="icon-sm" aria-label="版本历史" onClick={() => setHistoryOpen(true)} className="size-8 rounded-md"><History className="size-4" /></Button>
           <Button type="button" variant="ghost" size="icon-sm" aria-label="附件" aria-expanded={attachmentsOpen} onClick={() => setAttachmentsOpen((value) => !value)} className="size-8 rounded-md"><Paperclip className="size-4" /></Button>
         </div>
       </div>
-      <NoteEditorToolbar view={view} saveState={saveState ?? saveSnapshot.state} onRetry={() => void retrySave()} />
+      <NoteEditorToolbar
+        view={view}
+        saveState={saveState ?? saveSnapshot.state}
+        imageUploadState={imageUpload.state}
+        imageUploadError={imageUpload.error}
+        onUploadImage={uploadLocalImage}
+        onRetry={() => void retrySave()}
+      />
       {effectiveConflict && !conflictVisibility.open && (
         <div className="flex min-h-10 items-center justify-between gap-3 border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-sm" role="status">
           <span className="text-destructive">存在未处理的版本冲突</span>

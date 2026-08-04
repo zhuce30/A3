@@ -4,6 +4,8 @@ import katex from 'katex';
 
 import { schemaMarks, schemaNodes } from '@/lib/prosemirror/schema';
 
+const OWNED_IMAGE_PREVIEW = /^\/api\/a3\/notes\/attachments\/[0-9a-z-]+\/preview\/$/i;
+
 const safeHttpUrl = (value: string) => {
   try {
     const url = new URL(value);
@@ -12,6 +14,8 @@ const safeHttpUrl = (value: string) => {
     return false;
   }
 };
+
+const safeImageUrl = (value: string) => OWNED_IMAGE_PREVIEW.test(value) || safeHttpUrl(value);
 
 export const isSafeNoteLink = (value: string) => {
   const trimmed = value.trim();
@@ -55,8 +59,13 @@ const codeBlock: NodeSpec = {
   defining: true,
   parseDOM: [{
     tag: 'pre',
+    priority: 100,
     preserveWhitespace: 'full',
-    getAttrs: (dom) => ({ language: (dom as HTMLElement).querySelector('code')?.dataset.language ?? null }),
+    getAttrs: (dom) => {
+      const code = (dom as HTMLElement).querySelector('code');
+      const languageClass = [...(code?.classList ?? [])].find((value) => value.startsWith('language-'));
+      return { language: code?.dataset.language ?? languageClass?.slice('language-'.length) ?? null };
+    },
   }],
   toDOM: (node) => ['pre', ['code', { 'data-language': node.attrs.language }, 0]],
 };
@@ -92,7 +101,7 @@ const image: NodeSpec = {
     getAttrs: (dom) => {
       const element = dom as HTMLImageElement;
       const src = element.getAttribute('src') ?? '';
-      if (!safeHttpUrl(src)) return false;
+      if (!safeImageUrl(src)) return false;
       return {
         src,
         alt: element.alt || null,
@@ -262,7 +271,7 @@ export function createAttachmentReference(input: { id: string; label: string; ki
   };
 }
 
-export const isSafeNoteImage = safeHttpUrl;
+export const isSafeNoteImage = safeImageUrl;
 
 export function createMathNodeView(node: ProseMirrorNode): NodeView {
   const displayMode = node.type.name === 'math_display';
@@ -293,7 +302,7 @@ function sanitizeNodeJson(value: unknown): Record<string, unknown> | null {
   const attrs = node.attrs && typeof node.attrs === 'object' && !Array.isArray(node.attrs)
     ? { ...(node.attrs as Record<string, unknown>) }
     : undefined;
-  if (type === 'image' && (typeof attrs?.src !== 'string' || !safeHttpUrl(attrs.src))) return null;
+  if (type === 'image' && (typeof attrs?.src !== 'string' || !safeImageUrl(attrs.src))) return null;
   if (type === 'attachment_reference' && (typeof attrs?.attachmentId !== 'string' || !attrs.attachmentId.trim())) return null;
   const result: Record<string, unknown> = { ...node };
   if (attrs) result.attrs = attrs;
