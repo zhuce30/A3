@@ -232,7 +232,11 @@ describe('secure personal notes proxy', () => {
     vi.stubGlobal('fetch', fetchMock);
     const request = new NextRequest('http://frontend/api/a3/notes/assistant/chat/', {
       method: 'POST',
-      headers: { cookie: 'sessionid=secret', 'content-type': 'application/json' },
+      headers: {
+        cookie: 'sessionid=secret; csrftoken=csrf-token',
+        'content-type': 'application/json',
+        'x-csrftoken': 'csrf-token',
+      },
       body: JSON.stringify({ sessionId: 'session-1', message: 'hello' }),
     });
 
@@ -252,6 +256,42 @@ describe('secure personal notes proxy', () => {
     expect(response.status).toBe(202);
   });
 
+  it('obtains Django CSRF server-side when the browser only sends the shared session cookie', async () => {
+    process.env.A3_API_BASE_URL = 'http://backend:8000';
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ csrfToken: 'fresh-csrf' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(Response.json({ success: true }, { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const request = new NextRequest('http://frontend/api/a3/notes/notes/', {
+      method: 'POST',
+      headers: { cookie: 'a3_sessionid=secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'new note' }),
+    });
+
+    const response = await POST(request, { params: Promise.resolve({ path: ['notes'] }) });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'http://backend:8000/api/auth/csrf/',
+      expect.objectContaining({ headers: expect.objectContaining({ Cookie: 'a3_sessionid=secret' }) }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'http://backend:8000/api/notes/notes/',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Cookie: 'a3_sessionid=secret; csrftoken=fresh-csrf',
+          'X-CSRFToken': 'fresh-csrf',
+        }),
+      }),
+    );
+    expect(response.status).toBe(201);
+  });
+
   it('streams multipart request bodies without parsing them', async () => {
     process.env.A3_API_BASE_URL = 'http://backend:8000';
     const fetchMock = vi.fn().mockResolvedValue(Response.json({ success: true }, { status: 201 }));
@@ -260,9 +300,10 @@ describe('secure personal notes proxy', () => {
     const request = new NextRequest('http://frontend/api/a3/notes/notes/note-1/attachments/upload/', {
       method: 'POST',
       headers: {
-        cookie: 'sessionid=secret',
+        cookie: 'sessionid=secret; csrftoken=csrf-token',
         'content-type': `multipart/form-data; boundary=${boundary}`,
         'idempotency-key': 'upload-1',
+        'x-csrftoken': 'csrf-token',
       },
       body: `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.txt"\r\n\r\nx\r\n--${boundary}--`,
     });

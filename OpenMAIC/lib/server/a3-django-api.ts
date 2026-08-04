@@ -36,10 +36,10 @@ export async function postA3DjangoJson<T>(
   cookieHeader: string | null,
   body: unknown,
 ): Promise<DjangoJsonResponse<T>> {
-  let csrf = await resolveCsrfForServerPost(cookieHeader);
+  let csrf = await resolveA3DjangoCsrf(cookieHeader);
   let response = await postA3Django(path, cookieHeader, body, csrf);
   if (response.status === 403) {
-    csrf = await resolveCsrfForServerPost(cookieHeader, true);
+    csrf = await resolveA3DjangoCsrf(cookieHeader, true);
     response = await postA3Django(path, csrf.cookieHeader, body, csrf);
   }
 
@@ -67,10 +67,10 @@ export async function patchA3DjangoJson<T>(
   cookieHeader: string | null,
   body: unknown,
 ): Promise<DjangoJsonResponse<T>> {
-  let csrf = await resolveCsrfForServerPost(cookieHeader);
+  let csrf = await resolveA3DjangoCsrf(cookieHeader);
   let response = await patchA3Django(path, body, csrf);
   if (response.status === 403) {
-    csrf = await resolveCsrfForServerPost(cookieHeader, true);
+    csrf = await resolveA3DjangoCsrf(cookieHeader, true);
     response = await patchA3Django(path, body, csrf);
   }
   const responseText = await response.text();
@@ -137,7 +137,7 @@ async function patchA3Django(
   });
 }
 
-async function resolveCsrfForServerPost(cookieHeader: string | null, forceRefresh = false) {
+export async function resolveA3DjangoCsrf(cookieHeader: string | null, forceRefresh = false) {
   const existing = forceRefresh ? '' : extractCookie(cookieHeader, 'csrftoken');
   if (existing) return { token: existing, cookieHeader };
   const response = await fetch(resolveA3DjangoEndpoint('/api/auth/csrf/'), {

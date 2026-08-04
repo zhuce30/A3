@@ -1,6 +1,6 @@
 import type { NextRequest } from 'next/server';
 
-import { resolveA3DjangoEndpoint } from '@/lib/server/a3-django-api';
+import { resolveA3DjangoCsrf, resolveA3DjangoEndpoint } from '@/lib/server/a3-django-api';
 
 const ALLOWED_ROOTS = new Set([
   'notes',
@@ -53,6 +53,11 @@ async function proxy(request: NextRequest, context: RouteContext, method: ProxyM
     return Response.json({ success: false, code: 'invalid_notes_proxy_path', error: '笔记请求路径不安全' }, { status: 400 });
   }
   const headers = forwardedRequestHeaders(request.headers);
+  if (method !== 'GET' && !headers['X-CSRFToken'] && !headers['X-CSRF-Token']) {
+    const csrf = await resolveA3DjangoCsrf(headers.Cookie ?? null);
+    if (csrf.cookieHeader) headers.Cookie = csrf.cookieHeader;
+    if (csrf.token) headers['X-CSRFToken'] = csrf.token;
+  }
   const init: NodeRequestInit = {
     method,
     headers,
