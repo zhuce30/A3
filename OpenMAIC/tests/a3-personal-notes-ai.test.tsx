@@ -325,6 +325,32 @@ afterEach(() => {
 });
 
 describe('personal note AI drawer', () => {
+  it('renders assistant replies as structured Markdown instead of raw markers', async () => {
+    const markdown = '### 核心区别\n\n- **进程**拥有独立地址空间\n- **线程**共享进程资源';
+    const client = clientStub({
+      listAiSessions: vi.fn().mockResolvedValue({
+        success: true,
+        sessions: [{ id: 'session-1', title: 'Markdown', scopeType: 'note', scopeSnapshot: {}, status: 'active', createdAt: now, updatedAt: now }],
+      }),
+      listAiMessages: vi.fn().mockResolvedValue({
+        success: true,
+        messages: [assistantMessage({ content: markdown, status: 'succeeded', verified: true })],
+      }),
+    });
+    const container = mount(<NoteAiDrawer client={client} currentNote={note()} notes={[note()]} isMobile={false} onCitationNavigate={vi.fn()} />);
+
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="打开笔记 AI"]')!.click());
+
+    await vi.waitFor(() => expect(container.querySelector('h3')?.textContent).toBe('核心区别'));
+    expect([...container.querySelectorAll('li')].map((item) => item.textContent)).toEqual([
+      '进程拥有独立地址空间',
+      '线程共享进程资源',
+    ]);
+    expect([...container.querySelectorAll('strong')].map((item) => item.textContent)).toEqual(['进程', '线程']);
+    expect(container.textContent).not.toContain('###');
+    expect(container.textContent).not.toContain('**');
+  });
+
   it('is collapsed on first load and keeps the editor dominant', async () => {
     const container = mount(<NotesWorkspace client={clientStub()} userId="student-1" autosave={autosaveStub()} />);
     await vi.waitFor(() => expect(container.querySelector('[data-testid="notes-ai-drawer"]')).toBeTruthy());

@@ -3,6 +3,7 @@
 import { Bot, Brain, CheckCircle2, ChevronDown, ChevronRight, FilePenLine, RefreshCw, Send, ShieldAlert, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
+import { A3Markdown } from '@/components/a3/ui/a3-markdown';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { NotesClient } from '@/lib/a3/notes/client';
@@ -640,7 +641,11 @@ export function NoteAiDrawer({ client, currentNote, notes, editorSnapshot, isMob
                 <span>{message.role === 'user' ? '你' : '笔记 AI'}</span>
                 {message.role === 'assistant' && <MessageState message={message} />}
               </div>
-              {message.content && <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>}
+              {message.content && (
+                message.role === 'assistant'
+                  ? <A3Markdown className="text-sm leading-6 [&_h3]:text-sm [&_h4]:text-sm">{message.content}</A3Markdown>
+                  : <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>
+              )}
               {message.role === 'assistant' && (
                 <MemoryUseDisclosure
                   message={message}
