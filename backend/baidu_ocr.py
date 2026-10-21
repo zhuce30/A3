@@ -7,7 +7,9 @@ import sys
 import time
 
 JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
-TOKEN = "REMOVED_BEFORE_OPEN_SOURCE"
+TOKEN = os.environ.get("A3_BAIDU_PADDLEOCR_TOKEN", "").strip()
+if not TOKEN:
+    raise SystemExit("请先设置 A3_BAIDU_PADDLEOCR_TOKEN 环境变量，再运行 OCR 示例。")
 MODEL = "PaddleOCR-VL-1.6"
 
 file_path = "<local file path or file url>"
