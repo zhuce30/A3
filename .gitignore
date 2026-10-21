@@ -71,3 +71,17 @@ data/uploads/
 data/PPT/
 data/操作系统/
 data/计算机网络原理/
+
+# Local agent sessions and generated presentation material
+.codex-tmp/
+.local-cache/
+.pptx_build/
+.tmp/
+PPT/
+备份/
+outputs/defense-doc/
+outputs/ui-showcase/
+outputs/test-evidence/
+outputs/figures/
+control/*.exchange
+server-backups/
