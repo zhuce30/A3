@@ -8,6 +8,8 @@
 
 面向课程学习的多智能体平台，将学习诊断、个性化计划、课程 RAG、AI 辅导与测评复习连接起来。
 
+**中国软件杯大学生软件设计大赛国家级三等奖作品**
+
 [![Next.js](https://img.shields.io/badge/Next.js-16-111111?logo=nextdotjs)](OpenMAIC/package.json)
 [![React](https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white)](OpenMAIC/package.json)
 [![Django](https://img.shields.io/badge/Backend-Django-092E20?logo=django&logoColor=white)](backend/requirements.txt)
@@ -33,7 +35,7 @@
                     课程知识库 → 推荐资源与 AI 辅导
 ```
 
-项目起源于中国软件杯 A3 个性化学习资源生成场景。上传其他课程资料后，需要重新解析、建索引，并检查该课程的检索效果。
+本项目是中国软件杯大学生软件设计大赛国家级三等奖作品，围绕 A3 个性化学习资源生成赛题开发。上传其他课程资料后，需要重新解析、建索引，并检查该课程的检索效果。
 
 ## 界面预览
 
