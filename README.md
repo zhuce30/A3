@@ -254,11 +254,10 @@ pnpm exec playwright test e2e/tests/a3-openmaic-bridge.spec.ts --project=chromiu
 | 想了解什么 | 从这里开始 |
 | --- | --- |
 | 产品定位与体验原则 | [PRODUCT.md](PRODUCT.md) |
-| Agent 与后端架构 | [架构说明](A3_AGENT_ARCHITECTURE.md) · [后端说明](backend/README.md) |
+| 后端结构与接口 | [后端说明](backend/README.md) |
 | 多模态知识库方案 | [RAG 与知识库建设](docs/A3_多模态RAG与本地知识库建设方案.md) |
 | A3 与 OpenMAIC 的职责 | [页面分工与接入边界](docs/A3_OpenMAIC页面分工与接入边界.md) |
 | 六分钟演示路线 | [演示脚本](docs/A3_6分钟答辩脚本.md) |
-| 参与开发与回归检查 | [AGENTS.md](AGENTS.md) |
 | 安全问题与数据边界 | [SECURITY.md](SECURITY.md) |
 | 上游来源与资产授权 | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) |
 
