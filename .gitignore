@@ -85,3 +85,23 @@ outputs/test-evidence/
 outputs/figures/
 control/*.exchange
 server-backups/
+
+# Internal planning, debug captures and generated deliverables
+.superpowers/
+docs/superpowers/
+bug/
+outputs/
+control/
+/processed
+/PRODUCT.md
+/skills-lock.json
+/run-academic-writing-agents.cmd
+/docs/2026-07-14-A3首页上市展示深度审计与优化路线图.md
+/docs/停下来反思.md
+/docs/数字人.md
+/docs/借鉴.md
+/docs/A3_国奖级产品创新与外部项目调研报告.md
+/docs/A3_系统改进方向与收敛路线.md
+/docs/A3_学习效果评估v2开发计划.md
+/docs/A3_资源推荐系统改进清单.md
+/docs/A3_操作系统精准资源入库与推荐实施方案.md

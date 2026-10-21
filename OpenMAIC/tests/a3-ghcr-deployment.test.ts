@@ -46,14 +46,6 @@ const caddyPath = path.join(root, 'Caddyfile');
 const dockerfilePath = path.join(root, 'OpenMAIC/Dockerfile');
 const envTemplatePath = path.join(root, '.env.production.template');
 const runbookPath = path.join(root, 'docs/A3_GHCR前端镜像部署.md');
-const designPath = path.join(
-  root,
-  'docs/superpowers/specs/2026-07-13-ghcr-frontend-deployment-design.md',
-);
-const planPath = path.join(
-  root,
-  'docs/superpowers/plans/2026-07-13-ghcr-frontend-deployment.md',
-);
 
 function parseLines(value: unknown, field: string): string[] {
   if (typeof value !== 'string') {
@@ -341,10 +333,7 @@ describe('A3 private GHCR frontend deployment', () => {
   });
 
   it('documents SHA tag lookup and digest identity without a latest production switch', () => {
-    const sources = [
-      fs.readFileSync(designPath, 'utf8'),
-      fs.readFileSync(planPath, 'utf8'),
-    ];
+    const sources = [fs.readFileSync(runbookPath, 'utf8')];
 
     for (const source of sources) {
       expect(source).toContain('DEPLOY_SHA');
@@ -352,7 +341,7 @@ describe('A3 private GHCR frontend deployment', () => {
       expect(source).toContain('org.opencontainers.image.revision');
       expect(source).toContain('A3_FRONTEND_IMAGE');
       expect(source).toContain('ROLLBACK_DIGEST');
-      expect(source).toMatch(/deployment history/i);
+      expect(source).toMatch(/deployment history|部署历史/i);
       expect(source).toMatch(/digest/i);
       expect(source).not.toMatch(/set `?A3_FRONTEND_IMAGE`? to a known-good SHA tag/i);
       expect(source).not.toMatch(/Rollback performs the same tag lookup/i);
